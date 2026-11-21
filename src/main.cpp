@@ -131,7 +131,7 @@ namespace
 	// False when the plugin must not load into this game.
 	bool CheckRuntime(const REL::Version& a_runtime)
 	{
-		const auto shown = REL::to_string(a_runtime);
+		const auto shown = a_runtime.string(".");
 		switch (RuntimeSupport::Judge(a_runtime.major(), a_runtime.minor(), a_runtime.patch())) {
 		case RuntimeSupport::Verdict::kRefused:
 			logs::error("This is game version {}: SkyrimCoop needs Skyrim Special Edition {}.{}.{} or later (Skyrim VR and the 2011 game are not supported). Not loaded.",

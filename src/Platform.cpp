@@ -74,7 +74,7 @@ namespace Platform
 	const std::filesystem::path& GameFolder()
 	{
 		static const std::filesystem::path folder = [] {
-			wchar_t    buffer[REX::W32::MAX_PATH * 4];
+			wchar_t    buffer[1040];  // four times the classic path limit; MAX_PATH itself is a macro of Windows.h here
 			const auto length = REX::W32::GetModuleFileNameW(nullptr, buffer, static_cast<std::uint32_t>(std::size(buffer)));
 			return length > 0 && length < std::size(buffer) ? std::filesystem::path{ std::wstring_view{ buffer, length } }.parent_path() : std::filesystem::path{};
 		}();
