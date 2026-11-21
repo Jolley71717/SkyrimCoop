@@ -1,6 +1,7 @@
 -- Only the plugin needs CommonLibSSE-NG (and MSVC); on Linux the game-free targets below are built with gcc and
--- the plugin is skipped.
-if is_plat("windows") then
+-- the plugin is skipped. The test is on the host, not the platform: the platform is not known yet when xmake reads
+-- this file for its command line, and the library's options (--skyrim_vr, --skse_patch_safety) must be known by then.
+if is_host("windows") then
     -- Skyrim VR is not supported (docs/DESIGN.md), and without it the library needs neither the OpenVR headers nor
     -- rapidcsv. The library's "patch safety" option downloads MinHook; nothing here uses it. Both are also given on
     -- the `xmake f` line in CONTRIBUTING.md and the workflows, since a configuration made before this file was read

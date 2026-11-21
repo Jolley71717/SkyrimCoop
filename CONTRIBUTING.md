@@ -118,6 +118,8 @@ A new dependency must be source, pinned to a commit or a version, under a licens
 | spdlog (and fmt) | xmake package, the version CommonLibSSE-NG asks for | MIT |
 | DirectXMath, DirectXTK | xmake packages, the versions CommonLibSSE-NG asks for | MIT |
 
+Pin CommonLibSSE-NG to a commit that is not one of its release tags. On GitHub's machines its build file looks for a release tag on the pinned commit and, when it finds one, downloads that release's prebuilt library instead of compiling the source. This project builds every dependency from source, so the pin stays between tags; a bump of the submodule checks that with `git -C lib/commonlibsse-ng describe --tags --exact-match`, which must find no tag.
+
 The Steamworks SDK is not a dependency: it is not open source, and its terms do not fit a GPL repository. The plugin declares the few functions it calls by hand (`src/steam/SteamApi.h`) and finds them at run time in the Steam library the game itself loaded. Never add the SDK's headers or `steam_api64.dll` to the repository.
 
 Code from other multiplayer mods is not copied in, whatever their license says, without the maintainer deciding it first: [docs/PRIOR-ART.md](docs/PRIOR-ART.md). Code from [F4Multiplayer](https://github.com/Jolley71717/F4Multiplayer), the sister project under the same license, is carried over freely; [docs/PORTING.md](docs/PORTING.md) keeps track.
