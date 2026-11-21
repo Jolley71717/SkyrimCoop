@@ -69,6 +69,9 @@ if is_plat("windows") then
 target("SkyrimCoop")
     -- tools/package.ps1 sets it to the label and commit ("rc3 1a2b3c4"), shown in the log
     add_defines('SKYRIMCOOP_BUILD_LABEL="' .. (os.getenv("SKYRIMCOOP_LABEL") or "") .. '"')
+    -- Some of the library's headers bring in Windows.h. Without this it brings the old winsock.h with it, and ENet's
+    -- winsock2.h then fails to compile (every socket type defined twice).
+    add_defines("WIN32_LEAN_AND_MEAN", "NOMINMAX")
     add_rules("commonlibsse-ng.plugin", {
         name = "SkyrimCoop",
         author = "Jolley71717",
