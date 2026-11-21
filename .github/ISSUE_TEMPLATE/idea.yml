@@ -1,0 +1,35 @@
+name: Idea
+description: Something you want the mod to do, or do differently
+title: "[Idea] "
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ideas are welcome. Have a look at [the plan](https://github.com/Jolley71717/SkyrimCoop/blob/main/docs/PLAN.md)
+        and [the design](https://github.com/Jolley71717/SkyrimCoop/blob/main/docs/DESIGN.md) first: the mod is at
+        its very start, and some things are already planned or already decided.
+
+        Please keep Steam names and ids out of the text.
+  - type: textarea
+    id: what
+    attributes:
+      label: What should happen?
+      description: Describe it from the players' point of view, as if it already worked.
+      placeholder: When a friend picks a lock, I want to see them kneel at the door...
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why?
+      description: What is annoying, confusing or missing today, and how often would it come up in a session?
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What did you try?
+      description: Settings in `SkyrimCoop.ini`, other mods, workarounds, and what they did or did not do. "Nothing yet" is fine.
+    validations:
+      required: true

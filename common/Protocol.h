@@ -1,0 +1,620 @@
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+// Wire protocol shared by the game plugin, the server and test tools.
+// All values are little-endian. Every packet starts with a one-byte MessageType.
+//
+// This is the first, small protocol: joining, leaving, where each player is, and a heartbeat. It has the shape of
+// F4Multiplayer's (the Reader and Writer, the hello and its load order, the two channels) so what that project learned
+// carries over; what the Skyrim side adds comes message by message as docs/PLAN.md's phases land (docs/PORTING.md).
+namespace Protocol
+{
+	inline constexpr std::uint32_t MAGIC = 0x4F434B53;  // "SKCO"
+	// Raise it with every change to what goes over the wire or how it is read: two games of different versions refuse
+	// each other at the hello, with a reason that says so.
+	inline constexpr std::uint16_t VERSION = 1;
+	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
+	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
+	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
+	inline constexpr std::size_t MAX_REASON_LENGTH = 200;
+	// A load order on the wire (a hello's): at most this many names, the light plugins' mark among them, each of at most
+	// this many bytes (a file name on Windows is at most 260 characters).
+	inline constexpr std::size_t MAX_PLUGINS = 512;
+	inline constexpr std::size_t MAX_PLUGIN_NAME_LENGTH = 260;
+	inline constexpr std::size_t MAX_PASSWORD_LENGTH = 64;
+	// The most players a server takes, whatever it is asked for.
+	inline constexpr std::size_t MAX_PLAYERS = 8;
+
+	// How each refusal's reason starts, so the game can tell them apart and say more than the server knows.
+	inline constexpr std::string_view REJECT_VERSION = "This game runs another version of the mod";
+	inline constexpr std::string_view REJECT_LOAD_ORDER = "Your mods differ from the host's";
+	inline constexpr std::string_view REJECT_PASSWORD = "Wrong password";
+	inline constexpr std::string_view REJECT_FULL = "The game is full";
+
+	inline constexpr std::uint8_t CHANNEL_RELIABLE = 0;
+	inline constexpr std::uint8_t CHANNEL_STATE = 1;  // unreliable, sequenced
+	inline constexpr std::uint8_t CHANNEL_COUNT = 2;
+
+	// A number is never reused for another message: a retired one stays retired.
+	enum class MessageType : std::uint8_t
+	{
+		kHello = 1,         // client -> server, first packet
+		kWelcome = 2,       // server -> client: you are in, this is your player id
+		kReject = 3,        // server -> client: you are not, and why; the connection closes after it
+		kPlayerJoined = 4,  // server -> the others (and each player already there, to the one who joined)
+		kPlayerLeft = 5,
+		kPlayerState = 6,   // client -> server, on the state channel: where I am
+		kRemoteState = 7,   // server -> the others, on the state channel: where that player is
+		kHeartbeat = 8,     // answered right away with kHeartbeatAck, to measure the connection
+		kHeartbeatAck = 9,
+	};
+
+	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
+	[[nodiscard]] inline bool InWorld(float a_v)
+	{
+		return std::isfinite(a_v) && std::fabs(a_v) < 16777216.0f;
+	}
+
+	enum StateFlags : std::uint8_t
+	{
+		kNone = 0,
+		kSneaking = 1 << 0,
+		kSprinting = 1 << 1,
+		kWeaponDrawn = 1 << 2,
+		kJumping = 1 << 3,
+		kSwimming = 1 << 4,
+		kMounted = 1 << 5,
+	};
+
+	// A player's transform and movement, sampled on the owning client.
+	struct PlayerState
+	{
+		std::uint32_t sequence = 0;    // increases per sample; receivers drop older ones
+		std::uint32_t cell = 0;        // interior cell form ID, or 0 when outside
+		std::uint32_t worldspace = 0;  // worldspace form ID, or 0 when inside
+		float         x = 0, y = 0, z = 0;
+		float         heading = 0;  // radians
+		float         speed = 0;    // units/second, for picking walk/run animations
+		std::uint8_t  flags = kNone;
+		// The sender's clock when it was sampled, in ms (any start; it wraps after 49 days), so the receiver can
+		// place it in time however late it came; 0 when not known.
+		std::uint32_t sentMs = 0;
+		// Travel relative to facing in 256ths of a turn (0 forward, 64 right, 128 back, 192 left), and the pitch the
+		// player aims at, up (+) or down (-) in degrees.
+		std::uint8_t direction = 0;
+		std::int8_t  pitch = 0;
+
+		[[nodiscard]] bool IsFinite() const
+		{
+			return InWorld(x) && InWorld(y) && InWorld(z) && std::isfinite(heading) && std::isfinite(speed);
+		}
+
+		bool operator==(const PlayerState&) const = default;
+	};
+
+	// PlayerState::direction from a fraction of a turn, and back.
+	inline std::uint8_t PackDirection(float a_turns)
+	{
+		if (!std::isfinite(a_turns)) {
+			return 0;
+		}
+		return static_cast<std::uint8_t>(std::lround((a_turns - std::floor(a_turns)) * 256.0f) & 0xFF);
+	}
+	inline float UnpackDirection(std::uint8_t a_direction)
+	{
+		return static_cast<float>(a_direction) / 256.0f;
+	}
+
+	// PlayerState::pitch from a pitch in degrees, held to a quarter turn either way.
+	inline std::int8_t PackPitch(float a_degrees)
+	{
+		return std::isfinite(a_degrees) ? static_cast<std::int8_t>(std::clamp(std::lround(a_degrees), -90L, 90L)) : std::int8_t{ 0 };
+	}
+
+	// PlayerState::sentMs for a moment on the sender's steady clock (never 0, which means not known).
+	inline std::uint32_t SentMs(std::chrono::steady_clock::time_point a_at)
+	{
+		const auto ms = static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(a_at.time_since_epoch()).count());
+		return ms ? ms : 1;
+	}
+
+	struct Hello
+	{
+		std::uint32_t magic = MAGIC;
+		std::uint16_t version = VERSION;
+		std::uint32_t contentHash = 0;  // LoadOrderHash of the client's load order; all players must match
+		std::string   name;
+		std::string   password;
+		// Random, kept on the player's PC: the server gives a player who comes back the same player
+		// ID, so their own changes to the world are still known as theirs. 0 = none.
+		std::uint64_t identity = 0;
+		// The load order (plugin file names, in order: ComparedLoadOrder), so a refusal can say which plugins differ.
+		// At most MAX_PLUGINS.
+		std::vector<std::string> plugins;
+
+		bool operator==(const Hello&) const = default;
+	};
+
+	// The session's plugin table: the plugins that number every form ID on the wire, as Hello::plugins lays a load order
+	// out (the full ones, LIGHT_PLUGINS, the light ones). Every game translates its own form IDs to it and back by plugin
+	// name (common/FormIds.h). No message carries it yet: the first server only lets in games whose load orders match.
+	struct PluginTable
+	{
+		std::vector<std::string> plugins;
+
+		bool operator==(const PluginTable&) const = default;
+	};
+
+	struct Welcome
+	{
+		std::uint32_t playerId = 0;
+		std::uint64_t sessionId = 0;  // random per server run
+		// The host's own game's player id; 0: none in the session (a dedicated server).
+		std::uint32_t hostId = 0;
+
+		bool operator==(const Welcome&) const = default;
+	};
+
+	struct Reject
+	{
+		std::string reason;
+	};
+
+	struct PlayerJoined
+	{
+		std::uint32_t playerId = 0;
+		std::string   name;
+
+		bool operator==(const PlayerJoined&) const = default;
+	};
+
+	struct PlayerLeft
+	{
+		std::uint32_t playerId = 0;
+	};
+
+	// Another player's state, as the server passes it on.
+	struct RemoteState
+	{
+		std::uint32_t playerId = 0;
+		PlayerState   state;
+
+		bool operator==(const RemoteState&) const = default;
+	};
+
+	struct Heartbeat
+	{
+		std::uint32_t token = 0;
+	};
+
+	// ---- serialization -------------------------------------------------------------
+
+	// The longest start of a_text that is at most a_maxBytes long and doesn't end inside a UTF-8 character: a cut name
+	// loses its last character whole, never leaving half of one (which the game would show as junk).
+	[[nodiscard]] inline std::string_view Utf8Prefix(std::string_view a_text, std::size_t a_maxBytes)
+	{
+		if (a_text.size() <= a_maxBytes) {
+			return a_text;
+		}
+		std::size_t length = a_maxBytes;
+		// Back off continuation bytes (10xxxxxx) to the start of the character cut through, at most three.
+		for (int i = 0; i < 3 && length > 0 && (static_cast<unsigned char>(a_text[length]) & 0xC0) == 0x80; ++i) {
+			--length;
+		}
+		return a_text.substr(0, length);
+	}
+
+	class Writer
+	{
+	public:
+		explicit Writer(MessageType a_type) { U8(static_cast<std::uint8_t>(a_type)); }
+
+		void U8(std::uint8_t a_value) { buffer.push_back(a_value); }
+		void U16(std::uint16_t a_value) { Raw(&a_value, sizeof(a_value)); }
+		void U32(std::uint32_t a_value) { Raw(&a_value, sizeof(a_value)); }
+		void U64(std::uint64_t a_value) { Raw(&a_value, sizeof(a_value)); }
+		void F32(float a_value) { Raw(&a_value, sizeof(a_value)); }
+
+		// Cut short at a whole character (Utf8Prefix).
+		void Str(std::string_view a_value, std::size_t a_maxLength)
+		{
+			const auto length = Utf8Prefix(a_value, (std::min<std::size_t>)(a_maxLength, 255)).size();
+			U8(static_cast<std::uint8_t>(length));
+			Raw(a_value.data(), length);
+		}
+
+		// A string longer than Str's 255 bytes may be (a plugin's file name): a U16 length, then the bytes.
+		void LongStr(std::string_view a_value, std::size_t a_maxLength)
+		{
+			const auto length = Utf8Prefix(a_value, (std::min<std::size_t>)(a_maxLength, 0xFFFF)).size();
+			U16(static_cast<std::uint16_t>(length));
+			Raw(a_value.data(), length);
+		}
+
+		[[nodiscard]] const std::vector<std::uint8_t>& Data() const { return buffer; }
+
+	private:
+		void Raw(const void* a_data, std::size_t a_size)
+		{
+			const auto bytes = static_cast<const std::uint8_t*>(a_data);
+			buffer.insert(buffer.end(), bytes, bytes + a_size);
+		}
+
+		std::vector<std::uint8_t> buffer;
+	};
+
+	// Reads values from a packet. Any read past the end sets the failed flag and
+	// returns zero, so decoders can read everything and check Ok() once at the end.
+	class Reader
+	{
+	public:
+		explicit Reader(std::span<const std::uint8_t> a_data) :
+			data(a_data)
+		{}
+
+		std::uint8_t  U8() { return Read<std::uint8_t>(); }
+		std::uint16_t U16() { return Read<std::uint16_t>(); }
+		std::uint32_t U32() { return Read<std::uint32_t>(); }
+		std::uint64_t U64() { return Read<std::uint64_t>(); }
+		float         F32() { return Read<float>(); }
+
+		std::string Str(std::size_t a_maxLength)
+		{
+			const auto length = U8();
+			if (failed || length > a_maxLength || offset + length > data.size()) {
+				failed = true;
+				return {};
+			}
+			std::string out(reinterpret_cast<const char*>(data.data() + offset), length);
+			offset += length;
+			// Every string on the wire is text someone reads (a name, a reason, a line): control
+			// characters are dropped here, before any of it reaches a HUD, a log or a status line.
+			std::erase_if(out, [](const unsigned char c) { return c < 0x20 || c == 0x7F; });
+			return out;
+		}
+
+		// Writer::LongStr's string, its control characters dropped as Str's are.
+		std::string LongStr(std::size_t a_maxLength)
+		{
+			const auto length = U16();
+			if (failed || length > a_maxLength || offset + length > data.size()) {
+				failed = true;
+				return {};
+			}
+			std::string out(reinterpret_cast<const char*>(data.data() + offset), length);
+			offset += length;
+			std::erase_if(out, [](const unsigned char c) { return c < 0x20 || c == 0x7F; });
+			return out;
+		}
+
+		[[nodiscard]] bool Ok() const { return !failed; }
+		// Everything read, and all of it there: a read that ran past the end leaves the offset short of it, except one
+		// that began exactly at the end, which read nothing and must not pass as the end reached.
+		[[nodiscard]] bool AtEnd() const { return !failed && offset == data.size(); }
+
+	private:
+		template <class T>
+		T Read()
+		{
+			if (failed || offset + sizeof(T) > data.size()) {
+				failed = true;
+				return T{};
+			}
+			T value;
+			std::memcpy(&value, data.data() + offset, sizeof(T));
+			offset += sizeof(T);
+			return value;
+		}
+
+		std::span<const std::uint8_t> data;
+		std::size_t                   offset = 0;
+		bool                          failed = false;
+	};
+
+	inline std::optional<MessageType> PeekType(std::span<const std::uint8_t> a_data)
+	{
+		if (a_data.empty()) {
+			return std::nullopt;
+		}
+		return static_cast<MessageType>(a_data[0]);
+	}
+
+	// Each Encode returns a complete packet; each Decode expects one (including the type byte)
+	// and returns nullopt if it is malformed.
+
+	inline void WriteState(Writer& a_writer, const PlayerState& a_state)
+	{
+		a_writer.U32(a_state.sequence);
+		a_writer.U32(a_state.cell);
+		a_writer.U32(a_state.worldspace);
+		a_writer.F32(a_state.x);
+		a_writer.F32(a_state.y);
+		a_writer.F32(a_state.z);
+		a_writer.F32(a_state.heading);
+		a_writer.F32(a_state.speed);
+		a_writer.U8(a_state.flags);
+		a_writer.U32(a_state.sentMs);
+		a_writer.U8(a_state.direction);
+		a_writer.U8(static_cast<std::uint8_t>(a_state.pitch));
+	}
+
+	inline PlayerState ReadState(Reader& a_reader)
+	{
+		PlayerState state;
+		state.sequence = a_reader.U32();
+		state.cell = a_reader.U32();
+		state.worldspace = a_reader.U32();
+		state.x = a_reader.F32();
+		state.y = a_reader.F32();
+		state.z = a_reader.F32();
+		state.heading = a_reader.F32();
+		state.speed = a_reader.F32();
+		state.flags = a_reader.U8();
+		state.sentMs = a_reader.U32();
+		state.direction = a_reader.U8();
+		state.pitch = static_cast<std::int8_t>(a_reader.U8());
+		return state;
+	}
+
+	// A list of plugins: a U16 count (at most a_max; past it the rest are left off), then each name (LongStr, at most
+	// MAX_PLUGIN_NAME_LENGTH bytes).
+	inline void WritePlugins(Writer& a_writer, const std::vector<std::string>& a_plugins, std::size_t a_max = MAX_PLUGINS)
+	{
+		const auto count = (std::min)(a_plugins.size(), a_max);
+		a_writer.U16(static_cast<std::uint16_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			a_writer.LongStr(a_plugins[i], MAX_PLUGIN_NAME_LENGTH);
+		}
+	}
+
+	// None for more than a_max names or a name too long (the reader has failed then).
+	inline std::optional<std::vector<std::string>> ReadPlugins(Reader& a_reader, std::size_t a_max = MAX_PLUGINS)
+	{
+		const auto count = a_reader.U16();
+		if (!a_reader.Ok() || count > a_max) {
+			return std::nullopt;
+		}
+		std::vector<std::string> plugins;
+		plugins.reserve(count);
+		for (std::uint16_t i = 0; i < count && a_reader.Ok(); ++i) {
+			plugins.push_back(a_reader.LongStr(MAX_PLUGIN_NAME_LENGTH));
+		}
+		if (!a_reader.Ok()) {
+			return std::nullopt;
+		}
+		return plugins;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const Hello& a_msg)
+	{
+		Writer w{ MessageType::kHello };
+		w.U32(a_msg.magic);
+		w.U16(a_msg.version);
+		w.U32(a_msg.contentHash);
+		w.Str(a_msg.name, MAX_NAME_LENGTH);
+		w.Str(a_msg.password, MAX_PASSWORD_LENGTH);
+		w.U64(a_msg.identity);
+		WritePlugins(w, a_msg.plugins);
+		return w.Data();
+	}
+
+	// A hello of another version (or with another magic) is read up to its version only: the rest may be laid out
+	// otherwise, and the server needs no more to say the versions differ.
+	inline std::optional<Hello> DecodeHello(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Hello msg;
+		msg.magic = r.U32();
+		msg.version = r.U16();
+		if (!r.Ok()) {
+			return std::nullopt;
+		}
+		if (msg.magic != MAGIC || msg.version != VERSION) {
+			return msg;
+		}
+		msg.contentHash = r.U32();
+		msg.name = r.Str(MAX_NAME_LENGTH);
+		msg.password = r.Str(MAX_PASSWORD_LENGTH);
+		msg.identity = r.U64();
+		auto plugins = ReadPlugins(r);
+		if (!plugins || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		msg.plugins = std::move(*plugins);
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const Welcome& a_msg)
+	{
+		Writer w{ MessageType::kWelcome };
+		w.U32(a_msg.playerId);
+		w.U64(a_msg.sessionId);
+		w.U32(a_msg.hostId);
+		return w.Data();
+	}
+
+	inline std::optional<Welcome> DecodeWelcome(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Welcome msg;
+		msg.playerId = r.U32();
+		msg.sessionId = r.U64();
+		msg.hostId = r.U32();
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const Reject& a_msg)
+	{
+		Writer w{ MessageType::kReject };
+		w.Str(a_msg.reason, MAX_REASON_LENGTH);
+		return w.Data();
+	}
+
+	inline std::optional<Reject> DecodeReject(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Reject msg;
+		msg.reason = r.Str(MAX_REASON_LENGTH);
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const PlayerJoined& a_msg)
+	{
+		Writer w{ MessageType::kPlayerJoined };
+		w.U32(a_msg.playerId);
+		w.Str(a_msg.name, MAX_NAME_LENGTH);
+		return w.Data();
+	}
+
+	inline std::optional<PlayerJoined> DecodePlayerJoined(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		PlayerJoined msg;
+		msg.playerId = r.U32();
+		msg.name = r.Str(MAX_NAME_LENGTH);
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const PlayerLeft& a_msg)
+	{
+		Writer w{ MessageType::kPlayerLeft };
+		w.U32(a_msg.playerId);
+		return w.Data();
+	}
+
+	inline std::optional<PlayerLeft> DecodePlayerLeft(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		PlayerLeft msg;
+		msg.playerId = r.U32();
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const PlayerState& a_msg)
+	{
+		Writer w{ MessageType::kPlayerState };
+		WriteState(w, a_msg);
+		return w.Data();
+	}
+
+	// None for a state that is cut short, has bytes left over, or holds a position no game could be at.
+	inline std::optional<PlayerState> DecodePlayerState(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		const auto state = ReadState(r);
+		if (!r.AtEnd() || !state.IsFinite()) {
+			return std::nullopt;
+		}
+		return state;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const RemoteState& a_msg)
+	{
+		Writer w{ MessageType::kRemoteState };
+		w.U32(a_msg.playerId);
+		WriteState(w, a_msg.state);
+		return w.Data();
+	}
+
+	inline std::optional<RemoteState> DecodeRemoteState(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		RemoteState msg;
+		msg.playerId = r.U32();
+		msg.state = ReadState(r);
+		if (!r.AtEnd() || !msg.state.IsFinite()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// a_type: kHeartbeat or kHeartbeatAck (the answer carries the token back).
+	inline std::vector<std::uint8_t> Encode(const Heartbeat& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		w.U32(a_msg.token);
+		return w.Data();
+	}
+
+	inline std::optional<Heartbeat> DecodeHeartbeat(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Heartbeat msg;
+		msg.token = r.U32();
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// ---- load orders ---------------------------------------------------------------
+
+	// In a hello's load order, between the full plugins and the light ones (.esl files, and plugins flagged light).
+	// The two kinds are numbered apart: a full plugin's form IDs start with its place among the full ones (09000004),
+	// a light one's with FE and its place among the light ones.
+	inline constexpr std::string_view LIGHT_PLUGINS = "--light--";
+
+	[[nodiscard]] inline bool SamePluginName(std::string_view a_a, std::string_view a_b)
+	{
+		return std::ranges::equal(a_a, a_b, [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+	}
+
+	// A game's load order as its hello carries it: the full plugins, LIGHT_PLUGINS, the light ones.
+	[[nodiscard]] inline std::vector<std::string> ComparedLoadOrder(std::vector<std::string> a_full, const std::vector<std::string>& a_light)
+	{
+		auto out = std::move(a_full);
+		out.emplace_back(LIGHT_PLUGINS);
+		out.insert(out.end(), a_light.begin(), a_light.end());
+		return out;
+	}
+
+	// FNV-1a over a load order (ComparedLoadOrder), names in any case: the hello's content hash. Players whose hashes
+	// match play together without the lists being compared.
+	[[nodiscard]] inline std::uint32_t LoadOrderHash(const std::vector<std::string>& a_plugins)
+	{
+		std::uint32_t hash = 2166136261u;
+		for (const auto& name : a_plugins) {
+			for (const char c : name) {
+				hash ^= static_cast<std::uint8_t>(std::tolower(static_cast<unsigned char>(c)));
+				hash *= 16777619u;
+			}
+			hash ^= '|';
+			hash *= 16777619u;
+		}
+		return hash;
+	}
+}

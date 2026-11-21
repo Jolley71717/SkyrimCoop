@@ -1,0 +1,175 @@
+#include "steam/SteamApi.h"
+
+namespace SteamApi
+{
+	namespace
+	{
+		Api                     api;
+		std::atomic<const Api*> loaded{ nullptr };
+		bool                    reportedMissing = false;
+
+		// Where the last Get() stopped (see Unavailable).
+		enum class Stop
+		{
+			kNotTried,
+			kNoLibrary,     // steam_api64.dll is not in the game
+			kMissing,       // it lacks a function we need
+			kNoInterface,   // an interface accessor returned nullptr
+		};
+		Stop        stop = Stop::kNotTried;
+		std::string missingInterface;
+		REX::W32::HMODULE library = nullptr;
+
+		template <class T>
+		bool Resolve(REX::W32::HMODULE a_module, const char* a_name, T& a_out)
+		{
+			a_out = reinterpret_cast<T>(REX::W32::GetProcAddress(a_module, a_name));
+			if (!a_out && !reportedMissing) {
+				logs::warn("Steam: steam_api64.dll has no {}", a_name);
+			}
+			return a_out != nullptr;
+		}
+	}
+
+	const Api* Get()
+	{
+		if (const auto table = loaded.load()) {
+			return table;
+		}
+
+		const auto module = REX::W32::GetModuleHandleW(L"steam_api64.dll");
+		library = module;
+		if (!module) {
+			stop = Stop::kNoLibrary;
+			return nullptr;
+		}
+
+		using Accessor = void* (*)();
+		Accessor user{}, friends{}, matchmaking{}, messages{}, utils{};
+
+		bool ok = true;
+		ok &= Resolve(module, "SteamAPI_SteamUser_v021", user);
+		ok &= Resolve(module, "SteamAPI_SteamFriends_v017", friends);
+		ok &= Resolve(module, "SteamAPI_SteamMatchmaking_v009", matchmaking);
+		ok &= Resolve(module, "SteamAPI_SteamNetworkingMessages_SteamAPI_v002", messages);
+		ok &= Resolve(module, "SteamAPI_SteamNetworkingUtils_SteamAPI_v004", utils);
+
+		ok &= Resolve(module, "SteamAPI_ISteamUser_GetSteamID", api.GetSteamID);
+		ok &= Resolve(module, "SteamAPI_ISteamFriends_GetPersonaName", api.GetPersonaName);
+		ok &= Resolve(module, "SteamAPI_ISteamFriends_GetFriendPersonaName", api.GetFriendPersonaName);
+		ok &= Resolve(module, "SteamAPI_ISteamFriends_GetFriendRelationship", api.GetFriendRelationship);
+		ok &= Resolve(module, "SteamAPI_ISteamFriends_SetRichPresence", api.SetRichPresence);
+		ok &= Resolve(module, "SteamAPI_ISteamFriends_ClearRichPresence", api.ClearRichPresence);
+		ok &= Resolve(module, "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog", api.ActivateGameOverlayInviteDialog);
+
+		ok &= Resolve(module, "SteamAPI_ISteamMatchmaking_CreateLobby", api.CreateLobby);
+		ok &= Resolve(module, "SteamAPI_ISteamMatchmaking_JoinLobby", api.JoinLobby);
+		ok &= Resolve(module, "SteamAPI_ISteamMatchmaking_LeaveLobby", api.LeaveLobby);
+		ok &= Resolve(module, "SteamAPI_ISteamMatchmaking_SetLobbyData", api.SetLobbyData);
+		ok &= Resolve(module, "SteamAPI_ISteamMatchmaking_GetLobbyData", api.GetLobbyData);
+		ok &= Resolve(module, "SteamAPI_ISteamMatchmaking_GetLobbyOwner", api.GetLobbyOwner);
+		ok &= Resolve(module, "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers", api.GetNumLobbyMembers);
+		ok &= Resolve(module, "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex", api.GetLobbyMemberByIndex);
+
+		ok &= Resolve(module, "SteamAPI_ISteamNetworkingMessages_SendMessageToUser", api.SendMessageToUser);
+		ok &= Resolve(module, "SteamAPI_ISteamNetworkingMessages_ReceiveMessagesOnChannel", api.ReceiveMessagesOnChannel);
+		ok &= Resolve(module, "SteamAPI_ISteamNetworkingMessages_AcceptSessionWithUser", api.AcceptSessionWithUser);
+		ok &= Resolve(module, "SteamAPI_ISteamNetworkingMessages_CloseSessionWithUser", api.CloseSessionWithUser);
+		ok &= Resolve(module, "SteamAPI_SteamNetworkingMessage_t_Release", api.ReleaseMessage);
+
+		ok &= Resolve(module, "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess", api.InitRelayNetworkAccess);
+		ok &= Resolve(module, "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus", api.GetRelayNetworkStatus);
+
+		ok &= Resolve(module, "SteamAPI_RegisterCallback", api.RegisterCallback);
+		ok &= Resolve(module, "SteamAPI_UnregisterCallback", api.UnregisterCallback);
+
+		const bool voice = Resolve(module, "SteamAPI_ISteamUser_StartVoiceRecording", api.StartVoiceRecording) &&
+		                   Resolve(module, "SteamAPI_ISteamUser_StopVoiceRecording", api.StopVoiceRecording) &&
+		                   Resolve(module, "SteamAPI_ISteamUser_GetAvailableVoice", api.GetAvailableVoice) &&
+		                   Resolve(module, "SteamAPI_ISteamUser_GetVoice", api.GetVoice) &&
+		                   Resolve(module, "SteamAPI_ISteamUser_DecompressVoice", api.DecompressVoice) &&
+		                   Resolve(module, "SteamAPI_ISteamFriends_SetInGameVoiceSpeaking", api.SetInGameVoiceSpeaking);
+		if (!voice) {
+			api.StartVoiceRecording = nullptr;  // voice chat checks this one
+		}
+
+		const bool friendList = Resolve(module, "SteamAPI_ISteamFriends_GetFriendCount", api.GetFriendCount) &&
+		                        Resolve(module, "SteamAPI_ISteamFriends_GetFriendByIndex", api.GetFriendByIndex) &&
+		                        Resolve(module, "SteamAPI_ISteamFriends_GetFriendPersonaState", api.GetFriendPersonaState) &&
+		                        Resolve(module, "SteamAPI_ISteamFriends_GetFriendRichPresence", api.GetFriendRichPresence) &&
+		                        Resolve(module, "SteamAPI_ISteamFriends_RequestFriendRichPresence", api.RequestFriendRichPresence) &&
+		                        Resolve(module, "SteamAPI_ISteamFriends_GetFriendGamePlayed", api.GetFriendGamePlayed);
+		if (!friendList) {
+			api.GetFriendCount = nullptr;  // the friends scan checks this one
+		}
+
+		Accessor userStats{};
+		const bool achievements = Resolve(module, "SteamAPI_SteamUserStats_v012", userStats) &&
+		                          Resolve(module, "SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime", api.GetAchievementAndUnlockTime);
+
+		Accessor steamUtils{};
+		const bool diagnostics = Resolve(module, "SteamAPI_SteamUtils_v010", steamUtils) && Resolve(module, "SteamAPI_ISteamUtils_GetAppID", api.GetAppID) &&
+		                         Resolve(module, "SteamAPI_ISteamUtils_IsOverlayEnabled", api.IsOverlayEnabled);
+		Resolve(module, "SteamAPI_ISteamUtils_IsSteamRunningOnSteamDeck", api.IsSteamRunningOnSteamDeck);
+
+		reportedMissing = true;
+		if (!ok) {
+			stop = Stop::kMissing;
+			return nullptr;
+		}
+
+		// These return nullptr until the game has initialized Steam.
+		api.user = user();
+		api.friends = friends();
+		api.matchmaking = matchmaking();
+		api.messages = messages();
+		api.utils = utils();
+		if (!api.user || !api.friends || !api.matchmaking || !api.messages || !api.utils) {
+			stop = Stop::kNoInterface;
+			missingInterface = !api.user ? "SteamUser021" : !api.friends ? "SteamFriends017" : !api.matchmaking ? "SteamMatchMaking009" :
+			                   !api.messages                                                         ? "SteamNetworkingMessages002" :
+			                                                                                          "SteamNetworkingUtils004";
+			return nullptr;
+		}
+		api.userStats = achievements ? userStats() : nullptr;
+		api.steamUtils = diagnostics ? steamUtils() : nullptr;
+
+		loaded = &api;
+		return &api;
+	}
+
+	const Api* Loaded()
+	{
+		return loaded.load();
+	}
+
+	std::string Unavailable()
+	{
+		if (loaded.load()) {
+			return {};
+		}
+		switch (stop) {
+		case Stop::kNotTried:
+			return "not looked for yet";
+		case Stop::kNoLibrary:
+			return "the game has no steam_api64.dll loaded (not the Steam version of Skyrim Special Edition?)";
+		case Stop::kMissing:
+			return "the game's steam_api64.dll lacks functions the mod needs (the log names them above; another game version?)";
+		default:
+			break;
+		}
+		// The game's own SteamAPI_Init failed (or hasn't run yet): no Steam client it could reach, or no app id.
+		using Running = bool (*)();
+		using User = std::int32_t (*)();
+		const auto running = reinterpret_cast<Running>(REX::W32::GetProcAddress(library, "SteamAPI_IsSteamRunning"));
+		const auto user = reinterpret_cast<User>(REX::W32::GetProcAddress(library, "SteamAPI_GetHSteamUser"));
+		if (running && !running()) {
+			return "Steam is not running, as far as the game's Steam library can see (start Steam, then the game through it)";
+		}
+		if (user && user() == 0) {
+			return "the game did not start Steam (its SteamAPI_Init failed: the game was not started through Steam and got no app id, or "
+			       "Steam was not running yet)";
+		}
+		return std::format("Steam is up but gives the game no {} (a Steam client, or on Linux a Proton, too old for it)", missingInterface);
+	}
+}

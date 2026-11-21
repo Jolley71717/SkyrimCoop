@@ -1,0 +1,558 @@
+#include "Test.h"
+
+#include "ServerFixture.h"
+
+#include <string>
+#include <vector>
+
+// The session server (common/Server.cpp), driven through a FakeTransport: who gets in, what the others hear, and
+// what is passed on.
+
+namespace
+{
+	using MT = Protocol::MessageType;
+
+	constexpr std::uint8_t Type(MT a_type) { return static_cast<std::uint8_t>(a_type); }
+
+	Protocol::PlayerState StateAt(std::uint32_t a_sequence, float a_x)
+	{
+		Protocol::PlayerState state;
+		state.sequence = a_sequence;
+		state.worldspace = 0x3C;
+		state.x = a_x;
+		state.y = 20.0f;
+		state.z = 30.0f;
+		state.heading = 1.5f;
+		state.speed = 150.0f;
+		state.sentMs = 77;
+		return state;
+	}
+
+	// The remote states the server has sent a_peer so far, in the order sent.
+	std::vector<Protocol::RemoteState> RemoteStates(Fixture& a_fixture, PeerId a_peer)
+	{
+		std::vector<Protocol::RemoteState> out;
+		for (const auto& packet : a_fixture.fake->Take(a_peer)) {
+			if (Protocol::PeekType(packet) == MT::kRemoteState) {
+				if (const auto state = Protocol::DecodeRemoteState(packet)) {
+					out.push_back(*state);
+				}
+			}
+		}
+		return out;
+	}
+}
+
+TEST("server: the first player is welcomed as player 1, the second as player 2, and each hears of the other")
+{
+	Fixture f;
+	const auto first = f.Join(1, Fixture::MakeHello("Ada"));
+	REQUIRE(first);
+	CHECK(first->playerId == 1);
+	CHECK(first->hostId == 0);
+	CHECK(first->sessionId != 0);
+
+	const auto second = f.Join(2, Fixture::MakeHello("Bo"));
+	REQUIRE(second);
+	CHECK(second->playerId == 2);
+	CHECK(second->sessionId == first->sessionId);
+
+	// The one who joined is told who is there; the one who was there is told who joined.
+	const auto toSecond = f.fake->WaitFor(2, Type(MT::kPlayerJoined));
+	REQUIRE(toSecond);
+	const auto there = Protocol::DecodePlayerJoined(*toSecond);
+	REQUIRE(there);
+	CHECK(there->playerId == 1);
+	CHECK(there->name == "Ada");
+
+	const auto toFirst = f.fake->WaitFor(1, Type(MT::kPlayerJoined));
+	REQUIRE(toFirst);
+	const auto joined = Protocol::DecodePlayerJoined(*toFirst);
+	REQUIRE(joined);
+	CHECK(joined->playerId == 2);
+	CHECK(joined->name == "Bo");
+
+	CHECK(f.LoggedSoon("server: player 2 joined from fake 2 (2 in the session)"));
+	CHECK(f.server.Players() == 2);
+}
+
+TEST("server: a player without a name is shown as Player N")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("   ")));
+	const auto packet = f.fake->WaitFor(1, Type(MT::kPlayerJoined));
+	REQUIRE(packet);
+	const auto joined = Protocol::DecodePlayerJoined(*packet);
+	REQUIRE(joined);
+	CHECK(joined->name == "Player 2");
+}
+
+TEST("server: a hello of another protocol version is refused, saying both versions")
+{
+	Fixture f;
+	auto    hello = Fixture::MakeHello("Old");
+	hello.version = static_cast<std::uint16_t>(Protocol::VERSION + 1);
+	const auto reason = f.Refused(1, hello);
+	CHECK(reason == std::format("This game runs another version of the mod (protocol {}, the host has {}). Both players need the same version.",
+							Protocol::VERSION + 1, Protocol::VERSION));
+	CHECK(f.fake->WaitDisconnected(1));
+	CHECK(f.LoggedSoon(std::format("server: refused fake 1: protocol {} (ours is {})", Protocol::VERSION + 1, Protocol::VERSION)));
+	CHECK(f.server.Players() == 0);
+}
+
+TEST("server: a hello of another program is refused")
+{
+	Fixture f;
+	auto    hello = Fixture::MakeHello("Stranger");
+	hello.magic = 0x12345678;
+	CHECK(f.Refused(1, hello) == "This is not a SkyrimCoop game.");
+	CHECK(f.fake->WaitDisconnected(1));
+}
+
+TEST("server: a hello cut short is refused as unreadable")
+{
+	Fixture f;
+	auto    packet = Protocol::Encode(Fixture::MakeHello("Cut"));
+	packet.resize(packet.size() - 3);
+	f.fake->Connect(1);
+	f.fake->Deliver(1, packet);
+	const auto answer = f.fake->WaitFor(1, Type(MT::kReject));
+	REQUIRE(answer);
+	const auto reject = Protocol::DecodeReject(*answer);
+	REQUIRE(reject);
+	CHECK(reject->reason == "The join request could not be read.");
+	CHECK(f.fake->WaitDisconnected(1));
+}
+
+TEST("server: the password is asked of everyone when one is set")
+{
+	Server::Options options;
+	options.password = "sweetroll";
+	Fixture f{ options };
+
+	auto wrong = Fixture::MakeHello("Guesser");
+	wrong.password = "sweetrol";
+	CHECK(f.Refused(1, wrong) == "Wrong password.");
+	CHECK(f.fake->WaitDisconnected(1));
+	CHECK(f.LoggedSoon("server: refused fake 1: wrong password"));
+
+	CHECK(f.Refused(2, Fixture::MakeHello("NoPassword")) == "Wrong password.");
+
+	auto right = Fixture::MakeHello("Friend");
+	right.password = "sweetroll";
+	const auto welcome = f.Join(3, right);
+	REQUIRE(welcome);
+	CHECK(welcome->playerId == 1);
+
+	// The log never holds the password itself.
+	for (const auto& line : f.LogLines()) {
+		CHECK(line.find("sweetrol") == std::string::npos);
+	}
+}
+
+TEST("server: a full session refuses the next player, and lets one in again when someone leaves")
+{
+	Server::Options options;
+	options.maxPlayers = 2;
+	Fixture f{ options };
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+
+	CHECK(f.Refused(3, Fixture::MakeHello("Cy")) == "The game is full (2 players).");
+	CHECK(f.fake->WaitDisconnected(3));
+	CHECK(f.LoggedSoon("server: refused fake 3: the session is full"));
+
+	f.fake->Drop(2);
+	CHECK(f.LoggedSoon("server: player 2 left (disconnected)"));
+	const auto welcome = f.Join(4, Fixture::MakeHello("Cy"));
+	REQUIRE(welcome);
+	CHECK(welcome->playerId == 3);
+}
+
+TEST("server: more players than the protocol allows are never let in, whatever the option says")
+{
+	Server::Options options;
+	options.maxPlayers = 100;
+	Fixture f{ options };
+	CHECK(f.LoggedSoon(std::format("(max {} players", Protocol::MAX_PLAYERS)));
+	for (PeerId peer = 1; peer <= Protocol::MAX_PLAYERS; ++peer) {
+		REQUIRE(f.Join(peer, Fixture::MakeHello(std::format("P{}", peer))));
+	}
+	CHECK(f.Refused(100, Fixture::MakeHello("Late")) == std::format("The game is full ({} players).", Protocol::MAX_PLAYERS));
+}
+
+TEST("server: another load order is refused, naming the plugin the joiner lacks")
+{
+	Fixture f;
+	auto    host = Fixture::MakeHello("Host");
+	host.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "Dawnguard.esm", "BigMod.esp" }, { "Small.esl" });
+	host.contentHash = Protocol::LoadOrderHash(host.plugins);
+	REQUIRE(f.Join(1, host));
+
+	auto joiner = Fixture::MakeHello("Joiner");
+	joiner.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "Dawnguard.esm" }, { "Small.esl" });
+	joiner.contentHash = Protocol::LoadOrderHash(joiner.plugins);
+	CHECK(f.Refused(2, joiner) == "Your mods differ from the host's: you don't have BigMod.esp.");
+	CHECK(f.fake->WaitDisconnected(2));
+	CHECK(f.LoggedSoon("server: refused fake 2: another load order (you don't have BigMod.esp)"));
+}
+
+TEST("server: another load order is refused, naming the plugin the host lacks, or saying the order differs")
+{
+	Fixture f;
+	auto    host = Fixture::MakeHello("Host");
+	host.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "A.esp", "B.esp" }, {});
+	host.contentHash = Protocol::LoadOrderHash(host.plugins);
+	REQUIRE(f.Join(1, host));
+
+	auto extra = Fixture::MakeHello("Extra");
+	extra.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "A.esp", "B.esp", "Mine.esp" }, {});
+	extra.contentHash = Protocol::LoadOrderHash(extra.plugins);
+	CHECK(f.Refused(2, extra) == "Your mods differ from the host's: the host doesn't have Mine.esp.");
+
+	auto swapped = Fixture::MakeHello("Swapped");
+	swapped.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "B.esp", "A.esp" }, {});
+	swapped.contentHash = Protocol::LoadOrderHash(swapped.plugins);
+	CHECK(f.Refused(3, swapped) == "Your mods differ from the host's: the same plugins, in another order.");
+
+	// A hello that names no plugins (a bot) gets the short refusal.
+	auto bare = Fixture::MakeHello("Bare");
+	bare.contentHash = 0x9999;
+	CHECK(f.Refused(4, bare) == "Your mods differ from the host's.");
+}
+
+TEST("server: the same load order with names in another case is let in")
+{
+	Fixture f;
+	auto    host = Fixture::MakeHello("Host");
+	host.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm" }, { "Small.esl" });
+	host.contentHash = Protocol::LoadOrderHash(host.plugins);
+	REQUIRE(f.Join(1, host));
+
+	auto joiner = Fixture::MakeHello("Joiner");
+	joiner.plugins = Protocol::ComparedLoadOrder({ "SKYRIM.ESM", "update.esm" }, { "small.ESL" });
+	joiner.contentHash = Protocol::LoadOrderHash(joiner.plugins);
+	CHECK(f.Join(2, joiner).has_value());
+}
+
+TEST("server: an empty session takes the next player's load order")
+{
+	Fixture f;
+	auto    first = Fixture::MakeHello("First");
+	first.contentHash = 0x1111;
+	REQUIRE(f.Join(1, first));
+	f.fake->Drop(1);
+	CHECK(f.LoggedSoon("server: player 1 left (disconnected)"));
+
+	auto second = Fixture::MakeHello("Second");
+	second.contentHash = 0x2222;
+	REQUIRE(f.Join(2, second));
+
+	// And holds everyone after to it.
+	CHECK(f.Refused(3, first) == "Your mods differ from the host's.");
+}
+
+TEST("server: a player who comes back with the same identity gets the same player id")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada", 0xAAAA)));
+	const auto before = f.Join(2, Fixture::MakeHello("Bo", 0xBBBB));
+	REQUIRE(before);
+	CHECK(before->playerId == 2);
+
+	f.fake->Drop(2);
+	const auto leftPacket = f.fake->WaitFor(1, Type(MT::kPlayerLeft));
+	REQUIRE(leftPacket);
+	const auto left = Protocol::DecodePlayerLeft(*leftPacket);
+	REQUIRE(left);
+	CHECK(left->playerId == 2);
+
+	REQUIRE(f.Join(3, Fixture::MakeHello("Cy", 0xCCCC)));
+	const auto after = f.Join(4, Fixture::MakeHello("Bo", 0xBBBB));
+	REQUIRE(after);
+	CHECK(after->playerId == 2);
+
+	// A player with no identity is always new.
+	f.fake->Drop(3);
+	CHECK(f.LoggedSoon("server: player 3 left (disconnected)"));
+	const auto anonymous = f.Join(5, Fixture::MakeHello("Dee"));
+	REQUIRE(anonymous);
+	CHECK(anonymous->playerId == 4);
+}
+
+TEST("server: a player who joins again while their old connection stands takes its place")
+{
+	Server::Options options;
+	options.maxPlayers = 2;
+	Fixture f{ options };
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada", 0xAAAA)));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo", 0xBBBB)));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	// The session is full, but this is Bo again: let in, on the old id, and the old connection is dropped.
+	const auto again = f.Join(3, Fixture::MakeHello("Bo", 0xBBBB));
+	REQUIRE(again);
+	CHECK(again->playerId == 2);
+	CHECK(f.fake->WaitDisconnected(2));
+	CHECK(f.LoggedSoon("server: player 2 left (joined again on a new connection)"));
+
+	// The other player hears them leave, then join.
+	const auto packets = f.fake->TakeThrough(1, Type(MT::kPlayerJoined));
+	REQUIRE(packets.size() == 2);
+	CHECK(Protocol::PeekType(packets[0]) == MT::kPlayerLeft);
+	CHECK(Protocol::PeekType(packets[1]) == MT::kPlayerJoined);
+
+	REQUIRE(f.fake->Settle());
+	CHECK(f.server.Players() == 2);
+}
+
+TEST("server: the host is the game on this machine with the host's identity, and every welcome names it")
+{
+	Server::Options options;
+	options.hostIdentity = 0x4057;
+	Fixture f{ options };
+
+	// The same identity from another machine is an ordinary player.
+	const auto remote = f.Join(1, Fixture::MakeHello("Copycat", 0x4057));
+	REQUIRE(remote);
+	CHECK(remote->hostId == 0);
+	f.fake->Drop(1);
+	REQUIRE(f.fake->Settle());
+
+	// Another program on this machine (a bot) is an ordinary player too.
+	f.fake->SetLocal(2);
+	const auto bot = f.Join(2, Fixture::MakeHello("Bot", 0x1111));
+	REQUIRE(bot);
+	CHECK(bot->hostId == 0);
+
+	f.fake->SetLocal(3);
+	const auto host = f.Join(3, Fixture::MakeHello("Host", 0x4057));
+	REQUIRE(host);
+	CHECK(host->hostId == host->playerId);
+	CHECK(f.LoggedSoon(", the host ("));
+
+	const auto friendWelcome = f.Join(4, Fixture::MakeHello("Friend", 0x2222));
+	REQUIRE(friendWelcome);
+	CHECK(friendWelcome->hostId == host->playerId);
+
+	// Once the host has left, a welcome names no host.
+	f.fake->Drop(3);
+	REQUIRE(f.fake->Settle());
+	const auto late = f.Join(5, Fixture::MakeHello("Late", 0x3333));
+	REQUIRE(late);
+	CHECK(late->hostId == 0);
+}
+
+TEST("server: a player's state is passed on to the others, unreliably, and not back to its sender")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.Join(3, Fixture::MakeHello("Cy")));
+	REQUIRE(f.fake->Settle());
+	for (const PeerId peer : { 1u, 2u, 3u }) {
+		(void)f.fake->Take(peer);
+	}
+
+	const auto state = StateAt(1, 10.0f);
+	f.fake->Deliver(2, Protocol::Encode(state));
+	REQUIRE(f.fake->Settle());
+
+	for (const PeerId peer : { 1u, 3u }) {
+		const auto sent = f.fake->TakeSent(peer);
+		REQUIRE(sent.size() == 1);
+		CHECK(!sent[0].reliable);
+		const auto remote = Protocol::DecodeRemoteState(sent[0].data);
+		REQUIRE(remote);
+		CHECK(remote->playerId == 2);
+		CHECK(remote->state == state);
+	}
+	CHECK(f.fake->Take(2).empty());
+}
+
+TEST("server: a state older than the last one passed on is dropped, across a wrap of the sequence too")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(2);
+
+	for (const std::uint32_t sequence : { 5u, 4u, 5u, 6u, 0xFFFFFFFFu, 0xFFFFFFF0u, 2u }) {
+		f.fake->Deliver(1, Protocol::Encode(StateAt(sequence, static_cast<float>(sequence % 1000))));
+	}
+	REQUIRE(f.fake->Settle());
+
+	// 5, 6, then 0xFFFFFFFF reads as older than 6 (a signed difference); 0xFFFFFFF0 too; 2 is older than 6.
+	const auto states = RemoteStates(f, 2);
+	REQUIRE(states.size() == 2);
+	CHECK(states[0].state.sequence == 5);
+	CHECK(states[1].state.sequence == 6);
+
+	// Near the top, the sequence wraps to 0 and goes on.
+	Fixture g;
+	REQUIRE(g.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(g.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(g.fake->Settle());
+	(void)g.fake->Take(2);
+	for (const std::uint32_t sequence : { 0xFFFFFFFEu, 0xFFFFFFFFu, 0u, 1u, 0xFFFFFFFFu }) {
+		g.fake->Deliver(1, Protocol::Encode(StateAt(sequence, 1.0f)));
+	}
+	REQUIRE(g.fake->Settle());
+	const auto wrapped = RemoteStates(g, 2);
+	REQUIRE(wrapped.size() == 4);
+	CHECK(wrapped[2].state.sequence == 0);
+	CHECK(wrapped[3].state.sequence == 1);
+}
+
+TEST("server: a state with a position no game could be at is not passed on")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(2);
+
+	auto bad = StateAt(1, std::numeric_limits<float>::quiet_NaN());
+	f.fake->Deliver(1, Protocol::Encode(bad));
+	bad = StateAt(2, 1.0e30f);
+	f.fake->Deliver(1, Protocol::Encode(bad));
+	auto cut = Protocol::Encode(StateAt(3, 1.0f));
+	cut.pop_back();
+	f.fake->Deliver(1, cut);
+	f.fake->Deliver(1, Protocol::Encode(StateAt(4, 4.0f)));
+	REQUIRE(f.fake->Settle());
+
+	const auto states = RemoteStates(f, 2);
+	REQUIRE(states.size() == 1);
+	CHECK(states[0].state.sequence == 4);
+}
+
+TEST("server: nothing is heard from a connection before its hello")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	f.fake->Connect(2);
+	f.fake->Deliver(2, Protocol::Encode(StateAt(1, 1.0f)));
+	f.fake->Deliver(2, Protocol::Encode(Protocol::Heartbeat{ 7 }, MT::kHeartbeat));
+	REQUIRE(f.fake->Settle());
+	CHECK(f.fake->Take(1).empty());
+	CHECK(f.fake->Take(2).empty());
+	CHECK(f.server.Players() == 1);
+}
+
+TEST("server: a heartbeat is answered with its token, unreliably, and only so many in a burst")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	f.fake->Deliver(1, Protocol::Encode(Protocol::Heartbeat{ 0xBEEF }, MT::kHeartbeat));
+	REQUIRE(f.fake->Settle());
+	auto sent = f.fake->TakeSent(1);
+	REQUIRE(sent.size() == 1);
+	CHECK(!sent[0].reliable);
+	CHECK(Protocol::PeekType(sent[0].data) == MT::kHeartbeatAck);
+	const auto ack = Protocol::DecodeHeartbeat(sent[0].data);
+	REQUIRE(ack);
+	CHECK(ack->token == 0xBEEF);
+
+	// A flood: the burst is answered, the rest is not (some may be, as the budget refills while they come in).
+	for (std::uint32_t i = 0; i < 2000; ++i) {
+		f.fake->Deliver(1, Protocol::Encode(Protocol::Heartbeat{ i }, MT::kHeartbeat));
+	}
+	REQUIRE(f.fake->Settle());
+	const auto answers = f.fake->Take(1).size();
+	CHECK(answers >= 19);
+	CHECK(answers < 1000);
+}
+
+TEST("server: a message the server does not take is said once in the log and changes nothing")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+	(void)f.fake->Take(2);
+
+	// A welcome is the server's to send; type 200 is no message at all; an empty packet has no type.
+	f.fake->Deliver(2, Protocol::Encode(Protocol::Welcome{ 9, 9, 9 }));
+	f.fake->Deliver(2, std::vector<std::uint8_t>{ 200, 1, 2, 3 });
+	f.fake->Deliver(2, std::vector<std::uint8_t>{});
+	REQUIRE(f.fake->Settle());
+	CHECK(f.fake->Take(1).empty());
+	CHECK(f.fake->Take(2).empty());
+
+	std::size_t said = 0;
+	for (const auto& line : f.LogLines()) {
+		said += line.find("which the server does not take") != std::string::npos;
+	}
+	CHECK(said == 1);
+	CHECK(f.Logged("server: player 2 sent message type 2, which the server does not take"));
+	CHECK(f.server.Players() == 2);
+}
+
+TEST("server: a second hello from a player already in changes nothing")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+	f.fake->Deliver(1, Protocol::Encode(Fixture::MakeHello("Ada again")));
+	REQUIRE(f.fake->Settle());
+	CHECK(f.fake->Take(1).empty());
+	CHECK(f.server.Players() == 1);
+}
+
+TEST("server: a connection that never says hello is dropped")
+{
+	Server::Options options;
+	options.helloTimeout = std::chrono::milliseconds(250);
+	Fixture f{ options };
+	f.fake->Connect(1);
+	CHECK(f.fake->WaitDisconnected(1));
+	CHECK(f.LoggedSoon("server: dropped fake 1: no hello"));
+
+	// One that did say hello stays.
+	REQUIRE(f.Join(2, Fixture::MakeHello("Ada")));
+	std::this_thread::sleep_for(std::chrono::milliseconds(500));
+	REQUIRE(f.fake->Settle());
+	CHECK(!f.fake->Disconnected(2));
+	CHECK(f.server.Players() == 1);
+}
+
+TEST("server: the log names no player and holds no whole address")
+{
+	Fixture f;
+	f.fake->SetAddress(1, "udp 203.0.113.x:5000");
+	REQUIRE(f.Join(1, Fixture::MakeHello("A Very Private Name")));
+	f.fake->Drop(1);
+	CHECK(f.LoggedSoon("server: player 1 left (disconnected)"));
+	f.server.Stop();
+	CHECK(f.Logged("server: stopped"));
+	CHECK(f.Logged("server: player 1 joined from udp 203.0.113.x:5000"));
+	for (const auto& line : f.LogLines()) {
+		CHECK(line.find("Private") == std::string::npos);
+	}
+}
+
+TEST("server: a second server on the same port does not start, and says why")
+{
+	Fixture                  f;
+	std::vector<std::string> lines;
+	Server                   second{ [&](std::string_view a_line) { lines.emplace_back(a_line); } };
+	Server::Options          options;
+	options.port = f.udpPort;
+	options.udpLoopbackOnly = true;
+	CHECK(!second.Start(options));
+	CHECK(!second.Running());
+	REQUIRE(lines.size() == 1);
+	CHECK(lines[0] == std::format("server: could not bind UDP port {} (already in use?)", f.udpPort));
+}

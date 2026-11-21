@@ -1,0 +1,122 @@
+# Design
+
+How SkyrimCoop is meant to work, and why. This is a skeleton: the decisions that are made, the parts that exist, and for everything else a heading that says what has to be decided there. A section is filled in when its phase of [PLAN.md](PLAN.md) is built and tested, with what the game turned out to do, not before.
+
+Nothing here has been run in a game yet.
+
+## The idea
+
+A small group of friends plays through Skyrim together in one world.
+
+- **One host, whose save is the world.** The host loads their own save and plays. Friends join it. Quests, the state of the world, the time of day: the host's game decides, and the host's save keeps it.
+- **Friends follow.** A friend plays their own character, with their own gear and skills, kept in their own save. Their save keeps the character, not the world: what the group did lives in the host's save.
+- **Steam first.** The host's game opens a friends-only Steam lobby. A friend joins from the Steam overlay or the friends list. The games talk through Steam's relay network: no server to rent, no port to open, no address to pass around.
+- **By address second.** A direct UDP connection to an address and port (a LAN, a forwarded port, a VPN of the group's own choosing), and a dedicated server for those who want one. The same session either way.
+- **Tested for hours before it ships.** A release is a release candidate that two scripted games played for a long session without a failure ([RELEASING.md](RELEASING.md)).
+
+It is the design of [F4Multiplayer](https://github.com/Jolley71717/F4Multiplayer), the sister project for Fallout 4, moved to another game by the same engine family. Where that project has an answer that does not depend on the game, this one starts from it.
+
+## Decisions made
+
+| Decision | Why |
+| --- | --- |
+| The game is Skyrim Special Edition on Steam, the current version (the Anniversary Edition update line). Not the 2011 game, not Skyrim VR, not the GOG or Microsoft Store versions, for now. | One game version to reverse-engineer and test. Steam is how players join, so a version without Steam has no way in. |
+| The plugin is an SKSE64 plugin built on CommonLibSSE-NG, finding the game's functions through the Address Library. | The same stack as the sister project's (F4SE, CommonLibF4, Address Library), so the same habits apply. Address Library ids survive most game updates. |
+| The host owns the world; friends follow. | One source of truth. Two games that both decide drift apart, and no save can hold two worlds. |
+| Steam lobbies, invites and the relay first; join by address second. | The reason for the project: joining should be an invite, not network administration. |
+| Steam is reached through the game's own Steam library, by hand-declared functions found at run time. The Steamworks SDK is never in the repository and no Steam library ships with the mod. | The SDK's terms do not fit a GPL repository, and the game already has Steam loaded under its own app id. |
+| GPL-3.0-or-later with the modding and linking exceptions, as F4Multiplayer. | The same license lets code move between the two projects, and CommonLibSSE-NG's license asks for it. |
+| No code from other multiplayer mods. | Their licenses differ and some allow nothing ([PRIOR-ART.md](PRIOR-ART.md)); whether to build on any of them is the maintainer's decision, not a contributor's. |
+| Game-free code is kept apart (`common/`) and unit-tested on every pull request; anything that touches the game is tested on two real games. | The split the sister project relies on: most protocol bugs are found without a game, and no game behaviour is taken on trust. |
+| A release candidate first, then a long two-game test of exactly that build, then the release. | What is tested is what ships. |
+| Logs name no person and no machine. | A bug report's log is attached in public. |
+
+## What exists today
+
+```
+        game A (host)                                   game B (friend)
+  +--------------------------+                   +--------------------------+
+  | SkyrimCoop.dll           |                   | SkyrimCoop.dll           |
+  |  src/main.cpp  start-up  |                   |                          |
+  |  src/game/*    (stubs)   |                   |                          |
+  |  src/net/NetClient ------+--- transport -----+-- src/net/NetClient      |
+  |  common/Server (thread)  |   Steam relay or  |                          |
+  |  src/steam/*             |   UDP (ENet)      |  src/steam/*             |
+  +--------------------------+                   +--------------------------+
+```
+
+- **Start-up** (`src/main.cpp`): keeps the last three logs, starts the log, checks the game's version (`src/RuntimeSupport.h`), reports how the game was started (`src/LaunchReport.h`, `src/Platform.cpp`), reads the ini (`src/Settings.h`, `src/Config.cpp`), and listens for SKSE's messages: data loaded, before and after a load, new game, save, delete. It registers a co-save record ("SKCO") that holds nothing yet.
+- **The protocol** (`common/Protocol.h`): a first, small one. A hello with the mod's protocol version, the player's name, a password and the load order; a welcome or a refusal with its reason; players joining and leaving; each player's state (cell or worldspace, position, heading, speed, a few flags, the sender's clock); a heartbeat. Two channels: reliable, and unreliable-sequenced for state.
+- **The server** (`common/Server.cpp`): lets players in (same protocol version, same load order, the right password, room left), gives each an id, and passes each player's state to the others. It runs as a thread inside the host's game, or alone as `SkyrimCoopServer.exe`.
+- **Transports** (`common/Transport.h`): the session does not know how bytes travel. `common/EnetTransport` is UDP through ENet; `src/steam/SteamTransport` is Steam's relay messaging; `tests/FakeTransport.h` is memory, for tests.
+- **Steam** (`src/steam/`): the lobby, invites, "Join Game", friends who are hosting, carried from the sister project. Not yet shown to work under Skyrim ([GETTING-STARTED.md](GETTING-STARTED.md), "The first thing to test").
+- **The game side** (`src/game/`): four stubs behind small interfaces, each saying what it must become: the frame (`GameThread`), the load order (`LoadOrder`), the local player (`LocalPlayer`), the other players (`RemotePlayers`). [PORTING.md](PORTING.md) has a section for each.
+- **Privacy** (`common/Redact.h`): players are `player N` in every log line; addresses are masked; a last scrub runs over every line.
+
+## Sessions
+
+Carried from the sister project and unit-tested:
+
+- A friend is let in only with the same protocol version, the same load order and the host's password. Each refusal has its own reason, shown to the player.
+- The load order is compared by plugin names in order, full and light plugins apart. The first player in the session sets it; on a hosted game that is the host.
+- Each game has a random identity kept on its PC; a player who drops and returns gets the same player id. It is not a Steam id and says nothing about the person.
+- Up to 8 players by protocol, 4 by default.
+
+To design when phase 1 is built: what a friend sees while joining, joining in the middle of a fight or a scene, the host leaving, a friend's game crashing, bans.
+
+## Form ids across load orders
+
+Every object in the game is named by a form id whose first byte (or, for light plugins, bits) depends on the load order. Two games with the same plugins in the same order agree; the session refuses any other pair, so ids go over the wire as they are. `common/FormIds.h` holds the arithmetic (full and light plugins, ids created at run time).
+
+To decide later: whether to allow load orders that differ in ways that do not matter (a texture pack, a UI mod), which needs translating ids by plugin name. The sister project has that (its FormTranslate); it is not carried yet.
+
+## The frame
+
+Everything that reads or changes the game happens on the game's main thread, once per frame; network threads only queue. SKSE offers no "every frame" call, so the plugin needs a hook in the game's main update. Not written: [PORTING.md](PORTING.md), "The frame".
+
+## Players
+
+Not designed for Skyrim yet. Open questions, phase 2:
+
+- What stands in for another player: an actor made from the player's own race, looks and gear, that the game's AI leaves alone and guards do not arrest.
+- How it is moved: placed each frame from smoothed states, or driven through the game's own movement so animations follow.
+- What is sent: the state above is the sister project's first one. Skyrim adds mounts, shouts, werewolf and vampire-lord forms, and two hands that hold different things.
+- Players in different cells, interiors, fast travel, and how far apart the group may be.
+
+## Combat
+
+Not designed yet (phase 3). The starting rule is the sister project's: the host's game runs every NPC and decides every hit's result; a friend's game reports its hits and shows what the host decided. To settle: melee timing over a connection, blocking and staggers, bows and spells in flight, kill moves, a player's death, friendly fire, levelled enemies when players differ in level.
+
+## The world
+
+Not designed yet (phase 4). The host's world is the world: containers, items lying about, doors and locks, bodies, harvested and mined things, time and weather. To settle: what a friend who joins late is told, respawning cells, what a friend's save keeps, houses and Hearthfire.
+
+## Quests
+
+Not designed yet (phase 5). The aim is that every quest is shared: the stage advances for everyone whoever did the step, and the host's save keeps it. To settle: dialogue (who talks, what the others see), scenes written for one player, quest items, rewards, radiant quests, and the quests that cannot be shared as they are.
+
+## The menu
+
+Not designed yet. Phase 1 uses the ini and a key or console commands. A menu in the game (host, invite, join a friend, who is here) comes later. Skyrim's menus are Flash files in ActionScript 2, built from source like everything else; no compiled menu file is committed.
+
+## Decisions to confirm
+
+Choices made to keep moving. Each is the obvious option, cheap to change now, and the maintainer's to confirm or overturn.
+
+| Choice made | The alternative |
+| --- | --- |
+| The name is SkyrimCoop, for the repository, the DLL and the folders. Other GitHub repositories carry the same or a similar name (unrelated projects); no Nexus mod with exactly this name was found. | ShieldSiblings, SkyrimSteamCoop or SkyrimParty; none had a GitHub repository when checked. |
+| CommonLibSSE-NG (`alandtse/CommonLibSSE-NG`), pinned to a commit of its `ng` branch, built from source with Skyrim VR support off. | Another maintained fork of CommonLibSSE (for example `libxse/commonlibsse`), if it follows new game versions sooner. |
+| The plugin loads into game 1.5.97 and later, warns below 1.6.1170 and refuses anything older. | Raise the tested line to the version a fresh Steam install has (1.7.104 on 2026-11-21); drop 1.5.97 altogether. |
+| CommonLibSSE-NG's "patch safety" option is off (it would pull in one more dependency to guard writes to game memory), since the plugin patches nothing yet. | Turn it on with the first hook, after reading that dependency's license. |
+| The protocol and the server are a small first version (join, leave, player state, heartbeat), not the sister project's whole protocol. | Carry more of it at once. Most of the rest describes Fallout 4's systems. |
+| The first player in the session sets the load order. | Only ever the host. |
+| Up to 512 plugin names in a hello. | Raise it: a Skyrim load order can hold a few thousand light plugins. |
+| Up to 8 players by protocol, 4 by default; port 7780; ini and log named SkyrimCoop. | Other numbers. |
+| On GitHub, the Windows build runs only for the owner's branch pushes and by hand; pull requests get the Linux unit tests. No coverage report yet. | Build the plugin for every pull request once the repository is public and minutes are free. |
+| The Nexus upload workflow is present but switched off: it refuses to run until the mod has a Nexus page and its ids are filled in. | Remove it until then. |
+| The vetting workflow still knows how to build Flash menu sources, as in the sister project, though this project has none yet. | Trim it, and add it back with the first menu. |
+| The git hooks read `~/.skyrimcoop-private-patterns`, and fall back to the sister project's file. | A file of its own only. |
+| The ban list, load-order translation, the mod comparison shown to a refused player, and the log-privacy test over all sources are not carried yet ([PORTING.md](PORTING.md)). | Carry them now. |
+| Whether to ever build on another project's GPL code. | [PRIOR-ART.md](PRIOR-ART.md) sets out what that would and would not allow. Nothing has been taken. |
+| Proton and the Steam Deck are reported in the log and otherwise untested. | Test them from phase 1. |

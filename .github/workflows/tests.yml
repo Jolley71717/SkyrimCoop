@@ -1,0 +1,86 @@
+# Builds the game-free targets (the unit tests, the dedicated server, the bot) on Linux with gcc and runs the unit
+# tests. The plugin itself is not built here: it needs MSVC and CommonLibSSE-NG (build.yml builds it on Windows).
+# It runs for
+#   pull requests into main, from any branch or fork. A fork's run is GitHub's "pull_request" run: a read-only token,
+#            no secrets, and for a first-time contributor it waits for the maintainer's approval (the repository's
+#            Actions setting).
+#   pushes   the repository owner's, to main.
+# One run at a time per pull request or branch: a new push cancels the run before it, so pushes don't pile up.
+# The job is untrusted: it builds and runs the PR's code with contents: read, no secrets and no credentials kept.
+# No cache is restored or saved (see build.yml), every action is pinned by commit, and pull_request_target and
+# workflow_run are not used.
+name: Tests
+run-name: Tests ${{ github.event_name == 'pull_request' && format('PR {0}', github.event.pull_request.number) || github.ref_name }}
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: tests-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Unit tests (Linux, game-free targets)
+    if: github.event_name == 'pull_request' || github.actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      # A PR's run checks out GitHub's merge of the PR into main; the Linux build needs no submodule.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # No caches, restored or saved (its cache inputs all default to off).
+      - uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a  # v1.2.5
+        with:
+          xmake-version: '3.1.1'
+
+      - name: Install g++ 14 (Ubuntu's package)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends g++-14
+
+      - name: Configure
+        run: xmake f -y -p linux -m releasedbg --cc=gcc-14 --cxx=g++-14 --ld=g++-14
+
+      - name: Build
+        run: xmake build -y
+
+      - name: Unit tests
+        timeout-minutes: 15
+        run: |
+          set -o pipefail
+          tests=$(find build -type f -name SkyrimCoopTests -perm -u+x | head -n 1)
+          [ -n "$tests" ] || { echo "::error::no SkyrimCoopTests was built"; exit 1; }
+          "$tests" | tee tests.log
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            if [ -f tests.log ]; then
+              echo '```'
+              grep -E '^[0-9]+ tests, |^FAILED|^ +FAILED|^FIXED\?|^known ' tests.log | sed -n 1,100p
+              echo '```'
+            else
+              echo "No test log: the build failed (see the log)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the test log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: tests-linux
+          retention-days: 14
+          if-no-files-found: warn
+          path: tests.log

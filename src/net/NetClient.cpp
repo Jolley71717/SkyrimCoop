@@ -1,0 +1,89 @@
+#include "net/NetClient.h"
+
+#include "Net.h"
+#include "Protocol.h"
+
+// wingdi.h (pulled in by ENet) defines ERROR, which collides with other code.
+#undef ERROR
+
+void NetClient::Run(std::string a_address, std::uint16_t a_defaultPort)
+{
+	const auto fail = [this](std::string_view a_why) {
+		logs::error("NetClient: {}", a_why);
+		Finish();
+	};
+
+	if (!Net::Initialize()) {
+		fail("ENet initialization failed");
+		return;
+	}
+
+	ENetAddress address{};
+	if (!Net::ResolveAddress(a_address, a_defaultPort, address)) {
+		Net::Shutdown();
+		fail(std::format("cannot resolve '{}'", a_address));
+		return;
+	}
+
+	const auto host = enet_host_create(nullptr, 1, Protocol::CHANNEL_COUNT, 0, 0);
+	const auto peer = host ? enet_host_connect(host, &address, Protocol::CHANNEL_COUNT, 0) : nullptr;
+	if (!peer) {
+		if (host) {
+			enet_host_destroy(host);
+		}
+		Net::Shutdown();
+		fail("could not create connection");
+		return;
+	}
+	host->maximumPacketSize = 1024 * 1024;
+	enet_peer_timeout(peer, 0, 10000, 20000);
+
+	bool connected = false;
+	while (!stopRequested) {
+		auto pending = TakeOutgoing();
+		if (connected) {
+			for (const auto& packet : pending) {
+				Net::Send(peer, packet.data, packet.reliable);
+			}
+		}
+
+		ENetEvent event;
+		while (enet_host_service(host, &event, 2) > 0) {
+			switch (event.type) {
+			case ENET_EVENT_TYPE_CONNECT:
+				connected = true;
+				status = Status::kConnected;
+				Push({ Event::Type::kConnected, {} });
+				break;
+			case ENET_EVENT_TYPE_RECEIVE:
+				Push({ Event::Type::kPacket, { event.packet->data, event.packet->data + event.packet->dataLength } });
+				enet_packet_destroy(event.packet);
+				break;
+			case ENET_EVENT_TYPE_DISCONNECT:
+				connected = false;
+				stopRequested = true;
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
+	if (connected) {
+		enet_peer_disconnect(peer, 0);
+		// Give the server a moment to hear about it, so others see us leave immediately.
+		ENetEvent event;
+		const auto deadline = std::chrono::steady_clock::now() + 300ms;
+		while (std::chrono::steady_clock::now() < deadline && enet_host_service(host, &event, 50) >= 0) {
+			if (event.type == ENET_EVENT_TYPE_RECEIVE) {
+				enet_packet_destroy(event.packet);
+			} else if (event.type == ENET_EVENT_TYPE_DISCONNECT) {
+				break;
+			}
+		}
+	}
+	enet_host_destroy(host);
+	Net::Shutdown();
+
+	Finish();
+}
