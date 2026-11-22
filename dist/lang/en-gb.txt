@@ -1,0 +1,15 @@
+# SkyrimCoop texts: English (UK spelling). The built-in English is American; this file is the same words spelled the
+# British way (none of the texts differ yet; where a word does, it is changed here).
+
+reject.unreadable = The join request could not be read.
+reject.not_this_mod = This is not a SkyrimCoop game.
+reject.version = This game runs another version of the mod (protocol {you}, the host has {host}). Both players need the same version.
+reject.password = Wrong password.
+reject.full = The game is full ({n} players).
+reject.mods = Your mods differ from the host's.
+reject.mods_missing = Your mods differ from the host's: you don't have {plugin}.
+reject.mods_extra = Your mods differ from the host's: the host doesn't have {plugin}.
+reject.mods_order = Your mods differ from the host's: the same plugins, in another order.
+
+steam.status_hosting = Hosting Skyrim co-op
+steam.status_playing = Playing Skyrim co-op

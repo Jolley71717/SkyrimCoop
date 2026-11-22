@@ -33,6 +33,8 @@ namespace Settings
 		// The plugin uses the game's Steam library (lobbies, invites, relay). Off: it leaves Steam alone, for
 		// finding out whether a start-up problem is Steam's; only direct UDP is left.
 		bool steam = true;
+		// The language of the mod's texts: empty for the game's own, or a language file's code ("de", "pt-br") or name.
+		std::string language;
 		// "info" or "debug".
 		std::string logLevel = "info";
 		// The developer channel (DevChannel.h): test tools on this PC drive the game through it. Off for players.
@@ -117,6 +119,9 @@ namespace Settings
 			} else {
 				note("sPassword is longer than " + std::to_string(Protocol::MAX_PASSWORD_LENGTH) + " characters; no password is used");
 			}
+		}
+		if (const auto language = IniFile::GetValue(a_text, "sLanguage")) {
+			values.language = *language;
 		}
 		if (const auto steam = IniFile::GetValue(a_text, "bSteam")) {
 			values.steam = detail::ParseBool(*steam, values.steam);

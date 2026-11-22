@@ -1,0 +1,15 @@
+# machine-translated first pass, corrections welcome
+# SkyrimCoop texts: Українська (Ukrainian). The format and the keys are explained in en.txt; keep the {placeholders} as they are.
+
+reject.unreadable = Не вдалося прочитати запит на приєднання.
+reject.not_this_mod = Це не гра SkyrimCoop.
+reject.version = У цій грі інша версія мода (протокол {you}, у хоста — {host}). Обом гравцям потрібна однакова версія.
+reject.password = Неправильний пароль.
+reject.full = Гра заповнена (гравців: {n}).
+reject.mods = Ваші моди відрізняються від модів хоста.
+reject.mods_missing = Ваші моди відрізняються від модів хоста: у вас немає {plugin}.
+reject.mods_extra = Ваші моди відрізняються від модів хоста: у хоста немає {plugin}.
+reject.mods_order = Ваші моди відрізняються від модів хоста: ті самі плагіни, але в іншому порядку.
+
+steam.status_hosting = Проводить кооперативну гру в Skyrim
+steam.status_playing = Грає в Skyrim у кооперативі

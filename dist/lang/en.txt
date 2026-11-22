@@ -1,0 +1,25 @@
+# SkyrimCoop texts: English (American), the language built into the mod (src/TextEnglish.h, which a test keeps the
+# same as this file). A key a language file lacks shows this English text, so a missing or half-done file never
+# blanks a message.
+#
+# One "key = text" per line, in UTF-8 without a byte order mark. A line starting with # is a comment. \n is a
+# line break. Keep the {placeholders} ({n}, {plugin}, {you}, {host}) exactly as written: the mod fills them in, and
+# the tests check each file has the same ones as the English. The first comment line of every other language says
+# how it was made (a machine-translated first pass, or reviewed against the game's own terms).
+#
+# To correct a language without waiting for an update, put your lines in a file of your own beside the mod's log,
+# Documents\My Games\Skyrim Special Edition\SKSE\SkyrimCoop_lang_<code>.txt: they go over this folder's file for
+# that language (dist/INSTALL.md).
+
+reject.unreadable = The join request could not be read.
+reject.not_this_mod = This is not a SkyrimCoop game.
+reject.version = This game runs another version of the mod (protocol {you}, the host has {host}). Both players need the same version.
+reject.password = Wrong password.
+reject.full = The game is full ({n} players).
+reject.mods = Your mods differ from the host's.
+reject.mods_missing = Your mods differ from the host's: you don't have {plugin}.
+reject.mods_extra = Your mods differ from the host's: the host doesn't have {plugin}.
+reject.mods_order = Your mods differ from the host's: the same plugins, in another order.
+
+steam.status_hosting = Hosting Skyrim co-op
+steam.status_playing = Playing Skyrim co-op

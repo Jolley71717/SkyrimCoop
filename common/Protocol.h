@@ -55,11 +55,8 @@ namespace Protocol
 	// room to spare.
 	inline constexpr std::size_t MAX_WORN = 40;
 
-	// How each refusal's reason starts, so the game can tell them apart and say more than the server knows.
-	inline constexpr std::string_view REJECT_VERSION = "This game runs another version of the mod";
-	inline constexpr std::string_view REJECT_LOAD_ORDER = "Your mods differ from the host's";
-	inline constexpr std::string_view REJECT_PASSWORD = "Wrong password";
-	inline constexpr std::string_view REJECT_FULL = "The game is full";
+	// A refusal's reason (Reject) is English built from a reject.* key of src/TextEnglish.h (common/Server.cpp); the
+	// joining game shows it in its own language (Text::Reject). The text on the wire is the same as before the keys.
 
 	inline constexpr std::uint8_t CHANNEL_RELIABLE = 0;
 	inline constexpr std::uint8_t CHANNEL_STATE = 1;  // unreliable, sequenced

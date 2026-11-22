@@ -17,7 +17,7 @@ Agents working on the project also follow [AGENTS.md](AGENTS.md).
 | `src/net/` | The plugin's side of a connection. | partly |
 | `src/game/` | Everything that reads or changes the game. Today these are stubs behind small interfaces; [docs/PORTING.md](docs/PORTING.md) says what each one has to become. | yes |
 | `lib/commonlibsse-ng` | CommonLibSSE-NG, a git submodule pinned to a commit. | |
-| `dist/` | What goes in the release zip beside the DLL: the ini, the install page, release notes. | |
+| `dist/` | What goes in the release zip beside the DLL: the ini, the install page, release notes, the texts in every language (`dist/lang`). | |
 | `tools/` | Packaging, promotion, the Steam library check, the git hooks, and the rig scripts of the first test in a game (`tools/rig/`, [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)). | |
 | `docs/` | The design, the plan, the porting map, releasing, prior art, getting started. | |
 
@@ -78,6 +78,7 @@ A pull request from a fork gets the Linux tests. Its plugin build happens in `ve
 - The game is single-threaded where it matters: everything that reads or changes game data runs on the game's main thread, from the frame callback. Network threads hand their work over; they never touch the game.
 - `common/` stays free of the game and of Windows headers, so it builds and is tested on Linux.
 - No personal data in logs (below).
+- Every text a player reads (a notice, a menu label, a refusal, Steam's status line) is a key in `src/TextEnglish.h`, shown with `Text::Get` or `Text::Format`, and has a line in every `dist/lang` file. The tests fail on a key missing from a language, on placeholders that differ from the English, on a text left in English, and on a literal handed to a call that shows text. A new key's translations are a machine first pass until a speaker checks them; say which in the pull request. The log, the dedicated server's console and the dev channel stay English.
 
 ## The protocol
 
