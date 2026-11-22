@@ -431,7 +431,8 @@ namespace Steam
 			api->InitRelayNetworkAccess(api->utils);
 			setUp = true;
 			const auto overlay = Overlay();
-			logs::info("Steam: ready ({}); app {}, overlay {}{}", Redact::Alias(LocalId()), api->steamUtils ? api->GetAppID(api->steamUtils) : 0,
+			logs::info("Steam: ready ({}); app {}, logged on {}, relay {}, overlay {}{}", Redact::Alias(LocalId()),
+				api->steamUtils ? api->GetAppID(api->steamUtils) : 0, LoggedOn(), api->GetRelayNetworkStatus(api->utils, nullptr),
 				!overlay ? "unknown" : *overlay ? "in the game" : "not in the game yet",
 				api->steamUtils && api->IsSteamRunningOnSteamDeck && api->IsSteamRunningOnSteamDeck(api->steamUtils) ? ", on a Steam Deck" : "");
 			return true;
@@ -730,5 +731,71 @@ namespace Steam
 			api->ReleaseMessage(messages[i]);
 		}
 		return out;
+	}
+}
+
+// For the first test in a game (Steam.h). Not in F4Multiplayer's Steam.cpp.
+namespace Steam
+{
+	bool Hosting()
+	{
+		return hosting;
+	}
+
+	SteamApi::SteamId Lobby()
+	{
+		return lobby;
+	}
+
+	int LobbyMembers()
+	{
+		return Available() && lobby ? api->GetNumLobbyMembers(api->matchmaking, lobby) : 0;
+	}
+
+	SteamApi::SteamId OtherPlayer()
+	{
+		if (!Available() || !lobby) {
+			return 0;
+		}
+		const auto self = LocalId();
+		if (!hosting) {
+			const auto owner = api->GetLobbyOwner(api->matchmaking, lobby);
+			return owner != self ? owner : 0;
+		}
+		const int count = api->GetNumLobbyMembers(api->matchmaking, lobby);
+		for (int i = 0; i < count; ++i) {
+			const auto member = api->GetLobbyMemberByIndex(api->matchmaking, lobby, i);
+			if (member != 0 && member != self) {
+				return member;
+			}
+		}
+		return 0;
+	}
+
+	std::string_view LoggedOn()
+	{
+		// api, not Available(): SetUp asks this for its own log line
+		if (!api || !api->BLoggedOn || !api->user) {
+			return "unknown";
+		}
+		return api->BLoggedOn(api->user) ? "yes" : "no";
+	}
+
+	std::uint32_t AppId()
+	{
+		return Available() && api->steamUtils ? api->GetAppID(api->steamUtils) : 0;
+	}
+
+	int RelayStatus()
+	{
+		return Available() ? api->GetRelayNetworkStatus(api->utils, nullptr) : 0;
+	}
+
+	std::string JoinUrl()
+	{
+		if (!LobbyOpen()) {
+			return {};
+		}
+		return std::format("steam://joinlobby/{}/{}/{}", SKYRIM_SE_APP_ID, lobby, LocalId());
 	}
 }

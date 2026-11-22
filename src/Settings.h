@@ -13,6 +13,9 @@
 // reads the file and logs, the unit tests check the reading.
 namespace Settings
 {
+	// 7791, not F4Multiplayer's 7790: the rig's tunnels and tools for the two games never reach the wrong one.
+	inline constexpr std::uint16_t DEV_CHANNEL_PORT = 7791;
+
 	struct Values
 	{
 		// Name shown to the other players: "character" (the character's name), empty (the Steam name) or any name.
@@ -32,6 +35,9 @@ namespace Settings
 		bool steam = true;
 		// "info" or "debug".
 		std::string logLevel = "info";
+		// The developer channel (DevChannel.h): test tools on this PC drive the game through it. Off for players.
+		bool          devChannel = false;
+		std::uint16_t devChannelPort = DEV_CHANNEL_PORT;
 
 		friend bool operator==(const Values&, const Values&) = default;
 	};
@@ -114,6 +120,17 @@ namespace Settings
 		}
 		if (const auto steam = IniFile::GetValue(a_text, "bSteam")) {
 			values.steam = detail::ParseBool(*steam, values.steam);
+		}
+		if (const auto dev = IniFile::GetValue(a_text, "bDevChannel")) {
+			values.devChannel = detail::ParseBool(*dev, values.devChannel);
+		}
+		if (const auto port = IniFile::GetValue(a_text, "iDevChannelPort")) {
+			std::uint32_t number = 0;
+			if (detail::ParseNumber(*port, number) && number >= 1024 && number <= 65535) {
+				values.devChannelPort = static_cast<std::uint16_t>(number);
+			} else {
+				note("iDevChannelPort = " + *port + " is not a port (1024 to 65535); it is " + std::to_string(values.devChannelPort));
+			}
 		}
 		if (const auto level = IniFile::GetValue(a_text, "sLogLevel")) {
 			if (*level == "info" || *level == "debug") {

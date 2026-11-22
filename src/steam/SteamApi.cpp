@@ -111,6 +111,7 @@ namespace SteamApi
 		const bool diagnostics = Resolve(module, "SteamAPI_SteamUtils_v010", steamUtils) && Resolve(module, "SteamAPI_ISteamUtils_GetAppID", api.GetAppID) &&
 		                         Resolve(module, "SteamAPI_ISteamUtils_IsOverlayEnabled", api.IsOverlayEnabled);
 		Resolve(module, "SteamAPI_ISteamUtils_IsSteamRunningOnSteamDeck", api.IsSteamRunningOnSteamDeck);
+		Resolve(module, "SteamAPI_ISteamUser_BLoggedOn", api.BLoggedOn);
 
 		reportedMissing = true;
 		if (!ok) {

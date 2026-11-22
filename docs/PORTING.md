@@ -22,7 +22,7 @@ Nothing here has been run in a game. The "Skyrim equivalent" entries name classe
 | `server/`, `bot/` | 930 | about 330, cut down to the small protocol |
 | `tests/` | 120,300 | about 2,900: the tests of everything carried |
 | `ui/` (the in-game menu, Flash) | | nothing yet |
-| `tools/`, `.github/`, `dist/`, docs | | packaging, promotion, hooks and all workflows carried; rig tools not yet |
+| `tools/`, `.github/`, `dist/`, docs | | packaging, promotion, hooks and all workflows carried; the first test's rig scripts written new (`tools/rig/`, below) |
 
 ## `common/`: no game, no Windows
 
@@ -57,10 +57,10 @@ Nothing here has been run in a game. The "Skyrim equivalent" entries name classe
 | `RuntimeSupport.h` | | new | Which game versions the plugin loads into. |
 | `CrashWatch.*`, `CrashReport.h` | 993 | with changes, later | Writes a readable crash report beside the log. Mostly Windows, little game; bring over before phase 2, when crashes start to be the plugin's. Skyrim has well-known crash loggers that may make part of it unnecessary. |
 | `HangWatch.*`, `HangDetector.h`, `NestedPump.h` | 1,105 | with changes, later | Notices a frozen game. Needs the frame hook. |
-| `Background.h`, `MainThread.h` | 78 | with changes, later | Running work off and on the main thread. Comes with the frame hook. |
+| `Background.h`, `MainThread.h` | 78 | with changes, part carried | Running work off and on the main thread. The idea of `MainThread.h` (a network thread hands work to the main thread and waits for the answer) is in `src/MainQueue.h` and `src/DevChannel.cpp`, written new after F4Multiplayer commit 1d29178b1. The rest comes with the frame hook. |
 | `Text.*`, `TextEnglish.h` | 886 | with changes, later | Every line shown to a player, for translation. Comes with the first on-screen message. |
 | `StorySetting.h` | 67 | redo | A Fallout 4 quest setting. |
-| `DevChannel.*`, `DevCommands.*` | 5,706 | redo | The rig's way to ask a running game questions and give it orders. The channel (a local pipe) carries; nearly every command is about a Fallout 4 system. Bring the channel and a handful of commands (where is the player, who is in the session) in phase 1, because the rig needs them. |
+| `DevChannel.*`, `DevCommands.*` | 5,706 | with changes, part carried | The rig's way to ask a running game questions and give it orders. The channel is carried from F4Multiplayer commit 1d29178b1: loopback only, a token file beside the log, one client at a time, commands run on the main thread; port 7791, off unless the ini turns it on. Its line handling is in `src/DevLine.h` (unit-tested). Three commands are new, for the first test: `status`, `steam` (host, join a lobby by id, leave) and `probe` (pings over Steam's relay, `src/net/RelayProbe.h` and `src/steam/SteamProbe`). Fallout 4's other commands are about its own systems and are not carried. |
 
 ## `src/net/`
 
@@ -90,7 +90,7 @@ The four parts the plugin's start-up already calls are stubs with an interface:
 
 ### The frame
 
-`src/game/GameThread`. F4Multiplayer registers a permanent task with F4SE and gets called every frame on the main thread. SKSE's task interface runs a task once, so Skyrim needs a hook: a call inside the game's main update loop replaced by a function that calls the original and then the plugin. Many open SKSE plugins hook the same place; the Address Library ids and the offset are to be looked up for the current game version and checked in a disassembler, not copied on trust. CommonLibSSE-NG's trampoline (`SKSE::GetTrampoline`, `write_call`) does the patching. This is the first engine work of phase 1, and everything else waits for it. It also decides whether the library's "patch safety" option gets turned on.
+`src/game/GameThread`. F4Multiplayer registers a permanent task with F4SE and gets called every frame on the main thread. SKSE's task interface runs a task once, so Skyrim needs a hook: a call inside the game's main update loop replaced by a function that calls the original and then the plugin. Many open SKSE plugins hook the same place; the Address Library ids and the offset are to be looked up for the current game version and checked in a disassembler, not copied on trust. CommonLibSSE-NG's trampoline (`SKSE::GetTrampoline`, `write_call`) does the patching. This is the first engine work of phase 1, and everything else waits for it. It also decides whether the library's "patch safety" option gets turned on. Until then `GameThread` runs a stand-in: a thread that asks SKSE's task queue every 16 ms to run the tick once ([DESIGN.md](DESIGN.md), "The frame"). It is enough for the first test and logs whether the tick ran on the main thread.
 
 ### The load order
 
@@ -158,8 +158,10 @@ F4Multiplayer's menu is Flash, built from ActionScript 3 source by an open-sourc
 | `tools/git-hooks/` | carried as is | The pre-commit and pre-push privacy checks. |
 | `tools/steamcheck.ps1` | new | Reads which Steam functions a game's Steam library exports. |
 | `tools/addrcheck.ps1` | redo, phase 1 | Checks that every Address Library id the plugin uses exists for a game version. Needed from the first hook. |
-| `tools/deploy.ps1`, `tools/devctl.ps1`, `tools/input.ps1`, `tools/restart-game.ps1`, `tools/screenshot.ps1`, `tools/hangcatch.ps1` | with changes, phase 1 | Copy a build to both machines, talk to a running game, send input, restart it. Paths, process and window names change. |
+| `tools/devctl.ps1` | with changes, phase 1 | Talks to a running game's developer channel. Not carried as a file: the first test's scripts talk to the channel themselves (`dc_one` in `tools/rig/env.sh`, after F4Multiplayer commit b82f950ce). |
+| `tools/deploy.ps1`, `tools/input.ps1`, `tools/restart-game.ps1`, `tools/screenshot.ps1`, `tools/hangcatch.ps1` | with changes, phase 1 | Copy a build to both machines, send input, restart a game. Paths, process and window names change. For the first test, `tools/rig/install.sh` and `tools/rig/start.sh` (new) do the copying and the start. |
 | `tools/rig/`, `tools/soak.ps1`, `tools/botsoak.ps1`, `tools/stress.ps1`, `tools/testloop.sh`, `tools/menustress.sh` | redo, from phase 1 | The gate's checks and the soak. The framework (take the lock, back up, run, read both logs, restore, verdict) carries; every check is about a Fallout 4 scene and is written again for Skyrim. |
+| `tools/rig/env.sh` | with changes | Carried from F4Multiplayer commit 5b535694c (with `guard.sh`, `backup.sh` and `dcfast.sh` of the same commit as models): the same rig, rig folder and lock; Skyrim's paths, process, ports and file names. The first test's scripts beside it (`install`, `firststart`, `start`, `lobbytest`, `fetchlogs`) are new. Not yet run. |
 | `tools/questscan.*`, `tools/rewardscan.ps1`, `tools/menumodescan.ps1`, `tools/rollprobes.ps1` | redo, phase 5 | Scans of Fallout 4's data files for the quest audit. Skyrim's plugin format is close; the questions differ. |
 | `tools/coverage.sh`, `tools/mutate.sh` | with changes, later | Coverage and mutation testing of the game-free code. |
 | `tools/flash/`, `tools/svg-to-as.lua`, `tools/xwin.lua`, `tools/crossovermac.sh` | not carried | The ActionScript 3 toolchain, and building and running on a Mac. |

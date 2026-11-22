@@ -1,4 +1,7 @@
+#include "AddressLibraryFile.h"
 #include "Config.h"
+#include "DevChannel.h"
+#include "DevCommands.h"
 #include "Log.h"
 #include "Platform.h"
 #include "Protocol.h"
@@ -7,6 +10,7 @@
 #include "game/LoadOrder.h"
 #include "game/RemotePlayers.h"
 #include "steam/Steam.h"
+#include "steam/SteamProbe.h"
 
 // The plugin's entry: SKSE loads the DLL and calls SKSEPlugin_Load once, on the game's main thread, before the game's
 // data is read.
@@ -48,12 +52,38 @@ namespace
 		logs::warn("Steam: cannot be used yet: {}", Steam::Unavailable());
 	}
 
-	// Once a frame on the main thread, when GameThread can call it.
+	// About once a frame on the main thread (GameThread). Steam first, so a friend's first message is let in
+	// (SessionRequested) before the probe reads its channel.
 	void OnFrame()
 	{
 		if (Config::Get().steam) {
 			Steam::Frame();
+			SteamProbe::Frame();
+			DevCommands::Frame();
 		}
+		DevChannel::Frame();
+	}
+
+	// Whether the Address Library has the file for this game version, and an address is found through it: the first
+	// thing the first test reads. CommonLib's own answer to a missing file is a message box and the end of the game,
+	// so the file is looked for first and the plugin stays out without it. The id asked for is the game's main object
+	// (RE::Main), which CommonLib itself looks up the same way; nothing at that address is read.
+	bool CheckAddressLibrary(const REL::Version& a_runtime)
+	{
+		const auto relative = AddressLibraryFile::Path(a_runtime.major(), a_runtime.minor(), a_runtime.patch(), a_runtime.build());
+		std::error_code error;
+		const auto      size = std::filesystem::file_size(Platform::GamePath(relative), error);
+		if (error) {
+			logs::error("Address Library: {} is not there. Install \"Address Library for SKSE Plugins\" for game {} (docs/GETTING-STARTED.md). Not loaded.",
+				relative, a_runtime.string("."));
+			DevCommands::NoteStart(a_runtime.string("."), "missing");
+			return false;
+		}
+		const auto offset = REL::RelocationID(516943, 403449).offset();
+		logs::info("Address Library: {} ({} bytes) resolved an address (the game's main object at offset {:#x})", AddressLibraryFile::Name(a_runtime.major(),
+			a_runtime.minor(), a_runtime.patch(), a_runtime.build()), size, offset);
+		DevCommands::NoteStart(a_runtime.string("."), "ok");
+		return true;
 	}
 
 	void OnDataLoaded()
@@ -137,14 +167,18 @@ namespace
 			logs::error("This is game version {}: SkyrimCoop needs Skyrim Special Edition {}.{}.{} or later (Skyrim VR and the 2011 game are not supported). Not loaded.",
 				shown, RuntimeSupport::OLDEST[0], RuntimeSupport::OLDEST[1], RuntimeSupport::OLDEST[2]);
 			return false;
-		case RuntimeSupport::Verdict::kUntested:
-			logs::warn("Game version {}: older than {}.{}.{}, which is where testing starts. It may work; nothing is promised.", shown,
-				RuntimeSupport::TESTED_FROM[0], RuntimeSupport::TESTED_FROM[1], RuntimeSupport::TESTED_FROM[2]);
+		case RuntimeSupport::Verdict::kOlder:
+			logs::warn("Game version {}: older than {}.{}.{}, the version the mod is tested on. It may work; nothing is promised.", shown,
+				RuntimeSupport::TESTED[0], RuntimeSupport::TESTED[1], RuntimeSupport::TESTED[2]);
+			return true;
+		case RuntimeSupport::Verdict::kNewer:
+			logs::warn("Game version {}: newer than {}.{}.{}, the version the mod is tested on. It may work; nothing is promised.", shown,
+				RuntimeSupport::TESTED[0], RuntimeSupport::TESTED[1], RuntimeSupport::TESTED[2]);
 			return true;
 		case RuntimeSupport::Verdict::kSupported:
 			break;
 		}
-		logs::info("Game version {}", shown);
+		logs::info("Game version {} (the tested one)", shown);
 		return true;
 	}
 }
@@ -178,9 +212,13 @@ SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 	if (!CheckRuntime(a_skse->RuntimeVersion())) {
 		return false;
 	}
+	if (!CheckAddressLibrary(a_skse->RuntimeVersion())) {
+		return false;
+	}
 
 	Platform::LogStartup();
 	Config::Load();
+	DevChannel::Start();
 
 	const auto messaging = SKSE::GetMessagingInterface();
 	if (!messaging || !messaging->RegisterListener(OnSKSEMessage)) {

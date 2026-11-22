@@ -8,11 +8,11 @@ No build of this mod has been run in a game yet: the steps below are how SKSE pl
 
 - **The Elder Scrolls V: Skyrim Special Edition on Steam** (the Anniversary Edition is the same game with more content, and works the same). Not the 2011 game ("Legendary Edition"), not Skyrim VR, not the GOG or Microsoft Store versions.
 - Windows.
-- **SKSE64**, the build made for your game version, from [skse.silverlock.org](https://skse.silverlock.org/). The game's version is on its main menu's system page and in the properties of `SkyrimSE.exe`. Copy `skse64_loader.exe` and the `skse64_*.dll` next to `SkyrimSE.exe`, and the archive's `Data` folder into the game's `Data` folder.
-- **Address Library for SKSE Plugins**, the file made for your game version, from [its page on Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/32444?tab=files): "All in one (Anniversary Edition)" for game versions 1.6 and later, "All in one (Special Edition)" for 1.5.97.
+- **SKSE64**, the build made for your game version (2.3.1 for game 1.7.104), from [skse.silverlock.org](https://skse.silverlock.org/) or [its Nexus page](https://www.nexusmods.com/skyrimspecialedition/mods/30379). The game's version is in the properties of `SkyrimSE.exe`. Copy `skse64_loader.exe` and the `skse64_*.dll` next to `SkyrimSE.exe`, and the archive's `Data` folder into the game's `Data` folder.
+- **Address Library for SKSE Plugins**, the file made for your game version, from [its page on Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/32444?tab=files): "All in One (1.7.104.0)" for the current game. Without it the plugin does not load, and its log says why.
 - This mod: install the zip with a mod manager, or extract it into `Skyrim Special Edition\Data`.
 
-The plugin loads into game version 1.5.97 and later. Testing will start at 1.6.1170; on anything older the log says so.
+The mod is tested on game version 1.7.104 (the current Steam version). Older Anniversary Edition versions (1.6.317 and later) load with a warning in the log; 1.5.97 and older are not supported.
 
 Always start the game with SKSE (`skse64_loader.exe`, or your mod manager's SKSE launcher).
 
@@ -37,7 +37,7 @@ It should begin like this:
 
 ```
 SkyrimCoop 0.0.1 (protocol 1)
-Game version 1.6.1170
+Game version 1.7.104.0 (the tested one)
 ...
 Config: host no, transport auto, port 7780, up to 4 players, password none, address none, log level info
 ...

@@ -18,7 +18,7 @@ Agents working on the project also follow [AGENTS.md](AGENTS.md).
 | `src/game/` | Everything that reads or changes the game. Today these are stubs behind small interfaces; [docs/PORTING.md](docs/PORTING.md) says what each one has to become. | yes |
 | `lib/commonlibsse-ng` | CommonLibSSE-NG, a git submodule pinned to a commit. | |
 | `dist/` | What goes in the release zip beside the DLL: the ini, the install page, release notes. | |
-| `tools/` | Packaging, promotion, the Steam library check, the git hooks. | |
+| `tools/` | Packaging, promotion, the Steam library check, the git hooks, and the rig scripts of the first test in a game (`tools/rig/`, [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)). | |
 | `docs/` | The design, the plan, the porting map, releasing, prior art, getting started. | |
 
 ## Building
