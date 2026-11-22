@@ -1,0 +1,742 @@
+{
+ "release": "?",
+ "known_issues": [],
+ "updated": "2026-11-22T06:50:16+00:00",
+ "stages": [
+  "Queued",
+  "Looked into",
+  "Pull request",
+  "Reviewed",
+  "Rig-tested",
+  "Merged",
+  "Release candidate",
+  "Shipped"
+ ],
+ "items": [
+  {
+   "id": "a-friend-going-through-a-door-into-a-cave-or-out-of-town-lea",
+   "title": "A friend going through a door, into a cave or out of town leaves and arrives properly",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "a-friend-s-character-is-never-written-into-your-save",
+   "title": "A friend's character is never written into your save",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 3,
+   "note": "Built and reviewed; the test on two games will prove it.",
+   "pr": 5
+  },
+  {
+   "id": "a-friend-s-character-may-vanish-after-travelling-together-ac",
+   "title": "A friend's character may vanish after travelling together across the map",
+   "kind": "bug",
+   "priority": 2,
+   "stage": 1,
+   "note": ""
+  },
+  {
+   "id": "a-friend-s-name-over-their-head",
+   "title": "A friend's name over their head",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "a-friend-s-weapons-shield-spells-and-torch-are-shown-in-each",
+   "title": "A friend's weapons, shield, spells and torch are shown in each hand",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "a-friend-sitting-sleeping-or-working-at-a-station-is-shown",
+   "title": "A friend sitting, sleeping or working at a station is shown",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "a-friend-swimming-shows-as-swimming",
+   "title": "A friend swimming shows as swimming",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "a-friend-who-joins-late-sees-what-changed-before",
+   "title": "A friend who joins late sees what changed before",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "a-list-of-every-quest-shared-shared-with-limits-or-not",
+   "title": "A list of every quest: shared, shared with limits, or not",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "a-menu-in-the-game-for-hosting-and-joining",
+   "title": "A menu in the game for hosting and joining",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "anniversary-edition-content",
+   "title": "Anniversary Edition content",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "arrows-and-bolts-fly-and-hit-in-both-games",
+   "title": "Arrows and bolts fly and hit in both games",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "bodies-and-their-loot-the-dead-stay-dead",
+   "title": "Bodies and their loot; the dead stay dead",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "carriages-ride-together-to-another-hold",
+   "title": "Carriages: ride together to another hold",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "catch-up-with-a-friend-who-is-far-away",
+   "title": "Catch up with a friend who is far away",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "chests-and-containers-what-one-player-takes-is-gone-for-the",
+   "title": "Chests and containers: what one player takes is gone for the other",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "cleared-places-that-reset",
+   "title": "Cleared places that reset",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "conversations-one-talks-the-others-see-and-hear-it",
+   "title": "Conversations: one talks, the others see and hear it",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "crafting-together-forge-enchanting-alchemy-and-cooking",
+   "title": "Crafting together: forge, enchanting, alchemy and cooking",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "crime-and-bounty-in-co-op-to-decide",
+   "title": "Crime and bounty in co-op (to decide)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "daedric-quests-and-artifacts-to-decide",
+   "title": "Daedric quests and artifacts (to decide)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "dawnguard-and-dragonborn-add-on-stories-together",
+   "title": "Dawnguard and Dragonborn add-on stories together",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "dogs-and-other-animal-companions",
+   "title": "Dogs and other animal companions",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "doors-and-locks-opened-or-picked-for-everyone",
+   "title": "Doors and locks: opened or picked for everyone",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "dragon-attacks-are-shared",
+   "title": "Dragon attacks are shared",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "dragon-souls-when-a-dragon-dies-to-decide",
+   "title": "Dragon souls when a dragon dies (to decide)",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "dragons-fly-land-and-fight-the-same-in-both-games",
+   "title": "Dragons fly, land and fight the same in both games",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "each-player-keeps-their-own-horse",
+   "title": "Each player keeps their own horse",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "enemies-can-kill-a-friend-s-character",
+   "title": "Enemies can kill a friend's character",
+   "kind": "bug",
+   "priority": 2,
+   "stage": 1,
+   "note": ""
+  },
+  {
+   "id": "enemy-levels-when-friends-are-at-different-levels",
+   "title": "Enemy levels when friends are at different levels",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "experience-from-fights-and-quests-done-together",
+   "title": "Experience from fights and quests done together",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "faction-questlines-together",
+   "title": "Faction questlines together",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "fast-travel-together-to-decide",
+   "title": "Fast travel together (to decide)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "fire-frost-and-shock-spells-hit-in-both-games",
+   "title": "Fire, frost and shock spells hit in both games",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "followers-walk-and-fight-in-both-games",
+   "title": "Followers walk and fight in both games",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "friendly-fire-setting",
+   "title": "Friendly fire setting",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "friends-look-like-their-own-character-face-hair-body-and-ski",
+   "title": "Friends look like their own character: face, hair, body and skin",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "friends-shown-on-the-map-and-compass",
+   "title": "Friends shown on the map and compass",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "friends-whose-mod-lists-differ-only-a-little-can-t-join-yet",
+   "title": "Friends whose mod lists differ only a little can't join yet, and aren't told which mods differ",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "giving-an-item-to-a-friend",
+   "title": "Giving an item to a friend",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "guards-and-townsfolk-leave-a-friend-s-character-alone",
+   "title": "Guards and townsfolk leave a friend's character alone",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "healing-a-friend-with-restoration-spells",
+   "title": "Healing a friend with Restoration spells",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "hosting-and-inviting-with-a-key-or-console-commands-before-t",
+   "title": "Hosting and inviting with a key or console commands, before there is a menu",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "illusion-and-alteration-effects-on-enemies-calm-fear-paralys",
+   "title": "Illusion and Alteration effects on enemies (calm, fear, paralysis)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "items-lying-about-and-dropped-items",
+   "title": "Items lying about, and dropped items",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "join-by-address-and-the-dedicated-server",
+   "title": "Join by address and the dedicated server",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "joining-a-friend-s-game-from-steam-an-invite-or-join-game",
+   "title": "Joining a friend's game from Steam: an invite or Join Game",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 3,
+   "note": "",
+   "pr": 5
+  },
+  {
+   "id": "kill-moves-in-co-op-to-decide",
+   "title": "Kill moves in co-op (to decide)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "levers-puzzles-and-claw-doors-in-dungeons",
+   "title": "Levers, puzzles and claw doors in dungeons",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "load-orders-with-more-than-512-plugins-can-t-join-a-session",
+   "title": "Load orders with more than 512 plugins can't join a session",
+   "kind": "bug",
+   "priority": 2,
+   "stage": 1,
+   "note": ""
+  },
+  {
+   "id": "marriage-and-spouses-are-each-player-s-own-to-confirm",
+   "title": "Marriage and spouses are each player's own (to confirm)",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "no-leftover-script-data-in-saves",
+   "title": "No leftover script data in saves",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "older-game-versions-1-5-97",
+   "title": "Older game versions (1.5.97)",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "password-approving-who-joins-and-bans",
+   "title": "Password, approving who joins, and bans",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "places-one-player-discovers-show-on-everyone-s-map",
+   "title": "Places one player discovers show on everyone's map",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "plants-you-pick-and-ore-you-mine",
+   "title": "Plants you pick and ore you mine",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "player-houses-and-hearthfire-building",
+   "title": "Player houses and Hearthfire building",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "proton-and-the-steam-deck",
+   "title": "Proton and the Steam Deck",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "quest-items-and-rewards-for-everyone",
+   "title": "Quest items and rewards for everyone",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "quests-shared-whoever-does-the-step-moves-everyone-on",
+   "title": "Quests shared: whoever does the step moves everyone on",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "radiant-jobs-and-bounties",
+   "title": "Radiant jobs and bounties",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "riding-a-friend-on-horseback-is-shown-mounting-and-getting-o",
+   "title": "Riding: a friend on horseback is shown, mounting and getting off",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "riding-dragons-dragonborn-add-on",
+   "title": "Riding dragons (Dragonborn add-on)",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "scenes-written-for-one-player",
+   "title": "Scenes written for one player",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "shops-each-game-s-own-stock-to-confirm",
+   "title": "Shops: each game's own stock (to confirm)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "shouts-a-friend-s-thu-um-is-seen-heard-and-works-on-enemies",
+   "title": "Shouts: a friend's Thu'um is seen, heard and works on enemies",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "sleeping-and-waiting-in-co-op-to-decide",
+   "title": "Sleeping and waiting in co-op (to decide)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "sneaking-and-sneak-attacks-with-two-players",
+   "title": "Sneaking and sneak attacks with two players",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "summoned-atronachs-and-raised-dead-fight-in-both-games",
+   "title": "Summoned atronachs and raised dead fight in both games",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "sword-axe-and-mace-hits-count-in-both-games",
+   "title": "Sword, axe and mace hits count in both games",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "the-civil-war-one-side-for-the-group-to-decide",
+   "title": "The Civil War: one side for the group (to decide)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "the-game-pauses-in-a-session-when-its-window-is-in-the-backg",
+   "title": "The game pauses in a session when its window is in the background",
+   "kind": "bug",
+   "priority": 1,
+   "stage": 1,
+   "note": "We know why; the fix is planned."
+  },
+  {
+   "id": "the-host-loading-an-older-save-or-crashing",
+   "title": "The host loading an older save, or crashing",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "the-host-s-settings-in-the-game",
+   "title": "The host's settings in the game",
+   "kind": "feature",
+   "priority": 4,
+   "stage": 0,
+   "note": "An idea, not planned or promised yet."
+  },
+  {
+   "id": "the-mod-reads-the-load-order-so-both-games-can-compare-their",
+   "title": "The mod reads the load order, so both games can compare theirs",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 3,
+   "note": "",
+   "pr": 5
+  },
+  {
+   "id": "the-mod-runs-once-every-frame-in-the-world",
+   "title": "The mod runs once every frame in the world",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 3,
+   "note": "",
+   "pr": 5
+  },
+  {
+   "id": "the-opening-at-helgen-to-decide",
+   "title": "The opening at Helgen (to decide)",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "the-same-enemies-in-both-games",
+   "title": "The same enemies in both games",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "the-save-clean-up-runs-even-when-no-session-was-played",
+   "title": "The save clean-up runs even when no session was played",
+   "kind": "bug",
+   "priority": 2,
+   "stage": 1,
+   "note": ""
+  },
+  {
+   "id": "time-of-day-and-weather-follow-the-host",
+   "title": "Time of day and weather follow the host",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "traps-are-set-off-for-everyone",
+   "title": "Traps are set off for everyone",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "two-players-see-each-other-move",
+   "title": "Two players see each other move",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 3,
+   "note": "Built and reviewed; waiting for its first test on two games.",
+   "pr": 5
+  },
+  {
+   "id": "vampire-lord-form-shown-on-a-friend-dawnguard",
+   "title": "Vampire Lord form shown on a friend (Dawnguard)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "vampirism-and-lycanthropy-are-each-player-s-own-to-confirm",
+   "title": "Vampirism and lycanthropy are each player's own (to confirm)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "werewolf-form-shown-on-a-friend",
+   "title": "Werewolf form shown on a friend",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "what-happens-when-a-player-dies-to-decide",
+   "title": "What happens when a player dies (to decide)",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "who-is-the-dragonborn-in-co-op-to-decide",
+   "title": "Who is the Dragonborn in co-op (to decide)",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": "To be decided first; nothing is built yet."
+  },
+  {
+   "id": "word-walls-each-player-learns-the-word",
+   "title": "Word walls: each player learns the word",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "your-character-stays-your-own-skills-perks-and-gear",
+   "title": "Your character stays your own: skills, perks and gear",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "your-own-save-is-safe-after-playing-as-a-guest",
+   "title": "Your own save is safe after playing as a guest",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 0,
+   "note": ""
+  }
+ ]
+}
