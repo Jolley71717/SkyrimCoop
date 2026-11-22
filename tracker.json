@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-22T08:29:49+00:00",
+ "updated": "2026-11-22T08:33:42+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -267,8 +267,8 @@
    "title": "Every message in the player's language (14 languages)",
    "kind": "feature",
    "priority": 2,
-   "stage": 2,
-   "note": "Every message in the player's language",
+   "stage": 5,
+   "note": "Merged",
    "pr": 10,
    "desc": "The mod's texts come from one file per language, with English when a file lacks a text. The tests fail when a language is missing a text or a message is written in the code."
   },
