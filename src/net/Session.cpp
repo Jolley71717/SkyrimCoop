@@ -87,8 +87,14 @@ namespace Session
 				.password = Config::Get().password,
 				.identity = Identity::Get(),
 			};
-			if (order.size() <= Protocol::MAX_PLUGINS) {
+			// The list only says which plugin differs (the host compares the hash); one that would go on the wire cut
+			// (too many names, or more than MAX_PLUGIN_LIST_BYTES) is left off whole, so the host never names a
+			// difference that is only where the list was cut.
+			if (Protocol::PluginsFit(order)) {
 				hello.plugins = std::move(order);
+			} else {
+				logs::warn("Session: the load order ({} names) is too long for a hello's plugin list; only its hash is sent, so a host whose mods differ can't say which",
+					order.size());
 			}
 			Send(Protocol::Encode(hello), true);
 			logs::info("Session: said hello ({} plugins, load order {:08X})", plugins.full.size() + plugins.light.size(), hello.contentHash);
