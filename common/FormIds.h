@@ -83,7 +83,7 @@ namespace FormIds
 	// twice) counts where it first is; past the places a form ID can name, the rest has none.
 	struct Table
 	{
-		// Read them; Add changes them, so the index below stays right.
+		// Read them as they are; only Add puts a plugin in, so the index below stays right.
 		std::vector<std::string> full;
 		std::vector<std::string> light;
 
@@ -105,7 +105,7 @@ namespace FormIds
 		bool Add(const std::string& a_name, bool a_light)
 		{
 			auto&      kind = a_light ? light : full;
-			const auto [_, added] = index.try_emplace(Protocol::LowerPluginName(a_name), Place{ a_light, static_cast<std::uint16_t>(kind.size()) });
+			const bool added = index.try_emplace(Protocol::LowerPluginName(a_name), Place{ a_light, static_cast<std::uint16_t>(kind.size()) }).second;
 			if (added) {
 				kind.push_back(a_name);
 			}
@@ -124,8 +124,7 @@ namespace FormIds
 		[[nodiscard]] bool Empty() const { return full.empty() && light.empty(); }
 		[[nodiscard]] std::size_t Size() const { return full.size() + light.size(); }
 
-		// A plugin's place, by name in any case.
-		// Looked up, not searched: a load order holds thousands of light plugins, and every name of another is looked up.
+		// A plugin's place, by name in any case. Looked up, not searched: a load order holds thousands of light plugins.
 		[[nodiscard]] std::optional<Place> Find(std::string_view a_name) const
 		{
 			const auto found = index.find(Protocol::LowerPluginName(a_name));
