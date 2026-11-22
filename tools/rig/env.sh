@@ -24,6 +24,7 @@ HOST_SKSE=${HOST_SKSE:-$HOST_MYGAMES/SKSE}                                      
 VM_MYGAMES=${VM_MYGAMES:-Documents/My Games/Skyrim Special Edition}                     # the same on the VM, from its user profile (scp form)
 VM_SKSE=${VM_SKSE:-$VM_MYGAMES/SKSE}
 VM_KEY=${VM_KEY:-$STAGE/vm_ssh_key}
+VM_NO_AUDIO=${VM_NO_AUDIO:-1}             # the VM's game with its sound off (start.ps1 -NoAudio): it has no audio device
 VM_DIR=${VM_DIR:-C:/SkyrimCoop}           # the VM's folder for this project's scripts, payloads and install records
 CHECKS=${SKYRIMCOOP_CHECKS:-$STAGE/checks} # where runs write their logs and results
 GAME_EXE=SkyrimSE                         # the process name on both machines
