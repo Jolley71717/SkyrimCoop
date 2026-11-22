@@ -42,7 +42,9 @@ if [ $vmside = 1 ]; then
 	vmssh "New-Item -ItemType Directory -Force '$VM_DIR' | Out-Null" >/dev/null
 	vmscp "$RIG/start.ps1" "$VM_SSH:$VM_DIR/" || { say "vm: could not copy start.ps1"; exit 1; }
 	say "vm: starting"
-	vmssh "powershell -NoProfile -ExecutionPolicy Bypass -File $VM_DIR/start.ps1 -Game '$VM_GAME' $vmcell -ViaTask $VM_RUN -WaitSeconds 300; 'exit ' + \$LASTEXITCODE" > "$STAGE/skyrim-vm-start.log" &
+	# The VM has no audio device: its game runs with the sound off (start.ps1 -NoAudio; VM_NO_AUDIO=0 to leave it on).
+	vmaudio=""; [ "$VM_NO_AUDIO" = 1 ] && vmaudio="-NoAudio"
+	vmssh "powershell -NoProfile -ExecutionPolicy Bypass -File $VM_DIR/start.ps1 -Game '$VM_GAME' $vmcell $vmaudio -ViaTask $VM_RUN -WaitSeconds 300; 'exit ' + \$LASTEXITCODE" > "$STAGE/skyrim-vm-start.log" &
 	vmpid=$!
 fi
 if [ $host = 1 ]; then
