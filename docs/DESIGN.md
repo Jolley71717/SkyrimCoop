@@ -113,7 +113,7 @@ Choices made to keep moving. Each is the obvious option, cheap to change now, an
 | The first player in the session sets the load order. | Only ever the host. |
 | Up to 4352 plugin names in a hello (the longest load order, 254 full plugins and 4096 light ones, with one to spare) in at most 480 KB, so a hello is one Steam message (512 KB at most). That holds names of up to 110 bytes on average; a longer list is cut at a whole name, and `Protocol::PluginsFit` lets a game tell its player before it joins. | Send a longer list in parts, if real load orders ever need it. |
 | Up to 8 players by protocol, 4 by default; port 7780; ini and log named SkyrimCoop. | Other numbers. |
-| On GitHub, the Windows build runs only for the owner's branch pushes and by hand; pull requests get the Linux unit tests. No coverage report yet. | Build the plugin for every pull request once the repository is public and minutes are free. |
+| On GitHub, the Windows build runs only for the owner's branch pushes and by hand; pull requests get the Linux unit tests, with a line coverage report (the run's summary, and a comment on pull requests from this repository's branches). | Build the plugin for every pull request once the repository is public and minutes are free. |
 | The Nexus upload workflow is present but switched off: it refuses to run until the mod has a Nexus page and its ids are filled in. | Remove it until then. |
 | The vetting workflow still knows how to build Flash menu sources, as in the sister project, though this project has none yet. | Trim it, and add it back with the first menu. |
 | The git hooks read `~/.skyrimcoop-private-patterns`, and fall back to the sister project's file. | A file of its own only. |

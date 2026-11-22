@@ -46,6 +46,8 @@ xmake build -y
 build/linux/x86_64/releasedbg/SkyrimCoopTests
 ```
 
+`tools/coverage.sh` does the same with line coverage (it also needs gcovr 7 and python3): it builds into `build/coverage` with its own configuration, runs the tests and writes the reports to `build/coverage/report` (`coverage.md` is the short table, `summary.txt` has one line per file). It measures `common/` and `src/`; the tests themselves, the server and the bot are not counted. This is what GitHub runs; it works the same in WSL's Ubuntu 24.04.
+
 ## Tests
 
 ```
@@ -61,14 +63,14 @@ build/windows/x64/releasedbg/SkyrimCoopTests.exe Protocol   # only tests whose n
 
 | Workflow | When | What |
 | --- | --- | --- |
-| `tests.yml` | every pull request into `main`, and pushes to `main` | Linux: builds the game-free targets and runs the unit tests |
+| `tests.yml` | every pull request into `main`; the repository owner's pushes to `main`, and to a branch with no open pull request | Linux: builds the game-free targets with line coverage (`tools/coverage.sh`), runs the unit tests, and puts the coverage in the run's summary and in one comment on the pull request, kept up to date, with the change against `main` |
 | `build.yml` | the repository owner's pushes to a branch, and by hand | Windows: builds everything, the plugin included, and runs the unit tests |
 | `vet.yml` | by hand, for an outside pull request | reads and builds the pull request's code on a throwaway machine and reports what it found |
 | `review-label.yml`, `vet-label.yml` | pull request events | keep the `reviewed` and `vetted` labels honest: a new commit removes them |
 | `package.yml` | by hand | builds the release zips from a commit |
 | `nexus-upload.yml` | by hand | switched off until the mod has a Nexus page |
 
-A pull request from a fork gets the Linux tests. Its plugin build happens in `vet.yml` after the maintainer has looked at it.
+A pull request from a fork gets the Linux tests, with its coverage in the run's summary only: the coverage comment is written by a job that holds write access to pull requests, and it trusts only the reports of this repository's own branches. Its plugin build happens in `vet.yml` after the maintainer has looked at it.
 
 ## Code style
 
