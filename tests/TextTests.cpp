@@ -76,12 +76,32 @@ namespace
 		return a_code.find_first_not_of(" \t\r\n", start);
 	}
 
-	// Whether the text an argument gives starts as an English literal: "text", or std::format("text", ...).
-	// Whether the statement from a_at on (to its ';') picks between literals: cond ? "a" : "b". A Text call's key
+	// Where the argument that starts at a_at ends: at the ',' or ')' that closes it, or at the statement's ';'.
+	std::size_t ArgumentEnd(std::string_view a_code, std::size_t a_at)
+	{
+		int depth = 0;
+		for (auto i = a_at; i < a_code.size(); ++i) {
+			const char c = a_code[i];
+			if (c == '"' || c == '\'') {
+				for (++i; i < a_code.size() && a_code[i] != c; ++i) {
+					i += a_code[i] == '\\';  // what a backslash escapes is skipped
+				}
+			} else if (c == '(' || c == '{' || c == '[') {
+				++depth;
+			} else if ((c == ')' || c == '}' || c == ']') && depth > 0) {
+				--depth;
+			} else if (c == ';' || (depth == 0 && (c == ',' || c == ')'))) {
+				return i;
+			}
+		}
+		return a_code.size();
+	}
+
+	// Whether the argument that starts at a_at picks between literals: cond ? "a" : "b". A Text call's key
 	// ("Text::Get(\"key\")") is no such pick: its ':' is part of a "::".
 	bool PicksLiteral(std::string_view a_code, std::size_t a_at)
 	{
-		const auto end = std::min(a_code.size(), a_code.find(';', a_at));
+		const auto end = ArgumentEnd(a_code, a_at);
 		for (auto i = a_at; i < end; ++i) {
 			const bool colon = a_code[i] == ':' && (i + 1 >= end || a_code[i + 1] != ':') && (i == 0 || a_code[i - 1] != ':');
 			if (a_code[i] != '?' && !colon) {
@@ -95,6 +115,8 @@ namespace
 		return false;
 	}
 
+	// Whether the text an argument gives starts as an English literal: "text", or std::format("text", ...), or picks
+	// between literals.
 	bool IsLiteral(std::string_view a_code, std::size_t a_at)
 	{
 		if (a_at == std::string_view::npos) {
@@ -397,6 +419,9 @@ TEST("text: no player-facing text is a bare English literal in the code")
 	const std::string keyed = "api->SetRichPresence(api->friends, \"status\", Text::Get(hosting ? \"steam.a\" : \"steam.b\").c_str());\n";
 	CHECK(IsLiteral(keyed, ArgumentAt(keyed, keyed.find('('), 2)));  // keys picked inline: hand the call a variable
 	CHECK(!IsLiteral("x(status.c_str());", 2));
+	const std::string later = "refuse(a_key, Text::GetEnglish(\"reject.full\"), full ? \"full\" : \"replaced\");\n";
+	CHECK(!IsLiteral(later, ArgumentAt(later, later.find('('), 1)));  // a pick in a later argument is that argument's
+	CHECK(IsLiteral(later, ArgumentAt(later, later.find('('), 2)));
 }
 
 TEST("text: every key the code asks for by name is in the English table")
