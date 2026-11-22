@@ -37,6 +37,7 @@ TEST("settings: every key is read, with comments, blank lines and either line en
 		"iMaxPlayers = 8\n"
 		"sPassword = sweetroll\n"
 		"bSteam = false\n"
+		"sLanguage = pt-br\n"
 		"sLogLevel = debug\n"
 		"bRunInBackground = false\n"
 		"bDevChannel = true\n"
@@ -52,6 +53,7 @@ TEST("settings: every key is read, with comments, blank lines and either line en
 	CHECK(values.maxPlayers == 8);
 	CHECK(values.password == "sweetroll");
 	CHECK(!values.steam);
+	CHECK(values.language == "pt-br");
 	CHECK(values.logLevel == "debug");
 	CHECK(!values.runInBackground);
 	CHECK(values.devChannel);

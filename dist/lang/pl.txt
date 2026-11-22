@@ -1,0 +1,15 @@
+# machine-translated first pass, corrections welcome
+# SkyrimCoop texts: Polski (Polish). The format and the keys are explained in en.txt; keep the {placeholders} as they are.
+
+reject.unreadable = Nie udało się odczytać prośby o dołączenie.
+reject.not_this_mod = To nie jest gra SkyrimCoop.
+reject.version = Ta gra używa innej wersji moda (protokół {you}, host ma {host}). Obaj gracze potrzebują tej samej wersji.
+reject.password = Błędne hasło.
+reject.full = Gra jest pełna (graczy: {n}).
+reject.mods = Twoje mody różnią się od modów hosta.
+reject.mods_missing = Twoje mody różnią się od modów hosta: nie masz pliku {plugin}.
+reject.mods_extra = Twoje mody różnią się od modów hosta: host nie ma pliku {plugin}.
+reject.mods_order = Twoje mody różnią się od modów hosta: te same pluginy, w innej kolejności.
+
+steam.status_hosting = Hostuje Skyrim w trybie co-op
+steam.status_playing = Gra w Skyrim w trybie co-op

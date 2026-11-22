@@ -22,6 +22,7 @@ Always start the game with SKSE (`skse64_loader.exe`, or your mod manager's SKSE
 | --- | --- |
 | `SKSE\Plugins\SkyrimCoop.dll` | the plugin |
 | `SKSE\Plugins\SkyrimCoop.ini` | its settings (each one is explained in the file) |
+| `SKSE\Plugins\SkyrimCoop\lang` | the mod's texts, one file per language |
 | `SkyrimCoop\INSTALL.md` | this page |
 | `SkyrimCoop\LICENSE` | the GPL-3.0 license |
 | `SkyrimCoop\EXCEPTIONS` | the modding and linking exceptions that go with it |
@@ -36,7 +37,7 @@ Start the game through SKSE and get to the main menu, then open
 It should begin like this:
 
 ```
-SkyrimCoop 0.0.1 (protocol 1)
+SkyrimCoop 0.0.1 (protocol 3)
 Game version 1.7.104.0 (the tested one)
 ...
 Config: host no, transport auto, port 7780, up to 4 players, password none, address none, log level info
@@ -54,6 +55,21 @@ Steam: the game's own Steam library has everything the mod needs
 Edit `Data\SKSE\Plugins\SkyrimCoop.ini`. The file is read when the game starts: change it, then restart the game.
 
 - `bRunInBackground` (true): while you are in a session, your game keeps running when you alt-tab, so friends still see you, and you can be hurt meanwhile. Playing alone, alt-tab pauses the game as before, and the game's own setting (`bAlwaysActive`) is left as you had it.
+
+## Language
+
+The mod's texts follow the language the game is set to (English, French, German, Italian, Spanish, Polish, Russian,
+Japanese or Traditional Chinese). Set `sLanguage` in `SkyrimCoop.ini` to pick another: `en-gb` (English with UK
+spelling), `es-mx` (Latin American Spanish), `pt-br` (Brazilian Portuguese), `uk` (Ukrainian) or `zh-cn` (Simplified
+Chinese), which the game itself doesn't have. Steam shows your status to your friends in your language.
+
+The texts are in `Data\SKSE\Plugins\SkyrimCoop\lang`, one file per language; each file's first line says whether it
+is a first machine translation or has been checked against the game's own words. Those files are the mod's: every
+update brings its own, so a change made in them is gone after the next update. To correct a language or add one, put
+your texts in a file of your own beside the mod's log, `Documents\My Games\Skyrim Special Edition\SKSE\SkyrimCoop_lang_<code>.txt`
+(for Russian, `SkyrimCoop_lang_ru.txt`; for a language the mod doesn't have, pick a short code and set `sLanguage` to
+it): the same `key = text` lines, only the ones you change, keeping the `{placeholders}`. Your texts go over the mod's
+and no update touches the file. Corrections are welcome on the mod's GitHub page.
 
 ## Reporting a problem
 

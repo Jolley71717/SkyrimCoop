@@ -29,10 +29,10 @@ namespace Config
 		}
 		Log::SetLevel(values.logLevel);
 		// Never the password or the address: players attach this log to public bug reports.
-		logs::info("Config: host {}, transport {}, port {}, up to {} players, password {}, address {}, log level {}, run in background {}, dev channel {}",
+		logs::info("Config: host {}, transport {}, port {}, up to {} players, password {}, address {}, language {}, log level {}, run in background {}, dev channel {}",
 			values.host ? "yes" : "no", values.transport, values.port, values.maxPlayers, values.password.empty() ? "none" : "set",
-			values.serverAddress.empty() ? "none" : "set", Log::Level(), values.runInBackground ? "yes" : "no",
-			values.devChannel ? std::format("on (port {})", values.devChannelPort) : std::string{ "off" });
+			values.serverAddress.empty() ? "none" : "set", values.language.empty() ? "the game's" : values.language, Log::Level(),
+			values.runInBackground ? "yes" : "no", values.devChannel ? std::format("on (port {})", values.devChannelPort) : std::string{ "off" });
 	}
 
 	const Settings::Values& Get()

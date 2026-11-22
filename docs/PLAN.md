@@ -2,7 +2,7 @@
 
 Six phases, in order. Each one ends with something that has to be shown on two real games before the next one starts. There are no dates.
 
-**Where it is today: phase 0, not yet run in a game.** The repository builds for game 1.7.104, the game-free parts are unit-tested, and the first test in a game (the plugin loads on both rig machines, and a Steam lobby and relay messages pass between them) is written with its rig scripts, but none of it has been run ([GETTING-STARTED.md](GETTING-STARTED.md)).
+**Where it is today: phase 0 nearly done, phase 1 begun.** The repository builds for game 1.7.104 and the game-free parts are unit-tested. The first test in a game has passed on both rig machines: the plugin loads, a Steam lobby opens, both games see two members, and pings cross Steam's relay both ways ([GETTING-STARTED.md](GETTING-STARTED.md)). Reading the load order and the session itself (hello, welcome, a friend's stand-in) are written and wait for their test in a game.
 
 ## What counts as verified
 
@@ -14,7 +14,7 @@ The same rules as the sister project, which learned each one the hard way.
 - **Function, not looks.** "The other player's character is there" is not the test; "it stands where the other log says its player stands, within a stated distance, for the whole run" is.
 - **Over time.** A thing that works for a minute is tested for an hour before it is called done: the long test (the soak) of a release candidate is part of the gate ([RELEASING.md](RELEASING.md)).
 - **Nothing echoes.** What one game sends must not come back to it as news and be sent again. Every shared system gets a check for that.
-- **Say what was not tested.** A report names what was run and what was not. "Not tested in a game" is an honest answer and today it applies to everything.
+- **Say what was not tested.** A report names what was run and what was not. "Not tested in a game" is an honest answer and today it applies to almost everything.
 
 Bugs are sorted by what they do to a session:
 
@@ -29,7 +29,7 @@ Bugs are sorted by what they do to a session:
 
 The plugin is loaded by SKSE into the current Steam version of Skyrim Special Edition and does nothing but report.
 
-Written: the version check (1.7.104 tested, 1.6.317 and later warned, older refused), the Address Library check, a stand-in tick through SKSE's task queue, the developer channel (loopback, a token file, off unless the ini turns it on), and the first test's Steam steps. The rig scripts (`tools/rig/`: install, first start, start, the lobby test, fetching logs) are written and not yet run. Still to write: reading the load order (`src/game/LoadOrder`), so the log's plugin count is real.
+Written: the version check (1.7.104 tested, 1.6.317 and later warned, older refused), the Address Library check, a stand-in tick through SKSE's task queue, the developer channel (loopback, a token file, off unless the ini turns it on), and the first test's Steam steps. The rig scripts (`tools/rig/`: install, first start, start, the lobby test, fetching logs) are written and have run the first test. Still to write: reading the load order (`src/game/LoadOrder`), so the log's plugin count is real.
 
 The first test (`tools/rig/lobbytest.sh`, [GETTING-STARTED.md](GETTING-STARTED.md), "The first test") is the first proof, and answers the project's biggest open question before any engine work:
 

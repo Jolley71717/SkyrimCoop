@@ -1,0 +1,15 @@
+# machine-translated first pass, corrections welcome
+# SkyrimCoop texts: 日本語 (Japanese). The format and the keys are explained in en.txt; keep the {placeholders} as they are.
+
+reject.unreadable = 参加リクエストを読み取れませんでした。
+reject.not_this_mod = これはSkyrimCoopのゲームではありません。
+reject.version = このゲームは別のバージョンのMODを使っています（プロトコル{you}、ホストは{host}）。両方のプレイヤーが同じバージョンを使う必要があります。
+reject.password = パスワードが違います。
+reject.full = ゲームが満員です（{n}人）。
+reject.mods = MODがホストと異なります。
+reject.mods_missing = MODがホストと異なります：あなたの環境に{plugin}がありません。
+reject.mods_extra = MODがホストと異なります：ホストに{plugin}がありません。
+reject.mods_order = MODがホストと異なります：プラグインは同じですが、順番が違います。
+
+steam.status_hosting = Skyrim Co-opをホスト中
+steam.status_playing = Skyrim Co-opをプレイ中

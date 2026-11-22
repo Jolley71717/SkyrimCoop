@@ -138,6 +138,13 @@ Copy-Item (Join-Path $root 'dist\INSTALL.md') (Join-Path $stage 'SkyrimCoop')
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $stage 'SkyrimCoop')
 Copy-Item (Join-Path $root 'EXCEPTIONS') (Join-Path $stage 'SkyrimCoop')
 
+# The mod's texts in every language (Text.cpp reads Data\SKSE\Plugins\SkyrimCoop\lang\<code>.txt).
+$lang = Join-Path $stage 'SKSE\Plugins\SkyrimCoop\lang'
+New-Item -ItemType Directory -Force $lang | Out-Null
+$langFiles = @(Get-ChildItem (Join-Path $root 'dist\lang') -Filter '*.txt' -File)
+if (-not ($langFiles | Where-Object { $_.Name -eq 'en.txt' })) { throw 'dist\lang has no en.txt' }
+Copy-Item $langFiles.FullName $lang
+
 # Nothing in the zip may name this PC or its user.
 Assert-LeakScanWorks
 $patterns = @(Get-LeakPatterns)

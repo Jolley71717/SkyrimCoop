@@ -7,6 +7,7 @@
 #include "Platform.h"
 #include "Protocol.h"
 #include "RuntimeSupport.h"
+#include "Text.h"
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
@@ -160,6 +161,7 @@ namespace
 
 	void OnDataLoaded()
 	{
+		Text::Load();  // the game's own sLanguage is known by now
 		const auto plugins = LoadOrder::Read();
 		logs::info("Game data loaded ({} plugins read)", plugins.full.size() + plugins.light.size());
 		if (Config::Get().steam) {
