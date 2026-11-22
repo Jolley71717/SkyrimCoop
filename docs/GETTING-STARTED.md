@@ -16,7 +16,7 @@ The first test runs on the rig (the host PC and the VM, each signed in to its ow
 | 3 | The VM's game joins that lobby by its id, and both see two members | `First test: joined lobby L (2 members) ...`, `First test: a player joined our lobby ...` |
 | 4 | Messages cross Steam's relay both ways (the VM to the host first, then back), each answered, with round trips | `First test: relay report: sent=5 answered=5 ... rttMs min= median= max=` |
 
-All five passing means "Steam first" holds and phase 1 ([PLAN.md](PLAN.md)) can be built on it. Any one failing is the finding: write it down with both machines' logs before anything else is built.
+All five passing means "Steam first" holds and phase 1 ([PLAN.md](PLAN.md)) can be built on it. Any one failing is the finding: write it down with both machines' logs before anything else is built. Each FAIL line ends with `callbacks host=N vm=N`, the Steam callbacks each game has seen (the `status` line's `callbacks=`): the plugin leaves running Steam's callbacks to the game, so a 0 there means the game never ran them and the plugin has to, not that Steam did not answer.
 
 What it does not prove: the friends list's "Join Game" and the overlay invite (they need a person to click; `--join url` gets close by handing the VM's Steam client the same `steam://joinlobby` address a "Join Game" click uses), the frame hook (the tick is a stand-in, below), and anything about players, movement or the world.
 
@@ -37,7 +37,7 @@ SKSE has no "every frame" call. Until the frame hook is written ([PORTING.md](PO
 5. **Crash Logger** 1.27.0 (`CrashLogger_1.27.0.7z`, MIT) from its GitHub releases. Not needed for the test; it writes `crash-*.log` next to SKSE's logs if the game crashes, which is the only useful report of a crash.
 6. **The plugin**: the artifact of a `build.yml` run (`gh run download <run id>`), or a local build ([CONTRIBUTING.md](../CONTRIBUTING.md)). The `.pdb` of the same build is kept with it.
 
-The three downloads go into the rig's folder, one folder each: `skyrim-downloads/skse64/`, `skyrim-downloads/addresslibrary/`, `skyrim-downloads/crashlogger/`. `tools/rig/install.sh` checks their hashes against the ones it was written for (the files of 2026-11-21) and stops on any other file; a newer download is a new hash in the script, checked first.
+The three downloads go into the rig's folder, one folder each: `skyrim-downloads/skse64/`, `skyrim-downloads/addresslibrary/`, `skyrim-downloads/crashlogger/`. `tools/rig/install.sh` checks their hashes against the ones it was written for (the files of 2026-11-21) and stops on any other file; a newer download is a new hash in the script, checked first. Downloading them is the maintainer's: an agent never downloads any of them, and installs only these files, only through `install.sh` ([AGENTS.md](../AGENTS.md)).
 
 ## The first run, step by step
 
@@ -49,11 +49,11 @@ Everything in `tools/rig/` is written but has never been run. Each script says a
 2. Start Steam on both machines, signed in.
 3. Add `HOST_GAME=` and `VM_GAME=` to the rig's `rig.conf` if the games are not in the folders `tools/rig/env.sh` expects.
 
-**Then the scripts, in order (an agent can run them):**
+**Then the scripts, in order (an agent can run them, `install.sh` included: it installs only the maintainer's downloads above, hash-checked, backed up, and taken out again by `install.sh undo`):**
 
 | Step | Script | What it does |
 | --- | --- | --- |
-| 1 | `install.sh` | Puts SKSE, the Address Library file, Crash Logger and the plugin (with the developer channel on) into both game folders; backs up anything it replaces; keeps a record. `install.sh undo` takes out exactly what it put in. |
+| 1 | `install.sh` | Puts SKSE, the Address Library file, Crash Logger and the plugin (with the developer channel on) into both game folders; backs up anything it replaces; keeps a record. `install.sh undo` takes out exactly what it put in, and the folders it made once they are empty. |
 | 2 | `firststart.sh` | Writes the ini files the launcher would on a first start (windowed, 1280x720, no intro video), and checks Steam's update setting and the C++ runtime. `firststart.sh check` changes nothing; `undo` puts them back. |
 | 3 | `start.sh` | Starts both games through `skse64_loader.exe` and waits for the plugin's tick on both; then reaches the VM's developer channel through an ssh tunnel. |
 | 4 | `lobbytest.sh` | The test above. Writes `run.log`, `result.txt` and both machines' logs to `checks/skyrim-lobby-<time>/`. `lobbytest.sh --join url` is the second run, joining through Steam's own path. |

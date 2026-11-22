@@ -18,13 +18,14 @@ namespace DevCommands
 		std::string addressLibrary = "?";
 		FirstTest   firstTest;
 
-		// status: one line of key=value, never a name or a Steam id (the rig's logs keep it).
+		// status: one line of key=value, never a name or a Steam id (the rig's logs keep it). callbacks= tells a game that
+		// never runs Steam's callbacks (stays 0) from Steam not answering (it counts up, the lobby still doesn't come).
 		std::string Status(std::string_view)
 		{
 			const auto steam = Steam::Available();
-			return std::format("skyrimcoop protocol={} game={} addrlib={} ticks={} steam={} loggedon={} app={} relay={} hosting={} lobby={} members={}",
+			return std::format("skyrimcoop protocol={} game={} addrlib={} ticks={} steam={} loggedon={} app={} relay={} hosting={} lobby={} members={} callbacks={}",
 				Protocol::VERSION, game, addressLibrary, GameThread::Ticks(), steam ? "ready" : "unavailable", Steam::LoggedOn(), Steam::AppId(),
-				Steam::RelayStatus(), Steam::Hosting() ? 1 : 0, Steam::Lobby(), Steam::LobbyMembers());
+				Steam::RelayStatus(), Steam::Hosting() ? 1 : 0, Steam::Lobby(), Steam::LobbyMembers(), Steam::CallbacksSeen());
 		}
 
 		// steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why]

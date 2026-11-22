@@ -7,10 +7,11 @@
 #
 # Install: every file of the payload is copied to the same place under the game folder and its hash checked after. A
 # file that was there already is first copied to a backup folder beside the record; the record lists every file
-# written, its hash and its backup, one line each. Nothing is written while the game runs.
+# written, its hash and its backup, one line each, and every folder made for them. Nothing is written while the game
+# runs.
 # Undo: every file in the record that still has the hash we wrote is moved out of the game folder (into the record's
 # "removed" folder, never deleted) and its backup, if any, put back; a file that changed since is left alone and named.
-# Nothing outside the record is touched.
+# The folders the install made are taken out once empty. Nothing outside the record is touched.
 param(
 	[Parameter(Mandatory)] [string]$Game,
 	[string]$Payload = '',
@@ -30,8 +31,9 @@ function Hash([string]$path) { (Get-FileHash -LiteralPath $path -Algorithm SHA25
 if ($Undo) {
 	if (-not (Test-Path -LiteralPath $Record)) { throw "No record at $Record" }
 	$removed = Join-Path $recordDir ("removed-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-	$kept = 0; $back = 0; $gone = 0
+	$kept = 0; $back = 0; $gone = 0; $dirs = @()
 	foreach ($line in Get-Content -LiteralPath $Record) {
+		if ($line.StartsWith("#dir`t")) { $dirs += $line.Substring(5); continue }
 		if (-not $line -or $line.StartsWith('#')) { continue }
 		$rel, $hash, $backup = $line -split "`t"
 		$target = Join-Path $Game $rel
@@ -48,7 +50,16 @@ if ($Undo) {
 			$back++
 		}
 	}
-	"undone: our files moved to $removed; $back earlier files put back; $kept changed files left alone; $gone were gone already"
+	# The folders the install made, deepest first (each was recorded after its parent), taken out only when empty
+	$dirsGone = 0
+	[array]::Reverse($dirs)
+	foreach ($rel in $dirs) {
+		$dir = Join-Path $Game $rel
+		if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+		if (@(Get-ChildItem -LiteralPath $dir -Force).Count -eq 0) { Remove-Item -LiteralPath $dir; $dirsGone++ }
+		else { "folder not empty, left: $rel" }
+	}
+	"undone: our files moved to $removed; $back earlier files put back; $kept changed files left alone; $gone were gone already; $dirsGone empty folders the install made taken out"
 	if ($kept -gt 0) { exit 1 }
 	exit 0
 }
@@ -88,7 +99,11 @@ foreach ($file in Get-ChildItem -LiteralPath $Payload -Recurse -File) {
 		if ((Hash $backup) -ne (Hash $target)) { throw "backing up ${rel}: the hash differs after the copy" }
 		$replaced++
 	}
+	# Folders made for it are recorded ("#dir", parents first), so undo can take them out again when they are empty
+	$made = @(); $dir = Split-Path -Parent $target
+	while (-not (Test-Path -LiteralPath $dir)) { $made = @($dir) + $made; $dir = Split-Path -Parent $dir }
 	New-Item -ItemType Directory -Force (Split-Path -Parent $target) | Out-Null
+	foreach ($d in $made) { $lines += "#dir`t" + $d.Substring($Game.Length).TrimStart('\') }
 	Copy-Item -LiteralPath $file.FullName -Destination $target -Force
 	if ((Hash $target) -ne $want) { throw "copying ${rel}: the hash differs after the copy" }
 	$lines += "$rel`t$want`t$backup"

@@ -66,8 +66,10 @@ and ask.
 - No binaries in the repository (no DLLs, no compiled menu files, no archives): what ships is built from source by
   the project's workflows. A new dependency is source, pinned to a commit or a version, with a GPL-compatible license
   that the change names.
-- Never download the game, SKSE, the Address Library or any other mod onto the maintainer's machines: installing
-  those is the maintainer's to do (docs/GETTING-STARTED.md).
+- Never download the game, SKSE, the Address Library or any other mod onto the maintainer's machines: the maintainer
+  downloads them and puts them in the rig's `skyrim-downloads` folder. Agents may install from those files only, and
+  only with `tools/rig/install.sh`, which checks their hashes, backs up what it replaces and is undone with
+  `install.sh undo` (docs/GETTING-STARTED.md). Buying and installing the game itself stays the maintainer's.
 - Never permanently delete the maintainer's own files outside the repo, and never change system or security settings.
 - Never change the repository's visibility or its settings.
 

@@ -85,6 +85,9 @@ namespace Steam
 	[[nodiscard]] std::string_view LoggedOn();
 	[[nodiscard]] std::uint32_t    AppId();        // the app id Steam runs the game as; 0 when not known
 	[[nodiscard]] int              RelayStatus();  // ESteamNetworkingAvailability: 100 = the relay network is usable
+	// Steam callbacks that reached us so far. The plugin never runs Steam's callbacks itself (the game does), so 0 while
+	// a lobby is asked for means the game isn't running them, not that Steam didn't answer. Any thread.
+	[[nodiscard]] int CallbacksSeen();
 	// The steam:// address that makes a friend's Steam client join our lobby, as the rig's second machine does. It names
 	// our Steam id: for the developer channel's answer only, never for the log. "" when we host no lobby.
 	[[nodiscard]] std::string JoinUrl();
