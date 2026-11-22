@@ -39,6 +39,27 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # CONTRIBUTING.md: CommonLibSSE-NG is pinned to a commit that is not one of its release tags. On a tagged commit
+      # the library's build file downloads that release's prebuilt library on GitHub's machines instead of compiling
+      # the source. The pin is read from the tree (no submodule is fetched); the library's tags are listed as names and
+      # commit ids only, nothing is downloaded or run.
+      - name: CommonLibSSE-NG pin is not a release tag
+        run: |
+          set -o pipefail
+          pin=$(git ls-tree HEAD lib/commonlibsse-ng | awk '$2 == "commit" { print $3 }')
+          [[ "$pin" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::lib/commonlibsse-ng is not a submodule commit in this tree"; exit 1; }
+          url=$(git config -f .gitmodules submodule.lib/commonlibsse-ng.url)
+          [ "$url" = "https://github.com/alandtse/CommonLibSSE-NG.git" ] || { echo "::error::lib/commonlibsse-ng points at an unexpected URL"; exit 1; }
+          tags=$(git ls-remote --tags "$url")
+          [ -n "$tags" ] || { echo "::error::the library's tags could not be listed"; exit 1; }
+          # An annotated tag is listed twice: the tag object, and its commit as <name>^{}. Either matching is a tag.
+          hit=$(awk -v pin="$pin" '$1 == pin { sub("^refs/tags/", "", $2); sub(/\^[{][}]$/, "", $2); print $2 }' <<< "$tags" | sort -u)
+          if [ -n "$hit" ]; then
+            echo "::error::lib/commonlibsse-ng is pinned to $pin, the release tag $hit: pin a commit between tags (CONTRIBUTING.md)"
+            exit 1
+          fi
+          echo "pin $pin is not one of the library's $(grep -c . <<< "$tags") tag refs"
+
       # No caches, restored or saved (its cache inputs all default to off).
       - uses: xmake-io/github-action-setup-xmake@3a1a5dddfc7fa625d9a698738334bf55655a861a  # v1.2.5
         with:
