@@ -128,6 +128,16 @@ namespace RemotePlayers
 		// Where the graph's events are sent from: the stand-in's own update (the hook, by default) or the tick (dev
 		// `graph from tick`, a probe for why the graph turns moveStart away).
 		std::atomic<bool> eventsFromTick{ false };
+		// The graph's Speed and Direction set, and those it turned away (a probe, as the events' counts).
+		std::atomic<std::uint64_t> varsSet{ 0 };
+		std::atomic<std::uint64_t> varsRefused{ 0 };
+
+		void SetGait(RE::Actor* a_actor, const Gait::Step& a_step)
+		{
+			const bool speed = a_actor->SetGraphVariableFloat(Name("Speed"), a_step.speed);
+			const bool direction = a_actor->SetGraphVariableFloat(Name("Direction"), a_step.direction);
+			(speed && direction ? varsSet : varsRefused).fetch_add(1, std::memory_order_relaxed);
+		}
 
 		// Sends a step's events to a stand-in's graph and keeps the count of those taken and turned away. One turned away
 		// is sent again next time (what the graph shows stays what it was).
@@ -219,9 +229,8 @@ namespace RemotePlayers
 			if (!sample) {
 				return;
 			}
-			a_this->SetGraphVariableFloat(Name("Speed"), step.speed);
-			a_this->SetGraphVariableFloat(Name("Direction"), step.direction);
 			if (eventsHere) {
+				SetGait(a_this, step);
 				TellGraph(a_this, playerId, step, was);
 			}
 		}
@@ -589,6 +598,7 @@ namespace RemotePlayers
 					step = Gait::Next(was, sample->state, sample->held);
 					remote.shown = step.shown;
 				}
+				SetGait(actor.get(), step);
 				TellGraph(actor.get(), id, step, was);
 			}
 		}
@@ -727,7 +737,8 @@ namespace RemotePlayers
 			disabled += grave.disabledAt && !grave.deleted ? 1 : 0;
 			deleted += grave.deleted ? 1 : 0;
 		}
-		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={})", players.size(), standIns.load(), graveyard.size(), disabled, deleted);
+		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) graphVars set={} refused={} from={}", players.size(), standIns.load(),
+			graveyard.size(), disabled, deleted, varsSet.load(), varsRefused.load(), eventsFromTick ? "tick" : "hook");
 		const auto  here = LocalPlayer::Read();
 		std::scoped_lock l{ lock };
 		for (const auto& [id, remote] : players) {
