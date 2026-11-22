@@ -142,6 +142,10 @@ namespace
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
 		}
 		RunInBackground();  // before the first tick: the main menu must not stall either
+		// Whether the game's sound is on: the rig's VM, which has no audio device, runs with it off (tools/rig/start.ps1).
+		const auto ini = RE::INISettingCollection::GetSingleton();
+		const auto audio = ini ? ini->GetSetting("bEnableAudio:Audio") : nullptr;
+		logs::info("Config: the game's sound is {} ([Audio] bEnableAudio)", !audio ? "unknown" : audio->GetBool() ? "on" : "off");
 		GameThread::Install(OnFrame);
 	}
 
