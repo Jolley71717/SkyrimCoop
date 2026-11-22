@@ -165,7 +165,9 @@ namespace Session
 		void SendOurs(Clock::time_point a_now)
 		{
 			if (a_now >= nextState) {
-				nextState = a_now + STATE_EVERY;
+				// From the time the last was due, not when the tick came (about every 16 ms): 20 a second, not 15. One
+				// that fell far behind (a stall) starts over from now rather than sending a burst.
+				nextState = a_now - nextState < STATE_EVERY ? nextState + STATE_EVERY : a_now + STATE_EVERY;
 				if (auto state = LocalPlayer::Read()) {
 					state->sequence = ++sequence;
 					state->sentMs = Protocol::SentMs(a_now);
@@ -318,6 +320,11 @@ namespace Session
 			SendOurs(Clock::now());
 		}
 		RemotePlayers::Frame();
+	}
+
+	bool Active()
+	{
+		return role != Role::kNone;
 	}
 
 	std::string Describe()

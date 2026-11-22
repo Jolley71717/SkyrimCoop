@@ -1,4 +1,5 @@
 #include "AddressLibraryFile.h"
+#include "Background.h"
 #include "Config.h"
 #include "DevChannel.h"
 #include "DevCommands.h"
@@ -54,6 +55,43 @@ namespace
 		logs::warn("Steam: cannot be used yet: {}", Steam::Unavailable());
 	}
 
+	// bRunInBackground (Background.h): the game's bAlwaysActive on while in a session, and whenever the developer channel
+	// is on (the rig: a script must not stall because someone clicked elsewhere), the player's value back after.
+	Background::Switch background;
+
+	RE::Setting* AlwaysActive()
+	{
+		static RE::Setting* const found = [] {
+			const auto prefs = RE::INIPrefSettingCollection::GetSingleton();
+			const auto inPrefs = prefs ? prefs->GetSetting("bAlwaysActive:General") : nullptr;
+			const auto ini = RE::INISettingCollection::GetSingleton();
+			const auto setting = inPrefs ? inPrefs : ini ? ini->GetSetting("bAlwaysActive:General") : nullptr;
+			if (!setting || setting->GetType() != RE::Setting::Type::kBool) {
+				logs::warn("Config: the game's bAlwaysActive setting was not found; the game pauses while it is not focused");
+				return static_cast<RE::Setting*>(nullptr);
+			}
+			logs::info("Config: the game's bAlwaysActive is in its {} settings, {} now", inPrefs ? "Prefs ini" : "ini", setting->GetBool());
+			return setting;
+		}();
+		return found;
+	}
+
+	void RunInBackground()
+	{
+		const auto setting = AlwaysActive();
+		if (!setting) {
+			return;
+		}
+		const auto& config = Config::Get();
+		const bool  forced = config.devChannel || Session::Active();
+		if (const auto value = background.Update(config.runInBackground || config.devChannel, forced, setting->GetBool())) {
+			setting->SetBool(*value);
+			logs::info("Config: {}", *value ? (config.devChannel ? "the game runs on while it is not focused (the developer channel is on)" :
+			                                                       "in a session, the game runs on while it is not focused (bRunInBackground)") :
+			                                  "out of the session, the game's bAlwaysActive is back as it was");
+		}
+	}
+
 	// About once a frame on the main thread (GameThread). Steam first, so a friend's first message is let in
 	// (SessionRequested) before the probe reads its channel.
 	void OnFrame()
@@ -64,6 +102,7 @@ namespace
 			DevCommands::Frame();
 		}
 		Session::Frame();
+		RunInBackground();
 		VirtualPad::Frame();
 		DevChannel::Frame();
 	}
@@ -99,7 +138,10 @@ namespace
 		} else {
 			logs::info("Steam: left alone (bSteam = false)");
 		}
-		RemotePlayers::Install();
+		if (!RemotePlayers::Install()) {
+			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
+		}
+		RunInBackground();  // before the first tick: the main menu must not stall either
 		GameThread::Install(OnFrame);
 	}
 

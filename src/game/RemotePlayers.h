@@ -17,7 +17,8 @@ namespace SKSE
 //
 // A stand-in is never saved (docs/DESIGN.md, "Nothing of the session in a save"): every one is taken out of the world
 // before the game writes a save (BeforeSave, from SKSE's kSaveGame) and placed again after; the co-save lists the ones
-// taken out, and after a load any of them, or any other placed actor of a preset base, is removed (AfterLoad).
+// taken out, and after a load any of them, or any other placed actor of a preset base, is removed (AfterLoad; that
+// sweep only runs when this game has a reason to look, so another mod's preset actors are left alone otherwise).
 //
 // Main thread only, except the hook.
 namespace RemotePlayers
@@ -48,7 +49,8 @@ namespace RemotePlayers
 	// The co-save's record of the stand-ins taken out for this save, and its reading at a load.
 	void WriteCoSave(SKSE::SerializationInterface* a_intf);
 	void ReadCoSave(SKSE::SerializationInterface* a_intf, std::uint32_t a_version, std::uint32_t a_length);
-	// After a load (kPostLoadGame) or a new game: any stand-in that came back with the save is removed.
+	// After a load (kPostLoadGame): any stand-in that came back with the save is removed. The sweep of every placed
+	// preset actor runs only when this game placed a stand-in, the co-save named some, or friends are in the session.
 	void AfterLoad();
 
 	[[nodiscard]] std::size_t Count();

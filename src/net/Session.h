@@ -22,6 +22,9 @@ namespace Session
 	// Starts hosting; false (and a_why) when it can't.
 	bool Host(std::string& a_why);
 
+	// Hosting, or joining or joined to someone's.
+	[[nodiscard]] bool Active();
+
 	// Ends this game's part: the connection, the server when hosting, the lobby, every stand-in.
 	void Leave(std::string_view a_why);
 

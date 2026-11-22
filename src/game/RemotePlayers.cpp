@@ -51,6 +51,17 @@ namespace RemotePlayers
 		// co-save of a loaded save named, removed once the load is done.
 		std::vector<RE::FormID> takenForSave;
 		std::vector<RE::FormID> namedByLoad;
+		bool                    hooked = false;         // the Character update is ours: without it, no stand-in is placed
+		bool                    placedThisRun = false;  // a stand-in was placed since the game started
+		bool                    coSaveRecord = false;   // the loaded save's co-save has a stand-ins record
+
+		// Whether the save and load sweeps of preset actors have a reason to run: this game placed a stand-in, the
+		// loaded save was written with some taken out, or friends are in the session. Otherwise they could only find
+		// another mod's actors, and walk every form for nothing.
+		bool SweepWanted()
+		{
+			return placedThisRun || coSaveRecord || !players.empty();
+		}
 
 		// The preset base for a race and sex, once looked for (nullptr: there is none).
 		std::map<std::pair<RE::FormID, bool>, RE::TESNPC*> bases;
@@ -252,6 +263,7 @@ namespace RemotePlayers
 			if (!a_remote.name.empty()) {
 				actor->SetDisplayName(a_remote.name, true);
 			}
+			placedThisRun = true;
 			a_remote.standIn = actor->GetHandle();
 			a_remote.standInId = actor->GetFormID();
 			a_remote.base = base;
@@ -275,8 +287,10 @@ namespace RemotePlayers
 			}
 			std::size_t worn = 0;
 			for (const auto id : a_remote.looks->worn) {
+				// Another player's game named it: only armor a player can wear (no creature skins, no non-playable
+				// pieces).
 				const auto armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(id);
-				if (!armor) {
+				if (!armor || !armor->GetPlayable()) {
 					continue;
 				}
 				a_actor->AddObjectToContainer(armor, nullptr, 1, nullptr);
@@ -335,6 +349,7 @@ namespace RemotePlayers
 		}
 		originalUpdate = reinterpret_cast<UpdateFn>(current);
 		REL::safe_write(slot, reinterpret_cast<std::uintptr_t>(&UpdateHook));
+		hooked = true;
 		logs::info("Players: hooked the Character update (game+{:X})", current - image);
 		return true;
 	}
@@ -413,7 +428,8 @@ namespace RemotePlayers
 				continue;
 			}
 			if (!actor) {
-				if (now >= remote.placeAfter) {
+				// Without the hook a stand-in would run its own AI: none is placed.
+				if (hooked && now >= remote.placeAfter) {
 					Place(id, remote, sample->state);
 				}
 				continue;
@@ -460,7 +476,7 @@ namespace RemotePlayers
 			}
 		}
 		// And any other placed preset actor (one an earlier save brought back that a sweep missed): none is saved.
-		for (const auto actor : PresetActors()) {
+		for (const auto actor : SweepWanted() ? PresetActors() : std::vector<RE::Actor*>{}) {
 			if (!actor->IsDisabled()) {
 				takenForSave.push_back(actor->GetFormID());
 				Remove(actor);
@@ -491,6 +507,7 @@ namespace RemotePlayers
 	void ReadCoSave(SKSE::SerializationInterface* a_intf, std::uint32_t a_version, std::uint32_t a_length)
 	{
 		namedByLoad.clear();
+		coSaveRecord = true;
 		std::uint32_t count = 0;
 		if (a_version != COSAVE_STANDINS_VERSION || a_length < sizeof(count) || a_intf->ReadRecordData(&count, sizeof(count)) != sizeof(count) ||
 			count > 1024 || a_length != sizeof(count) + count * sizeof(RE::FormID)) {
@@ -498,7 +515,10 @@ namespace RemotePlayers
 			return;
 		}
 		namedByLoad.resize(count);
-		a_intf->ReadRecordData(namedByLoad.data(), count * static_cast<std::uint32_t>(sizeof(RE::FormID)));
+		const auto bytes = count * static_cast<std::uint32_t>(sizeof(RE::FormID));
+		if (const auto read = a_intf->ReadRecordData(namedByLoad.data(), bytes); read != bytes) {
+			logs::warn("Co-save: the stand-ins record gave {} of {} bytes; the load's sweep still runs", read, bytes);
+		}
 		logs::info("Co-save: this save was written with {} stand-in(s) taken out", count);
 	}
 
@@ -513,7 +533,7 @@ namespace RemotePlayers
 			}
 		}
 		std::size_t swept = 0;
-		for (const auto actor : PresetActors()) {
+		for (const auto actor : SweepWanted() ? PresetActors() : std::vector<RE::Actor*>{}) {
 			if (!IsCurrentStandIn(actor) && !actor->IsDisabled()) {
 				Remove(actor);
 				++swept;
@@ -522,9 +542,10 @@ namespace RemotePlayers
 		if (named + swept > 0) {
 			logs::warn("Load: removed {} stand-in(s) the save brought back ({} named by the co-save, {} found by the sweep)", named + swept, named, swept);
 		} else {
-			logs::info("Load: no stand-in in this save (the co-save named {})", namedByLoad.size());
+			logs::info("Load: no stand-in in this save (the co-save named {}{})", namedByLoad.size(), SweepWanted() ? "" : "; no sweep: no session or stand-in in this game");
 		}
 		namedByLoad.clear();
+		coSaveRecord = false;
 	}
 
 	std::size_t Count()

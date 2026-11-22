@@ -53,6 +53,8 @@ Steam: the game's own Steam library has everything the mod needs
 
 Edit `Data\SKSE\Plugins\SkyrimCoop.ini`. The file is read when the game starts: change it, then restart the game.
 
+- `bRunInBackground` (true): while you are in a session, your game keeps running when you alt-tab, so friends still see you, and you can be hurt meanwhile. Playing alone, alt-tab pauses the game as before, and the game's own setting (`bAlwaysActive`) is left as you had it.
+
 ## Reporting a problem
 
 Use the bug form at <https://github.com/Jolley71717/SkyrimCoop/issues/new/choose> and attach the log. The log is written to leave out player names, Steam ids and network addresses; check anything else you attach.
