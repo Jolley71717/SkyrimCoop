@@ -1,0 +1,15 @@
+# machine-translated first pass, corrections welcome
+# SkyrimCoop texts: 繁體中文 (Traditional Chinese, the game's own Chinese). The format and the keys are explained in en.txt; keep the {placeholders} as they are.
+
+reject.unreadable = 無法讀取加入請求。
+reject.not_this_mod = 這不是 SkyrimCoop 遊戲。
+reject.version = 這個遊戲使用另一個版本的模組（通訊協定 {you}，房主為 {host}）。雙方需要相同的版本。
+reject.password = 密碼錯誤。
+reject.full = 遊戲已滿（{n} 名玩家）。
+reject.mods = 你的模組與房主的不同。
+reject.mods_missing = 你的模組與房主的不同：你沒有 {plugin}。
+reject.mods_extra = 你的模組與房主的不同：房主沒有 {plugin}。
+reject.mods_order = 你的模組與房主的不同：插件相同，但順序不同。
+
+steam.status_hosting = 正在主持 Skyrim 連線合作
+steam.status_playing = 正在玩 Skyrim 連線合作

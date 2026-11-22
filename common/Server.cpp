@@ -3,6 +3,7 @@
 #include "EnetTransport.h"
 #include "Name.h"
 #include "Redact.h"
+#include "Text.h"
 #include "TokenBucket.h"
 
 #include <algorithm>
@@ -42,27 +43,36 @@ namespace
 		bool        toldUnknown = false;
 	};
 
-	// What a refusal says about two load orders that differ: the first plugin one side has and the other lacks.
-	// a_session and a_joiner are laid out as hellos carry them (Protocol::ComparedLoadOrder).
-	std::string LoadOrderDifference(const std::vector<std::string>& a_session, const std::vector<std::string>& a_joiner)
+	// The refusal of a joiner whose load order differs from the session's: the first plugin one side has and the
+	// other lacks, as the English the server sends (a reject.* key, filled in) and as the log says it. a_session and
+	// a_joiner are laid out as hellos carry them (Protocol::ComparedLoadOrder); either empty says only that they differ.
+	struct LoadOrderRefusal
+	{
+		std::string reason;
+		std::string logged;
+	};
+
+	LoadOrderRefusal LoadOrderDifference(const std::vector<std::string>& a_session, const std::vector<std::string>& a_joiner)
 	{
 		const auto has = [](const std::vector<std::string>& a_list, const std::string& a_name) {
 			return std::ranges::any_of(a_list, [&](const std::string& a_other) { return Protocol::SamePluginName(a_other, a_name); });
 		};
 		if (a_session.empty() || a_joiner.empty()) {
-			return {};
+			return { Text::GetEnglish("reject.mods"), "another load order" };
 		}
 		for (const auto& name : a_session) {
 			if (name != Protocol::LIGHT_PLUGINS && !has(a_joiner, name)) {
-				return std::format("you don't have {}", name);
+				return { Text::FormatEnglish("reject.mods_missing", { { "plugin", name } }),
+					std::format("another load order (you don't have {})", Redact::OneLine(name)) };
 			}
 		}
 		for (const auto& name : a_joiner) {
 			if (name != Protocol::LIGHT_PLUGINS && !has(a_session, name)) {
-				return std::format("the host doesn't have {}", name);
+				return { Text::FormatEnglish("reject.mods_extra", { { "plugin", name } }),
+					std::format("another load order (the host doesn't have {})", Redact::OneLine(name)) };
 			}
 		}
-		return "the same plugins, in another order";
+		return { Text::GetEnglish("reject.mods_order"), "another load order (the same plugins, in another order)" };
 	}
 }
 
@@ -169,20 +179,20 @@ void Server::Run()
 		}
 		const auto hello = Protocol::DecodeHello(a_data);
 		if (!hello) {
-			refuse(a_key, "The join request could not be read.", "a hello that could not be read");
+			refuse(a_key, Text::GetEnglish("reject.unreadable"), "a hello that could not be read");
 			return;
 		}
 		if (hello->magic != Protocol::MAGIC) {
-			refuse(a_key, "This is not a SkyrimCoop game.", "not this mod's hello");
+			refuse(a_key, Text::GetEnglish("reject.not_this_mod"), "not this mod's hello");
 			return;
 		}
 		if (hello->version != Protocol::VERSION) {
-			refuse(a_key, std::format("{} (protocol {}, the host has {}). Both players need the same version.", Protocol::REJECT_VERSION, hello->version, Protocol::VERSION),
+			refuse(a_key, Text::FormatEnglish("reject.version", { { "you", hello->version }, { "host", Protocol::VERSION } }),
 				std::format("protocol {} (ours is {})", hello->version, Protocol::VERSION));
 			return;
 		}
 		if (!options.password.empty() && hello->password != options.password) {
-			refuse(a_key, std::format("{}.", Protocol::REJECT_PASSWORD), "wrong password");
+			refuse(a_key, Text::GetEnglish("reject.password"), "wrong password");
 			return;
 		}
 		// Someone coming back while their old connection still stands (it has not timed out yet) takes its place.
@@ -196,14 +206,13 @@ void Server::Run()
 			}
 		}
 		if (!replaced && countPlayers() >= options.maxPlayers) {
-			refuse(a_key, std::format("{} ({} players).", Protocol::REJECT_FULL, options.maxPlayers), "the session is full");
+			refuse(a_key, Text::FormatEnglish("reject.full", { { "n", options.maxPlayers } }), "the session is full");
 			return;
 		}
 		const bool othersIn = countPlayers() > (replaced ? 1u : 0u);
 		if (othersIn && sessionHash && *sessionHash != hello->contentHash) {
-			const auto difference = LoadOrderDifference(sessionPlugins, hello->plugins);
-			refuse(a_key, difference.empty() ? std::format("{}.", Protocol::REJECT_LOAD_ORDER) : std::format("{}: {}.", Protocol::REJECT_LOAD_ORDER, difference),
-				difference.empty() ? "another load order" : std::format("another load order ({})", Redact::OneLine(difference)));
+			auto difference = LoadOrderDifference(sessionPlugins, hello->plugins);
+			refuse(a_key, std::move(difference.reason), difference.logged);
 			return;
 		}
 
