@@ -88,7 +88,6 @@ namespace Text
 		{
 			Table table;                  // the language file's texts, by key
 			std::string code = "en";      // the language they are in
-			std::unordered_map<std::string_view, std::string_view> english;  // built on first use
 		};
 
 		inline State& Current()
@@ -97,14 +96,17 @@ namespace Text
 			return state;
 		}
 
+		// Built once, on first use, by whichever thread asks first: the server's thread (its refusals' English) and the
+		// game's (a text) may both be first, and a function's static is filled by one of them while the other waits.
 		inline const std::unordered_map<std::string_view, std::string_view>& EnglishMap()
 		{
-			auto& map = Current().english;
-			if (map.empty()) {
+			static const auto map = [] {
+				std::unordered_map<std::string_view, std::string_view> built;
 				for (const auto& entry : English()) {
-					map.emplace(entry.key, entry.text);
+					built.emplace(entry.key, entry.text);
 				}
-			}
+				return built;
+			}();
 			return map;
 		}
 	}

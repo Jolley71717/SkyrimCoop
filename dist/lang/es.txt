@@ -3,7 +3,7 @@
 
 reject.unreadable = No se ha podido leer la solicitud para unirse.
 reject.not_this_mod = Esta no es una partida de SkyrimCoop.
-reject.version = Esta partida usa otra versión del mod (protocolo {you}, el anfitrión tiene el {host}). Ambos jugadores necesitan la misma versión.
+reject.version = Tu juego usa otra versión del mod (protocolo {you}, el anfitrión tiene el {host}). Ambos jugadores necesitan la misma versión.
 reject.password = Contraseña incorrecta.
 reject.full = La partida está llena ({n} jugadores).
 reject.mods = Tus mods no coinciden con los del anfitrión.
@@ -11,5 +11,5 @@ reject.mods_missing = Tus mods no coinciden con los del anfitrión: no tienes {p
 reject.mods_extra = Tus mods no coinciden con los del anfitrión: el anfitrión no tiene {plugin}.
 reject.mods_order = Tus mods no coinciden con los del anfitrión: los mismos plugins, en otro orden.
 
-steam.status_hosting = Alojando Skyrim cooperativo
+steam.status_hosting = Organizando una partida cooperativa de Skyrim
 steam.status_playing = Jugando a Skyrim cooperativo

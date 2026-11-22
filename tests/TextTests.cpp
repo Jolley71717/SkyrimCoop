@@ -3,7 +3,15 @@
 #include "SourceTree.h"
 #include "Text.h"
 
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <map>
 #include <regex>
+#include <set>
+#include <string>
+#include <string_view>
+#include <vector>
 
 // The mod's own texts: the placeholder formatter, the language files and the guards that keep a key from missing in
 // any language and a new message from being written as a bare English literal. Carried over from F4Multiplayer's
@@ -326,7 +334,9 @@ TEST("text: no player-facing text is a bare English literal in the code")
 		{ "SetOverrideName(", 0 },
 		{ "refuse(", 1 },
 	};
-	int found = 0;
+	int         found = 0;
+	std::size_t refusals = 0;  // what the guard saw, so a renamed call does not leave it checking nothing
+	std::size_t statuses = 0;
 	for (const std::string_view folder : { "src", "common" }) {
 		for (const auto& [name, code] : SourceTree::Code(*root, folder)) {
 			if (name == "src/TextEnglish.h" || name == "src/Text.h") {
@@ -335,6 +345,7 @@ TEST("text: no player-facing text is a bare English literal in the code")
 			for (const auto& shown : SHOWN) {
 				for (auto at = code.find(shown.call); at != std::string::npos; at = code.find(shown.call, at + 1)) {
 					const auto open = at + shown.call.size() - 1;
+					refusals += shown.call == "refuse(";
 					if (IsLiteral(code, ArgumentAt(code, open, shown.argument))) {
 						++found;
 						Test::Fail(__FILE__, __LINE__, std::format("{} shows a literal through {}..): use a Text key", name, shown.call));
@@ -345,7 +356,9 @@ TEST("text: no player-facing text is a bare English literal in the code")
 			for (auto at = code.find("SetRichPresence("); at != std::string::npos; at = code.find("SetRichPresence(", at + 1)) {
 				const auto open = at + 15;
 				const auto key = ArgumentAt(code, open, 1);
-				if (key != std::string_view::npos && code.substr(key).starts_with("\"status\"") && IsLiteral(code, ArgumentAt(code, open, 2))) {
+				const bool status = key != std::string_view::npos && code.substr(key).starts_with("\"status\"");
+				statuses += status;
+				if (status && IsLiteral(code, ArgumentAt(code, open, 2))) {
 					++found;
 					Test::Fail(__FILE__, __LINE__, std::format("{} sets Steam's status line from a literal: use a Text key", name));
 				}
@@ -353,6 +366,8 @@ TEST("text: no player-facing text is a bare English literal in the code")
 		}
 	}
 	CHECK(found == 0);
+	CHECK(refusals >= 6u);  // common/Server.cpp's refusals
+	CHECK(statuses >= 1u);  // src/steam/Steam.cpp's status line
 
 	// The guard finds what it looks for (so a rename of a call does not leave it checking nothing).
 	const std::string sample = "RE::DebugNotification(\"Hello\");\nrefuse(a_key, std::format(\"{} left\", n), x);\nrefuse(a_key, Text::GetEnglish(\"reject.password\"), \"wrong password\");\n";

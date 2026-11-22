@@ -11,5 +11,5 @@ reject.mods_missing = Ваши моды отличаются от модов х�
 reject.mods_extra = Ваши моды отличаются от модов хоста: у хоста нет {plugin}.
 reject.mods_order = Ваши моды отличаются от модов хоста: те же плагины, но в другом порядке.
 
-steam.status_hosting = Хост кооператива Skyrim
+steam.status_hosting = Проводит кооперативную игру в Skyrim
 steam.status_playing = Играет в Skyrim в кооперативе

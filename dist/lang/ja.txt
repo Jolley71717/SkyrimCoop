@@ -7,7 +7,7 @@ reject.version = このゲームは別のバージョンのMODを使っていま
 reject.password = パスワードが違います。
 reject.full = ゲームが満員です（{n}人）。
 reject.mods = MODがホストと異なります。
-reject.mods_missing = MODがホストと異なります：{plugin}がありません。
+reject.mods_missing = MODがホストと異なります：あなたの環境に{plugin}がありません。
 reject.mods_extra = MODがホストと異なります：ホストに{plugin}がありません。
 reject.mods_order = MODがホストと異なります：プラグインは同じですが、順番が違います。
 
