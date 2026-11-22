@@ -77,6 +77,24 @@ namespace
 	}
 
 	// Whether the text an argument gives starts as an English literal: "text", or std::format("text", ...).
+	// Whether the statement from a_at on (to its ';') picks between literals: cond ? "a" : "b". A Text call's key
+	// ("Text::Get(\"key\")") is no such pick: its ':' is part of a "::".
+	bool PicksLiteral(std::string_view a_code, std::size_t a_at)
+	{
+		const auto end = std::min(a_code.size(), a_code.find(';', a_at));
+		for (auto i = a_at; i < end; ++i) {
+			const bool colon = a_code[i] == ':' && (i + 1 >= end || a_code[i + 1] != ':') && (i == 0 || a_code[i - 1] != ':');
+			if (a_code[i] != '?' && !colon) {
+				continue;
+			}
+			const auto next = a_code.find_first_not_of(" \t\r\n", i + 1);
+			if (next < end && (a_code[next] == '"' || a_code.substr(next).starts_with("std::format(\""))) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool IsLiteral(std::string_view a_code, std::size_t a_at)
 	{
 		if (a_at == std::string_view::npos) {
@@ -87,7 +105,7 @@ namespace
 			rest.remove_prefix(12);
 			rest.remove_prefix(std::min(rest.size(), rest.find_first_not_of(" \t\r\n")));
 		}
-		return rest.starts_with('"') || rest.starts_with("u8\"") || rest.starts_with("L\"");
+		return rest.starts_with('"') || rest.starts_with("u8\"") || rest.starts_with("L\"") || PicksLiteral(a_code, a_at);
 	}
 }
 
@@ -374,6 +392,11 @@ TEST("text: no player-facing text is a bare English literal in the code")
 	CHECK(IsLiteral(sample, ArgumentAt(sample, sample.find('('), 0)));
 	CHECK(IsLiteral(sample, ArgumentAt(sample, sample.find("refuse(") + 6, 1)));
 	CHECK(!IsLiteral(sample, ArgumentAt(sample, sample.rfind("refuse(") + 6, 1)));
+	const std::string picked = "api->SetRichPresence(api->friends, \"status\", hosting ? \"Hosting\" : \"Playing\");\n";
+	CHECK(IsLiteral(picked, ArgumentAt(picked, picked.find('('), 2)));
+	const std::string keyed = "api->SetRichPresence(api->friends, \"status\", Text::Get(hosting ? \"steam.a\" : \"steam.b\").c_str());\n";
+	CHECK(IsLiteral(keyed, ArgumentAt(keyed, keyed.find('('), 2)));  // keys picked inline: hand the call a variable
+	CHECK(!IsLiteral("x(status.c_str());", 2));
 }
 
 TEST("text: every key the code asks for by name is in the English table")
