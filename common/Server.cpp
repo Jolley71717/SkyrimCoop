@@ -30,6 +30,10 @@ namespace
 		std::uint64_t     identity = 0;
 		bool              anyState = false;
 		std::uint32_t     lastSequence = 0;
+		// The player's looks as last sent, for whoever joins after (none until the first come).
+		std::optional<Protocol::PlayerLooks> looks;
+		// Looks taken: a burst of ten, then one a second (a game sends them when its player changes clothes).
+		TokenBucket looksBudget{ 10.0, 1.0 };
 		// Heartbeats answered: a burst of twenty, then ten a second (the game sends a few a second at most).
 		TokenBucket heartbeats{ 20.0, 10.0 };
 		bool        toldUnknown = false;
@@ -232,6 +236,9 @@ void Server::Run()
 		for (const auto& [key, peer] : peers) {
 			if (peer.joined && key != a_key) {
 				send(a_key, Protocol::Encode(Protocol::PlayerJoined{ peer.playerId, peer.name }), true);
+				if (peer.looks) {
+					send(a_key, Protocol::Encode(Protocol::RemoteLooks{ peer.playerId, *peer.looks }), true);
+				}
 			}
 		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
@@ -263,6 +270,17 @@ void Server::Run()
 				a_peer.anyState = true;
 				a_peer.lastSequence = state->sequence;
 				broadcast(Protocol::Encode(Protocol::RemoteState{ a_peer.playerId, *state }), false, &a_key);
+			}
+			break;
+		case MT::kPlayerLooks:
+			// Kept for whoever joins later, and passed on to those there now. Reliable, and on the reliable channel, so
+			// it comes after the join it belongs to.
+			if (auto looks = Protocol::DecodePlayerLooks(a_data); looks && a_peer.looksBudget.Take(Clock::now())) {
+				if (a_peer.looks && *a_peer.looks == *looks) {
+					break;  // the same again: nothing for the others
+				}
+				a_peer.looks = std::move(*looks);
+				broadcast(Protocol::Encode(Protocol::RemoteLooks{ a_peer.playerId, *a_peer.looks }), true, &a_key);
 			}
 			break;
 		case MT::kHeartbeat:

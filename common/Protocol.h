@@ -26,7 +26,8 @@ namespace Protocol
 	inline constexpr std::uint32_t MAGIC = 0x4F434B53;  // "SKCO"
 	// Raise it with every change to what goes over the wire or how it is read: two games of different versions refuse
 	// each other at the hello, with a reason that says so.
-	inline constexpr std::uint16_t VERSION = 1;
+	// 2: a player's looks (PlayerLooks, RemoteLooks), for the stand-in the others show of them.
+	inline constexpr std::uint16_t VERSION = 2;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -38,6 +39,9 @@ namespace Protocol
 	inline constexpr std::size_t MAX_PASSWORD_LENGTH = 64;
 	// The most players a server takes, whatever it is asked for.
 	inline constexpr std::size_t MAX_PLAYERS = 8;
+	// Worn items in a player's looks: Skyrim has 32 body slots (BGSBipedObjectForm), and a hand holds one weapon or
+	// spell more each.
+	inline constexpr std::size_t MAX_WORN = 40;
 
 	// How each refusal's reason starts, so the game can tell them apart and say more than the server knows.
 	inline constexpr std::string_view REJECT_VERSION = "This game runs another version of the mod";
@@ -61,6 +65,8 @@ namespace Protocol
 		kRemoteState = 7,   // server -> the others, on the state channel: where that player is
 		kHeartbeat = 8,     // answered right away with kHeartbeatAck, to measure the connection
 		kHeartbeatAck = 9,
+		kPlayerLooks = 10,  // client -> server, reliable: what my character looks like (again whenever it changes)
+		kRemoteLooks = 11,  // server -> the others (and each one there, to the one who joined): that player's looks
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -75,7 +81,7 @@ namespace Protocol
 		kSneaking = 1 << 0,
 		kSprinting = 1 << 1,
 		kWeaponDrawn = 1 << 2,
-		kJumping = 1 << 3,
+		kJumping = 1 << 3,  // in the air: jumped, or falling
 		kSwimming = 1 << 4,
 		kMounted = 1 << 5,
 	};
@@ -199,6 +205,28 @@ namespace Protocol
 	struct Heartbeat
 	{
 		std::uint32_t token = 0;
+	};
+
+	// What a player's character looks like, as the others' stand-in of them shows it. Form ids go over the wire as they
+	// are: the session lets in only games with the same load order (DESIGN.md, "Form ids across load orders").
+	struct PlayerLooks
+	{
+		std::uint32_t race = 0;  // TESRace form id; 0: not known
+		bool          female = false;
+		float         weight = 0.0f;  // the body's weight, 0 to 100
+		// The armor (and clothing) worn, as base form ids, at most MAX_WORN.
+		std::vector<std::uint32_t> worn;
+
+		[[nodiscard]] bool IsFinite() const { return std::isfinite(weight); }
+		bool operator==(const PlayerLooks&) const = default;
+	};
+
+	// Another player's looks, as the server passes them on.
+	struct RemoteLooks
+	{
+		std::uint32_t playerId = 0;
+		PlayerLooks   looks;
+		bool operator==(const RemoteLooks&) const = default;
 	};
 
 	// ---- serialization -------------------------------------------------------------
@@ -578,6 +606,80 @@ namespace Protocol
 		if (!r.AtEnd()) {
 			return std::nullopt;
 		}
+		return msg;
+	}
+
+	inline void WriteLooks(Writer& a_writer, const PlayerLooks& a_looks)
+	{
+		a_writer.U32(a_looks.race);
+		a_writer.U8(a_looks.female ? 1 : 0);
+		a_writer.F32(a_looks.weight);
+		const auto count = (std::min)(a_looks.worn.size(), MAX_WORN);
+		a_writer.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			a_writer.U32(a_looks.worn[i]);
+		}
+	}
+
+	// None for more than MAX_WORN items, a sex byte other than 0 or 1, or a weight that is no number.
+	inline std::optional<PlayerLooks> ReadLooks(Reader& a_reader)
+	{
+		PlayerLooks looks;
+		looks.race = a_reader.U32();
+		const auto female = a_reader.U8();
+		looks.weight = a_reader.F32();
+		const auto count = a_reader.U8();
+		if (!a_reader.Ok() || female > 1 || count > MAX_WORN || !looks.IsFinite()) {
+			return std::nullopt;
+		}
+		looks.female = female == 1;
+		looks.worn.reserve(count);
+		for (std::uint8_t i = 0; i < count; ++i) {
+			looks.worn.push_back(a_reader.U32());
+		}
+		if (!a_reader.Ok()) {
+			return std::nullopt;
+		}
+		return looks;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const PlayerLooks& a_msg)
+	{
+		Writer w{ MessageType::kPlayerLooks };
+		WriteLooks(w, a_msg);
+		return w.Data();
+	}
+
+	inline std::optional<PlayerLooks> DecodePlayerLooks(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		auto looks = ReadLooks(r);
+		if (!looks || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		return looks;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const RemoteLooks& a_msg)
+	{
+		Writer w{ MessageType::kRemoteLooks };
+		w.U32(a_msg.playerId);
+		WriteLooks(w, a_msg.looks);
+		return w.Data();
+	}
+
+	inline std::optional<RemoteLooks> DecodeRemoteLooks(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		RemoteLooks msg;
+		msg.playerId = r.U32();
+		auto looks = ReadLooks(r);
+		if (!looks || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		msg.looks = std::move(*looks);
 		return msg;
 	}
 
