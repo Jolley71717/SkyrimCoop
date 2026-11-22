@@ -127,7 +127,7 @@ jobs:
             if [ -f "$report/tests.log" ] && grep -qE '^(FAILED|FIXED\?)' "$report/tests.log"; then
               echo
               echo '```'
-              grep -E '^(FAILED|FIXED\?)' "$report/tests.log" | sed -n 1,100p
+              grep -E '^(FAILED|FIXED\?)|^ +FAILED ' "$report/tests.log" | sed -n 1,100p
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
