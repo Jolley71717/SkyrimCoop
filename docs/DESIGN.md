@@ -38,19 +38,20 @@ It is the design of [F4Multiplayer](https://github.com/Jolley71717/F4Multiplayer
   +--------------------------+                   +--------------------------+
   | SkyrimCoop.dll           |                   | SkyrimCoop.dll           |
   |  src/main.cpp  start-up  |                   |                          |
-  |  src/game/*    (stubs)   |                   |                          |
+  |  src/game/*  stand-ins   |                   |  src/game/*  stand-ins   |
   |  src/net/NetClient ------+--- transport -----+-- src/net/NetClient      |
   |  common/Server (thread)  |   Steam relay or  |                          |
   |  src/steam/*             |   UDP (ENet)      |  src/steam/*             |
   +--------------------------+                   +--------------------------+
 ```
 
-- **Start-up** (`src/main.cpp`): keeps the last three logs, starts the log, checks the game's version (`src/RuntimeSupport.h`), reports how the game was started (`src/LaunchReport.h`, `src/Platform.cpp`), reads the ini (`src/Settings.h`, `src/Config.cpp`), and listens for SKSE's messages: data loaded, before and after a load, new game, save, delete. It registers a co-save record ("SKCO") that holds nothing yet.
+- **Start-up** (`src/main.cpp`): keeps the last three logs, starts the log, checks the game's version (`src/RuntimeSupport.h`), reports how the game was started (`src/LaunchReport.h`, `src/Platform.cpp`), reads the ini (`src/Settings.h`, `src/Config.cpp`), and listens for SKSE's messages: data loaded, before and after a load, new game, save, delete. Its co-save ("SKCO") holds one record: the stand-ins taken out of the world for that save (below, "Nothing of the session in a save").
 - **The protocol** (`common/Protocol.h`): a first, small one. A hello with the mod's protocol version, the player's name, a password and the load order; a welcome or a refusal with its reason; players joining and leaving; each player's state (cell or worldspace, position, heading, speed, a few flags, the sender's clock); each player's looks (race, sex, weight and the armor worn, as form ids), which the server keeps and gives to whoever joins later; a heartbeat. Two channels: reliable, and unreliable-sequenced for state.
 - **The server** (`common/Server.cpp`): lets players in (same protocol version, same load order, the right password, room left), gives each an id, and passes each player's state and looks to the others. It runs as a thread inside the host's game, or alone as `SkyrimCoopServer.exe`.
 - **Transports** (`common/Transport.h`): the session does not know how bytes travel. `common/EnetTransport` is UDP through ENet; `src/steam/SteamTransport` is Steam's relay messaging; `tests/FakeTransport.h` is memory, for tests.
 - **Steam** (`src/steam/`): the lobby, invites, "Join Game", friends who are hosting, carried from the sister project. Not yet shown to work under Skyrim ([GETTING-STARTED.md](GETTING-STARTED.md), "The first thing to test").
-- **The game side** (`src/game/`): four stubs behind small interfaces, each saying what it must become: the frame (`GameThread`), the load order (`LoadOrder`), the local player (`LocalPlayer`), the other players (`RemotePlayers`). [PORTING.md](PORTING.md) has a section for each.
+- **The session in the game** (`src/net/Session`): hosting runs the server in the game, reached by friends through Steam and by the host's own connection over UDP on this machine only; a friend joins from Steam itself (an invite, "Join Game", a `steam://joinlobby` address, or the lobby on the command line Steam starts the game with, `src/net/LaunchArgs.h`). Once in, each game sends its player's state 20 times a second and its looks when they change.
+- **The game side** (`src/game/`): the load order (`LoadOrder`), the local player (`LocalPlayer`), the other players' stand-ins (`RemotePlayers`, with `StateBuffer` and `Gait`), the frame (`GameThread`, still the stand-in tick) and, for the rig, a virtual gamepad (`VirtualPad`) and console commands (`Console`). [PORTING.md](PORTING.md) has a section for each.
 - **Privacy** (`common/Redact.h`): players are `player N` in every log line; addresses are masked; a last scrub runs over every line.
 
 ## Sessions
@@ -72,16 +73,25 @@ To decide later: whether to allow load orders that differ in ways that do not ma
 
 ## The frame
 
-Everything that reads or changes the game happens on the game's main thread, once per frame; network threads only queue. SKSE offers no "every frame" call, so the plugin needs a hook in the game's main update. Not written yet ([PORTING.md](PORTING.md), "The frame"). Until it is, a stand-in tick serves the first test: a small thread asks SKSE's task queue every 16 ms to run the plugin's tick once on the main thread, one request at a time. It is not tied to the game's frames and may not run in every game state; it is replaced, not built on.
+Everything that reads or changes the game happens on the game's main thread, once per frame; network threads only queue. The stand-ins' movement does not wait for the tick: they are placed inside their own actor update, which the game runs every frame. SKSE offers no "every frame" call, so the plugin needs a hook in the game's main update. Not written yet ([PORTING.md](PORTING.md), "The frame"). Until it is, a stand-in tick serves the first test: a small thread asks SKSE's task queue every 16 ms to run the plugin's tick once on the main thread, one request at a time. It is not tied to the game's frames and may not run in every game state; it is replaced, not built on.
 
 ## Players
 
-Not designed for Skyrim yet. Open questions, phase 2:
+The first stand-in (`src/game/RemotePlayers`), kept simple on purpose:
 
-- What stands in for another player: an actor made from the player's own race, looks and gear, that the game's AI leaves alone and guards do not arrest.
-- How it is moved: placed each frame from smoothed states, or driven through the game's own movement so animations follow.
-- What is sent: the state above is the sister project's first one. Skyrim adds mounts, shouts, werewolf and vampire-lord forms, and two hands that hold different things.
-- Players in different cells, interiors, fast travel, and how far apart the group may be.
+- **What it is**: a plain NPC of the friend's race and sex, wearing the armor they wear and named as they are. Its base is one of the game's own character-creation presets of that race and sex (the lowest form id, so every game picks the same), an NPC of the load order: never a form made at run time. Faces, hair and body come later.
+- **How it is moved**: the game never runs its AI. Every Character's actor update goes through one hook (the class's vtable, `Actor::Update`); for a stand-in it places the actor where its friend was 120 ms ago (blended between the two states either side, `StateBuffer`), turns it, runs the engine's no-AI update and tells its animation graph what its friend's legs do (`Gait`: the graph's Speed and Direction, and its move, sprint, sneak and jump events). Any other actor gets the game's own update.
+- **When it is there**: while both players are in the same interior cell or the same worldspace and within about two cells of each other.
+- Open, for later: guards, factions and crime; mounts, shouts and transformed forms; two hands; how far apart the group may be.
+
+## Nothing of the session in a save
+
+A friend keeps their own save, and nothing of the session goes into it. The sister project learned that a stand-in written into a save comes back broken, and crashes the game when its base was made at run time. Here:
+
+- A stand-in's base is an NPC of the load order, so even one that a save did keep would load as a plain actor, not a crash.
+- SKSE tells the plugin a save is about to be written (`kSaveGame`), before the game writes it. Every stand-in is then disabled, so none stands in the world the save is made of; each is placed again a moment later. It is deleted a second later, not at once: a stand-in disabled and deleted in the same frame crashed the game (the disable's own task, run later, found the actor already out of its cell). Every way a stand-in leaves (its player leaves, the session ends, it goes out of range, its looks change, a save) takes the same two steps (`src/game/Retire.h`), so a save may still hold a disabled stand-in; the next point removes it.
+- The co-save lists the stand-ins taken out. After a load, any of them the save brought back is removed, and so is any other placed actor of a preset base (a sweep, for a save written before this guard ran).
+- The rig checks it: a friend saves mid-session, loads that save alone, and the plugin's `strays` count is 0. The load's log line says whether anything had to be removed, and by which of the two.
 
 ## Combat
 

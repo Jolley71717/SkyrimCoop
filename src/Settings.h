@@ -37,6 +37,9 @@ namespace Settings
 		std::string language;
 		// "info" or "debug".
 		std::string logLevel = "info";
+		// While in a session, the game keeps running when its window is not focused (the game's own bAlwaysActive,
+		// put back as it was after the session; src/Background.h).
+		bool runInBackground = true;
 		// The developer channel (DevChannel.h): test tools on this PC drive the game through it. Off for players.
 		bool          devChannel = false;
 		std::uint16_t devChannelPort = DEV_CHANNEL_PORT;
@@ -125,6 +128,9 @@ namespace Settings
 		}
 		if (const auto steam = IniFile::GetValue(a_text, "bSteam")) {
 			values.steam = detail::ParseBool(*steam, values.steam);
+		}
+		if (const auto background = IniFile::GetValue(a_text, "bRunInBackground")) {
+			values.runInBackground = detail::ParseBool(*background, values.runInBackground);
 		}
 		if (const auto dev = IniFile::GetValue(a_text, "bDevChannel")) {
 			values.devChannel = detail::ParseBool(*dev, values.devChannel);

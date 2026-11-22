@@ -19,8 +19,8 @@
 // window in front or not, and analog sticks instead of key taps. What the pad holds, the `pad` command's parsing, the
 // walkto steering and its progress are here; pure, so they are unit tested. Dev channel only: no player has a pad of ours.
 //
-// Carried from F4Multiplayer's src/game/PadPlan.h (commit a7bddd24b) with only the button comments changed. Skyrim's
-// gamepad layout: the left stick moves (a small push walks, a full one runs), the right stick turns, lb held sprints, the
+// Carried from F4Multiplayer's src/game/PadPlan.h (commit a7bddd24b) with the button comments changed and one variable
+// renamed (near, a macro of Windows.h). Skyrim's gamepad layout: the left stick moves (a small push walks, a full one runs), the right stick turns, lb held sprints, the
 // left stick pressed in toggles sneaking, y jumps.
 namespace PadPlan
 {
@@ -441,8 +441,8 @@ namespace PadPlan
 			return out;
 		}
 		const float off = AngleDiff(Bearing(a_dx, a_dy), a_yawDegrees);
-		const float near = a_settings.radius * a_settings.slowFrom;
-		const float ease = near > a_settings.radius ? std::clamp((distance - a_settings.radius) / (near - a_settings.radius), 0.0f, 1.0f) : 1.0f;
+		const float slowAt = a_settings.radius * a_settings.slowFrom;  // not "near": Windows.h makes that a macro
+		const float ease = slowAt > a_settings.radius ? std::clamp((distance - a_settings.radius) / (slowAt - a_settings.radius), 0.0f, 1.0f) : 1.0f;
 		const float push = a_settings.speed * (a_settings.slowest + (1.0f - a_settings.slowest) * ease);
 		const float r = off / TO_DEGREES;
 		out.leftX = std::sin(r) * push;

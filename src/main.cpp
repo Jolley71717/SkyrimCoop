@@ -1,4 +1,5 @@
 #include "AddressLibraryFile.h"
+#include "Background.h"
 #include "Config.h"
 #include "DevChannel.h"
 #include "DevCommands.h"
@@ -9,16 +10,19 @@
 #include "Text.h"
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
+#include "game/LocalPlayer.h"
 #include "game/RemotePlayers.h"
+#include "game/VirtualPad.h"
+#include "net/Session.h"
 #include "steam/Steam.h"
 #include "steam/SteamProbe.h"
 
 // The plugin's entry: SKSE loads the DLL and calls SKSEPlugin_Load once, on the game's main thread, before the game's
 // data is read.
 //
-// What is here is the start-up only: the log, the settings, the game version check and the SKSE messages. What the
-// mod does in the game (reading the player, showing the other players, the session itself) is behind the interfaces
-// in src/game and not written yet; docs/PORTING.md says what each needs.
+// What is here is the start-up (the log, the settings, the game version check), the SKSE messages and the co-save, and
+// the tick that runs the rest: the session (net/Session.h), the stand-ins of the other players (game/RemotePlayers.h)
+// and the developer channel.
 
 namespace
 {
@@ -53,6 +57,69 @@ namespace
 		logs::warn("Steam: cannot be used yet: {}", Steam::Unavailable());
 	}
 
+	// bRunInBackground (Background.h): the game's bAlwaysActive on while in a session, and whenever the developer channel
+	// is on (the rig: a script must not stall because someone clicked elsewhere), the player's value back after.
+	Background::Switch background;
+
+	RE::Setting* AlwaysActive()
+	{
+		static RE::Setting* const found = [] {
+			const auto prefs = RE::INIPrefSettingCollection::GetSingleton();
+			const auto inPrefs = prefs ? prefs->GetSetting("bAlwaysActive:General") : nullptr;
+			const auto ini = RE::INISettingCollection::GetSingleton();
+			const auto setting = inPrefs ? inPrefs : ini ? ini->GetSetting("bAlwaysActive:General") : nullptr;
+			if (!setting || setting->GetType() != RE::Setting::Type::kBool) {
+				logs::warn("Config: the game's bAlwaysActive setting was not found; the game pauses while it is not focused");
+				return static_cast<RE::Setting*>(nullptr);
+			}
+			logs::info("Config: the game's bAlwaysActive is in its {} settings, {} now", inPrefs ? "Prefs ini" : "ini", setting->GetBool());
+			return setting;
+		}();
+		return found;
+	}
+
+	void RunInBackground()
+	{
+		const auto setting = AlwaysActive();
+		if (!setting) {
+			return;
+		}
+		const auto& config = Config::Get();
+		const bool  forced = config.devChannel || Session::Active();
+		if (const auto value = background.Update(config.runInBackground || config.devChannel, forced, setting->GetBool())) {
+			setting->SetBool(*value);
+			logs::info("Config: {}", *value ? (config.devChannel ? "the game runs on while it is not focused (the developer channel is on)" :
+			                                                       "in a session, the game runs on while it is not focused (bRunInBackground)") :
+			                                  "out of the session, the game's bAlwaysActive is back as it was");
+		}
+	}
+
+	// The rig only (developer channel on): the questions a new game asks once, before the player can move, are taken
+	// as answered "no", so a game the rig starts with coc from the main menu never waits on a box nobody will click.
+	// Each is a global its quest sets once it has asked; set here before the quest looks, every frame until it holds (a
+	// new game may set it back). A box that is up anyway shows in `where` (menus=...), and the rig's start stops on it.
+	//   Survival_PlayerHasBeenPrompted  "Enable Survival Mode? Yes / No" (the bundled Survival Mode, ccQDRSSE001)
+	void NoFirstRunPrompts()
+	{
+		if (!Config::Get().devChannel) {
+			return;
+		}
+		static constexpr std::array ASKED_ONCE{ "Survival_PlayerHasBeenPrompted" };
+		static std::array<RE::TESGlobal*, ASKED_ONCE.size()> globals = [] {
+			std::array<RE::TESGlobal*, ASKED_ONCE.size()> found{};
+			for (std::size_t i = 0; i < ASKED_ONCE.size(); ++i) {
+				found[i] = RE::TESForm::LookupByEditorID<RE::TESGlobal>(ASKED_ONCE[i]);
+				logs::info("Rig: {} {}", ASKED_ONCE[i], found[i] ? "found: the game will not ask it" : "not in this load order");
+			}
+			return found;
+		}();
+		for (const auto global : globals) {
+			if (global && global->value != 1.0f) {
+				global->value = 1.0f;
+			}
+		}
+	}
+
 	// About once a frame on the main thread (GameThread). Steam first, so a friend's first message is let in
 	// (SessionRequested) before the probe reads its channel.
 	void OnFrame()
@@ -62,6 +129,11 @@ namespace
 			SteamProbe::Frame();
 			DevCommands::Frame();
 		}
+		NoFirstRunPrompts();
+		Session::Frame();
+		RemotePlayers::TendGraveyard();  // after the session's frame: a stand-in it took away is disabled in this tick
+		RunInBackground();
+		VirtualPad::Frame();
 		DevChannel::Frame();
 	}
 
@@ -97,6 +169,16 @@ namespace
 		} else {
 			logs::info("Steam: left alone (bSteam = false)");
 		}
+		if (!RemotePlayers::Install()) {
+			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
+		}
+		LocalPlayer::NoteDefaultName();
+		NoFirstRunPrompts();
+		RunInBackground();  // before the first tick: the main menu must not stall either
+		// Whether the game's sound is on: the rig's VM, which has no audio device, runs with it off (tools/rig/start.ps1).
+		const auto ini = RE::INISettingCollection::GetSingleton();
+		const auto audio = ini ? ini->GetSetting("bEnableAudio:Audio") : nullptr;
+		logs::info("Config: the game's sound is {} ([Audio] bEnableAudio)", !audio ? "unknown" : audio->GetBool() ? "on" : "off");
 		GameThread::Install(OnFrame);
 	}
 
@@ -121,19 +203,23 @@ namespace
 		case SKSE::MessagingInterface::kPreLoadGame:
 			// Which save is loaded: the line a report of "an old save" is read by.
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
-			RemotePlayers::Clear();  // the load takes the world they stand in
+			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 			// data is not a pointer here: it is whether the load worked.
 			logs::info("Load: {}", a_msg->data ? "done" : "failed");
+			RemotePlayers::AfterLoad();  // any stand-in the save brought back goes
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
+			RemotePlayers::ForgetStandIns();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:
+			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
+			RemotePlayers::BeforeSave();
 			break;
 		case SKSE::MessagingInterface::kDeleteGame:
 			logs::debug("Save: \"{}\" was deleted", MessageText(a_msg));
@@ -143,21 +229,30 @@ namespace
 		}
 	}
 
-	// The co-save: nothing of ours is kept in a save yet. The callbacks are registered so the first record has a
-	// place to go, and so a load into another save is seen (Revert).
-	void OnSave(SKSE::SerializationInterface*)
+	// The co-save: the only record is the list of stand-ins taken out of the world for the save (RemotePlayers), so a
+	// load can remove any that the save brought back. Nothing else of a session is kept.
+	void OnSave(SKSE::SerializationInterface* a_intf)
 	{
-		logs::debug("Co-save: nothing to write");
+		RemotePlayers::WriteCoSave(a_intf);
 	}
 
-	void OnLoad(SKSE::SerializationInterface*)
+	void OnLoad(SKSE::SerializationInterface* a_intf)
 	{
-		logs::debug("Co-save: nothing to read");
+		std::uint32_t type = 0;
+		std::uint32_t version = 0;
+		std::uint32_t length = 0;
+		while (a_intf->GetNextRecordInfo(type, version, length)) {
+			if (type == RemotePlayers::COSAVE_STANDINS) {
+				RemotePlayers::ReadCoSave(a_intf, version, length);
+			} else {
+				logs::warn("Co-save: a record of a type this version does not know ({:08X}); skipped", type);
+			}
+		}
 	}
 
 	void OnRevert(SKSE::SerializationInterface*)
 	{
-		RemotePlayers::Clear();
+		RemotePlayers::ForgetStandIns();
 	}
 
 	// False when the plugin must not load into this game.
@@ -220,7 +315,6 @@ SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 
 	Platform::LogStartup();
 	Config::Load();
-	DevChannel::Start();
 
 	const auto messaging = SKSE::GetMessagingInterface();
 	if (!messaging || !messaging->RegisterListener(OnSKSEMessage)) {
@@ -236,6 +330,10 @@ SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 	} else {
 		logs::warn("SKSE: no co-save interface; nothing of the mod will be kept in saves");
 	}
+
+	// Last, once nothing can fail the load: a plugin that is not loaded leaves no listener thread and no patched import.
+	DevChannel::Start();
+	VirtualPad::Install();  // developer channel only; before the game makes its gamepad
 
 	return true;
 }

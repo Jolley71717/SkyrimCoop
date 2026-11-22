@@ -102,7 +102,14 @@ namespace DevChannel
 			std::ranges::replace(line, '\n', ' ');
 			std::ranges::replace(line, '\r', ' ');
 			line += '\n';
-			send(a_client, line.data(), static_cast<int>(line.size()), 0);
+			// send may take part of it: the rest goes until all of it has, or the client is gone.
+			for (std::size_t sent = 0; sent < line.size();) {
+				const int n = send(a_client, line.data() + sent, static_cast<int>(line.size() - sent), 0);
+				if (n <= 0) {
+					return;
+				}
+				sent += static_cast<std::size_t>(n);
+			}
 		}
 
 		void ServeClient(SOCKET a_client)

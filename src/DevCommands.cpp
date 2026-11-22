@@ -4,7 +4,13 @@
 #include "DevLine.h"
 #include "FirstTest.h"
 #include "Protocol.h"
+#include "Redact.h"
+#include "game/Console.h"
 #include "game/GameThread.h"
+#include "game/LocalPlayer.h"
+#include "game/RemotePlayers.h"
+#include "game/VirtualPad.h"
+#include "net/Session.h"
 #include "steam/Steam.h"
 #include "steam/SteamProbe.h"
 
@@ -102,6 +108,66 @@ namespace DevCommands
 			return "error: usage: probe [send [count] | report | log | reset]";
 		}
 
+		// session [host | leave]: this game's part in the session (net/Session.h), one line, no names or Steam ids.
+		std::string SessionCommand(std::string_view a_args)
+		{
+			const auto words = DevLine::Words(a_args);
+			const auto what = words.empty() ? std::string_view{} : words[0];
+			if (what == "host") {
+				std::string why;
+				return Session::Host(why) ? "hosting " + Session::Describe() : "error: " + why;
+			}
+			if (what == "leave") {
+				Session::Leave("asked on the developer channel");
+				return "left " + Session::Describe();
+			}
+			if (what.empty() || what == "status") {
+				return Session::Describe();
+			}
+			return "error: usage: session [host | leave | status]";
+		}
+
+		// where: the player's place and movement as they are sent (LocalPlayer::Describe).
+		std::string Where(std::string_view)
+		{
+			return LocalPlayer::Describe();
+		}
+
+		std::string StandIns(std::string_view)
+		{
+			return RemotePlayers::Describe();
+		}
+
+		std::string Strays(std::string_view)
+		{
+			return RemotePlayers::Strays();
+		}
+
+		std::string Graph(std::string_view a_args)
+		{
+			return RemotePlayers::Graph(a_args);
+		}
+
+		std::string Pad(std::string_view a_args)
+		{
+			return VirtualPad::Command(a_args);
+		}
+
+		std::string WalkTo(std::string_view a_args)
+		{
+			return VirtualPad::WalkTo(a_args);
+		}
+
+		// console <command>: runs a console command in this game (the rig places players with coc and saves with save).
+		std::string ConsoleCommand(std::string_view a_args)
+		{
+			if (a_args.empty()) {
+				return "error: usage: console <command>";
+			}
+			logs::info("Console: running a command from the developer channel: {}", Redact::OneLine(a_args));
+			return Console::Run(a_args) ? "ran" : "error: the game could not run it";
+		}
+
 		struct Entry
 		{
 			std::string_view name;
@@ -111,6 +177,14 @@ namespace DevCommands
 			{ "status", Status },
 			{ "steam", SteamCommand },
 			{ "probe", Probe },
+			{ "session", SessionCommand },
+			{ "where", Where },
+			{ "standins", StandIns },
+			{ "strays", Strays },
+			{ "graph", Graph },
+			{ "pad", Pad },
+			{ "walkto", WalkTo },
+			{ "console", ConsoleCommand },
 		};
 	}
 
@@ -126,7 +200,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset]";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)
