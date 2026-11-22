@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-22T07:58:32+00:00",
+ "updated": "2026-11-22T08:29:49+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -263,6 +263,16 @@
    "note": "An idea, not planned or promised yet."
   },
   {
+   "id": "every-message-in-the-player-s-language-14-languages",
+   "title": "Every message in the player's language (14 languages)",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 2,
+   "note": "Every message in the player's language",
+   "pr": 10,
+   "desc": "The mod's texts come from one file per language, with English when a file lacks a text. The tests fail when a language is missing a text or a message is written in the code."
+  },
+  {
    "id": "experience-from-fights-and-quests-done-together",
    "title": "Experience from fights and quests done together",
    "kind": "feature",
@@ -420,8 +430,9 @@
    "title": "Load orders with more than 512 plugins can't join a session",
    "kind": "bug",
    "priority": 2,
-   "stage": 1,
-   "note": ""
+   "stage": 5,
+   "note": "Fixed in the code: a load order of any size Skyrim allows can join.",
+   "pr": 11
   },
   {
    "id": "marriage-and-spouses-are-each-player-s-own-to-confirm",
