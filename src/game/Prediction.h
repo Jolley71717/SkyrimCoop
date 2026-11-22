@@ -1,0 +1,178 @@
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+
+// Pure helpers behind stand-in motion, kept free of the game so they can be tested. Carried as is from F4Multiplayer's
+// src/game/Prediction.h (commit a7bddd24b); StateBuffer.h uses SenderClock and ArrivalClock.
+namespace Prediction
+{
+	// When the next position update is late, the stand-in keeps going along its last known
+	// velocity for this long, instead of stopping dead (which looks like stutter); after that it
+	// holds still.
+	constexpr auto MAX_AHEAD = std::chrono::milliseconds(150);
+
+	// How far ahead of the last known position to project, in seconds, clamped to MAX_AHEAD. 0 when
+	// the update is not late.
+	constexpr float AheadSeconds(std::chrono::steady_clock::duration a_late)
+	{
+		const auto clamped = std::clamp(a_late, std::chrono::steady_clock::duration::zero(), std::chrono::steady_clock::duration(MAX_AHEAD));
+		return std::chrono::duration<float>(clamped).count();
+	}
+
+	// The speed fed to the animation: what the stand-in actually covered, smoothed, so the feet
+	// match the ground even when the reported speed lags (a_measured is this frame's
+	// displacement rate; a_previous the last smoothed value).
+	constexpr float SmoothSpeed(float a_previous, float a_measured)
+	{
+		constexpr float keep = 0.5f;
+		return a_previous * keep + a_measured * (1.0f - keep);
+	}
+
+	// Distance over time in windows of a tenth of a second: a per-call rate would be wrong when a
+	// frame sets the same target twice, or when two frames are a millisecond apart.
+	struct SpeedWindow
+	{
+		float distance = 0.0f;
+		float seconds = 0.0f;
+		float speed = 0.0f;  // the smoothed result
+
+		static constexpr float WINDOW = 0.1f;
+
+		// Adds one step; true when the window closed and `speed` was updated.
+		constexpr bool Add(float a_distance, float a_seconds)
+		{
+			distance += a_distance;
+			seconds += a_seconds;
+			if (seconds < WINDOW) {
+				return false;
+			}
+			speed = SmoothSpeed(speed, distance / seconds);
+			distance = seconds = 0.0f;
+			return true;
+		}
+
+		constexpr void Reset(float a_speed)
+		{
+			distance = seconds = 0.0f;
+			speed = a_speed;
+		}
+	};
+
+	// States reach the game when it reads the network, once a frame. At 16 frames a second two or three
+	// arrive in the same frame, and stamped with that frame's time the blend between them moved the
+	// stand-in in spurts: a friend in a slow game saw the host run unevenly and bounce. Each state is
+	// stamped one usual gap after the last instead, eased toward when it really arrived; a silence, or a
+	// state far off the beat, starts the timeline over.
+	struct ArrivalClock
+	{
+		using Clock = std::chrono::steady_clock;
+		static constexpr auto  RESYNC = std::chrono::milliseconds(250);
+		static constexpr float EASE = 0.125f;    // of the distance to the real arrival, taken per state
+		static constexpr float GAP_KEEP = 0.9f;  // smoothing of the usual gap
+
+		float             gap = 0.033f;  // seconds between the sender's states (a guess until measured)
+		Clock::time_point stamp{};
+		Clock::time_point arrival{};
+		bool              started = false;
+
+		// The time to stamp a state that arrived at a_arrival with; a_steps is how many states the sender
+		// made since the last one we got (more than one when some were lost), 1 when unknown.
+		Clock::time_point Next(Clock::time_point a_arrival, std::uint32_t a_steps = 1)
+		{
+			const float steps = static_cast<float>((std::max)(a_steps, 1u));
+			if (!started) {
+				started = true;
+				stamp = arrival = a_arrival;
+				return stamp;
+			}
+			const float since = std::chrono::duration<float>(a_arrival - arrival).count() / steps;
+			arrival = a_arrival;
+			if (since < std::chrono::duration<float>(RESYNC).count()) {
+				gap = gap * GAP_KEEP + since * (1.0f - GAP_KEEP);
+			}
+			const auto predicted = stamp + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<float>(gap * steps));
+			const auto error = a_arrival - predicted;
+			if (error > RESYNC || error < -RESYNC) {
+				stamp = a_arrival;
+				return stamp;
+			}
+			const auto eased = predicted + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<float>(error) * EASE);
+			stamp = (std::max)(eased, stamp + std::chrono::milliseconds(1));
+			return stamp;
+		}
+	};
+
+	// Stamps a friend's states with when they were sampled (the sender's clock, PlayerState::sentMs) moved onto
+	// ours. Evened-out arrival times (ArrivalClock) were wrong whenever states came late: after a stall in our
+	// game or on the way, the ones that came together were spread out from the moment they came, and the
+	// stand-in slowed down and then lurched ahead; and a friend whose game sends at uneven frames was drawn
+	// speeding up and slowing down. The shift between the clocks follows the quickest trip of the last TRIPS
+	// states, by at most FOLLOW seconds a second, so it never jerks the stamps; a state that was only late
+	// does not move it, and a route that got slower is followed within a few seconds. Until the window first
+	// fills, though, a trip more than JUMP_OVER quicker than the shift is jumped to: the first state is the zero
+	// point, and when it came late (our game hitched over the welcome on joining, or a relay route was still
+	// settling) following at FOLLOW drew the stand-in that much further behind for many seconds, or held it at
+	// its oldest state. The stamps already given step back with it (steppedBack), so the stand-in skips ahead
+	// once, early on; the jitter of an ordinary trip is still followed gently. Over the first TRIPS states the
+	// quickest trip only falls, so the shift never has to rise until then; after them it follows either way.
+	struct SenderClock
+	{
+		using Clock = std::chrono::steady_clock;
+		static constexpr std::size_t TRIPS = 64;  // about two seconds of states
+		static constexpr float       FOLLOW = 0.03f;
+		static constexpr auto        JUMP_OVER = std::chrono::milliseconds(50);  // more than a trip's usual jitter
+
+		bool                                 started = false;
+		std::uint32_t                        lastSent = 0;  // the last state's sentMs
+		Clock::duration                      sent{};        // the sender's time since their first state here
+		Clock::time_point                    first{};       // when their first state came
+		std::array<Clock::duration, TRIPS>   trips{};       // each state's trip, less the first one's
+		std::size_t                          tripCount = 0;
+		std::size_t                          tripNext = 0;
+		Clock::duration                      shift{};       // what the stamps add to first + sent
+		Clock::time_point                    arrival{};     // when the last state came
+		Clock::time_point                    stamp{};
+		Clock::duration                      steppedBack{};  // how much earlier the stamps given before this one now are
+
+		Clock::time_point Next(Clock::time_point a_arrival, std::uint32_t a_sentMs)
+		{
+			steppedBack = Clock::duration::zero();
+			if (!started) {
+				started = true;
+				lastSent = a_sentMs;
+				stamp = arrival = first = a_arrival;
+				Add(Clock::duration::zero());
+				return stamp;
+			}
+			// Their clock only goes forward; one read backwards (a state from a restarted game) counts as no time.
+			const auto delta = static_cast<std::int32_t>(a_sentMs - lastSent);
+			lastSent = a_sentMs;
+			sent += std::chrono::milliseconds((std::max)(delta, 0));
+			const bool warming = tripCount < TRIPS;
+			Add(a_arrival - (first + sent));
+			const auto quickest = *std::min_element(trips.begin(), trips.begin() + static_cast<std::ptrdiff_t>(tripCount));
+			const auto most = std::chrono::duration_cast<Clock::duration>((a_arrival - arrival) * FOLLOW);
+			arrival = a_arrival;
+			if (warming && quickest < shift - JUMP_OVER) {
+				steppedBack = shift - quickest;
+				shift = quickest;
+				stamp -= steppedBack;
+			} else {
+				shift += std::clamp(quickest - shift, -most, most);
+			}
+			stamp = (std::max)(first + sent + shift, stamp + std::chrono::milliseconds(1));
+			return stamp;
+		}
+
+	private:
+		void Add(Clock::duration a_trip)
+		{
+			trips[tripNext] = a_trip;
+			tripNext = (tripNext + 1) % TRIPS;
+			tripCount = (std::min)(tripCount + 1, TRIPS);
+		}
+	};
+}

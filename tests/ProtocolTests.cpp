@@ -353,3 +353,98 @@ TEST("protocol: the time a state was sampled is never 0, which means not known")
 	// It wraps after 49 days rather than stopping.
 	CHECK(Protocol::SentMs(Clock::time_point{ std::chrono::milliseconds(0x100000000ll + 42) }) == 42);
 }
+
+namespace
+{
+	Protocol::PlayerLooks SampleLooks()
+	{
+		Protocol::PlayerLooks looks;
+		looks.race = 0x00013746;  // a race's form id, as Skyrim.esm numbers them
+		looks.female = true;
+		looks.weight = 62.5f;
+		looks.worn = { 0x00012E49, 0x00012E4B, 0x00012E46, 0x00012E4D };
+		return looks;
+	}
+}
+
+TEST("protocol: a player's looks come back as they went, alone and as another player's")
+{
+	const auto looks = SampleLooks();
+	const auto packet = Protocol::Encode(looks);
+	CHECK(Protocol::PeekType(packet) == MT::kPlayerLooks);
+	const auto back = Protocol::DecodePlayerLooks(packet);
+	REQUIRE(back);
+	CHECK(*back == looks);
+	CheckStrict(packet, [](std::span<const std::uint8_t> a_data) { return Protocol::DecodePlayerLooks(a_data); });
+
+	const Protocol::RemoteLooks remote{ 4, looks };
+	const auto                  remotePacket = Protocol::Encode(remote);
+	CHECK(Protocol::PeekType(remotePacket) == MT::kRemoteLooks);
+	const auto remoteBack = Protocol::DecodeRemoteLooks(remotePacket);
+	REQUIRE(remoteBack);
+	CHECK(*remoteBack == remote);
+	CheckStrict(remotePacket, [](std::span<const std::uint8_t> a_data) { return Protocol::DecodeRemoteLooks(a_data); });
+
+	// Nothing worn is a look too (a character in nothing but the body).
+	Protocol::PlayerLooks bare;
+	bare.race = 0x00013741;
+	const auto bareBack = Protocol::DecodePlayerLooks(Protocol::Encode(bare));
+	REQUIRE(bareBack);
+	CHECK(*bareBack == bare);
+}
+
+TEST("protocol: looks are sent with at most MAX_WORN items, and read with no more")
+{
+	auto many = SampleLooks();
+	many.worn.clear();
+	for (std::uint32_t i = 0; i < Protocol::MAX_WORN + 5; ++i) {
+		many.worn.push_back(0x00010000 + i);
+	}
+	const auto back = Protocol::DecodePlayerLooks(Protocol::Encode(many));
+	REQUIRE(back);
+	CHECK(back->worn.size() == Protocol::MAX_WORN);
+	CHECK(back->worn.front() == 0x00010000);
+
+	// A packet that claims more than MAX_WORN, with all of them there, is not read.
+	Protocol::Writer writer{ MT::kPlayerLooks };
+	writer.U32(0x00013746);
+	writer.U8(0);
+	writer.F32(50.0f);
+	writer.U8(static_cast<std::uint8_t>(Protocol::MAX_WORN + 1));
+	for (std::size_t i = 0; i <= Protocol::MAX_WORN; ++i) {
+		writer.U32(0x00012E49);
+	}
+	CHECK(!Protocol::DecodePlayerLooks(writer.Data()).has_value());
+}
+
+TEST("protocol: looks with a sex that is neither, or a weight that is no number, are not read")
+{
+	auto packet = Protocol::Encode(SampleLooks());
+	packet[1 + 4] = 2;  // after the type and the race: the sex byte
+	CHECK(!Protocol::DecodePlayerLooks(packet).has_value());
+
+	for (const float value : { std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity() }) {
+		auto looks = SampleLooks();
+		looks.weight = value;
+		CHECK(!looks.IsFinite());
+		CHECK(!Protocol::DecodePlayerLooks(Protocol::Encode(looks)).has_value());
+		CHECK(!Protocol::DecodeRemoteLooks(Protocol::Encode(Protocol::RemoteLooks{ 1, looks })).has_value());
+	}
+}
+
+TEST("protocol: looks with a body weight outside 0 to 100 are not read; the ends are")
+{
+	for (const float value : { -0.5f, 100.5f, 1e30f, -1e30f }) {
+		auto looks = SampleLooks();
+		looks.weight = value;
+		CHECK(!Protocol::DecodePlayerLooks(Protocol::Encode(looks)).has_value());
+		CHECK(!Protocol::DecodeRemoteLooks(Protocol::Encode(Protocol::RemoteLooks{ 1, looks })).has_value());
+	}
+	for (const float value : { 0.0f, 100.0f }) {
+		auto looks = SampleLooks();
+		looks.weight = value;
+		const auto read = Protocol::DecodePlayerLooks(Protocol::Encode(looks));
+		REQUIRE(read);
+		CHECK(read->weight == value);
+	}
+}

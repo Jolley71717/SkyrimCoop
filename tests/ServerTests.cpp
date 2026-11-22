@@ -556,3 +556,189 @@ TEST("server: a second server on the same port does not start, and says why")
 	REQUIRE(lines.size() == 1);
 	CHECK(lines[0] == std::format("server: could not bind UDP port {} (already in use?)", f.udpPort));
 }
+
+namespace
+{
+	Protocol::PlayerLooks LooksOf(std::uint32_t a_race, std::uint32_t a_worn)
+	{
+		Protocol::PlayerLooks looks;
+		looks.race = a_race;
+		looks.weight = 40.0f;
+		looks.worn = { a_worn, a_worn + 1 };
+		return looks;
+	}
+
+	// The looks the server has sent a_peer so far, in the order sent, each with whether it was sent reliably.
+	std::vector<std::pair<Protocol::RemoteLooks, bool>> SentLooks(Fixture& a_fixture, PeerId a_peer)
+	{
+		std::vector<std::pair<Protocol::RemoteLooks, bool>> out;
+		for (const auto& sent : a_fixture.fake->TakeSent(a_peer)) {
+			if (Protocol::PeekType(sent.data) == MT::kRemoteLooks) {
+				if (const auto looks = Protocol::DecodeRemoteLooks(sent.data)) {
+					out.emplace_back(*looks, sent.reliable);
+				}
+			}
+		}
+		return out;
+	}
+}
+
+TEST("server: a player's looks are passed on to the others, reliably, and not back to its sender")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.Join(3, Fixture::MakeHello("Cy")));
+	REQUIRE(f.fake->Settle());
+	for (const PeerId peer : { 1u, 2u, 3u }) {
+		(void)f.fake->Take(peer);
+	}
+
+	const auto looks = LooksOf(0x00013746, 0x00012E49);
+	f.fake->Deliver(2, Protocol::Encode(looks));
+	REQUIRE(f.fake->Settle());
+
+	for (const PeerId peer : { 1u, 3u }) {
+		const auto sent = SentLooks(f, peer);
+		REQUIRE(sent.size() == 1);
+		CHECK(sent[0].second);
+		CHECK(sent[0].first.playerId == 2);
+		CHECK(sent[0].first.looks == looks);
+	}
+	CHECK(f.fake->Take(2).empty());
+}
+
+TEST("server: a player who joins later is told the looks of each player there, after that player's join")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	const auto first = LooksOf(0x00013746, 0x00012E49);
+	f.fake->Deliver(1, Protocol::Encode(first));
+	REQUIRE(f.fake->Settle());
+	// Bo sends none: nothing is made up for them.
+
+	REQUIRE(f.Join(3, Fixture::MakeHello("Cy")));
+	REQUIRE(f.fake->Settle());
+	const auto sent = f.fake->TakeSent(3);
+	std::optional<std::size_t> joinedAt;
+	std::optional<std::size_t> looksAt;
+	std::size_t                looksCount = 0;
+	for (std::size_t i = 0; i < sent.size(); ++i) {
+		if (const auto joined = Protocol::PeekType(sent[i].data) == MT::kPlayerJoined ? Protocol::DecodePlayerJoined(sent[i].data) : std::nullopt; joined && joined->playerId == 1) {
+			joinedAt = i;
+		}
+		if (const auto looks = Protocol::PeekType(sent[i].data) == MT::kRemoteLooks ? Protocol::DecodeRemoteLooks(sent[i].data) : std::nullopt) {
+			++looksCount;
+			looksAt = i;
+			CHECK(looks->playerId == 1);
+			CHECK(looks->looks == first);
+			CHECK(sent[i].reliable);
+		}
+	}
+	REQUIRE(joinedAt);
+	REQUIRE(looksAt);
+	CHECK(*looksAt > *joinedAt);
+	CHECK(looksCount == 1);
+}
+
+TEST("server: the same looks sent again are not passed on again; changed ones are")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	const auto looks = LooksOf(0x00013746, 0x00012E49);
+	f.fake->Deliver(2, Protocol::Encode(looks));
+	f.fake->Deliver(2, Protocol::Encode(looks));
+	auto changed = looks;
+	changed.worn.push_back(0x00012E4D);
+	f.fake->Deliver(2, Protocol::Encode(changed));
+	REQUIRE(f.fake->Settle());
+
+	const auto sent = SentLooks(f, 1);
+	REQUIRE(sent.size() == 2);
+	CHECK(sent[0].first.looks == looks);
+	CHECK(sent[1].first.looks == changed);
+}
+
+TEST("server: looks that cannot be read are not passed on")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	auto bad = Protocol::Encode(LooksOf(0x00013746, 0x00012E49));
+	bad.pop_back();
+	f.fake->Deliver(2, bad);
+	auto heavy = LooksOf(0x00013746, 0x00012E49);
+	heavy.weight = 1e30f;
+	f.fake->Deliver(2, Protocol::Encode(heavy));
+	REQUIRE(f.fake->Settle());
+	CHECK(SentLooks(f, 1).empty());
+}
+
+TEST("server: a burst of looks faster than a game changes clothes is held back, and its last still reaches everyone")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	// Thirty different looks at once (a load that re-equips everything): the burst passes ten on at once, and the
+	// newest follows once the budget has room, about a second later; never the ones between.
+	constexpr std::uint32_t BURST = 30;
+	const auto              last = LooksOf(0x00013746, 0x00020000 + (BURST - 1) * 2);
+	for (std::uint32_t i = 0; i < BURST; ++i) {
+		f.fake->Deliver(2, Protocol::Encode(LooksOf(0x00013746, 0x00020000 + i * 2)));
+	}
+	REQUIRE(f.fake->Settle());
+	auto sent = SentLooks(f, 1);
+	CHECK(sent.size() >= 10);
+	CHECK(sent.size() < BURST);
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while ((sent.empty() || sent.back().first.looks != last) && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		for (auto& more : SentLooks(f, 1)) {
+			sent.push_back(std::move(more));
+		}
+	}
+	REQUIRE(!sent.empty());
+	CHECK(sent.back().first.looks == last);
+	CHECK(sent.back().second);
+	CHECK(sent.size() <= 12);
+
+	// And one who joins now is told the newest.
+	REQUIRE(f.Join(3, Fixture::MakeHello("Cy")));
+	REQUIRE(f.fake->Settle());
+	const auto told = SentLooks(f, 3);
+	REQUIRE(told.size() == 1);
+	CHECK(told[0].first.looks == last);
+}
+
+TEST("server: the same looks sent again and again spend none of the budget")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	const auto same = LooksOf(0x00013746, 0x00012E49);
+	for (int i = 0; i < 40; ++i) {
+		f.fake->Deliver(2, Protocol::Encode(same));
+	}
+	auto changed = same;
+	changed.worn.push_back(0x00012E4D);
+	f.fake->Deliver(2, Protocol::Encode(changed));
+	REQUIRE(f.fake->Settle());
+	const auto sent = SentLooks(f, 1);
+	REQUIRE(sent.size() == 2);
+	CHECK(sent[1].first.looks == changed);  // at once: the repeats used up nothing
+}
