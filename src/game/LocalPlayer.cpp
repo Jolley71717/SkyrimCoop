@@ -17,6 +17,9 @@ namespace LocalPlayer
 		};
 		std::optional<Last> last;
 
+		// The name the game gives a character that has none yet ("Prisoner" in English), read at data load.
+		std::string defaultName;
+
 		float GraphFloat(const RE::Actor* a_actor, const char* a_name, float a_default)
 		{
 			float value = a_default;
@@ -137,6 +140,14 @@ namespace LocalPlayer
 		return looks;
 	}
 
+	void NoteDefaultName()
+	{
+		const auto player = RE::PlayerCharacter::GetSingleton();
+		const auto name = player ? player->GetName() : nullptr;
+		defaultName = name ? std::string{ name } : std::string{};
+		logs::info("Players: a character not yet named is called \"{}\" by the game; that name is never sent as ours", defaultName);
+	}
+
 	std::string CharacterName()
 	{
 		const auto player = RE::PlayerCharacter::GetSingleton();
@@ -144,13 +155,34 @@ namespace LocalPlayer
 			return {};
 		}
 		const auto name = player->GetName();
-		return name ? std::string{ name } : std::string{};
+		if (!name || (!defaultName.empty() && defaultName == name)) {
+			return {};  // no name yet (a new game before the character is made, or one started with coc from the menu)
+		}
+		return std::string{ name };
+	}
+
+	std::string OpenMenus()
+	{
+		const auto ui = RE::UI::GetSingleton();
+		if (!ui) {
+			return "?";
+		}
+		std::string out;
+		for (const auto& [name, entry] : ui->menuMap) {
+			if (entry.menu && entry.menu->OnStack()) {
+				out += out.empty() ? "" : ",";
+				for (const char c : std::string_view{ name.c_str() }) {
+					out += c == ' ' ? '_' : c;  // one word in a status line ("Tutorial_Menu")
+				}
+			}
+		}
+		return std::format("{} modal={}", out.empty() ? "none" : out, ui->IsModalMenuOpen() ? 1 : 0);
 	}
 
 	std::string Describe()
 	{
 		if (!InWorld()) {
-			return "not in world";
+			return "not in world menus=" + OpenMenus();
 		}
 		const auto player = RE::PlayerCharacter::GetSingleton();
 		const auto state = Read();
@@ -163,8 +195,8 @@ namespace LocalPlayer
 		const bool hasSneak = player->GetGraphVariableBool("IsSneaking", sneaking);
 		float      graphSpeed = -1.0f;
 		const bool hasSpeed = player->GetGraphVariableFloat("Speed", graphSpeed);
-		return std::format("cell={:08X} world={:08X} pos=({:.0f},{:.0f},{:.0f}) heading={:.3f} speed={:.0f} graphSpeed={} dir={} pitch={} flags={:#04x} graphSprint={} graphSneak={}",
+		return std::format("cell={:08X} world={:08X} pos=({:.0f},{:.0f},{:.0f}) heading={:.3f} speed={:.0f} graphSpeed={} dir={} pitch={} flags={:#04x} graphSprint={} graphSneak={} menus={}",
 			state->cell, state->worldspace, state->x, state->y, state->z, state->heading, state->speed, hasSpeed ? std::format("{:.0f}", graphSpeed) : "none",
-			state->direction, state->pitch, state->flags, hasSprint ? (sprinting ? "1" : "0") : "none", hasSneak ? (sneaking ? "1" : "0") : "none");
+			state->direction, state->pitch, state->flags, hasSprint ? (sprinting ? "1" : "0") : "none", hasSneak ? (sneaking ? "1" : "0") : "none", OpenMenus());
 	}
 }

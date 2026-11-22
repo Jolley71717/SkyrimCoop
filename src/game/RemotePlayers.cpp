@@ -260,6 +260,12 @@ namespace RemotePlayers
 			}
 			actor->SetPosition({ a_at.x, a_at.y, a_at.z }, true);
 			actor->SetHeading(a_at.heading);
+			// Nothing a player does to a stand-in reaches the preset NPC under it: talking, pickpocketing, trading,
+			// follower commands and any other activation are all one activation, blocked here (the prompt is hidden
+			// too where the game knows that flag). It is a friend, not an NPC with dialogue of its own.
+			actor->extraList.SetExtraFlags(static_cast<RE::ExtraFlags::Flag>(
+				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivate) | std::to_underlying(RE::ExtraFlags::Flag::kBlockPlayerActivate) |
+				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivateText)), true);
 			if (!a_remote.name.empty()) {
 				actor->SetDisplayName(a_remote.name, true);
 			}

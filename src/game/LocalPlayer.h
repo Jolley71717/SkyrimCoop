@@ -17,9 +17,17 @@ namespace LocalPlayer
 	// Nothing while not InWorld.
 	[[nodiscard]] std::optional<Protocol::PlayerLooks> Looks();
 
-	// The character's name; empty before the character has one.
+	// At data load, before any game: the name the game gives a character that has none yet ("Prisoner").
+	void NoteDefaultName();
+
+	// The character's name; empty before the character has one (still the game's default name: a new game before
+	// the character is made, or a game started with coc from the main menu). The name sent is then the Steam name.
 	[[nodiscard]] std::string CharacterName();
 
-	// For the developer channel's `where`: one line of where the player is and what their graph says.
+	// The menus open now ("HUD Menu,MessageBoxMenu modal=1"): for `where`, so the rig sees a box that blocks input.
+	[[nodiscard]] std::string OpenMenus();
+
+	// For the developer channel's `where`: one line of where the player is, what their graph says and what menus are
+	// open.
 	[[nodiscard]] std::string Describe();
 }

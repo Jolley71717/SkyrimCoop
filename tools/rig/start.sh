@@ -5,8 +5,11 @@
 #
 # The host's game is started here (this shell runs on the host's desktop); the VM's through ssh and the rig's
 # scheduled-task helper ($VM_RUN), since an ssh session can't show a window. Without --cell both stay at the main
-# menu, which is enough for the Steam test; --cell qasmoke (Skyrim's test cell) loads a cell with a default
-# character and no character creation. Steam must be running and signed in on both machines.
+# menu, which is enough for the Steam test; --cell qasmoke (Skyrim's test cell) puts each game's player there with
+# coc from the main menu over the developer channel (a default character, no character creation), and the start
+# passes only when each game says (`where`) its player is in that world with no box open over it (menus ... modal=0;
+# a new game's one-time questions, such as Survival Mode's, are answered by the plugin on the rig: main.cpp).
+# Steam must be running and signed in on both machines.
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 set -u
 VM_RUN=${VM_RUN:-C:/F4MP/in-vm-run.ps1}
@@ -35,7 +38,8 @@ fi
 
 no_fallout || exit 1
 cellarg=(); vmcell=""
-[ -n "$cell" ] && { cellarg=(-Cell "$cell"); vmcell="-Cell $cell"; }
+# --cell is not given to start.ps1: Skyrim SE never runs Skyrim.ini's sStartingConsoleCommand (both games sat at the main
+# menu). Each game is told "coc <cell>" over its developer channel once it is up (into_world, below).
 rc=0
 if [ $vmside = 1 ]; then
 	# the VM first: it is the slower of the two, and starts while the host's game loads
@@ -61,5 +65,20 @@ if [ $vmside = 1 ]; then
 	else
 		say "vm: no dev token read, or no tunnel made"; rc=1
 	fi
+fi
+# into_world <host|vm>: coc to the cell from the main menu, then up to 90 s for the player in the world with no modal box
+into_world() {
+	local who=$1 r w i
+	r=$($who "console coc $cell"); [ "$r" = ran ] || { say "$who: coc $cell refused ('$r')"; return 1; }
+	for i in $(seq 1 90); do
+		w=$($who where)
+		if [[ $w == cell=* ]] && [[ $w == *" modal=0"* ]]; then say "$who: in the world: $w"; return 0; fi
+		sleep 1; [ $((i % 30)) = 0 ] && lock_keepalive
+	done
+	say "$who: not in the world with no box open after 90 s: $w"; return 1
+}
+if [ $rc = 0 ] && [ -n "$cell" ]; then
+	[ $host = 1 ] && { into_world host || rc=1; }
+	[ $vmside = 1 ] && { into_world vm || rc=1; }
 fi
 exit $rc

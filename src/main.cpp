@@ -9,6 +9,7 @@
 #include "RuntimeSupport.h"
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
+#include "game/LocalPlayer.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "net/Session.h"
@@ -92,6 +93,32 @@ namespace
 		}
 	}
 
+	// The rig only (developer channel on): the questions a new game asks once, before the player can move, are taken
+	// as answered "no", so a game the rig starts with coc from the main menu never waits on a box nobody will click.
+	// Each is a global its quest sets once it has asked; set here before the quest looks, every frame until it holds (a
+	// new game may set it back). A box that is up anyway shows in `where` (menus=...), and the rig's start stops on it.
+	//   Survival_PlayerHasBeenPrompted  "Enable Survival Mode? Yes / No" (the bundled Survival Mode, ccQDRSSE001)
+	void NoFirstRunPrompts()
+	{
+		if (!Config::Get().devChannel) {
+			return;
+		}
+		static constexpr std::array ASKED_ONCE{ "Survival_PlayerHasBeenPrompted" };
+		static std::array<RE::TESGlobal*, ASKED_ONCE.size()> globals = [] {
+			std::array<RE::TESGlobal*, ASKED_ONCE.size()> found{};
+			for (std::size_t i = 0; i < ASKED_ONCE.size(); ++i) {
+				found[i] = RE::TESForm::LookupByEditorID<RE::TESGlobal>(ASKED_ONCE[i]);
+				logs::info("Rig: {} {}", ASKED_ONCE[i], found[i] ? "found: the game will not ask it" : "not in this load order");
+			}
+			return found;
+		}();
+		for (const auto global : globals) {
+			if (global && global->value != 1.0f) {
+				global->value = 1.0f;
+			}
+		}
+	}
+
 	// About once a frame on the main thread (GameThread). Steam first, so a friend's first message is let in
 	// (SessionRequested) before the probe reads its channel.
 	void OnFrame()
@@ -101,6 +128,7 @@ namespace
 			SteamProbe::Frame();
 			DevCommands::Frame();
 		}
+		NoFirstRunPrompts();
 		Session::Frame();
 		RunInBackground();
 		VirtualPad::Frame();
@@ -141,6 +169,8 @@ namespace
 		if (!RemotePlayers::Install()) {
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
 		}
+		LocalPlayer::NoteDefaultName();
+		NoFirstRunPrompts();
 		RunInBackground();  // before the first tick: the main menu must not stall either
 		// Whether the game's sound is on: the rig's VM, which has no audio device, runs with it off (tools/rig/start.ps1).
 		const auto ini = RE::INISettingCollection::GetSingleton();
