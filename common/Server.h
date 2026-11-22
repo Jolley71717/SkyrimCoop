@@ -44,7 +44,7 @@ public:
 	using LogFn = std::function<void(std::string_view)>;
 
 	// a_log is called from the server thread (and from Start). Its lines name no player: "player 2", a masked
-	// address or an alias (common/Redact.h).
+	// address or an alias (common/Redact.h), and each has been through Redact::Scrub.
 	explicit Server(LogFn a_log);
 	~Server();
 

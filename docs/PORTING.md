@@ -137,11 +137,12 @@ The four parts the plugin's start-up already calls are stubs with an interface:
 
 ## `tests/`
 
-262 files and 120,300 lines there; 17 files and about 2,900 lines here. Carried: the harness (`Test.h`, `main.cpp`), the in-memory transport and the server fixture, and the tests of everything carried (`FormIds`, `IniFile`, `LaunchReport`, `LogRotation`, `NameChoice`, `Name`, `Protocol`, `Redact`, `Server`, `ServerEnet`, `TokenBucket`), with the protocol and server tests cut to the small protocol. New: `SettingsTests`.
+262 files and 120,300 lines there; 23 files and about 4,900 lines here. Carried: the harness (`Test.h`, `main.cpp`), the in-memory transport and the server fixture, and the tests of everything carried (`FormIds`, `IniFile`, `LaunchReport`, `LogRotation`, `NameChoice`, `Name`, `Protocol`, `Redact`, `Server`, `ServerEnet`, `TokenBucket`), with the protocol and server tests cut to the small protocol. New: `SettingsTests`.
+
+`LogPrivacyTests` and its `SourceTree.h` are carried with changes: the server's log over an evening of players (its tests of ignored plugins and of the mod list a joiner is sent are left out until those return, and the flood test became one of a stray message), and the guard on the source, whose list of log calls is the plugin's own (`logs::`, `SKSE::log::`, `spdlog::`) and which also knows Skyrim's ways to a player's name (`Steam::NameOf`, `NameChoice::Choose`, the player character's `GetName`). With it the server, like F4Multiplayer's, runs every log line through `Redact::Scrub`.
 
 Not carried yet:
 
-- `LogPrivacyTests` (reads every source file and fails on a log call that could print a name or an address): bring over soon; it needs only its list of allowed calls redone.
 - The simulations (`tests/sim/`): game-free stand-ins for a game, for testing whole exchanges without one. They return when there is a session to simulate.
 - The tests of each rule book in `src/game`: each comes with its book.
 - The coverage report on pull requests (`tools/coverage.sh` and its workflow steps).
