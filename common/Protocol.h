@@ -39,8 +39,8 @@ namespace Protocol
 	inline constexpr std::size_t MAX_PASSWORD_LENGTH = 64;
 	// The most players a server takes, whatever it is asked for.
 	inline constexpr std::size_t MAX_PLAYERS = 8;
-	// Worn items in a player's looks: Skyrim has 32 body slots (BGSBipedObjectForm), and a hand holds one weapon or
-	// spell more each.
+	// Worn items in a player's looks: armor and clothing, of which Skyrim has 32 body slots (BGSBipedObjectForm), with
+	// room to spare.
 	inline constexpr std::size_t MAX_WORN = 40;
 
 	// How each refusal's reason starts, so the game can tell them apart and say more than the server knows.
@@ -621,7 +621,8 @@ namespace Protocol
 		}
 	}
 
-	// None for more than MAX_WORN items, a sex byte other than 0 or 1, or a weight that is no number.
+	// None for more than MAX_WORN items, a sex byte other than 0 or 1, or a weight that is not 0 to 100 (another
+	// player's game sent it: it would go onto a stand-in's body as it is).
 	inline std::optional<PlayerLooks> ReadLooks(Reader& a_reader)
 	{
 		PlayerLooks looks;
@@ -629,7 +630,7 @@ namespace Protocol
 		const auto female = a_reader.U8();
 		looks.weight = a_reader.F32();
 		const auto count = a_reader.U8();
-		if (!a_reader.Ok() || female > 1 || count > MAX_WORN || !looks.IsFinite()) {
+		if (!a_reader.Ok() || female > 1 || count > MAX_WORN || !looks.IsFinite() || looks.weight < 0.0f || looks.weight > 100.0f) {
 			return std::nullopt;
 		}
 		looks.female = female == 1;

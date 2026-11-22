@@ -431,3 +431,20 @@ TEST("protocol: looks with a sex that is neither, or a weight that is no number,
 		CHECK(!Protocol::DecodeRemoteLooks(Protocol::Encode(Protocol::RemoteLooks{ 1, looks })).has_value());
 	}
 }
+
+TEST("protocol: looks with a body weight outside 0 to 100 are not read; the ends are")
+{
+	for (const float value : { -0.5f, 100.5f, 1e30f, -1e30f }) {
+		auto looks = SampleLooks();
+		looks.weight = value;
+		CHECK(!Protocol::DecodePlayerLooks(Protocol::Encode(looks)).has_value());
+		CHECK(!Protocol::DecodeRemoteLooks(Protocol::Encode(Protocol::RemoteLooks{ 1, looks })).has_value());
+	}
+	for (const float value : { 0.0f, 100.0f }) {
+		auto looks = SampleLooks();
+		looks.weight = value;
+		const auto read = Protocol::DecodePlayerLooks(Protocol::Encode(looks));
+		REQUIRE(read);
+		CHECK(read->weight == value);
+	}
+}

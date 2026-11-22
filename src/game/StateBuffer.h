@@ -26,15 +26,18 @@ namespace StateBuffer
 	using Clock = std::chrono::steady_clock;
 	using namespace std::chrono_literals;
 
-	// How far in the past the stand-in is drawn: a state every 50 ms (Session sends 20 a second) and a relay trip's
+	// How far in the past the stand-in is drawn: a state every 50 ms (a game is to send 20 a second) and a relay trip's
 	// jitter fit in it. A developer command may change it to measure.
 	constexpr auto             DEFAULT_DELAY = 120ms;
 	inline std::atomic<int>    delayMs{ static_cast<int>(DEFAULT_DELAY.count()) };
 	// Past the newest state, a friend who was moving goes on the way they went for this long, rather than stopping
 	// until the next comes and jumping on.
 	constexpr auto             EXTRAPOLATE = 100ms;
-	// Faster than this between two states is a jump (a door, the console), not a run: not carried on.
-	constexpr float            EXTRAPOLATE_SPEED = 1500.0f;  // units a second; Skyrim's sprint is about 500
+	// Faster than this between two states is a jump (a door, the console), not a run: not carried on. Units a second;
+	// to measure in a game against Skyrim's fastest movement (a sprint, a mounted gallop).
+	constexpr float            EXTRAPOLATE_SPEED = 1500.0f;
+	// Slower than this in the newest state: it says they stand, so they are not carried on.
+	constexpr float            EXTRAPOLATE_FROM = 10.0f;
 	// No state for this long: nothing to draw (the friend is on a loading screen, or gone).
 	constexpr auto             STALE_AFTER = 5s;
 	constexpr std::size_t      MAX_SNAPSHOTS = 32;
@@ -67,7 +70,7 @@ namespace StateBuffer
 	{
 		Protocol::PlayerState state;  // where it is drawn, its heading blended; speed, direction and flags of the state it is going to
 		bool                  ahead = false;  // past the newest state, going on the way they went
-		bool                  held = false;   // past that too: it stands at the newest state
+		bool                  held = false;   // past that too: it stands where the carry-on ended
 	};
 
 	struct Buffer
@@ -75,6 +78,7 @@ namespace StateBuffer
 		std::deque<Snapshot>     snapshots;
 		Prediction::SenderClock  sender;
 		Prediction::ArrivalClock arrivals;  // for states that don't say when they were sent
+		// States turned away since one was last taken: a sender whose count started over (a restarted game) shows here.
 		std::uint32_t            refused = 0;
 
 		// Takes a state that came at a_now; false (and nothing kept) when it is no newer than the newest held. The
@@ -94,6 +98,7 @@ namespace StateBuffer
 				}
 			}
 			snapshots.push_back({ stamp, a_state });
+			refused = 0;
 			while (snapshots.size() > MAX_SNAPSHOTS) {
 				snapshots.pop_front();
 			}
@@ -104,8 +109,8 @@ namespace StateBuffer
 
 		[[nodiscard]] static Clock::duration Delay() { return std::chrono::milliseconds(std::clamp(delayMs.load(), 0, 1000)); }
 
-		// The way the newest state was going, units a second, from the one before it: none when the two are in
-		// different spaces, too far apart in time to say, or faster than anyone runs (a jump).
+		// The way the newest state was going, units a second, from the one before it: none when the newest says they
+		// stand, the two are in different spaces, too far apart in time to say, or faster than anyone runs (a jump).
 		[[nodiscard]] std::optional<std::array<float, 3>> Velocity() const
 		{
 			if (snapshots.size() < 2) {
@@ -114,7 +119,7 @@ namespace StateBuffer
 			const auto& a = snapshots[snapshots.size() - 2];
 			const auto& b = snapshots.back();
 			const float span = std::chrono::duration<float>(b.stamp - a.stamp).count();
-			if (a.state.cell != b.state.cell || a.state.worldspace != b.state.worldspace || span <= 0.0f || span > 0.5f) {
+			if (b.state.speed < EXTRAPOLATE_FROM || a.state.cell != b.state.cell || a.state.worldspace != b.state.worldspace || span <= 0.0f || span > 0.5f) {
 				return std::nullopt;
 			}
 			// In the air the fall is no line: only the way across is carried on.

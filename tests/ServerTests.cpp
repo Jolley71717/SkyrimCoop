@@ -665,7 +665,7 @@ TEST("server: the same looks sent again are not passed on again; changed ones ar
 	CHECK(sent[1].first.looks == changed);
 }
 
-TEST("server: looks that cannot be read, or come faster than a game changes clothes, are not passed on")
+TEST("server: looks that cannot be read are not passed on")
 {
 	Fixture f;
 	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
@@ -676,12 +676,69 @@ TEST("server: looks that cannot be read, or come faster than a game changes clot
 	auto bad = Protocol::Encode(LooksOf(0x00013746, 0x00012E49));
 	bad.pop_back();
 	f.fake->Deliver(2, bad);
-	// Thirty different looks at once: the burst lets ten through.
-	for (std::uint32_t i = 0; i < 30; ++i) {
+	auto heavy = LooksOf(0x00013746, 0x00012E49);
+	heavy.weight = 1e30f;
+	f.fake->Deliver(2, Protocol::Encode(heavy));
+	REQUIRE(f.fake->Settle());
+	CHECK(SentLooks(f, 1).empty());
+}
+
+TEST("server: a burst of looks faster than a game changes clothes is held back, and its last still reaches everyone")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	// Thirty different looks at once (a load that re-equips everything): the burst passes ten on at once, and the
+	// newest follows once the budget has room, about a second later; never the ones between.
+	constexpr std::uint32_t BURST = 30;
+	const auto              last = LooksOf(0x00013746, 0x00020000 + (BURST - 1) * 2);
+	for (std::uint32_t i = 0; i < BURST; ++i) {
 		f.fake->Deliver(2, Protocol::Encode(LooksOf(0x00013746, 0x00020000 + i * 2)));
 	}
 	REQUIRE(f.fake->Settle());
-	const auto sent = SentLooks(f, 1);
+	auto sent = SentLooks(f, 1);
 	CHECK(sent.size() >= 10);
-	CHECK(sent.size() < 30);
+	CHECK(sent.size() < BURST);
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while ((sent.empty() || sent.back().first.looks != last) && std::chrono::steady_clock::now() < deadline) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		for (auto& more : SentLooks(f, 1)) {
+			sent.push_back(std::move(more));
+		}
+	}
+	REQUIRE(!sent.empty());
+	CHECK(sent.back().first.looks == last);
+	CHECK(sent.back().second);
+	CHECK(sent.size() <= 12);
+
+	// And one who joins now is told the newest.
+	REQUIRE(f.Join(3, Fixture::MakeHello("Cy")));
+	REQUIRE(f.fake->Settle());
+	const auto told = SentLooks(f, 3);
+	REQUIRE(told.size() == 1);
+	CHECK(told[0].first.looks == last);
+}
+
+TEST("server: the same looks sent again and again spend none of the budget")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	const auto same = LooksOf(0x00013746, 0x00012E49);
+	for (int i = 0; i < 40; ++i) {
+		f.fake->Deliver(2, Protocol::Encode(same));
+	}
+	auto changed = same;
+	changed.worn.push_back(0x00012E4D);
+	f.fake->Deliver(2, Protocol::Encode(changed));
+	REQUIRE(f.fake->Settle());
+	const auto sent = SentLooks(f, 1);
+	REQUIRE(sent.size() == 2);
+	CHECK(sent[1].first.looks == changed);  // at once: the repeats used up nothing
 }

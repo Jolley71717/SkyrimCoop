@@ -73,6 +73,10 @@ TEST("stand-in drawing: a state no newer than the newest held is refused, across
 	REQUIRE(wrapping.Push(Walking(0xFFFFFFFF, 0), start));
 	CHECK(wrapping.Push(Walking(0, 50), start + 50ms));
 	CHECK(wrapping.snapshots.size() == 2);
+
+	// The count is of states turned away since one was last taken.
+	REQUIRE(buffer.Push(Walking(6, 100), start + 100ms));
+	CHECK(buffer.refused == 0);
 }
 
 TEST("stand-in drawing: a friend whose states stop goes on the way they went for a moment, then stands with its legs stopped")
@@ -111,6 +115,29 @@ TEST("stand-in drawing: a friend who stands still is not carried anywhere")
 	REQUIRE(sampled);
 	CHECK(Near(sampled->state.x, 0.0f));
 	CHECK(sampled->state.speed == 0.0f);
+}
+
+TEST("stand-in drawing: a friend whose newest state says they stopped is not carried past where they stood")
+{
+	const auto          start = Clock::now();
+	StateBuffer::Buffer buffer;
+	for (std::uint32_t i = 0; i < 9; ++i) {
+		REQUIRE(buffer.Push(Walking(i + 1, i * 50), start + std::chrono::milliseconds(i * 50)));
+	}
+	// The last step, at 450 ms: a little further on, and standing.
+	auto stopped = Walking(10, 450);
+	stopped.x = 82.0f;
+	stopped.speed = 0.0f;
+	REQUIRE(buffer.Push(stopped, start + 450ms));
+	CHECK(!buffer.Velocity().has_value());
+
+	const auto delay = StateBuffer::Buffer::Delay();
+	for (const auto past : { 20ms, 50ms, 100ms, 2000ms }) {
+		const auto sampled = buffer.Sample(start + 450ms + delay + past);
+		REQUIRE(sampled);
+		CHECK(Near(sampled->state.x, 82.0f));
+		CHECK(sampled->state.speed == 0.0f);
+	}
 }
 
 TEST("stand-in drawing: no blend across a door; the stand-in is where the newer state says")

@@ -30,10 +30,13 @@ namespace
 		std::uint64_t     identity = 0;
 		bool              anyState = false;
 		std::uint32_t     lastSequence = 0;
-		// The player's looks as last sent, for whoever joins after (none until the first come).
+		// The player's newest looks, for whoever joins after (none until the first come). Always the newest: looks are
+		// state, and the last of a burst is the one that counts.
 		std::optional<Protocol::PlayerLooks> looks;
-		// Looks taken: a burst of ten, then one a second (a game sends them when its player changes clothes).
+		// Looks passed on: a burst of ten, then one a second (a game sends them when its player changes clothes). Past
+		// it, the newest are kept and owed: passed on from the server's loop once the budget has room.
 		TokenBucket looksBudget{ 10.0, 1.0 };
+		bool        looksOwed = false;
 		// Heartbeats answered: a burst of twenty, then ten a second (the game sends a few a second at most).
 		TokenBucket heartbeats{ 20.0, 10.0 };
 		bool        toldUnknown = false;
@@ -275,12 +278,17 @@ void Server::Run()
 		case MT::kPlayerLooks:
 			// Kept for whoever joins later, and passed on to those there now. Reliable, and on the reliable channel, so
 			// it comes after the join it belongs to.
-			if (auto looks = Protocol::DecodePlayerLooks(a_data); looks && a_peer.looksBudget.Take(Clock::now())) {
+			if (auto looks = Protocol::DecodePlayerLooks(a_data)) {
 				if (a_peer.looks && *a_peer.looks == *looks) {
-					break;  // the same again: nothing for the others
+					break;  // the same again: nothing for the others, and no budget spent
 				}
 				a_peer.looks = std::move(*looks);
-				broadcast(Protocol::Encode(Protocol::RemoteLooks{ a_peer.playerId, *a_peer.looks }), true, &a_key);
+				if (a_peer.looksBudget.Take(Clock::now())) {
+					a_peer.looksOwed = false;
+					broadcast(Protocol::Encode(Protocol::RemoteLooks{ a_peer.playerId, *a_peer.looks }), true, &a_key);
+				} else {
+					a_peer.looksOwed = true;  // the newest goes once the budget allows
+				}
 			}
 			break;
 		case MT::kHeartbeat:
@@ -331,9 +339,13 @@ void Server::Run()
 		}
 
 		// A connection that never says hello holds one of the few spare slots: dropped after a while. Its kDisconnect
-		// event removes it; until then it is not asked again.
+		// event removes it; until then it is not asked again. And looks held back by the budget go once it has room.
 		const auto now = Clock::now();
 		for (auto& [key, peer] : peers) {
+			if (peer.joined && peer.looksOwed && peer.looks && peer.looksBudget.Take(now)) {
+				peer.looksOwed = false;
+				broadcast(Protocol::Encode(Protocol::RemoteLooks{ peer.playerId, *peer.looks }), true, &key);
+			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {
 				log(std::format("server: dropped {}: no hello", transports[key.first]->Describe(key.second)));
 				transports[key.first]->Disconnect(key.second);
