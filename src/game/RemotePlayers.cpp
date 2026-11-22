@@ -190,8 +190,10 @@ namespace RemotePlayers
 		}
 
 		// Puts a_hook in a vtable's slot when the function there is the game's own: in its image, not another plugin's
-		// hook (whose own original we would call twice) or junk. The function the slot held, or 0 (not hooked).
-		std::uintptr_t HookSlot(std::uintptr_t a_vtable, std::size_t a_index, std::uintptr_t a_hook, std::string_view a_what)
+		// hook (whose own original we would call twice) or junk. a_original holds the function the slot held before the
+		// slot changes (a job thread may call the hook at once); false: not hooked, a_original left as it was.
+		template <class Fn>
+		bool HookSlot(std::uintptr_t a_vtable, std::size_t a_index, Fn a_hook, Fn& a_original, std::string_view a_what)
 		{
 			const auto slot = a_vtable + sizeof(void*) * a_index;
 			const auto current = *reinterpret_cast<const std::uintptr_t*>(slot);
@@ -199,11 +201,12 @@ namespace RemotePlayers
 			MEMORY_BASIC_INFORMATION info{};
 			if (!::VirtualQuery(reinterpret_cast<void*>(current), &info, sizeof(info)) || reinterpret_cast<std::uintptr_t>(info.AllocationBase) != image) {
 				logs::error("Players: the {} slot holds {:#x}, outside the game's image: not hooked", a_what, current);
-				return 0;
+				return false;
 			}
-			REL::safe_write(slot, a_hook);
+			a_original = reinterpret_cast<Fn>(current);
+			REL::safe_write(slot, reinterpret_cast<std::uintptr_t>(a_hook));
 			logs::info("Players: hooked the {} (game+{:X})", a_what, current - image);
-			return current;
+			return true;
 		}
 
 		// Sends a step's events to a stand-in's graph and keeps the count of those taken and turned away. One turned away
@@ -555,23 +558,18 @@ namespace RemotePlayers
 	{
 		REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_Character[0] };
 		characterVtable = vtable.address();
-		const auto update = HookSlot(characterVtable, UPDATE_INDEX, reinterpret_cast<std::uintptr_t>(&UpdateHook), "Character update");
-		if (update == 0) {
+		if (!HookSlot<UpdateFn>(characterVtable, UPDATE_INDEX, &UpdateHook, originalUpdate, "Character update")) {
 			logs::error("Players: without the Character update hook no stand-in is placed");
 			return false;
 		}
-		originalUpdate = reinterpret_cast<UpdateFn>(update);
 		hooked = true;
 		// Without these, stand-ins are placed and moved as before; their legs stand still.
 		REL::Relocation<std::uintptr_t> speedChannel{ RE::VTABLE_BSTAnimationGraphDataChannel_Actor_float_ActorSpeedChannel_[0] };
 		REL::Relocation<std::uintptr_t> directionChannel{ RE::VTABLE_BSTAnimationGraphDataChannel_Actor_float_ActorDirectionChannel_[0] };
-		originalSpeedPoll = reinterpret_cast<PollFn>(HookSlot(speedChannel.address(), CHANNEL_POLL_INDEX, reinterpret_cast<std::uintptr_t>(&SpeedPoll), "graph's Speed channel"));
-		if (originalSpeedPoll) {
-			originalDirectionPoll =
-				reinterpret_cast<PollFn>(HookSlot(directionChannel.address(), CHANNEL_POLL_INDEX, reinterpret_cast<std::uintptr_t>(&DirectionPoll), "graph's Direction channel"));
-		}
-		if (!originalSpeedPoll || !originalDirectionPoll) {
-			logs::warn("Players: the graph's {} channel is not ours: stand-ins' legs won't follow their friends'", originalSpeedPoll ? "Direction" : "Speed");
+		const bool speed = HookSlot<PollFn>(speedChannel.address(), CHANNEL_POLL_INDEX, &SpeedPoll, originalSpeedPoll, "graph's Speed channel");
+		const bool direction = speed && HookSlot<PollFn>(directionChannel.address(), CHANNEL_POLL_INDEX, &DirectionPoll, originalDirectionPoll, "graph's Direction channel");
+		if (!direction) {
+			logs::warn("Players: the graph's {} channel is not ours: stand-ins' legs won't follow their friends'", speed ? "Direction" : "Speed");
 		}
 		return true;
 	}
