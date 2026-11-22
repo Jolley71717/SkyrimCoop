@@ -130,6 +130,7 @@ namespace
 		}
 		NoFirstRunPrompts();
 		Session::Frame();
+		RemotePlayers::TendGraveyard();  // after the session's frame: a stand-in it took away is disabled in this tick
 		RunInBackground();
 		VirtualPad::Frame();
 		DevChannel::Frame();

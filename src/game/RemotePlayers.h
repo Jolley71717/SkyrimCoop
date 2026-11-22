@@ -16,8 +16,9 @@ namespace SKSE
 // where its friend is (StateBuffer), turns it, runs the engine's no-AI update and drives its animation graph (Gait).
 //
 // A stand-in is never saved (docs/DESIGN.md, "Nothing of the session in a save"): every one is taken out of the world
-// before the game writes a save (BeforeSave, from SKSE's kSaveGame) and placed again after; the co-save lists the ones
-// taken out, and after a load any of them, or any other placed actor of a preset base, is removed (AfterLoad; that
+// before the game writes a save (BeforeSave, from SKSE's kSaveGame: disabled then, deleted a second later, never both in
+// one frame) and placed again after; the co-save lists the ones taken out, and after a load any of them, or any other
+// placed actor of a preset base, is removed (AfterLoad; that
 // sweep only runs when this game has a reason to look, so another mod's preset actors are left alone otherwise).
 //
 // Main thread only, except the hook.
@@ -39,6 +40,10 @@ namespace RemotePlayers
 
 	// The session ended: every player and stand-in goes.
 	void Clear();
+
+	// Once a tick, in a session or not: each stand-in on its way out of the world goes a step further. It is disabled
+	// first and deleted only once the game has taken it out (src/game/Retire.h); never both in one frame.
+	void TendGraveyard();
 
 	// A save is about to be loaded, or a new game started: the stand-ins go with the world (their players stay, and
 	// come back once the new world is there).

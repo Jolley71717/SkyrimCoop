@@ -2,7 +2,9 @@
 
 #include "DevLine.h"
 #include "game/Gait.h"
+#include "game/GameThread.h"
 #include "game/LocalPlayer.h"
+#include "game/Retire.h"
 #include "game/StateBuffer.h"
 
 #include <Windows.h>
@@ -32,20 +34,44 @@ namespace RemotePlayers
 			RE::TESNPC*       base = nullptr;
 			bool              dressed = false;
 			Clock::time_point placeAfter{};
+			Clock::time_point placedAt{};
 			std::uint32_t     placed = 0;
 
 			Gait::Shown   shown;  // under lock
 			std::uint64_t drawn = 0;
+			std::uint64_t takenEvents = 0;
 			std::uint64_t refusedEvents = 0;
 			std::string   lastRefused;
 			Protocol::PlayerState lastDrawn;
 			bool          hasDrawn = false;
 		};
 
-		std::mutex                                lock;  // players' buffers and graph state, and byActor
+		std::mutex                                lock;  // players' buffers and graph state, byActor and retiring
 		std::unordered_map<std::uint32_t, Remote> players;
-		std::unordered_map<RE::Actor*, std::uint32_t> byActor;  // stand-in -> player id
+		std::unordered_map<RE::Actor*, std::uint32_t> byActor;   // stand-in -> player id
+		std::unordered_map<RE::Actor*, RE::FormID>    retiring;  // stand-ins on their way out -> their form id
 		std::atomic<std::size_t>                  standIns{ 0 };
+		std::atomic<std::size_t>                  watched{ 0 };  // byActor and retiring: the hook looks only when some
+
+		void CountWatched()  // under lock
+		{
+			standIns = byActor.size();
+			watched = byActor.size() + retiring.size();
+		}
+
+		// The stand-ins on their way out of the world (main thread): disabled, then deleted once that is done
+		// (src/game/Retire.h), then held until the game lets go of them. The hook keeps their AI off all the while.
+		struct Grave
+		{
+			RE::ActorHandle                  actor;
+			RE::FormID                       id = 0;
+			Clock::time_point                placedAt{};  // long ago for one this game did not place
+			std::optional<Clock::time_point> disabledAt;
+			std::uint64_t                    disabledTick = 0;
+			bool                             deleted = false;
+			bool                             toldStuck = false;
+		};
+		std::vector<Grave> graveyard;
 
 		// Stand-ins taken out of the world for the save being written (their form ids), for the co-save; and those the
 		// co-save of a loaded save named, removed once the load is done.
@@ -99,9 +125,53 @@ namespace RemotePlayers
 			flags.movingForward = a_step.shown.moving ? 1 : 0;
 		}
 
+		// Where the graph's events are sent from: the stand-in's own update (the hook, by default) or the tick (dev
+		// `graph from tick`, a probe for why the graph turns moveStart away).
+		std::atomic<bool> eventsFromTick{ false };
+
+		// Sends a step's events to a stand-in's graph and keeps the count of those taken and turned away. One turned away
+		// is sent again next time (what the graph shows stays what it was).
+		void TellGraph(RE::Actor* a_actor, std::uint32_t a_player, const Gait::Step& a_step, const Gait::Shown& a_was)
+		{
+			if (a_step.events.empty()) {
+				return;
+			}
+			std::string   refused;
+			std::uint64_t taken = 0;
+			for (const auto event : a_step.events) {
+				if (a_actor->NotifyAnimationGraph(Name(event))) {
+					++taken;
+				} else {
+					refused = event;
+				}
+			}
+			std::scoped_lock l{ lock };
+			const auto       player = players.find(a_player);
+			if (player == players.end() || player->second.standInId != a_actor->GetFormID()) {
+				return;
+			}
+			auto& remote = player->second;
+			if (remote.takenEvents == 0 && taken > 0) {
+				logs::info("Players: player {}'s stand-in {:08X}: its graph took its first event ({} of {}{})", a_player, remote.standInId, taken,
+					a_step.events.size(), refused.empty() ? "" : "; turned away " + refused);
+			}
+			remote.takenEvents += taken;
+			if (!refused.empty()) {
+				remote.shown = a_was;
+				++remote.refusedEvents;
+				if (remote.lastRefused != refused || remote.refusedEvents == 1) {
+					logs::info("Players: player {}'s stand-in {:08X}: its graph turned {} away ({} times so far; sent from the {})", a_player, remote.standInId,
+						refused, remote.refusedEvents, eventsFromTick ? "tick" : "update");
+				}
+				remote.lastRefused = refused;
+			} else {
+				remote.shown = a_step.shown;
+			}
+		}
+
 		void UpdateHook(RE::Actor* a_this, float a_delta)
 		{
-			if (standIns.load(std::memory_order_relaxed) == 0) {
+			if (watched.load(std::memory_order_relaxed) == 0) {
 				originalUpdate(a_this, a_delta);
 				return;
 			}
@@ -109,17 +179,24 @@ namespace RemotePlayers
 			Gait::Step                          step;
 			Gait::Shown                         was;
 			bool                                ours = false;
+			std::uint32_t                       playerId = 0;
+			const bool                          eventsHere = !eventsFromTick.load(std::memory_order_relaxed);
 			{
 				std::scoped_lock l{ lock };
-				if (const auto it = byActor.find(a_this); it != byActor.end()) {
+				if (const auto gone = retiring.find(a_this); gone != retiring.end() && gone->second == a_this->GetFormID()) {
+					ours = true;  // on its way out: still no AI of its own, and no longer moved
+				} else if (const auto it = byActor.find(a_this); it != byActor.end()) {
 					if (const auto player = players.find(it->second); player != players.end() && player->second.standInId == a_this->GetFormID()) {
 						ours = true;
+						playerId = it->second;
 						auto& remote = player->second;
 						sample = remote.buffer.Sample(Clock::now());
 						if (sample) {
 							was = remote.shown;
 							step = Gait::Next(remote.shown, sample->state, sample->held);
-							remote.shown = step.shown;
+							if (eventsHere) {
+								remote.shown = step.shown;  // else the tick tells the graph (TellGraph from Frame)
+							}
 							remote.lastDrawn = sample->state;
 							remote.hasDrawn = true;
 							++remote.drawn;
@@ -144,22 +221,8 @@ namespace RemotePlayers
 			}
 			a_this->SetGraphVariableFloat(Name("Speed"), step.speed);
 			a_this->SetGraphVariableFloat(Name("Direction"), step.direction);
-			std::string refused;
-			for (const auto event : step.events) {
-				if (!a_this->NotifyAnimationGraph(Name(event))) {
-					refused = event;
-				}
-			}
-			if (!refused.empty()) {
-				// Not taken: the graph is told again next frame (what it shows stays what it was).
-				std::scoped_lock l{ lock };
-				if (const auto it = byActor.find(a_this); it != byActor.end()) {
-					if (const auto player = players.find(it->second); player != players.end()) {
-						player->second.shown = was;
-						++player->second.refusedEvents;
-						player->second.lastRefused = refused;
-					}
-				}
+			if (eventsHere) {
+				TellGraph(a_this, playerId, step, was);
 			}
 		}
 
@@ -196,33 +259,106 @@ namespace RemotePlayers
 			return npc && npc->IsPreset();
 		}
 
-		// Out of the world: disabled now, and deleted, so the game drops it once it may. Never left for a save.
-		void Remove(RE::Actor* a_actor)
+		bool InGraveyard(RE::FormID a_id)
 		{
-			a_actor->Disable();
-			a_actor->SetDelete(true);
+			return std::ranges::any_of(graveyard, [&](const Grave& a_grave) { return a_grave.id == a_id; });
 		}
 
-		void TakeAway(std::uint32_t a_id, Remote& a_remote, std::string_view a_why, bool a_forSave = false)
+		// Sent on its way out of the world (Retire.h): disabled at the next tend, deleted once that is done. a_placedAt:
+		// when it was placed (one whose 3D is still loading waits for it); long ago for one this game did not place.
+		void SendOut(RE::Actor* a_actor, Clock::time_point a_placedAt)
+		{
+			const auto id = a_actor->GetFormID();
+			if (InGraveyard(id)) {
+				return;
+			}
+			graveyard.push_back({ .actor = a_actor->GetHandle(), .id = id, .placedAt = a_placedAt });
+			std::scoped_lock l{ lock };
+			retiring[a_actor] = id;
+			CountWatched();
+		}
+
+		void LetGo(const Grave& a_grave)
+		{
+			std::scoped_lock l{ lock };
+			std::erase_if(retiring, [&](const auto& a_entry) { return a_entry.second == a_grave.id; });
+			CountWatched();
+		}
+
+		// The graveyard's step for this tick: each stand-in on its way out is disabled, deleted or let go of, as
+		// Retire::Next says. a_save: before a save; every one still there is named in the co-save.
+		void Tend(bool a_save)
+		{
+			if (graveyard.empty()) {
+				return;
+			}
+			const auto now = Clock::now();
+			const auto tick = GameThread::Ticks();
+			std::erase_if(graveyard, [&](Grave& a_grave) {
+				const auto actor = a_grave.actor.get();
+				if (!actor || actor->GetFormID() != a_grave.id) {
+					logs::info("Players: stand-in {:08X} is gone{} (the game let go of it)", a_grave.id, a_grave.deleted ? "" : " before it was deleted");
+					LetGo(a_grave);
+					return true;
+				}
+				if (a_save) {
+					takenForSave.push_back(a_grave.id);
+				}
+				if (a_grave.deleted) {
+					return false;  // held until the game frees it, so the hook never runs its AI meanwhile
+				}
+				const Retire::Facts facts{
+					.has3D = actor->Is3DLoaded(),
+					.sincePlaced = now - a_grave.placedAt,
+					.sinceDisabled = a_grave.disabledAt ? std::optional{ now - *a_grave.disabledAt } : std::nullopt,
+					.ticksSinceDisabled = a_grave.disabledAt ? tick - a_grave.disabledTick : 0,
+				};
+				switch (Retire::Next(facts)) {
+				case Retire::Step::kDisable:
+					actor->Disable();
+					a_grave.disabledAt = now;
+					a_grave.disabledTick = tick;
+					logs::info("Players: stand-in {:08X} disabled{}; deleted once the game has taken it out", a_grave.id, a_save ? " before the save" : "");
+					break;
+				case Retire::Step::kDelete:
+					actor->SetDelete(true);
+					a_grave.deleted = true;
+					logs::info("Players: stand-in {:08X} marked for deletion, {} ms and {} ticks after it was disabled", a_grave.id,
+						std::chrono::duration_cast<std::chrono::milliseconds>(*facts.sinceDisabled).count(), facts.ticksSinceDisabled);
+					break;
+				case Retire::Step::kWait:
+					if (Retire::Stuck(facts) && !a_grave.toldStuck) {
+						a_grave.toldStuck = true;
+						logs::warn("Players: stand-in {:08X} was disabled {} s ago and still has its 3D; left disabled, not deleted", a_grave.id,
+							std::chrono::duration_cast<std::chrono::seconds>(*facts.sinceDisabled).count());
+					} else if (a_save && !a_grave.disabledAt) {
+						logs::info("Players: stand-in {:08X} is still loading its 3D: left as it is for this save (the co-save names it)", a_grave.id);
+					}
+					break;
+				}
+				return false;
+			});
+		}
+
+		// Out of the world, never both disabled and deleted in one frame (Retire.h): its AI stays off meanwhile.
+		void TakeAway(std::uint32_t a_id, Remote& a_remote, std::string_view a_why)
 		{
 			const auto actor = a_remote.standIn.get();
+			const bool same = actor && actor->GetFormID() == a_remote.standInId;
+			if (same) {
+				SendOut(actor.get(), a_remote.placedAt);
+				logs::info("Players: player {}'s stand-in {:08X} taken away ({})", a_id, a_remote.standInId, a_why);
+			}
 			{
 				std::scoped_lock l{ lock };
 				for (auto it = byActor.begin(); it != byActor.end();) {
 					it = it->second == a_id ? byActor.erase(it) : std::next(it);
 				}
-				standIns = byActor.size();
+				CountWatched();
 				a_remote.shown = {};
-			}
-			if (actor && actor->GetFormID() == a_remote.standInId) {
-				if (a_forSave) {
-					takenForSave.push_back(a_remote.standInId);
-				}
-				Remove(actor.get());
-				logs::info("Players: player {}'s stand-in {:08X} taken away ({})", a_id, a_remote.standInId, a_why);
+				a_remote.standInId = 0;
 			}
 			a_remote.standIn = {};
-			a_remote.standInId = 0;
 			a_remote.dressed = false;
 			a_remote.placeAfter = Clock::now() + RESPAWN_AFTER;
 		}
@@ -254,7 +390,7 @@ namespace RemotePlayers
 			}
 			if (*reinterpret_cast<std::uintptr_t*>(actor) != characterVtable) {
 				logs::warn("Players: the stand-in {:08X} is not a Character; taken away", actor->GetFormID());
-				Remove(actor);
+				SendOut(actor, Clock::now());
 				a_remote.placeAfter = Clock::now() + 30s;
 				return;
 			}
@@ -271,14 +407,15 @@ namespace RemotePlayers
 			}
 			placedThisRun = true;
 			a_remote.standIn = actor->GetHandle();
-			a_remote.standInId = actor->GetFormID();
 			a_remote.base = base;
 			a_remote.dressed = false;
+			a_remote.placedAt = Clock::now();
 			++a_remote.placed;
 			{
 				std::scoped_lock l{ lock };
+				a_remote.standInId = actor->GetFormID();
 				byActor[actor] = a_id;
-				standIns = byActor.size();
+				CountWatched();
 				a_remote.shown = {};
 			}
 			logs::info("Players: player {}'s stand-in {:08X} placed (base {:08X}) at ({:.0f},{:.0f},{:.0f}) in {:08X}", a_id, a_remote.standInId, base->GetFormID(),
@@ -443,6 +580,17 @@ namespace RemotePlayers
 			if (!remote.dressed) {
 				Dress(id, remote, actor.get());
 			}
+			if (eventsFromTick && actor->Is3DLoaded()) {
+				Gait::Step  step;
+				Gait::Shown was;
+				{
+					std::scoped_lock l{ lock };
+					was = remote.shown;
+					step = Gait::Next(was, sample->state, sample->held);
+					remote.shown = step.shown;
+				}
+				TellGraph(actor.get(), id, step, was);
+			}
 		}
 	}
 
@@ -451,10 +599,16 @@ namespace RemotePlayers
 		for (auto& [id, remote] : players) {
 			TakeAway(id, remote, "the session ended");
 		}
+		// The graveyard goes on (TendGraveyard, each tick, session or not).
 		std::scoped_lock l{ lock };
 		players.clear();
 		byActor.clear();
-		standIns = 0;
+		CountWatched();
+	}
+
+	void TendGraveyard()
+	{
+		Tend(false);
 	}
 
 	void ForgetStandIns()
@@ -468,7 +622,10 @@ namespace RemotePlayers
 			remote.buffer.Clear();  // the states before the load are of another moment
 		}
 		byActor.clear();
-		standIns = 0;
+		// Those on their way out go with the world too: the load lets go of every reference this game placed.
+		retiring.clear();
+		graveyard.clear();
+		CountWatched();
 	}
 
 	void BeforeSave()
@@ -477,20 +634,23 @@ namespace RemotePlayers
 		std::size_t taken = 0;
 		for (auto& [id, remote] : players) {
 			if (remote.standInId != 0) {
-				TakeAway(id, remote, "a save is written", true);
+				TakeAway(id, remote, "a save is written");
 				++taken;
 			}
 		}
 		// And any other placed preset actor (one an earlier save brought back that a sweep missed): none is saved.
 		for (const auto actor : SweepWanted() ? PresetActors() : std::vector<RE::Actor*>{}) {
-			if (!actor->IsDisabled()) {
-				takenForSave.push_back(actor->GetFormID());
-				Remove(actor);
+			if (!actor->IsDisabled() && !InGraveyard(actor->GetFormID())) {
+				SendOut(actor, {});
 				++taken;
 			}
 		}
-		if (taken > 0 || !players.empty()) {
-			logs::info("Save: {} stand-in(s) taken out of the world before the save; placed again after", taken);
+		// Each is disabled now, so none stands in the world the save is made of; none is deleted in the same frame
+		// (Retire.h: that crashed both games). Those disabled a while ago are deleted now; the others a second after the
+		// save, and the co-save names them all, so a load of this save removes any it kept.
+		Tend(true);
+		if (taken > 0 || !takenForSave.empty() || !players.empty()) {
+			logs::info("Save: {} stand-in(s) taken out of the world before the save, {} named in the co-save; placed again after", taken, takenForSave.size());
 		}
 	}
 
@@ -534,14 +694,14 @@ namespace RemotePlayers
 		for (const auto id : namedByLoad) {
 			const auto actor = RE::TESForm::LookupByID<RE::Actor>(id);
 			if (actor && IsStandInBase(actor->GetObjectReference()) && !actor->IsDeleted()) {
-				Remove(actor);
+				SendOut(actor, {});
 				++named;
 			}
 		}
 		std::size_t swept = 0;
 		for (const auto actor : SweepWanted() ? PresetActors() : std::vector<RE::Actor*>{}) {
-			if (!IsCurrentStandIn(actor) && !actor->IsDisabled()) {
-				Remove(actor);
+			if (!IsCurrentStandIn(actor) && !actor->IsDisabled() && !InGraveyard(actor->GetFormID())) {
+				SendOut(actor, {});
 				++swept;
 			}
 		}
@@ -561,7 +721,13 @@ namespace RemotePlayers
 
 	std::string Describe()
 	{
-		std::string out = std::format("players={} standins={}", players.size(), standIns.load());
+		std::size_t disabled = 0;
+		std::size_t deleted = 0;
+		for (const auto& grave : graveyard) {
+			disabled += grave.disabledAt && !grave.deleted ? 1 : 0;
+			deleted += grave.deleted ? 1 : 0;
+		}
+		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={})", players.size(), standIns.load(), graveyard.size(), disabled, deleted);
 		const auto  here = LocalPlayer::Read();
 		std::scoped_lock l{ lock };
 		for (const auto& [id, remote] : players) {
@@ -574,11 +740,11 @@ namespace RemotePlayers
 			float      speed = -1.0f;
 			const bool hasSpeed = actor && actor->GetGraphVariableFloat(Name("Speed"), speed);
 			const auto& newest = remote.buffer.snapshots.empty() ? std::optional<Protocol::PlayerState>{} : std::optional{ remote.buffer.snapshots.back().state };
-			out += std::format(" | player {} standin={:08X} placed={} dressed={} at={} target={} graphSpeed={} shown={}{}{}{} drawn={} refused={}{} states={} newest={} dist={}",
+			out += std::format(" | player {} standin={:08X} placed={} dressed={} at={} target={} graphSpeed={} shown={}{}{}{} drawn={} refused={}{} taken={} states={} newest={} dist={}",
 				id, remote.standInId, remote.placed, remote.dressed ? 1 : 0, at,
 				remote.hasDrawn ? std::format("({:.0f},{:.0f},{:.0f}) speed={:.0f} flags={:#04x}", remote.lastDrawn.x, remote.lastDrawn.y, remote.lastDrawn.z, remote.lastDrawn.speed, remote.lastDrawn.flags) : "none",
 				hasSpeed ? std::format("{:.0f}", speed) : "none", remote.shown.moving ? "m" : "-", remote.shown.sneaking ? "s" : "-", remote.shown.sprinting ? "r" : "-",
-				remote.shown.inAir ? "j" : "-", remote.drawn, remote.refusedEvents, remote.lastRefused.empty() ? "" : " last=" + remote.lastRefused,
+				remote.shown.inAir ? "j" : "-", remote.drawn, remote.refusedEvents, remote.lastRefused.empty() ? "" : " last=" + remote.lastRefused, remote.takenEvents,
 				remote.buffer.snapshots.size(),
 				newest ? std::format("({:.0f},{:.0f},{:.0f}) in {:08X}", newest->x, newest->y, newest->z, newest->cell ? newest->cell : newest->worldspace) : "none",
 				here && newest ? std::format("{:.0f}", SameSpace(*here, *newest) ? Distance(*here, *newest) : -1.0f) : "?");
@@ -610,9 +776,14 @@ namespace RemotePlayers
 	std::string Graph(std::string_view a_args)
 	{
 		const auto words = DevLine::Words(a_args);
+		if (words.size() == 2 && words[0] == "from" && (words[1] == "hook" || words[1] == "tick")) {
+			eventsFromTick = words[1] == "tick";
+			logs::info("Players: the stand-ins' graph events are sent from the {} from now on", eventsFromTick ? "tick" : "update hook");
+			return std::format("graph events from the {}", words[1]);
+		}
 		const auto id = words.empty() ? std::nullopt : DevLine::Number(words[0]);
 		if (!id) {
-			return "error: usage: graph <player id> [vars | event <name> | float <name> | bool <name> | int <name>]";
+			return "error: usage: graph <player id> [vars | event <name> | float <name> | bool <name> | int <name>] | graph from hook|tick";
 		}
 		const auto it = players.find(static_cast<std::uint32_t>(*id));
 		const auto actor = it != players.end() ? it->second.standIn.get() : RE::NiPointer<RE::Actor>{};

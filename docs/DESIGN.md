@@ -89,7 +89,7 @@ The first stand-in (`src/game/RemotePlayers`), kept simple on purpose:
 A friend keeps their own save, and nothing of the session goes into it. The sister project learned that a stand-in written into a save comes back broken, and crashes the game when its base was made at run time. Here:
 
 - A stand-in's base is an NPC of the load order, so even one that a save did keep would load as a plain actor, not a crash.
-- SKSE tells the plugin a save is about to be written (`kSaveGame`), before the game writes it. Every stand-in is then disabled and deleted, so none is in the world the save is made of; each is placed again a moment later.
+- SKSE tells the plugin a save is about to be written (`kSaveGame`), before the game writes it. Every stand-in is then disabled, so none stands in the world the save is made of; each is placed again a moment later. It is deleted a second later, not at once: a stand-in disabled and deleted in the same frame crashed the game (the disable's own task, run later, found the actor already out of its cell). Every way a stand-in leaves (its player leaves, the session ends, it goes out of range, its looks change, a save) takes the same two steps (`src/game/Retire.h`), so a save may still hold a disabled stand-in; the next point removes it.
 - The co-save lists the stand-ins taken out. After a load, any of them the save brought back is removed, and so is any other placed actor of a preset base (a sweep, for a save written before this guard ran).
 - The rig checks it: a friend saves mid-session, loads that save alone, and the plugin's `strays` count is 0. The load's log line says whether anything had to be removed, and by which of the two.
 
