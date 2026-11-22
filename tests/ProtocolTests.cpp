@@ -244,43 +244,120 @@ TEST("protocol: a string that claims more bytes than the packet holds, or than i
 	CHECK(Protocol::DecodeReject(longPacket).has_value());
 }
 
-TEST("protocol: a hello carries a whole Skyrim load order, and no more plugins than the limit")
+namespace
 {
-	std::vector<std::string> full;
-	for (int i = 0; i < 254; ++i) {
-		full.push_back(std::format("Full plugin {:03}.esp", i));
+	// The longest load order a game can have: 254 full plugins and 4096 light ones, each name a_length bytes (at
+	// least 24), laid out as a hello carries it.
+	std::vector<std::string> WholeLoadOrder(std::size_t a_length = 40)
+	{
+		const auto named = [&](std::string a_name) {
+			a_name.insert(a_name.size() - 4, a_length - a_name.size(), '_');
+			return a_name;
+		};
+		std::vector<std::string> full;
+		for (int i = 0; i < 254; ++i) {
+			full.push_back(named(std::format("Full plugin {:03}.esp", i)));
+		}
+		std::vector<std::string> light;
+		for (int i = 0; i < 4096; ++i) {
+			light.push_back(named(std::format("Light plugin {:04}.esl", i)));
+		}
+		return Protocol::ComparedLoadOrder(full, light);
 	}
-	std::vector<std::string> light;
-	for (std::size_t i = full.size() + 1; i < Protocol::MAX_PLUGINS; ++i) {
-		light.push_back(std::format("Light plugin {:04}.esl", i));
+
+	// A hello's fields as the server reads them, then a_count and the names as given (not as the writer would cut them).
+	std::vector<std::uint8_t> HandWrittenHello(std::size_t a_count, const std::vector<std::string>& a_names)
+	{
+		Protocol::Writer writer{ MT::kHello };
+		writer.U32(Protocol::MAGIC);
+		writer.U16(Protocol::VERSION);
+		writer.U32(0);
+		writer.Str("name", Protocol::MAX_NAME_LENGTH);
+		writer.Str("", Protocol::MAX_PASSWORD_LENGTH);
+		writer.U64(0);
+		writer.U16(static_cast<std::uint16_t>(a_count));
+		for (const auto& name : a_names) {
+			writer.LongStr(name, 0xFFFF);
+		}
+		return writer.Data();
 	}
+}
+
+TEST("protocol: a hello carries a whole Skyrim load order, 254 full plugins and 4096 light ones")
+{
 	auto hello = SampleHello();
-	hello.plugins = Protocol::ComparedLoadOrder(full, light);
-	REQUIRE(hello.plugins.size() == Protocol::MAX_PLUGINS);
+	hello.plugins = WholeLoadOrder();
+	REQUIRE(hello.plugins.size() == 254 + 1 + 4096);
+	CHECK(hello.plugins.size() <= Protocol::MAX_PLUGINS);
+	CHECK(Protocol::PluginsFit(hello.plugins));
 	const auto back = Protocol::DecodeHello(Protocol::Encode(hello));
 	REQUIRE(back);
 	CHECK(back->plugins == hello.plugins);
 
+	// Names of 110 bytes on average still go whole; that is what MAX_PLUGIN_LIST_BYTES promises.
+	hello.plugins = WholeLoadOrder(110);
+	CHECK(Protocol::PluginsFit(hello.plugins));
+	const auto longNames = Protocol::DecodeHello(Protocol::Encode(hello));
+	REQUIRE(longNames);
+	CHECK(longNames->plugins == hello.plugins);
+}
+
+TEST("protocol: a hello with more plugins than the limit leaves the rest off, and one that claims more is not read")
+{
+	auto hello = SampleHello();
+	hello.plugins.clear();
+	for (std::size_t i = 0; i < Protocol::MAX_PLUGINS; ++i) {
+		hello.plugins.push_back(std::format("P{}.esl", i));
+	}
+	CHECK(Protocol::PluginsFit(hello.plugins));
+	const auto atLimit = Protocol::DecodeHello(Protocol::Encode(hello));
+	REQUIRE(atLimit);
+	CHECK(atLimit->plugins == hello.plugins);
+
 	// One more than the limit: the writer leaves the rest off.
 	hello.plugins.push_back("One too many.esp");
+	CHECK(!Protocol::PluginsFit(hello.plugins));
 	const auto cut = Protocol::DecodeHello(Protocol::Encode(hello));
 	REQUIRE(cut);
 	CHECK(cut->plugins.size() == Protocol::MAX_PLUGINS);
 	CHECK(cut->plugins.back() != "One too many.esp");
 
 	// A packet that claims more plugins than the limit is not read at all.
-	Protocol::Writer writer{ MT::kHello };
-	writer.U32(Protocol::MAGIC);
-	writer.U16(Protocol::VERSION);
-	writer.U32(0);
-	writer.Str("name", Protocol::MAX_NAME_LENGTH);
-	writer.Str("", Protocol::MAX_PASSWORD_LENGTH);
-	writer.U64(0);
-	writer.U16(static_cast<std::uint16_t>(Protocol::MAX_PLUGINS + 1));
-	for (std::size_t i = 0; i <= Protocol::MAX_PLUGINS; ++i) {
-		writer.LongStr("a.esp", Protocol::MAX_PLUGIN_NAME_LENGTH);
-	}
-	CHECK(!Protocol::DecodeHello(writer.Data()).has_value());
+	CHECK(!Protocol::DecodeHello(HandWrittenHello(Protocol::MAX_PLUGINS + 1, std::vector<std::string>(Protocol::MAX_PLUGINS + 1, "a.esp"))).has_value());
+	CHECK(Protocol::DecodeHello(HandWrittenHello(Protocol::MAX_PLUGINS, std::vector<std::string>(Protocol::MAX_PLUGINS, "a.esp"))).has_value());
+}
+
+TEST("protocol: the longest hello fits in one message on every transport, its list cut at whole names")
+{
+	// Every field at its longest, and as many plugins as the limit allows, each with a name past the longest.
+	Protocol::Hello hello;
+	hello.contentHash = 0xFFFFFFFF;
+	hello.name = std::string(Protocol::MAX_NAME_LENGTH + 10, 'n');
+	hello.password = std::string(Protocol::MAX_PASSWORD_LENGTH + 10, 'p');
+	hello.identity = ~std::uint64_t{ 0 };
+	hello.plugins = std::vector<std::string>(Protocol::MAX_PLUGINS, std::string(Protocol::MAX_PLUGIN_NAME_LENGTH + 10, 'x'));
+	CHECK(!Protocol::PluginsFit(hello.plugins));
+
+	const auto packet = Protocol::Encode(hello);
+	CHECK(packet.size() <= Protocol::MAX_HELLO_SIZE);
+	CHECK(packet.size() <= Protocol::MAX_MESSAGE_SIZE);
+	// The list fills its bytes to within one name.
+	CHECK(packet.size() + Protocol::PluginNameBytes(hello.plugins[0]) > Protocol::MAX_HELLO_SIZE);
+
+	const auto back = Protocol::DecodeHello(packet);
+	REQUIRE(back);
+	CHECK(back->plugins.size() == Protocol::PluginsCarried(hello.plugins));
+	CHECK(back->plugins.size() < Protocol::MAX_PLUGINS);
+	CHECK(std::ranges::all_of(back->plugins, [](const std::string& a_name) { return a_name.size() == Protocol::MAX_PLUGIN_NAME_LENGTH; }));
+}
+
+TEST("protocol: a plugin list past its bytes is not read, even with fewer names than the limit")
+{
+	const std::string longest(Protocol::MAX_PLUGIN_NAME_LENGTH, 'x');
+	const auto        fits = Protocol::PluginsCarried(std::vector<std::string>(Protocol::MAX_PLUGINS, longest));
+	REQUIRE(fits < Protocol::MAX_PLUGINS);
+	CHECK(Protocol::DecodeHello(HandWrittenHello(fits, std::vector<std::string>(fits, longest))).has_value());
+	CHECK(!Protocol::DecodeHello(HandWrittenHello(fits + 1, std::vector<std::string>(fits + 1, longest))).has_value());
 }
 
 TEST("protocol: a plugin's name longer than a file name may be is not read")

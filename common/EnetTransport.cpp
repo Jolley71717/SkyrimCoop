@@ -10,6 +10,7 @@ namespace
 {
 	// Bigger packets than any message we send are an attack or a bug.
 	constexpr std::size_t MAX_PACKET_SIZE = 1024 * 1024;
+	static_assert(MAX_PACKET_SIZE >= Protocol::MAX_MESSAGE_SIZE, "every message the protocol allows, the biggest hello included, is let in");
 }
 
 std::unique_ptr<EnetServerTransport> EnetServerTransport::Create(std::uint16_t a_port, std::size_t a_maxPeers, bool a_loopbackOnly, std::string& a_error)

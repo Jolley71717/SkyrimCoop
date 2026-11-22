@@ -27,15 +27,27 @@ namespace Protocol
 	// Raise it with every change to what goes over the wire or how it is read: two games of different versions refuse
 	// each other at the hello, with a reason that says so.
 	// 2: a player's looks (PlayerLooks, RemoteLooks), for the stand-in the others show of them.
-	inline constexpr std::uint16_t VERSION = 2;
+	// 3: a hello carries a whole Skyrim load order (MAX_PLUGINS names, in at most MAX_PLUGIN_LIST_BYTES), not 512 names.
+	inline constexpr std::uint16_t VERSION = 3;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
 	inline constexpr std::size_t MAX_REASON_LENGTH = 200;
-	// A load order on the wire (a hello's): at most this many names, the light plugins' mark among them, each of at most
-	// this many bytes (a file name on Windows is at most 260 characters).
-	inline constexpr std::size_t MAX_PLUGINS = 512;
+	// A load order on the wire (a hello's): at most MAX_PLUGINS names, the light plugins' mark among them. Skyrim numbers
+	// 254 full plugins (form IDs 00 to FD) and 4096 light ones (FE 000 to FFF), the game's own masters and the Creation
+	// Club's files among them, so the longest load order a game can have is 254 + the mark + 4096 = 4351 names
+	// (FormIds.h checks it); 4352 is that with one to spare. Each name is at most MAX_PLUGIN_NAME_LENGTH bytes (a file
+	// name on Windows is at most 260 characters).
+	inline constexpr std::size_t MAX_PLUGINS = 4352;
 	inline constexpr std::size_t MAX_PLUGIN_NAME_LENGTH = 260;
+	// The most bytes one message may be: Steam's limit for one message (k_cbMaxSteamNetworkingSocketsMessageSizeSend),
+	// the smaller of the two transports' (the ENet hosts take up to 1 MB). Bigger ones are never sent.
+	inline constexpr std::size_t MAX_MESSAGE_SIZE = 512 * 1024;
+	// The most bytes a plugin list takes on the wire (its count, and each name's length and bytes), so that a hello fits
+	// in one message: 4351 names of 260 bytes would not (about 1.1 MB). 480 KB holds a whole load order of names that
+	// average up to 110 bytes; real plugin names are a few tens. A longer list is cut at a whole name (WritePlugins),
+	// and a game checks PluginsFit before it joins, to say why rather than send a cut list.
+	inline constexpr std::size_t MAX_PLUGIN_LIST_BYTES = 480 * 1024;
 	inline constexpr std::size_t MAX_PASSWORD_LENGTH = 64;
 	// The most players a server takes, whatever it is asked for.
 	inline constexpr std::size_t MAX_PLAYERS = 8;
@@ -149,7 +161,8 @@ namespace Protocol
 		// ID, so their own changes to the world are still known as theirs. 0 = none.
 		std::uint64_t identity = 0;
 		// The load order (plugin file names, in order: ComparedLoadOrder), so a refusal can say which plugins differ.
-		// At most MAX_PLUGINS.
+		// At most MAX_PLUGINS names in MAX_PLUGIN_LIST_BYTES (WritePlugins leaves the rest off); contentHash is over the
+		// whole list all the same.
 		std::vector<std::string> plugins;
 
 		bool operator==(const Hello&) const = default;
@@ -398,18 +411,47 @@ namespace Protocol
 		return state;
 	}
 
-	// A list of plugins: a U16 count (at most a_max; past it the rest are left off), then each name (LongStr, at most
-	// MAX_PLUGIN_NAME_LENGTH bytes).
+	// The bytes one name of a plugin list takes on the wire: its U16 length and its bytes, cut at MAX_PLUGIN_NAME_LENGTH.
+	[[nodiscard]] inline std::size_t PluginNameBytes(std::string_view a_name)
+	{
+		return sizeof(std::uint16_t) + Utf8Prefix(a_name, MAX_PLUGIN_NAME_LENGTH).size();
+	}
+
+	// How many of a_plugins, from the first, a plugin list carries: at most a_max names in at most MAX_PLUGIN_LIST_BYTES.
+	[[nodiscard]] inline std::size_t PluginsCarried(const std::vector<std::string>& a_plugins, std::size_t a_max = MAX_PLUGINS)
+	{
+		std::size_t bytes = sizeof(std::uint16_t);
+		std::size_t count = 0;
+		for (; count < a_plugins.size() && count < a_max; ++count) {
+			bytes += PluginNameBytes(a_plugins[count]);
+			if (bytes > MAX_PLUGIN_LIST_BYTES) {
+				break;
+			}
+		}
+		return count;
+	}
+
+	// The list goes on the wire whole and as it is: no name left off, none cut short. A game checks it before it joins
+	// and says why it can't, rather than send a list the host would compare cut.
+	[[nodiscard]] inline bool PluginsFit(const std::vector<std::string>& a_plugins, std::size_t a_max = MAX_PLUGINS)
+	{
+		return PluginsCarried(a_plugins, a_max) == a_plugins.size() &&
+		       std::ranges::all_of(a_plugins, [](const std::string& a_name) { return a_name.size() <= MAX_PLUGIN_NAME_LENGTH; });
+	}
+
+	// A list of plugins: a U16 count, then each name (LongStr, at most MAX_PLUGIN_NAME_LENGTH bytes). At most a_max names
+	// and MAX_PLUGIN_LIST_BYTES in all (PluginsCarried); past either the rest are left off, whole names only.
 	inline void WritePlugins(Writer& a_writer, const std::vector<std::string>& a_plugins, std::size_t a_max = MAX_PLUGINS)
 	{
-		const auto count = (std::min)(a_plugins.size(), a_max);
+		const auto count = PluginsCarried(a_plugins, a_max);
 		a_writer.U16(static_cast<std::uint16_t>(count));
 		for (std::size_t i = 0; i < count; ++i) {
 			a_writer.LongStr(a_plugins[i], MAX_PLUGIN_NAME_LENGTH);
 		}
 	}
 
-	// None for more than a_max names or a name too long (the reader has failed then).
+	// None for more than a_max names, a name too long or a list past MAX_PLUGIN_LIST_BYTES (the reader has failed then,
+	// or it is no list WritePlugins writes).
 	inline std::optional<std::vector<std::string>> ReadPlugins(Reader& a_reader, std::size_t a_max = MAX_PLUGINS)
 	{
 		const auto count = a_reader.U16();
@@ -418,10 +460,12 @@ namespace Protocol
 		}
 		std::vector<std::string> plugins;
 		plugins.reserve(count);
+		std::size_t bytes = sizeof(std::uint16_t);
 		for (std::uint16_t i = 0; i < count && a_reader.Ok(); ++i) {
 			plugins.push_back(a_reader.LongStr(MAX_PLUGIN_NAME_LENGTH));
+			bytes += PluginNameBytes(plugins.back());
 		}
-		if (!a_reader.Ok()) {
+		if (!a_reader.Ok() || bytes > MAX_PLUGIN_LIST_BYTES) {
 			return std::nullopt;
 		}
 		return plugins;
@@ -439,6 +483,13 @@ namespace Protocol
 		WritePlugins(w, a_msg.plugins);
 		return w.Data();
 	}
+
+	// The most bytes Encode(Hello) writes: the fields before the list at their longest, then the longest list. The tests
+	// encode that hello too, so a field added above without a change here is caught.
+	inline constexpr std::size_t MAX_HELLO_SIZE = sizeof(std::uint8_t) + sizeof(std::uint32_t) + sizeof(std::uint16_t) + sizeof(std::uint32_t) +
+	                                              (1 + MAX_NAME_LENGTH) + (1 + MAX_PASSWORD_LENGTH) + sizeof(std::uint64_t) + MAX_PLUGIN_LIST_BYTES;
+	static_assert(MAX_HELLO_SIZE <= MAX_MESSAGE_SIZE, "a hello goes in one message on every transport");
+	static_assert(MAX_PLUGINS <= 0xFFFF, "a plugin list's count is a U16");
 
 	// A hello of another version (or with another magic) is read up to its version only: the rest may be laid out
 	// otherwise, and the server needs no more to say the versions differ.
@@ -694,6 +745,16 @@ namespace Protocol
 	[[nodiscard]] inline bool SamePluginName(std::string_view a_a, std::string_view a_b)
 	{
 		return std::ranges::equal(a_a, a_b, [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+	}
+
+	// A plugin's name as SamePluginName compares it, for looking names up rather than searching a list for them.
+	[[nodiscard]] inline std::string LowerPluginName(std::string_view a_name)
+	{
+		std::string out(a_name);
+		for (auto& c : out) {
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		}
+		return out;
 	}
 
 	// A game's load order as its hello carries it: the full plugins, LIGHT_PLUGINS, the light ones.

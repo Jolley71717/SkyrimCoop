@@ -222,6 +222,34 @@ TEST("server: another load order is refused, naming the plugin the host lacks, o
 	CHECK(f.Refused(4, bare) == "Your mods differ from the host's.");
 }
 
+TEST("server: a whole Skyrim load order is let in, and one that differs from it at its end is refused by name")
+{
+	std::vector<std::string> full;
+	for (int i = 0; i < 254; ++i) {
+		full.push_back(std::format("Full{:03}.esp", i));
+	}
+	std::vector<std::string> light;
+	for (int i = 0; i < 4096; ++i) {
+		light.push_back(std::format("Light{:04}.esl", i));
+	}
+	Fixture f;
+	auto    host = Fixture::MakeHello("Host");
+	host.plugins = Protocol::ComparedLoadOrder(full, light);
+	host.contentHash = Protocol::LoadOrderHash(host.plugins);
+	REQUIRE(f.Join(1, host));
+
+	auto same = Fixture::MakeHello("Same");
+	same.plugins = host.plugins;
+	same.contentHash = host.contentHash;
+	CHECK(f.Join(2, same).has_value());
+
+	light.back() = "Other.esl";
+	auto other = Fixture::MakeHello("Other");
+	other.plugins = Protocol::ComparedLoadOrder(full, light);
+	other.contentHash = Protocol::LoadOrderHash(other.plugins);
+	CHECK(f.Refused(3, other) == "Your mods differ from the host's: you don't have Light4095.esl.");
+}
+
 TEST("server: the same load order with names in another case is let in")
 {
 	Fixture f;

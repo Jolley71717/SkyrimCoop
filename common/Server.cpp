@@ -11,6 +11,7 @@
 #include <optional>
 #include <random>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace
@@ -43,22 +44,30 @@ namespace
 	};
 
 	// What a refusal says about two load orders that differ: the first plugin one side has and the other lacks.
-	// a_session and a_joiner are laid out as hellos carry them (Protocol::ComparedLoadOrder).
+	// a_session and a_joiner are laid out as hellos carry them (Protocol::ComparedLoadOrder). Names are looked up, not
+	// searched for: each list may hold thousands (Protocol::MAX_PLUGINS), and any game that connects can send one.
 	std::string LoadOrderDifference(const std::vector<std::string>& a_session, const std::vector<std::string>& a_joiner)
 	{
-		const auto has = [](const std::vector<std::string>& a_list, const std::string& a_name) {
-			return std::ranges::any_of(a_list, [&](const std::string& a_other) { return Protocol::SamePluginName(a_other, a_name); });
-		};
 		if (a_session.empty() || a_joiner.empty()) {
 			return {};
 		}
+		const auto names = [](const std::vector<std::string>& a_list) {
+			std::unordered_set<std::string> out;
+			out.reserve(a_list.size());
+			for (const auto& name : a_list) {
+				out.insert(Protocol::LowerPluginName(name));
+			}
+			return out;
+		};
+		const auto session = names(a_session);
+		const auto joiner = names(a_joiner);
 		for (const auto& name : a_session) {
-			if (name != Protocol::LIGHT_PLUGINS && !has(a_joiner, name)) {
+			if (name != Protocol::LIGHT_PLUGINS && !joiner.contains(Protocol::LowerPluginName(name))) {
 				return std::format("you don't have {}", name);
 			}
 		}
 		for (const auto& name : a_joiner) {
-			if (name != Protocol::LIGHT_PLUGINS && !has(a_session, name)) {
+			if (name != Protocol::LIGHT_PLUGINS && !session.contains(Protocol::LowerPluginName(name))) {
 				return std::format("the host doesn't have {}", name);
 			}
 		}
