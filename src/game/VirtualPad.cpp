@@ -41,10 +41,12 @@ namespace VirtualPad
 		using GetCapabilitiesFn = unsigned long (*)(unsigned long, unsigned long, XCapabilities*);
 		using SetStateFn = unsigned long (*)(unsigned long, XVibration*);
 
-		GetStateFn        realGetState = nullptr;
-		GetStateFn        realGetStateEx = nullptr;
-		GetCapabilitiesFn realGetCapabilities = nullptr;
-		SetStateFn        realSetState = nullptr;
+		// The game's own functions, stored before its import slot is pointed at the hook (release) and read by the hook
+		// on whatever thread the game polls from (acquire).
+		std::atomic<GetStateFn>        realGetState{ nullptr };
+		std::atomic<GetStateFn>        realGetStateEx{ nullptr };
+		std::atomic<GetCapabilitiesFn> realGetCapabilities{ nullptr };
+		std::atomic<SetStateFn>        realSetState{ nullptr };
 		std::string       hooked;  // what Install patched, for the status
 
 		std::mutex                 lock;  // the pad's state: set on the main thread, read wherever the game polls
@@ -73,8 +75,8 @@ namespace VirtualPad
 			return a_real ? a_real(a_index, a_state) : NOT_CONNECTED;
 		}
 
-		unsigned long GetStateHook(unsigned long a_index, XState* a_state) { return Answer(a_index, a_state, realGetState); }
-		unsigned long GetStateExHook(unsigned long a_index, XState* a_state) { return Answer(a_index, a_state, realGetStateEx); }
+		unsigned long GetStateHook(unsigned long a_index, XState* a_state) { return Answer(a_index, a_state, realGetState.load(std::memory_order_acquire)); }
+		unsigned long GetStateExHook(unsigned long a_index, XState* a_state) { return Answer(a_index, a_state, realGetStateEx.load(std::memory_order_acquire)); }
 
 		unsigned long GetCapabilitiesHook(unsigned long a_index, unsigned long a_flags, XCapabilities* a_caps)
 		{
@@ -87,7 +89,8 @@ namespace VirtualPad
 				a_caps->vibration = { 0xFFFF, 0xFFFF };
 				return OK;
 			}
-			return realGetCapabilities ? realGetCapabilities(a_index, a_flags, a_caps) : NOT_CONNECTED;
+			const auto real = realGetCapabilities.load(std::memory_order_acquire);
+			return real ? real(a_index, a_flags, a_caps) : NOT_CONNECTED;
 		}
 
 		unsigned long SetStateHook(unsigned long a_index, XVibration* a_vibration)
@@ -95,7 +98,8 @@ namespace VirtualPad
 			if (a_index == PAD_INDEX && plugged.load()) {
 				return OK;  // the rumble goes nowhere
 			}
-			return realSetState ? realSetState(a_index, a_vibration) : NOT_CONNECTED;
+			const auto real = realSetState.load(std::memory_order_acquire);
+			return real ? real(a_index, a_vibration) : NOT_CONNECTED;
 		}
 
 		struct ImportDescriptor  // IMAGE_IMPORT_DESCRIPTOR
@@ -146,19 +150,19 @@ namespace VirtualPad
 					std::uintptr_t         hook = 0;
 					std::string_view       what;
 					if (ordinal == 2 || name == "XInputGetState") {
-						realGetState = reinterpret_cast<GetStateFn>(current);
+						realGetState.store(reinterpret_cast<GetStateFn>(current), std::memory_order_release);
 						hook = reinterpret_cast<std::uintptr_t>(&GetStateHook);
 						what = "GetState";
 					} else if (ordinal == 100) {
-						realGetStateEx = reinterpret_cast<GetStateFn>(current);
+						realGetStateEx.store(reinterpret_cast<GetStateFn>(current), std::memory_order_release);
 						hook = reinterpret_cast<std::uintptr_t>(&GetStateExHook);
 						what = "GetStateEx";
 					} else if (ordinal == 4 || name == "XInputGetCapabilities") {
-						realGetCapabilities = reinterpret_cast<GetCapabilitiesFn>(current);
+						realGetCapabilities.store(reinterpret_cast<GetCapabilitiesFn>(current), std::memory_order_release);
 						hook = reinterpret_cast<std::uintptr_t>(&GetCapabilitiesHook);
 						what = "GetCapabilities";
 					} else if (ordinal == 3 || name == "XInputSetState") {
-						realSetState = reinterpret_cast<SetStateFn>(current);
+						realSetState.store(reinterpret_cast<SetStateFn>(current), std::memory_order_release);
 						hook = reinterpret_cast<std::uintptr_t>(&SetStateHook);
 						what = "SetState";
 					}
@@ -262,6 +266,11 @@ namespace VirtualPad
 		if (!Config::Get().devChannel) {
 			return;
 		}
+		static bool done = false;  // once, at plugin load: a second patch would take our hook for the game's function
+		if (done) {
+			return;
+		}
+		done = true;
 		PatchImports();
 	}
 

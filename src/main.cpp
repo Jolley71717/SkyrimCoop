@@ -278,8 +278,6 @@ SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 
 	Platform::LogStartup();
 	Config::Load();
-	DevChannel::Start();
-	VirtualPad::Install();  // developer channel only; before the game makes its gamepad
 
 	const auto messaging = SKSE::GetMessagingInterface();
 	if (!messaging || !messaging->RegisterListener(OnSKSEMessage)) {
@@ -295,6 +293,10 @@ SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 	} else {
 		logs::warn("SKSE: no co-save interface; nothing of the mod will be kept in saves");
 	}
+
+	// Last, once nothing can fail the load: a plugin that is not loaded leaves no listener thread and no patched import.
+	DevChannel::Start();
+	VirtualPad::Install();  // developer channel only; before the game makes its gamepad
 
 	return true;
 }
