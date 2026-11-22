@@ -66,8 +66,11 @@ namespace
 	}
 }
 
+// Every line goes through Redact::Scrub. The lines name players by number and mask addresses already, but a
+// transport's description or a plugin's name (a host can name one after a SteamID64) is not the server's to vouch
+// for, and the dedicated server prints its lines as they come.
 Server::Server(LogFn a_log) :
-	log(std::move(a_log))
+	log([a_log = std::move(a_log)](std::string_view a_line) { a_log(Redact::Scrub(a_line)); })
 {}
 
 Server::~Server()
