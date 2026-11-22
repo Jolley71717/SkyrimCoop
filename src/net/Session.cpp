@@ -44,6 +44,10 @@ namespace Session
 		Clock::time_point                 nextLooks{};
 		Clock::time_point                 nextBeat{};
 		Clock::time_point                 joinedAt{};
+		// The looks last sent on this connection. The contract with the server: a game sends its looks after every
+		// welcome (a new connection starts with none on the server, so Reset and the welcome clear this), and again
+		// whenever they change. What comes the other way is another player's game's word: RemotePlayers takes a race
+		// only as the race of a load-order preset and a worn id only as a TESObjectARMO.
 		std::optional<Protocol::PlayerLooks> sentLooks;
 		std::unordered_map<std::uint32_t, Clock::time_point> beats;  // heartbeat token -> when it went
 		std::uint32_t                     beatToken = 0;

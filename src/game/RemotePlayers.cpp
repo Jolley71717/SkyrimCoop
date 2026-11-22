@@ -344,6 +344,8 @@ namespace RemotePlayers
 		std::scoped_lock l{ lock };
 		auto& remote = players[a_playerId];
 		remote.name = std::string{ a_name };
+		// A player who joins again starts their state count over: what the buffer held would turn every new one away.
+		remote.buffer = {};
 		logs::info("Players: player {} joined ({} here now)", a_playerId, players.size());
 	}
 
