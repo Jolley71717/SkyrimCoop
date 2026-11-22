@@ -1,10 +1,7 @@
 #pragma once
 
 // The plugins this game has loaded, in order: what a joining game tells the host so that both play the same world
-// (Protocol::ComparedLoadOrder, Protocol::LoadOrderHash).
-//
-// NOT WRITTEN YET (docs/PORTING.md, "The load order"): the answer is empty lists until the reading of the game's
-// loaded files is written and checked in a game.
+// (Protocol::ComparedLoadOrder, Protocol::LoadOrderHash). Read from the game's compiled file lists (TESDataHandler).
 namespace LoadOrder
 {
 	struct Plugins

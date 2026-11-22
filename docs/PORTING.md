@@ -70,7 +70,7 @@ Nothing here has been run in a game. The "Skyrim equivalent" entries name classe
 | `NetClient.h/.cpp` | 102 | as is | |
 | `Identity.h/.cpp` | 72 | as is | The random number that lets a returning player keep their id. |
 | `NameChoice.h` | 71 | as is | Which name a player shows. |
-| `Session.h/.cpp`, `SessionSteps.h` | 2,269 | with changes, phase 1 | The plugin's session: host or join, each frame's send and receive, what happens on a drop. Its skeleton carries; its body calls every game system and is rebuilt as those arrive. |
+| `Session.h/.cpp`, `SessionSteps.h` | 2,269 | written new, part | The plugin's session: host or join, each frame's send and receive, what happens on a drop. `src/net/Session` is a small new one on the same shape (host: the server in the game, Steam for friends, UDP on this machine for the host's own connection; friend: a Steam connection to the lobby's owner; states 20 a second, looks when they change, heartbeats). Reconnects, the menu and what F4Multiplayer's `SessionSteps.h` orders come later. The lobby on Steam's launch command line is read by `src/net/LaunchArgs.h` (new, unit-tested). |
 | `ModDiff.h` | 439 | with changes, later | Tells a refused player which mods differ, in words. Game-free; bring with the menu. |
 | `PlayerHitRules.h`, `Refusals.h` | 119 | with changes, phase 3 | Rules for hits between players and refused actions. |
 
@@ -94,15 +94,19 @@ The four parts the plugin's start-up already calls are stubs with an interface:
 
 ### The load order
 
-`src/game/LoadOrder`. F4Multiplayer reads the data handler's compiled file lists (full and light plugins). Skyrim's `TESDataHandler` has the same two lists (`compiledFileCollection.files` and `.smallFiles`) and they are filled when SKSE sends `kDataLoaded`. Small, phase 0.
+`src/game/LoadOrder`. F4Multiplayer reads the data handler's compiled file lists (full and light plugins). Skyrim's `TESDataHandler` has the same two lists (`compiledFileCollection.files` and `.smallFiles`) and they are filled when SKSE sends `kDataLoaded`. Written: it reads them through CommonLibSSE-NG's `GetLoadedMods` and `GetLoadedLightMods`.
 
 ### The local player
 
-`src/game/LocalPlayer`. Where the player is and what they are doing, once a frame: `PlayerCharacter::GetSingleton()`, its position and angle, parent cell and worldspace, and the actor state (sneaking, sprinting, weapon drawn, swimming, mounted). The player's name comes from the player's base form. Phase 2; small.
+`src/game/LocalPlayer`. Where the player is and what they are doing, once a frame: `PlayerCharacter::GetSingleton()`, its position and angle, parent cell and worldspace, and the actor state (sneaking, sprinting, weapon drawn, swimming, mounted). Written: the speed and direction are the player's graph's own (`Speed`, `Direction`), with the ground covered when the graph has none; its looks are race, sex, weight and the armor worn.
 
 ### The other players
 
 `src/game/RemotePlayers` (F4Multiplayer: `RemotePlayers`, `Puppets`, the `StandIn*` headers, `StateBuffer`, the gait and prediction headers, `Equipment`, `Face*`, `Body*`, `Looks*`: about 16,000 lines). The stand-in actor for each other player: made, dressed, moved, animated, and kept out of the AI's and the guards' way. The largest single piece of phase 2 and the one with the most engine work. To find in Skyrim: creating an actor from a copy of the player's base (`TESNPC`: race, sex, head parts, tints, weight), placing it (`PlaceObjectAtMe`), moving it without the AI fighting back (the character controller, or packages), driving its animation graph (`NotifyAnimationGraph`, graph variables), equipping it (`ActorEquipManager`), and making factions and crime ignore it. `StateBuffer.h` (smoothing between received states) and the prediction headers are game-free and carry: `src/game/Prediction.h` is carried as is and `src/game/StateBuffer.h` cut down (the sender's clock, a fixed delay, no blend across a door, a short carry-on past the newest state unless it says they stopped), both from F4Multiplayer commit a7bddd24b, with their tests.
+
+The first stand-in is written ([DESIGN.md](DESIGN.md), "Players"): the idea of F4Multiplayer's `Puppets` (the Character class's actor update hooked, a stand-in placed and run with the no-AI update, its graph driven), written new for Skyrim. Its base is a character-creation preset of the friend's race and sex, not a copy of their base; `src/game/Gait.h` (new, unit-tested) says which of the graph's events start and stop its movement. The save guard ([DESIGN.md](DESIGN.md), "Nothing of the session in a save") is new: F4Multiplayer's `SaveGuard` drops records from the engine's change map, which CommonLibSSE-NG does not lay out.
+
+The rig's virtual gamepad, `src/game/VirtualPad.cpp`, is carried from F4Multiplayer commit a7bddd24b without its muting of the desktop's keyboard and mouse; `src/game/PadPlan.h` is carried as is. `src/game/Console` runs console commands for the rig's `console` command.
 
 ### The rest, by system
 

@@ -9,15 +9,17 @@
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
 #include "game/RemotePlayers.h"
+#include "game/VirtualPad.h"
+#include "net/Session.h"
 #include "steam/Steam.h"
 #include "steam/SteamProbe.h"
 
 // The plugin's entry: SKSE loads the DLL and calls SKSEPlugin_Load once, on the game's main thread, before the game's
 // data is read.
 //
-// What is here is the start-up only: the log, the settings, the game version check and the SKSE messages. What the
-// mod does in the game (reading the player, showing the other players, the session itself) is behind the interfaces
-// in src/game and not written yet; docs/PORTING.md says what each needs.
+// What is here is the start-up (the log, the settings, the game version check), the SKSE messages and the co-save, and
+// the tick that runs the rest: the session (net/Session.h), the stand-ins of the other players (game/RemotePlayers.h)
+// and the developer channel.
 
 namespace
 {
@@ -61,6 +63,8 @@ namespace
 			SteamProbe::Frame();
 			DevCommands::Frame();
 		}
+		Session::Frame();
+		VirtualPad::Frame();
 		DevChannel::Frame();
 	}
 
@@ -95,6 +99,7 @@ namespace
 		} else {
 			logs::info("Steam: left alone (bSteam = false)");
 		}
+		RemotePlayers::Install();
 		GameThread::Install(OnFrame);
 	}
 
@@ -119,19 +124,23 @@ namespace
 		case SKSE::MessagingInterface::kPreLoadGame:
 			// Which save is loaded: the line a report of "an old save" is read by.
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
-			RemotePlayers::Clear();  // the load takes the world they stand in
+			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 			// data is not a pointer here: it is whether the load worked.
 			logs::info("Load: {}", a_msg->data ? "done" : "failed");
+			RemotePlayers::AfterLoad();  // any stand-in the save brought back goes
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
+			RemotePlayers::ForgetStandIns();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:
+			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
+			RemotePlayers::BeforeSave();
 			break;
 		case SKSE::MessagingInterface::kDeleteGame:
 			logs::debug("Save: \"{}\" was deleted", MessageText(a_msg));
@@ -141,21 +150,30 @@ namespace
 		}
 	}
 
-	// The co-save: nothing of ours is kept in a save yet. The callbacks are registered so the first record has a
-	// place to go, and so a load into another save is seen (Revert).
-	void OnSave(SKSE::SerializationInterface*)
+	// The co-save: the only record is the list of stand-ins taken out of the world for the save (RemotePlayers), so a
+	// load can remove any that the save brought back. Nothing else of a session is kept.
+	void OnSave(SKSE::SerializationInterface* a_intf)
 	{
-		logs::debug("Co-save: nothing to write");
+		RemotePlayers::WriteCoSave(a_intf);
 	}
 
-	void OnLoad(SKSE::SerializationInterface*)
+	void OnLoad(SKSE::SerializationInterface* a_intf)
 	{
-		logs::debug("Co-save: nothing to read");
+		std::uint32_t type = 0;
+		std::uint32_t version = 0;
+		std::uint32_t length = 0;
+		while (a_intf->GetNextRecordInfo(type, version, length)) {
+			if (type == RemotePlayers::COSAVE_STANDINS) {
+				RemotePlayers::ReadCoSave(a_intf, version, length);
+			} else {
+				logs::warn("Co-save: a record of a type this version does not know ({:08X}); skipped", type);
+			}
+		}
 	}
 
 	void OnRevert(SKSE::SerializationInterface*)
 	{
-		RemotePlayers::Clear();
+		RemotePlayers::ForgetStandIns();
 	}
 
 	// False when the plugin must not load into this game.
@@ -219,6 +237,7 @@ SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 	Platform::LogStartup();
 	Config::Load();
 	DevChannel::Start();
+	VirtualPad::Install();  // developer channel only; before the game makes its gamepad
 
 	const auto messaging = SKSE::GetMessagingInterface();
 	if (!messaging || !messaging->RegisterListener(OnSKSEMessage)) {

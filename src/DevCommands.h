@@ -2,8 +2,9 @@
 
 // The developer channel's commands (DevChannel.h). Every handler runs on the game's main thread, from the tick.
 //
-// The first test's commands only: F4Multiplayer's src/DevCommands.cpp has about a hundred, nearly all about Fallout 4's
-// systems; the names kept here are its names (`status`, `steam join <id>`), so the rig's habits carry.
+// The rig's commands: the first test's (status, steam, probe) and the session's (session, where, standins, strays, graph,
+// pad, walkto, console). F4Multiplayer's src/DevCommands.cpp has about a hundred, nearly all about Fallout 4's systems;
+// the names kept here are its names (`status`, `steam join <id>`, `pad`, `walkto`), so the rig's habits carry.
 namespace DevCommands
 {
 	using Handler = std::string (*)(std::string_view a_args);
