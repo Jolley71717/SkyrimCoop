@@ -2,7 +2,7 @@
 
 // The repository's own files, for the tests that guard them (every language file has every key, no player text is a
 // literal in the plugin's code): those rules are on code that only runs in the game, so they are checked where it is
-// written. Carried over from F4Multiplayer's tests/SourceTree.h.
+// written (and what the game's log may say). Carried over from F4Multiplayer's tests/SourceTree.h.
 
 #include <filesystem>
 #include <fstream>
@@ -36,7 +36,7 @@ namespace SourceTree
 		for (auto at : starts) {
 			for (;; at = at.parent_path()) {
 				std::error_code error;
-				if (std::filesystem::exists(at / "src" / "TextEnglish.h", error) && std::filesystem::exists(at / "common" / "Server.cpp", error)) {
+				if (std::filesystem::exists(at / "src" / "Log.h", error) && std::filesystem::exists(at / "common" / "Server.cpp", error)) {
 					return at;
 				}
 				if (at == at.parent_path()) {
