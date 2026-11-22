@@ -2,6 +2,7 @@
 
 #include "DevLine.h"
 #include "game/Gait.h"
+#include "game/GaitDrive.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
 #include "game/Retire.h"
@@ -128,15 +129,84 @@ namespace RemotePlayers
 		// Where the graph's events are sent from: the stand-in's own update (the hook, by default) or the tick (dev
 		// `graph from tick`, a probe for why the graph turns moveStart away).
 		std::atomic<bool> eventsFromTick{ false };
-		// The graph's Speed and Direction set, and those it turned away (a probe, as the events' counts).
-		std::atomic<std::uint64_t> varsSet{ 0 };
-		std::atomic<std::uint64_t> varsRefused{ 0 };
 
-		void SetGait(RE::Actor* a_actor, const Gait::Step& a_step)
+		// ---- the graph's Speed and Direction (GaitDrive.h) ----
+		// The engine gives an actor's graph its Speed and Direction itself, each time the graph updates, through one
+		// channel object per variable: BSTAnimationGraphDataChannel<Actor, float, ActorSpeedChannel>, whose poll (slot 1
+		// of its vtable) reads the movement speed in the actor's process (AIProcess middle-high +2A8) over the actor's
+		// scale, and <..., ActorDirectionChannel>, the movement direction (+B8) as a fraction of a turn. Every
+		// high-process actor's movement job (the process lists' movement jobs, then Actor's movement update) sets both
+		// each frame from the actor's movement controller's desired movement, which is none for an actor whose AI never
+		// runs: whatever was set on a stand-in's graph read 0 again at its next update, and its legs stood still while it
+		// slid along. So each poll is hooked: after the engine's, a stand-in's channel holds its friend's value, which
+		// the graph then reads. Nothing else of the actor changes: its movement controller still moves it by nothing.
+		//
+		// A channel: its vtable at 0, the variable's name at 10, the value the graph is given at 18, the channel's own
+		// data at 20 (ActorSpeedChannel: the last raw speed and the scale), the actor at 28 (Skyrim SE 1.7.104).
+		constexpr std::size_t CHANNEL_POLL_INDEX = 1;
+		constexpr std::size_t CHANNEL_VALUE = 0x18;
+		constexpr std::size_t CHANNEL_ACTOR = 0x28;
+		using PollFn = void (*)(void*, bool);
+		PollFn originalSpeedPoll = nullptr;
+		PollFn originalDirectionPoll = nullptr;
+
+		GaitDrive::Table<const RE::Actor*> drive;
+		// The channel values given to stand-ins' graphs (dev `standins`: driven=).
+		std::atomic<std::uint64_t> speedsDriven{ 0 };
+		std::atomic<std::uint64_t> directionsDriven{ 0 };
+
+		// The values to give a channel's actor, if it is a stand-in this game moves. The polls run as graphs update, on
+		// the game's job threads: only the table's own lock is taken (GaitDrive.h), never the players' one.
+		std::optional<GaitDrive::Values> DrivenFor(void* a_channel)
 		{
-			const bool speed = a_actor->SetGraphVariableFloat(Name("Speed"), a_step.speed);
-			const bool direction = a_actor->SetGraphVariableFloat(Name("Direction"), a_step.direction);
-			(speed && direction ? varsSet : varsRefused).fetch_add(1, std::memory_order_relaxed);
+			if (watched.load(std::memory_order_relaxed) == 0) {
+				return std::nullopt;
+			}
+			const auto actor = *reinterpret_cast<RE::Actor* const*>(static_cast<std::byte*>(a_channel) + CHANNEL_ACTOR);
+			return actor ? drive.Get(actor, actor->GetFormID(), Clock::now()) : std::nullopt;
+		}
+
+		float& ChannelValue(void* a_channel)
+		{
+			return *reinterpret_cast<float*>(static_cast<std::byte*>(a_channel) + CHANNEL_VALUE);
+		}
+
+		void SpeedPoll(void* a_channel, bool a_flag)
+		{
+			originalSpeedPoll(a_channel, a_flag);
+			if (const auto values = DrivenFor(a_channel)) {
+				ChannelValue(a_channel) = values->speed;
+				speedsDriven.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
+		void DirectionPoll(void* a_channel, bool a_flag)
+		{
+			originalDirectionPoll(a_channel, a_flag);
+			if (const auto values = DrivenFor(a_channel)) {
+				ChannelValue(a_channel) = values->direction;
+				directionsDriven.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
+		// Puts a_hook in a vtable's slot when the function there is the game's own: in its image, not another plugin's
+		// hook (whose own original we would call twice) or junk. a_original holds the function the slot held before the
+		// slot changes (a job thread may call the hook at once); false: not hooked, a_original left as it was.
+		template <class Fn>
+		bool HookSlot(std::uintptr_t a_vtable, std::size_t a_index, Fn a_hook, Fn& a_original, std::string_view a_what)
+		{
+			const auto slot = a_vtable + sizeof(void*) * a_index;
+			const auto current = *reinterpret_cast<const std::uintptr_t*>(slot);
+			const auto image = reinterpret_cast<std::uintptr_t>(REX::W32::GetModuleHandleW(nullptr));
+			MEMORY_BASIC_INFORMATION info{};
+			if (!::VirtualQuery(reinterpret_cast<void*>(current), &info, sizeof(info)) || reinterpret_cast<std::uintptr_t>(info.AllocationBase) != image) {
+				logs::error("Players: the {} slot holds {:#x}, outside the game's image: not hooked", a_what, current);
+				return false;
+			}
+			a_original = reinterpret_cast<Fn>(current);
+			REL::safe_write(slot, reinterpret_cast<std::uintptr_t>(a_hook));
+			logs::info("Players: hooked the {} (game+{:X})", a_what, current - image);
+			return true;
 		}
 
 		// Sends a step's events to a stand-in's graph and keeps the count of those taken and turned away. One turned away
@@ -224,13 +294,11 @@ namespace RemotePlayers
 				a_this->SetPosition({ sample->state.x, sample->state.y, sample->state.z }, true);
 				a_this->SetHeading(sample->state.heading);
 				SetMoveFlags(a_this, step, sample->state);
+				// What its graph's Speed and Direction channels give it from now on (SpeedPoll, DirectionPoll).
+				drive.Set(a_this, a_this->GetFormID(), { step.speed, step.direction }, Clock::now());
 			}
 			a_this->UpdateNoAI(a_delta);
-			if (!sample) {
-				return;
-			}
-			if (eventsHere) {
-				SetGait(a_this, step);
+			if (sample && eventsHere) {
 				TellGraph(a_this, playerId, step, was);
 			}
 		}
@@ -355,6 +423,7 @@ namespace RemotePlayers
 			const auto actor = a_remote.standIn.get();
 			const bool same = actor && actor->GetFormID() == a_remote.standInId;
 			if (same) {
+				drive.Erase(actor.get());
 				SendOut(actor.get(), a_remote.placedAt);
 				logs::info("Players: player {}'s stand-in {:08X} taken away ({})", a_id, a_remote.standInId, a_why);
 			}
@@ -489,20 +558,19 @@ namespace RemotePlayers
 	{
 		REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_Character[0] };
 		characterVtable = vtable.address();
-		const auto slot = characterVtable + sizeof(void*) * UPDATE_INDEX;
-		const auto current = *reinterpret_cast<const std::uintptr_t*>(slot);
-		const auto image = reinterpret_cast<std::uintptr_t>(REX::W32::GetModuleHandleW(nullptr));
-		// The function in the slot must be the game's own: in its image, not some other plugin's hook (whose own original
-		// we would call twice) or junk.
-		MEMORY_BASIC_INFORMATION info{};
-		if (!::VirtualQuery(reinterpret_cast<void*>(current), &info, sizeof(info)) || reinterpret_cast<std::uintptr_t>(info.AllocationBase) != image) {
-			logs::error("Players: the Character update slot holds {:#x}, outside the game's image: not hooked, no stand-ins", current);
+		if (!HookSlot<UpdateFn>(characterVtable, UPDATE_INDEX, &UpdateHook, originalUpdate, "Character update")) {
+			logs::error("Players: without the Character update hook no stand-in is placed");
 			return false;
 		}
-		originalUpdate = reinterpret_cast<UpdateFn>(current);
-		REL::safe_write(slot, reinterpret_cast<std::uintptr_t>(&UpdateHook));
 		hooked = true;
-		logs::info("Players: hooked the Character update (game+{:X})", current - image);
+		// Without these, stand-ins are placed and moved as before; their legs stand still.
+		REL::Relocation<std::uintptr_t> speedChannel{ RE::VTABLE_BSTAnimationGraphDataChannel_Actor_float_ActorSpeedChannel_[0] };
+		REL::Relocation<std::uintptr_t> directionChannel{ RE::VTABLE_BSTAnimationGraphDataChannel_Actor_float_ActorDirectionChannel_[0] };
+		const bool speed = HookSlot<PollFn>(speedChannel.address(), CHANNEL_POLL_INDEX, &SpeedPoll, originalSpeedPoll, "graph's Speed channel");
+		const bool direction = speed && HookSlot<PollFn>(directionChannel.address(), CHANNEL_POLL_INDEX, &DirectionPoll, originalDirectionPoll, "graph's Direction channel");
+		if (!direction) {
+			logs::warn("Players: the graph's {} channel is not ours: stand-ins' legs won't follow their friends'", speed ? "Direction" : "Speed");
+		}
 		return true;
 	}
 
@@ -598,7 +666,6 @@ namespace RemotePlayers
 					step = Gait::Next(was, sample->state, sample->held);
 					remote.shown = step.shown;
 				}
-				SetGait(actor.get(), step);
 				TellGraph(actor.get(), id, step, was);
 			}
 		}
@@ -610,6 +677,7 @@ namespace RemotePlayers
 			TakeAway(id, remote, "the session ended");
 		}
 		// The graveyard goes on (TendGraveyard, each tick, session or not).
+		drive.Clear();
 		std::scoped_lock l{ lock };
 		players.clear();
 		byActor.clear();
@@ -623,6 +691,7 @@ namespace RemotePlayers
 
 	void ForgetStandIns()
 	{
+		drive.Clear();
 		std::scoped_lock l{ lock };
 		for (auto& [id, remote] : players) {
 			remote.standIn = {};
@@ -737,8 +806,8 @@ namespace RemotePlayers
 			disabled += grave.disabledAt && !grave.deleted ? 1 : 0;
 			deleted += grave.deleted ? 1 : 0;
 		}
-		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) graphVars set={} refused={} from={}", players.size(), standIns.load(),
-			graveyard.size(), disabled, deleted, varsSet.load(), varsRefused.load(), eventsFromTick ? "tick" : "hook");
+		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) driven speed={} direction={} channels={} from={}", players.size(),
+			standIns.load(), graveyard.size(), disabled, deleted, speedsDriven.load(), directionsDriven.load(), drive.Size(), eventsFromTick ? "tick" : "hook");
 		const auto  here = LocalPlayer::Read();
 		std::scoped_lock l{ lock };
 		for (const auto& [id, remote] : players) {
@@ -748,13 +817,18 @@ namespace RemotePlayers
 				const auto p = actor->GetPosition();
 				at = std::format("({:.0f},{:.0f},{:.0f}) heading={:.3f}", p.x, p.y, p.z, actor->GetAngleZ());
 			}
-			float      speed = -1.0f;
-			const bool hasSpeed = actor && actor->GetGraphVariableFloat(Name("Speed"), speed);
+			// What its graph reads now: Speed and Direction (the channels' values, its friend's while it is driven) and the
+			// SpeedSampled its graph made of them (what its legs cycle at).
+			const auto graphFloat = [&](std::string_view a_name, std::string_view a_format) -> std::string {
+				float v = 0.0f;
+				return actor && actor->GetGraphVariableFloat(Name(a_name), v) ? std::vformat(a_format, std::make_format_args(v)) : std::string{ "none" };
+			};
 			const auto& newest = remote.buffer.snapshots.empty() ? std::optional<Protocol::PlayerState>{} : std::optional{ remote.buffer.snapshots.back().state };
-			out += std::format(" | player {} standin={:08X} placed={} dressed={} at={} target={} graphSpeed={} shown={}{}{}{} drawn={} refused={}{} taken={} states={} newest={} dist={}",
+			out += std::format(" | player {} standin={:08X} placed={} dressed={} at={} target={} graphSpeed={} graphDir={} graphSampled={} shown={}{}{}{} drawn={} refused={}{} taken={} states={} newest={} dist={}",
 				id, remote.standInId, remote.placed, remote.dressed ? 1 : 0, at,
-				remote.hasDrawn ? std::format("({:.0f},{:.0f},{:.0f}) speed={:.0f} flags={:#04x}", remote.lastDrawn.x, remote.lastDrawn.y, remote.lastDrawn.z, remote.lastDrawn.speed, remote.lastDrawn.flags) : "none",
-				hasSpeed ? std::format("{:.0f}", speed) : "none", remote.shown.moving ? "m" : "-", remote.shown.sneaking ? "s" : "-", remote.shown.sprinting ? "r" : "-",
+				remote.hasDrawn ? std::format("({:.0f},{:.0f},{:.0f}) speed={:.0f} dir={:.3f} flags={:#04x}", remote.lastDrawn.x, remote.lastDrawn.y, remote.lastDrawn.z, remote.lastDrawn.speed,
+					Protocol::UnpackDirection(remote.lastDrawn.direction), remote.lastDrawn.flags) : "none",
+				graphFloat("Speed", "{:.0f}"), graphFloat("Direction", "{:.3f}"), graphFloat("SpeedSampled", "{:.0f}"), remote.shown.moving ? "m" : "-", remote.shown.sneaking ? "s" : "-", remote.shown.sprinting ? "r" : "-",
 				remote.shown.inAir ? "j" : "-", remote.drawn, remote.refusedEvents, remote.lastRefused.empty() ? "" : " last=" + remote.lastRefused, remote.takenEvents,
 				remote.buffer.snapshots.size(),
 				newest ? std::format("({:.0f},{:.0f},{:.0f}) in {:08X}", newest->x, newest->y, newest->z, newest->cell ? newest->cell : newest->worldspace) : "none",

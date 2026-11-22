@@ -7,9 +7,10 @@
 #include <vector>
 
 // What a stand-in's animation graph is told so its legs do what its friend's do: the graph's own variables (Speed,
-// Direction) each frame, and its events when the friend starts or stops moving, sneaking, sprinting or jumping. The
-// names are those of Skyrim's character behavior graph as the game's own movement sends them; whether each is taken is
-// logged on the rig (RemotePlayers' `graph` probe). No game here, so it is unit-tested.
+// Direction) each frame, given to it through the engine's own channels for them (GaitDrive.h), and its events when the
+// friend starts or stops moving, sneaking, sprinting or jumping. The names are those of Skyrim's character behavior
+// graph as the game's own movement sends them; whether each is taken is logged on the rig (RemotePlayers' `graph`
+// probe). No game here, so it is unit-tested.
 namespace Gait
 {
 	// Below this many units a second a friend stands: the graph is told to stop.

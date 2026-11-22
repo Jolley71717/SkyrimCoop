@@ -13,7 +13,8 @@ namespace SKSE
 // A stand-in is a plain NPC of the friend's race and sex, wearing the armor they wear, named as they are. Its base is
 // one of the game's own character-creation presets (an NPC of the load order, never a form made at run time), and the
 // game never runs its AI: the actor update of every Character goes through our hook, which for a stand-in places it
-// where its friend is (StateBuffer), turns it, runs the engine's no-AI update and drives its animation graph (Gait).
+// where its friend is (StateBuffer), turns it, runs the engine's no-AI update and drives its animation graph (Gait; the
+// graph's Speed and Direction through the engine's own channels for them, GaitDrive).
 //
 // A stand-in is never saved (docs/DESIGN.md, "Nothing of the session in a save"): every one is taken out of the world
 // before the game writes a save (BeforeSave, from SKSE's kSaveGame: disabled then, deleted a second later, never both in
