@@ -759,6 +759,20 @@ namespace RemotePlayers
 				remote.buffer.snapshots.size(),
 				newest ? std::format("({:.0f},{:.0f},{:.0f}) in {:08X}", newest->x, newest->y, newest->z, newest->cell ? newest->cell : newest->worldspace) : "none",
 				here && newest ? std::format("{:.0f}", SameSpace(*here, *newest) ? Distance(*here, *newest) : -1.0f) : "?");
+			// Whose name the stand-in shows (never the name itself: friend = its player's, base = its preset's own),
+			// and whether this game's crosshair is on it (the rig's activation check).
+			std::string_view named = "none";
+			bool             aimed = false;
+			if (actor) {
+				const auto shown = actor->GetDisplayFullName();
+				const auto baseName = remote.base ? remote.base->GetName() : nullptr;
+				const std::string_view text = shown ? shown : "";
+				named = text.empty() ? "empty" : (!remote.name.empty() && text == remote.name) ? "friend" : (baseName && text == baseName) ? "base" : "other";
+				if (const auto pick = RE::CrosshairPickData::GetSingleton()) {
+					aimed = pick->GetActiveTarget().get().get() == actor.get();
+				}
+			}
+			out += std::format(" named={} aimed={}", named, aimed ? 1 : 0);
 		}
 		return out;
 	}
