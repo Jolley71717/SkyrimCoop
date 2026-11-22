@@ -21,6 +21,8 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+# checked here as start.ps1 checks it: the cell goes into the VM's remote command line unquoted
+[ -z "$cell" ] || [[ $cell =~ ^[A-Za-z0-9_]+$ ]] || { echo "--cell takes a cell's editor id (letters, digits and _ only)"; exit 2; }
 rig_guard || exit 1
 lock_keepalive
 

@@ -99,7 +99,7 @@ no_fallout() {
 # rig_guard: 0 when $STAGE/rig.lock is held by $SKYRIMCOOP_RIG_OWNER (taken with rigq.sh take <that name>). The owner is
 # never read from the lock to fill the variable: a caller that never took the rig must not be handed a name to use.
 rig_guard() {
-	[ "$SKYRIMCOOP_SKIP_LOCK_CHECK" = 1 ] && return 0
+	[ "${SKYRIMCOOP_SKIP_LOCK_CHECK:-}" = 1 ] && return 0  # :- because the scripts run with set -u
 	local owner; owner=$(head -1 "$STAGE/rig.lock/owner" 2>/dev/null | cut -d' ' -f1)
 	if [ -z "$owner" ]; then say "refusing: nobody holds the rig. Take it: bash $STAGE/rigq.sh take <name>; then run with SKYRIMCOOP_RIG_OWNER=<name>"; return 1; fi
 	if [ "$owner" != "${SKYRIMCOOP_RIG_OWNER:-}" ]; then say "refusing: the rig is held by someone else (or SKYRIMCOOP_RIG_OWNER is not the name you took it with)"; return 1; fi

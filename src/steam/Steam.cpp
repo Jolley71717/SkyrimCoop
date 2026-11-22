@@ -791,6 +791,11 @@ namespace Steam
 		return Available() ? api->GetRelayNetworkStatus(api->utils, nullptr) : 0;
 	}
 
+	int CallbacksSeen()
+	{
+		return callbacksSeen.load();
+	}
+
 	std::string JoinUrl()
 	{
 		if (!LobbyOpen()) {

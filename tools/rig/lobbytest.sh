@@ -30,7 +30,10 @@ run=$CHECKS/skyrim-lobby-$(date +%Y%m%d-%H%M%S); mkdir -p "$run" || exit 1
 exec > >(tee "$run/run.log") 2>&1
 declare -A verdict
 pass() { verdict[$1]="PASS point $1: $2"; say "PASS point $1: $2"; }
-fail() { verdict[$1]="FAIL point $1: $2"; say "FAIL point $1: $2"; }
+# Each FAIL ends with the Steam callbacks each game has seen: the plugin leaves running them to the game, so 0 means the
+# game never ran them (the plugin must), not that Steam didn't answer. "?" = that game's dev channel gave no status.
+callbacks() { local h v; h=$(field callbacks "$(host status)"); v=$(field callbacks "$(vm status)"); echo "callbacks host=${h:-?} vm=${v:-?}"; }
+fail() { verdict[$1]="FAIL point $1: $2 ($(callbacks))"; say "${verdict[$1]}"; }
 # wait_for <seconds> <command...>: until the command succeeds, every second
 wait_for() { local t=$1 i; shift; for i in $(seq 1 "$t"); do "$@" && return 0; sleep 1; [ $((i % 30)) = 0 ] && lock_keepalive; done; return 1; }
 # logline <host|vm> <pattern>: the last line of that game's plugin log matching the pattern (logs are read where they are)
@@ -97,9 +100,15 @@ else
 	[[ $url =~ ^steam://joinlobby/$APP_ID/$lobby/[0-9]+$ ]] || { fail 3 "the host gave no join address"; finish; }
 	vm "steam expectjoin" >/dev/null
 	say "vm: giving its Steam client the lobby's steam://joinlobby address"
-	vmssh "& $VM_RUN -Name \"SkyrimCoop-Join-\$(Get-Date -Format HHmmss)\" -Exe 'C:\Program Files (x86)\Steam\steam.exe' -Arguments '$url'" | grep -q started \
-		|| { url=""; fail 3 "could not start the VM's Steam with the join address"; finish; }
+	task=SkyrimCoop-Join-$(date +%H%M%S)
+	started=$(vmssh "& $VM_RUN -Name '$task' -Exe 'C:\Program Files (x86)\Steam\steam.exe' -Arguments '$url'")
 	url=""
+	# The task's action holds the address, and with it the host's Steam id: it goes once the steam.exe it started has
+	# handed the address to the running Steam and quit. One still running after 30 s is left alone (unregistering it could
+	# stop that steam.exe) and named, for whoever frees the rig.
+	gone=$(vmssh "\$n = '$task'; for (\$i = 0; \$i -lt 30 -and (Get-ScheduledTask -TaskName \$n -ErrorAction SilentlyContinue).State -eq 'Running'; \$i++) { Start-Sleep 1 }; if ((Get-ScheduledTask -TaskName \$n -ErrorAction SilentlyContinue).State -ne 'Running') { Unregister-ScheduledTask -TaskName \$n -Confirm:\$false -ErrorAction SilentlyContinue }; if (Get-ScheduledTask -TaskName \$n -ErrorAction SilentlyContinue) { 'kept' } else { 'gone' }")
+	[ "$gone" = gone ] && say "vm: the join task is removed" || say "WARN: the VM's scheduled task $task is still there (it names the host's Steam id): Unregister-ScheduledTask -TaskName $task on the VM"
+	grep -q started <<<"$started" || { fail 3 "could not start the VM's Steam with the join address"; finish; }
 fi
 both_in() { local h v; h=$(host status); v=$(vm status); [ "$(field lobby "$v")" = "$lobby" ] && [ "$(field members "$v")" = 2 ] && [ "$(field members "$h")" = 2 ]; }
 if wait_for 90 both_in; then
