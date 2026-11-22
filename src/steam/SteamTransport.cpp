@@ -1,5 +1,6 @@
 #include "steam/SteamTransport.h"
 
+#include "Protocol.h"
 #include "Redact.h"
 
 namespace SteamTransport
@@ -15,7 +16,7 @@ namespace SteamTransport
 		constexpr auto TIMEOUT = 20s;
 		constexpr auto CONNECT_TIMEOUT = 30s;    // includes waiting for the host to accept
 		constexpr auto CLOSE_DELAY = 2s;         // lets queued messages (a rejection) arrive before closing
-		constexpr std::size_t MAX_MESSAGE_SIZE = 512 * 1024;  // Steam's limit for one message
+		constexpr std::size_t MAX_MESSAGE_SIZE = Protocol::MAX_MESSAGE_SIZE;  // Steam's limit for one message
 		constexpr int BATCH = 64;
 
 		bool SendTo(const SteamApi::Api* a_api, SteamApi::SteamId a_to, int a_channel, std::span<const std::uint8_t> a_data, bool a_reliable)

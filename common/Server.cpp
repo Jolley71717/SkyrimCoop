@@ -12,6 +12,7 @@
 #include <optional>
 #include <random>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace
@@ -46,6 +47,8 @@ namespace
 	// The refusal of a joiner whose load order differs from the session's: the first plugin one side has and the
 	// other lacks, as the English the server sends (a reject.* key, filled in) and as the log says it. a_session and
 	// a_joiner are laid out as hellos carry them (Protocol::ComparedLoadOrder); either empty says only that they differ.
+	// Names are looked up, not searched for: each list may hold thousands (Protocol::MAX_PLUGINS), and any game that
+	// connects can send one.
 	struct LoadOrderRefusal
 	{
 		std::string reason;
@@ -54,20 +57,27 @@ namespace
 
 	LoadOrderRefusal LoadOrderDifference(const std::vector<std::string>& a_session, const std::vector<std::string>& a_joiner)
 	{
-		const auto has = [](const std::vector<std::string>& a_list, const std::string& a_name) {
-			return std::ranges::any_of(a_list, [&](const std::string& a_other) { return Protocol::SamePluginName(a_other, a_name); });
-		};
 		if (a_session.empty() || a_joiner.empty()) {
 			return { Text::GetEnglish("reject.mods"), "another load order" };
 		}
+		const auto names = [](const std::vector<std::string>& a_list) {
+			std::unordered_set<std::string> out;
+			out.reserve(a_list.size());
+			for (const auto& name : a_list) {
+				out.insert(Protocol::LowerPluginName(name));
+			}
+			return out;
+		};
+		const auto session = names(a_session);
+		const auto joiner = names(a_joiner);
 		for (const auto& name : a_session) {
-			if (name != Protocol::LIGHT_PLUGINS && !has(a_joiner, name)) {
+			if (name != Protocol::LIGHT_PLUGINS && !joiner.contains(Protocol::LowerPluginName(name))) {
 				return { Text::FormatEnglish("reject.mods_missing", { { "plugin", name } }),
 					std::format("another load order (you don't have {})", Redact::OneLine(name)) };
 			}
 		}
 		for (const auto& name : a_joiner) {
-			if (name != Protocol::LIGHT_PLUGINS && !has(a_session, name)) {
+			if (name != Protocol::LIGHT_PLUGINS && !session.contains(Protocol::LowerPluginName(name))) {
 				return { Text::FormatEnglish("reject.mods_extra", { { "plugin", name } }),
 					std::format("another load order (the host doesn't have {})", Redact::OneLine(name)) };
 			}

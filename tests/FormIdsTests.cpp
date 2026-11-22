@@ -158,3 +158,60 @@ TEST("form ids: the table stops growing where places or the wire's list run out"
 	CHECK(table.size() < Protocol::MAX_PLUGINS);
 	CHECK(Table::Of(table).Size() + 1 == table.size());
 }
+
+TEST("form ids: a whole ESL-heavy load order, 254 full plugins and 4096 light ones, makes a table that goes in a hello")
+{
+	Names full;
+	for (int i = 0; i < 254; ++i) {
+		full.push_back(std::format("Full{:03}.esp", i));
+	}
+	Names light;
+	for (int i = 0; i < 4096; ++i) {
+		light.push_back(std::format("Light{:04}.esl", i));
+	}
+	Names table;
+	CHECK(Extend(table, Order(full, light)) == 254 + 4096);
+	CHECK(table == Order(full, light));
+	CHECK(table.size() <= Protocol::MAX_PLUGINS);
+	CHECK(Protocol::PluginsFit(table));
+
+	// No more places: another light plugin is left out.
+	CHECK(Extend(table, Order({}, { "OneMore.esl" })) == 0);
+	CHECK(!Table::Of(table).Find("OneMore.esl"));
+
+	// The last light place and the last full one translate both ways, by name in any case.
+	Names reversed(light.rbegin(), light.rend());
+	for (auto& name : reversed) {
+		std::ranges::transform(name, name.begin(), [](char a_c) { return static_cast<char>(std::toupper(static_cast<unsigned char>(a_c))); });
+	}
+	const Mapper m(Order(full, reversed), table);
+	CHECK(!m.Identity());
+	CHECK(m.OursOnly() == 0);
+	CHECK(m.SessionsOnly() == 0);
+	CHECK(m.ToSession(0xFE000123) == 0xFEFFF123u);  // LIGHT4095: our light 0, the session's light FFF
+	CHECK(m.ToLocal(0xFEFFF123) == 0xFE000123u);
+	CHECK(m.ToSession(0xFD001234) == 0xFD001234u);
+	CHECK(m.SessionPlugin(0xFEFFF001) == "Light4095.esl");
+}
+
+TEST("form ids: the table stops growing where its list would pass a hello's bytes")
+{
+	const auto named = [](std::string a_name) {
+		a_name.insert(0, Protocol::MAX_PLUGIN_NAME_LENGTH - a_name.size(), 'x');
+		return a_name;
+	};
+	Names light;
+	for (int i = 0; i < 4096; ++i) {
+		light.push_back(named(std::format("{:04}.esl", i)));
+	}
+	Names table;
+	const auto added = Extend(table, Order({}, light));
+	CHECK(added > 0);
+	CHECK(added < light.size());
+	CHECK(Protocol::PluginsFit(table));
+	CHECK(Protocol::PluginsCarried(table) == table.size());
+	// One more name of that length and it would not.
+	auto more = table;
+	more.push_back(light[added]);
+	CHECK(!Protocol::PluginsFit(more));
+}

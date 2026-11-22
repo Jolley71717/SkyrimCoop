@@ -111,6 +111,10 @@ and a virtual machine, each with its own Steam account that owns the game) is me
   not at the end of the task.
 - Mark an item as taken the moment work on it starts, and move its stage as the work moves (looked into, PR,
   reviewed, rig-tested, merged, rc, shipped). The maintainer follows the work there.
+- Then sync the public status site (GitHub Pages, the `gh-pages` branch) from the tracker, with the maintainer's
+  publish script, which lives beside the tracker outside this repository; nobody edits `gh-pages` by hand. It shows
+  players each item's public title and stage only: no tracker ids, no names, no file paths, no internals. An item
+  appears there once it has a public title; give new player-facing items one. Tooling and rig items stay off it.
 - The tracker is private. Its ids, its name and its data never appear in commits, PRs, docs, release notes or
   comments.
 - An agent that can't reach the tracker (a cloud session) lists the new bugs in its PR or hand-off so they get filed.

@@ -111,7 +111,7 @@ Choices made to keep moving. Each is the obvious option, cheap to change now, an
 | CommonLibSSE-NG's "patch safety" option is off (it would pull in one more dependency to guard writes to game memory), since the plugin patches nothing yet. | Turn it on with the first hook, after reading that dependency's license. |
 | The protocol and the server are a small first version (join, leave, player state, heartbeat), not the sister project's whole protocol. | Carry more of it at once. Most of the rest describes Fallout 4's systems. |
 | The first player in the session sets the load order. | Only ever the host. |
-| Up to 512 plugin names in a hello. | Raise it: a Skyrim load order can hold a few thousand light plugins. |
+| Up to 4352 plugin names in a hello (the longest load order, 254 full plugins and 4096 light ones, with one to spare) in at most 480 KB, so a hello is one Steam message (512 KB at most). That holds names of up to 110 bytes on average; a longer list is cut at a whole name, and `Protocol::PluginsFit` lets a game tell its player before it joins. | Send a longer list in parts, if real load orders ever need it. |
 | Up to 8 players by protocol, 4 by default; port 7780; ini and log named SkyrimCoop. | Other numbers. |
 | On GitHub, the Windows build runs only for the owner's branch pushes and by hand; pull requests get the Linux unit tests. No coverage report yet. | Build the plugin for every pull request once the repository is public and minutes are free. |
 | The Nexus upload workflow is present but switched off: it refuses to run until the mod has a Nexus page and its ids are filled in. | Remove it until then. |

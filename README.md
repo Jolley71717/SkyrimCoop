@@ -11,9 +11,22 @@ SkyrimCoop will be a co-op mod for The Elder Scrolls V: Skyrim Special Edition o
 
 ## Where it is today
 
-The project is at its very start. What exists is the foundation: an SKSE plugin that loads into the game and writes a log, the network and session code carried over from F4Multiplayer, a dedicated server, and their unit tests. It has not been run in a game yet, and it does not connect two games.
+The project is at its very start. What exists is the foundation: an SKSE plugin that loads into the game and writes a log, the network and session code carried over from F4Multiplayer, a dedicated server, and their unit tests. In a game it has gone as far as two games finding each other through a Steam lobby; players can't see each other yet.
 
 [docs/PLAN.md](docs/PLAN.md) lists the phases in order, from "the plugin loads" to shared quests, and what each one has to prove before the next begins. There are no dates.
+
+## Tracker
+
+Every planned feature and known bug, and how far along each one is. Click the picture for the full tracker, with a page for each item.
+
+<a href="https://jolley71717.github.io/SkyrimCoop/">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://jolley71717.github.io/SkyrimCoop/tracker-dark.svg">
+    <img alt="Progress: how many items are at each step from queued to shipped" src="https://jolley71717.github.io/SkyrimCoop/tracker-light.svg" width="840">
+  </picture>
+</a>
+
+Found a bug or have an idea? Use the [bug form](https://github.com/Jolley71717/SkyrimCoop/issues/new/choose) on GitHub.
 
 ## For the curious
 
