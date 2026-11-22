@@ -35,7 +35,9 @@ void NetClient::Run(std::string a_address, std::uint16_t a_defaultPort)
 		fail("could not create connection");
 		return;
 	}
-	host->maximumPacketSize = 1024 * 1024;
+	constexpr std::size_t MAX_PACKET_SIZE = 1024 * 1024;
+	static_assert(MAX_PACKET_SIZE >= Protocol::MAX_MESSAGE_SIZE, "every message the protocol allows is let in");
+	host->maximumPacketSize = MAX_PACKET_SIZE;
 	enet_peer_timeout(peer, 0, 10000, 20000);
 
 	bool connected = false;

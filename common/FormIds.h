@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 // Form IDs across load orders (protocol 36). A form ID's top byte is its plugin's place among the full plugins of the
@@ -26,6 +27,8 @@ namespace FormIds
 	// Places a form ID can name: full plugins 00 to FD (FE and FF mean light and runtime), light ones 000 to FFF.
 	inline constexpr std::size_t MAX_FULL = 0xFE;
 	inline constexpr std::size_t MAX_LIGHT = 0x1000;
+	// The longest load order a game can have, the light plugins' mark between the kinds, goes in a hello.
+	static_assert(MAX_FULL + 1 + MAX_LIGHT <= Protocol::MAX_PLUGINS, "a whole load order fits a hello's plugin list");
 	// The part of a form ID its plugin numbers: 24 bits for a full plugin's, 12 for a light one's.
 	inline constexpr std::uint32_t FULL_LOCAL = 0x00FFFFFF;
 	inline constexpr std::uint32_t LIGHT_LOCAL = 0x00000FFF;
@@ -80,6 +83,7 @@ namespace FormIds
 	// twice) counts where it first is; past the places a form ID can name, the rest has none.
 	struct Table
 	{
+		// Read them; Add changes them, so the index below stays right.
 		std::vector<std::string> full;
 		std::vector<std::string> light;
 
@@ -90,14 +94,22 @@ namespace FormIds
 			for (const auto& name : a_order) {
 				if (name == Protocol::LIGHT_PLUGINS) {
 					light = true;
-				} else if (!name.empty() && !out.Find(name)) {
-					auto& kind = light ? out.light : out.full;
-					if (kind.size() < (light ? MAX_LIGHT : MAX_FULL)) {
-						kind.push_back(name);
-					}
+				} else if (!name.empty() && (light ? out.light.size() < MAX_LIGHT : out.full.size() < MAX_FULL)) {
+					out.Add(name, light);
 				}
 			}
 			return out;
+		}
+
+		// Puts a plugin after the rest of its kind; false (nothing changed) when the table has it already.
+		bool Add(const std::string& a_name, bool a_light)
+		{
+			auto&      kind = a_light ? light : full;
+			const auto [_, added] = index.try_emplace(Protocol::LowerPluginName(a_name), Place{ a_light, static_cast<std::uint16_t>(kind.size()) });
+			if (added) {
+				kind.push_back(a_name);
+			}
+			return added;
 		}
 
 		// Back to the hello layout.
@@ -113,19 +125,11 @@ namespace FormIds
 		[[nodiscard]] std::size_t Size() const { return full.size() + light.size(); }
 
 		// A plugin's place, by name in any case.
+		// Looked up, not searched: a load order holds thousands of light plugins, and every name of another is looked up.
 		[[nodiscard]] std::optional<Place> Find(std::string_view a_name) const
 		{
-			for (std::size_t i = 0; i < full.size(); ++i) {
-				if (Protocol::SamePluginName(full[i], a_name)) {
-					return Place{ false, static_cast<std::uint16_t>(i) };
-				}
-			}
-			for (std::size_t i = 0; i < light.size(); ++i) {
-				if (Protocol::SamePluginName(light[i], a_name)) {
-					return Place{ true, static_cast<std::uint16_t>(i) };
-				}
-			}
-			return std::nullopt;
+			const auto found = index.find(Protocol::LowerPluginName(a_name));
+			return found != index.end() ? std::optional{ found->second } : std::nullopt;
 		}
 
 		// The plugin at a place, or nothing.
@@ -143,6 +147,9 @@ namespace FormIds
 			};
 			return same(full, a_other.full) && same(light, a_other.light);
 		}
+
+	private:
+		std::unordered_map<std::string, Place> index;  // each plugin's place, by its name in lower case
 	};
 
 	// One game's form IDs and the session's, both ways. Without both tables (the session's not come yet, or a peer that
@@ -235,23 +242,31 @@ namespace FormIds
 	};
 
 	// Adds the plugins of a_order (a hello's list) that a session's table (the same layout) lacks, each after the rest
-	// of its kind, so the IDs the table gave before stay what they were. As far as places last (MAX_FULL, MAX_LIGHT, and
-	// Protocol::MAX_PLUGINS names in all, the mark included). How many were added.
+	// of its kind, so the IDs the table gave before stay what they were. As far as places last (MAX_FULL, MAX_LIGHT) and
+	// the table still goes whole in a plugin list (Protocol::PluginsFit: MAX_PLUGINS names, the mark included, in
+	// MAX_PLUGIN_LIST_BYTES). How many were added.
 	inline std::size_t Extend(std::vector<std::string>& a_table, const std::vector<std::string>& a_order)
 	{
 		auto       table = Table::Of(a_table);
 		const auto theirs = Table::Of(a_order);
 		std::size_t added = 0;
-		const auto  add = [&](const std::vector<std::string>& a_names, std::vector<std::string>& a_kind, std::size_t a_max) {
+		std::size_t bytes = sizeof(std::uint16_t);  // the table's list on the wire, the mark included
+		for (const auto& name : table.Order()) {
+			bytes += Protocol::PluginNameBytes(name);
+		}
+		const auto add = [&](const std::vector<std::string>& a_names, bool a_light) {
+			const auto max = a_light ? MAX_LIGHT : MAX_FULL;
 			for (const auto& name : a_names) {
-				if (!table.Find(name) && a_kind.size() < a_max && table.Size() + 2 < Protocol::MAX_PLUGINS) {
-					a_kind.push_back(name);
+				const auto size = Protocol::PluginNameBytes(name);
+				if ((a_light ? table.light : table.full).size() < max && table.Size() + 2 <= Protocol::MAX_PLUGINS &&
+					bytes + size <= Protocol::MAX_PLUGIN_LIST_BYTES && table.Add(name, a_light)) {
+					bytes += size;
 					++added;
 				}
 			}
 		};
-		add(theirs.full, table.full, MAX_FULL);
-		add(theirs.light, table.light, MAX_LIGHT);
+		add(theirs.full, false);
+		add(theirs.light, true);
 		if (added != 0 || a_table.empty() != table.Empty()) {
 			a_table = table.Order();
 		}
