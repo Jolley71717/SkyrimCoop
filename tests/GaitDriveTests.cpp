@@ -18,7 +18,8 @@ TEST("gait drive: a stand-in's values are read back for it, and only for it")
 	table.Set(1, 0xFF000801, { 320.0f, 0.25f }, T0);
 	const auto got = table.Get(1, 0xFF000801, T0 + 10ms);
 	CHECK(got.has_value());
-	CHECK(got == GaitDrive::Values{ 320.0f, 0.25f });
+	const GaitDrive::Values want{ 320.0f, 0.25f };
+	CHECK(got == want);
 	// Another actor: nothing set for it, so the engine's own values stand.
 	CHECK(!table.Get(2, 0xFF000802, T0).has_value());
 }
@@ -38,7 +39,8 @@ TEST("gait drive: values its update stopped writing go back to the engine's afte
 	CHECK(!table.Get(1, 0xFF000801, T0 + GaitDrive::FRESH + 1ms).has_value());
 	// Written again: read again.
 	table.Set(1, 0xFF000801, { 0.0f, 0.5f }, T0 + 2s);
-	CHECK(table.Get(1, 0xFF000801, T0 + 2s) == GaitDrive::Values{ 0.0f, 0.5f });
+	const GaitDrive::Values stopped{ 0.0f, 0.5f };
+	CHECK(table.Get(1, 0xFF000801, T0 + 2s) == stopped);
 }
 
 TEST("gait drive: a stand-in taken away, or all of them, leave nothing behind")
