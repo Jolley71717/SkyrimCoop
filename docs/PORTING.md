@@ -145,7 +145,6 @@ Not carried yet:
 
 - The simulations (`tests/sim/`): game-free stand-ins for a game, for testing whole exchanges without one. They return when there is a session to simulate.
 - The tests of each rule book in `src/game`: each comes with its book.
-- The coverage report on pull requests (`tools/coverage.sh` and its workflow steps).
 
 ## The menu (`ui/`)
 
@@ -164,7 +163,8 @@ F4Multiplayer's menu is Flash, built from ActionScript 3 source by an open-sourc
 | `tools/rig/`, `tools/soak.ps1`, `tools/botsoak.ps1`, `tools/stress.ps1`, `tools/testloop.sh`, `tools/menustress.sh` | redo, from phase 1 | The gate's checks and the soak. The framework (take the lock, back up, run, read both logs, restore, verdict) carries; every check is about a Fallout 4 scene and is written again for Skyrim. |
 | `tools/rig/env.sh` | with changes | Carried from F4Multiplayer commit 5b535694c (with `guard.sh`, `backup.sh` and `dcfast.sh` of the same commit as models): the same rig, rig folder and lock; Skyrim's paths, process, ports and file names. The first test's scripts beside it (`install`, `firststart`, `start`, `lobbytest`, `fetchlogs`) are new. Not yet run. |
 | `tools/questscan.*`, `tools/rewardscan.ps1`, `tools/menumodescan.ps1`, `tools/rollprobes.ps1` | redo, phase 5 | Scans of Fallout 4's data files for the quest audit. Skyrim's plugin format is close; the questions differ. |
-| `tools/coverage.sh`, `tools/mutate.sh` | with changes, later | Coverage and mutation testing of the game-free code. |
+| `tools/coverage.sh` | with changes | Carried from F4Multiplayer commit a50f56028: line coverage of `common/` and `src/` by `SkyrimCoopTests`. It builds the server and the bot too (not measured), so CI still checks they build on Linux. |
+| `tools/mutate.sh` | with changes, later | Mutation testing of the game-free code. |
 | `tools/flash/`, `tools/svg-to-as.lua`, `tools/xwin.lua`, `tools/crossovermac.sh` | not carried | The ActionScript 3 toolchain, and building and running on a Mac. |
 
 ## Workflows and repository files
@@ -172,7 +172,7 @@ F4Multiplayer's menu is Flash, built from ActionScript 3 source by an open-sourc
 | In F4Multiplayer | Status | Notes |
 | --- | --- | --- |
 | `.github/workflows/build.yml` | with changes | Windows build and tests for the owner's branch pushes and by hand. |
-| `.github/workflows/tests.yml` | with changes | Linux build and tests of the game-free targets for every pull request; no coverage comment yet. |
+| `.github/workflows/tests.yml` | with changes | Carried from F4Multiplayer commit a50f56028 (with its `gate`, `tests` and `comment` jobs): the Linux build of the game-free targets with line coverage, the tests, the coverage in the run's summary and a comment on the pull request kept up to date against main. Kept from before: the check that CommonLibSSE-NG is not pinned to a release tag. |
 | `.github/workflows/review-label.yml`, `vet-label.yml` | as is | |
 | `.github/workflows/vet.yml`, `.github/scripts/vet.py` | with changes | Names and the submodule. |
 | `.github/workflows/package.yml` | with changes | |
