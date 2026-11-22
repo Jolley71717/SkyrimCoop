@@ -73,6 +73,22 @@ namespace Steam
 
 	[[nodiscard]] std::string Describe();
 
+	// For the first test in a game (FirstTest.h, the developer channel). Not in F4Multiplayer's Steam.h.
+	[[nodiscard]] bool              Hosting();
+	[[nodiscard]] SteamApi::SteamId Lobby();         // the lobby we're in (ours when hosting); 0 with none
+	[[nodiscard]] int               LobbyMembers();  // in it, this game included; 0 with no lobby
+	// The other player of a two-player test: the lobby's owner when we joined, the first other member when we host.
+	// 0 with none.
+	[[nodiscard]] SteamApi::SteamId OtherPlayer();
+	// Whether this account is logged on to Steam's servers: "yes", "no", or "unknown" (Steam not set up yet, or the
+	// library lacks the call).
+	[[nodiscard]] std::string_view LoggedOn();
+	[[nodiscard]] std::uint32_t    AppId();        // the app id Steam runs the game as; 0 when not known
+	[[nodiscard]] int              RelayStatus();  // ESteamNetworkingAvailability: 100 = the relay network is usable
+	// The steam:// address that makes a friend's Steam client join our lobby, as the rig's second machine does. It names
+	// our Steam id: for the developer channel's answer only, never for the log. "" when we host no lobby.
+	[[nodiscard]] std::string JoinUrl();
+
 	// Developer test: sends a message to our own Steam ID, or reports what arrived.
 	std::string SelfTest(bool a_send);
 }

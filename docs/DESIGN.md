@@ -72,7 +72,7 @@ To decide later: whether to allow load orders that differ in ways that do not ma
 
 ## The frame
 
-Everything that reads or changes the game happens on the game's main thread, once per frame; network threads only queue. SKSE offers no "every frame" call, so the plugin needs a hook in the game's main update. Not written: [PORTING.md](PORTING.md), "The frame".
+Everything that reads or changes the game happens on the game's main thread, once per frame; network threads only queue. SKSE offers no "every frame" call, so the plugin needs a hook in the game's main update. Not written yet ([PORTING.md](PORTING.md), "The frame"). Until it is, a stand-in tick serves the first test: a small thread asks SKSE's task queue every 16 ms to run the plugin's tick once on the main thread, one request at a time. It is not tied to the game's frames and may not run in every game state; it is replaced, not built on.
 
 ## Players
 
@@ -107,7 +107,7 @@ Choices made to keep moving. Each is the obvious option, cheap to change now, an
 | --- | --- |
 | The name is SkyrimCoop, for the repository, the DLL and the folders. Other GitHub repositories carry the same or a similar name (unrelated projects); no Nexus mod with exactly this name was found. | ShieldSiblings, SkyrimSteamCoop or SkyrimParty; none had a GitHub repository when checked. |
 | CommonLibSSE-NG (`alandtse/CommonLibSSE-NG`), pinned to a commit of its `ng` branch, built from source with Skyrim VR support off. | Another maintained fork of CommonLibSSE (for example `libxse/commonlibsse`), if it follows new game versions sooner. |
-| The plugin loads into game 1.5.97 and later, warns below 1.6.1170 and refuses anything older. | Raise the tested line to the version a fresh Steam install has (1.7.104 on 2026-11-21); drop 1.5.97 altogether. |
+| The plugin is tested on game 1.7.104 (a fresh Steam install on 2026-11-21), loads with a warning into 1.6.317 and later, and refuses anything older, 1.5.97 included. | Keep 1.5.97 loadable (its own SKSE build and Address Library file, and a second test line). |
 | CommonLibSSE-NG's "patch safety" option is off (it would pull in one more dependency to guard writes to game memory), since the plugin patches nothing yet. | Turn it on with the first hook, after reading that dependency's license. |
 | The protocol and the server are a small first version (join, leave, player state, heartbeat), not the sister project's whole protocol. | Carry more of it at once. Most of the rest describes Fallout 4's systems. |
 | The first player in the session sets the load order. | Only ever the host. |

@@ -201,6 +201,10 @@ namespace SteamApi
 		std::uint32_t (*GetAppID)(void*) = nullptr;
 		bool (*IsOverlayEnabled)(void*) = nullptr;
 		bool (*IsSteamRunningOnSteamDeck)(void*) = nullptr;
+
+		// Whether this account is logged on to Steam's servers right now, for the first test's log (optional: nullptr if
+		// this Steam library lacks it; Skyrim's 1.7.104 library has it). Not in F4Multiplayer's table.
+		bool (*BLoggedOn)(void*) = nullptr;
 	};
 
 	constexpr int VOICE_OK = 0;

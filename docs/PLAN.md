@@ -2,7 +2,7 @@
 
 Six phases, in order. Each one ends with something that has to be shown on two real games before the next one starts. There are no dates.
 
-**Where it is today: phase 0, not yet run in a game.** The repository builds, the game-free parts are unit-tested, and the plugin's start-up is written but has never been loaded by a game.
+**Where it is today: phase 0, not yet run in a game.** The repository builds for game 1.7.104, the game-free parts are unit-tested, and the first test in a game (the plugin loads on both rig machines, and a Steam lobby and relay messages pass between them) is written with its rig scripts, but none of it has been run ([GETTING-STARTED.md](GETTING-STARTED.md)).
 
 ## What counts as verified
 
@@ -29,21 +29,26 @@ Bugs are sorted by what they do to a session:
 
 The plugin is loaded by SKSE into the current Steam version of Skyrim Special Edition and does nothing but report.
 
-To write: nothing new is required for the first load; reading the load order (`src/game/LoadOrder`) belongs here so the log's plugin count is real.
+Written: the version check (1.7.104 tested, 1.6.317 and later warned, older refused), the Address Library check, a stand-in tick through SKSE's task queue, the developer channel (loopback, a token file, off unless the ini turns it on), and the first test's Steam steps. The rig scripts (`tools/rig/`: install, first start, start, the lobby test, fetching logs) are written and not yet run. Still to write: reading the load order (`src/game/LoadOrder`), so the log's plugin count is real.
 
-Proof, on one game, then on the second machine:
+The first test (`tools/rig/lobbytest.sh`, [GETTING-STARTED.md](GETTING-STARTED.md), "The first test") is the first proof, and answers the project's biggest open question before any engine work:
 
-- `SkyrimCoop.log` exists and starts with the version line, the game's version, the `Launch:` lines and the settings read from the ini.
+- Both games: version 1.7.104, the Address Library resolved an address, the tick runs on the game's main thread.
+- Both games: Steam usable from the plugin (every function found, logged on, app 489830).
+- The host's game opens a friends-only lobby; the VM's game joins it by its id; both see two members.
+- Pings cross Steam's relay both ways, every one answered, with round trips logged.
+
+Then, on one game and then the second machine:
+
+- `SkyrimCoop.log` starts with the version line, the game's version, the Address Library line, the `Launch:` lines and the settings read from the ini.
 - "Game data loaded (N plugins read)" with N matching the load order.
 - Loading a save, saving and starting a new game each write their line, and the game plays for ten minutes with the plugin in, with no new warning in the log and no crash.
-- The log's Steam line and the output of `tools\steamcheck.ps1` are written down: they are the first input to phase 1 ([GETTING-STARTED.md](GETTING-STARTED.md), "The first thing to test").
-- The same on game version 1.5.97 if that version is to stay loadable (a decision to confirm).
 
 ## Phase 1: a Steam lobby and an invite between two games
 
 Two games find each other through Steam and exchange messages. Nobody sees anybody yet.
 
-To write: the frame hook (`src/game/GameThread`), so Steam's callbacks and the session run every frame; whatever the Steam check of phase 0 showed is missing; a first way to host and to invite without a menu (an ini setting and a key, or console commands); the session's start (hello, welcome, the load-order comparison) wired to the carried `common/Server` and `src/net/NetClient`.
+To write: the frame hook (`src/game/GameThread`) in place of the stand-in tick, so Steam's callbacks and the session run every frame; whatever the first test showed is missing; a first way to host and to invite without a menu (an ini setting and a key, or console commands); the session's start (hello, welcome, the load-order comparison) wired to the carried `common/Server` and `src/net/NetClient`.
 
 Proof, on the rig, both as host:
 

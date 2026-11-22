@@ -37,7 +37,9 @@ TEST("settings: every key is read, with comments, blank lines and either line en
 		"iMaxPlayers = 8\n"
 		"sPassword = sweetroll\n"
 		"bSteam = false\n"
-		"sLogLevel = debug\n";
+		"sLogLevel = debug\n"
+		"bDevChannel = true\n"
+		"iDevChannelPort = 7795\n";
 	std::vector<std::string> notes;
 	const auto               values = Settings::Parse(text, &notes);
 	CHECK(notes.empty());
@@ -50,6 +52,8 @@ TEST("settings: every key is read, with comments, blank lines and either line en
 	CHECK(values.password == "sweetroll");
 	CHECK(!values.steam);
 	CHECK(values.logLevel == "debug");
+	CHECK(values.devChannel);
+	CHECK(values.devChannelPort == 7795);
 }
 
 TEST("settings: a value that can't be used keeps the default and is said, without the password")
@@ -94,19 +98,37 @@ TEST("settings: a long player name is cut at the protocol's limit, and an empty 
 }
 
 
-TEST("runtime support: Special Edition 1.5.97 and later load, anything older is refused")
+TEST("runtime support: 1.7.104 is the tested build, the rest of the Anniversary line warns, 1.5.97 and older are refused")
 {
 	using RuntimeSupport::Judge;
 	using RuntimeSupport::Verdict;
 	// Skyrim VR reports 1.4.15.
 	CHECK(Judge(1, 4, 15) == Verdict::kRefused);
 	CHECK(Judge(1, 5, 80) == Verdict::kRefused);
+	CHECK(Judge(1, 5, 97) == Verdict::kRefused);
+	CHECK(Judge(1, 6, 316) == Verdict::kRefused);
 	CHECK(Judge(0, 9, 9999) == Verdict::kRefused);
-	CHECK(Judge(1, 5, 97) == Verdict::kUntested);
-	CHECK(Judge(1, 6, 640) == Verdict::kUntested);
-	CHECK(Judge(1, 6, 1130) == Verdict::kUntested);
-	CHECK(Judge(1, 6, 1170) == Verdict::kSupported);
-	CHECK(Judge(1, 6, 1179) == Verdict::kSupported);
-	CHECK(Judge(1, 7, 0) == Verdict::kSupported);
-	CHECK(Judge(2, 0, 0) == Verdict::kSupported);
+	CHECK(Judge(1, 6, 317) == Verdict::kOlder);
+	CHECK(Judge(1, 6, 640) == Verdict::kOlder);
+	CHECK(Judge(1, 6, 1170) == Verdict::kOlder);
+	CHECK(Judge(1, 7, 99) == Verdict::kOlder);
+	CHECK(Judge(1, 7, 104) == Verdict::kSupported);
+	CHECK(Judge(1, 7, 105) == Verdict::kNewer);
+	CHECK(Judge(1, 8, 0) == Verdict::kNewer);
+	CHECK(Judge(2, 0, 0) == Verdict::kNewer);
+}
+
+TEST("settings: the developer channel is off by default, on its own port, and refuses ports below 1024")
+{
+	const auto defaults = Settings::Parse("");
+	CHECK(!defaults.devChannel);
+	CHECK(defaults.devChannelPort == 7791);
+	CHECK(defaults.devChannelPort != 7790);  // F4Multiplayer's: the rig's tools for the two games never cross
+
+	std::vector<std::string> notes;
+	const auto               values = Settings::Parse("bDevChannel = 1\niDevChannelPort = 80\n", &notes);
+	CHECK(values.devChannel);
+	CHECK(values.devChannelPort == 7791);
+	REQUIRE(notes.size() == 1);
+	CHECK(notes[0] == "iDevChannelPort = 80 is not a port (1024 to 65535); it is 7791");
 }
