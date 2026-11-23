@@ -546,7 +546,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "step_see: a stand-in taken away (placed=1 still) fails" "$(grep -c '^FAIL .*a stand-in of the .* is placed' <<<"$o")" 2
 	sd=$d/see4; mkdir -p "$sd"; o=$( ( A_OUT=$sd; a_init see >/dev/null; fake "${STANDINS/heading=1.000/heading=2.571}" 'strays=0 standins=1 presetActors=1'; step_see; a_summary ) 2>&1 )
 	t "step_see: a stand-in facing another way fails, both ways" "$(grep -c '^FAIL .*the stand-in faces the way.*1.571 rad' <<<"$o")" 2
-	t "step_see: ... and only that fails" "$(grep -c '^FAIL' <<<"$o")" 2
+	t "step_see: ... and only that fails" "$(grep -c '^FAIL ' <<<"$o")" 2
 	# move_stats: the sprint columns
 	printf '%s\n' i,mx,my,mz,mspeed,sx,sy,sz,sgraph,msprint,sshown 1,0,0,0,400,0,0,0,300,1,m--- 2,0,100,0,600,0,60,0,500,1,m-r- 3,0,300,0,600,0,260,0,500,1,m-r- 4,0,500,0,600,0,460,0,500,1,m-r- 5,0,700,0,0,0,690,0,0,0,---- > "$d/sprint.csv"
 	st=$(move_stats "$d/sprint.csv")
