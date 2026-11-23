@@ -12,15 +12,16 @@
 // runs and aliases, src/game/QuestRunRules.h).
 // What our game does is read from the game itself: a stage done (TESQuestStageEvent), a quest started or stopped
 // (TESQuestStartStopEvent), and, polled every second, the objectives and ends of the shared quests that run and the
-// references their aliases hold. Each is reported when the session doesn't know it yet. The session's word is made here
-// where this game is behind, by the game's own console commands (setstage, SetObjectiveDisplayed,
+// references and locations their aliases hold. Each is reported when the session doesn't know it yet. The session's
+// word is made here where this game is behind, by the game's own console commands (setstage, SetObjectiveDisplayed,
 // SetObjectiveCompleted, CompleteQuest), a stage at a time, so each quest's own scripts run here as they ran in the game
 // that did the step. The host's game says its world's quests at its welcome and after each load (kQuestReset, then its
 // runs and its snapshot): the host's save is the world.
 //
-// Runs: the host's game says each shared quest and radiant job it starts (kQuestRun) with the references its aliases
-// hold; a friend's game starts the quest with those references (or forces them into the quest that runs there
-// already) before it makes the run's stages, and stops a radiant job the host's game stopped.
+// Runs: the host's game says each shared quest and radiant job it starts (kQuestRun) with the references and locations
+// its aliases hold; a friend's game starts the quest with them (or forces the references into the quest that runs there
+// already, and starts a radiant job held at another location again) before it makes the run's stages, and stops a
+// radiant job the host's game stopped. Given up is not the end: a later word starts it, a later start is the run.
 //
 // From the tick only (GameThread), except the event sinks, which only queue.
 namespace QuestSync
@@ -56,9 +57,10 @@ namespace QuestSync
 	void Clear();
 
 	// Developer channel: `quests` (counts), `quests pick [n]` (a shared quest not started here, for the rig), `quests
-	// runpick <radiant|shared> [n]` (one a console start can begin), `quests run <id>` (its run and its aliases' references
-	// here), `quests start <id>` (started by the engine's own start), `quest <editor id or hex id>` (one quest: its class,
-	// stages, objectives, and the session's word on it).
+	// runpick <radiant|shared> [n] [plain|loc|event]` (one a console start can begin, by the kind of aliases it has),
+	// `quests run <id>` (its run and its aliases' references and locations here), `quests start <id> [here | at <location>]`
+	// (started by the engine's own start; with a place, given to the aliases its event fills), `quest <editor id or hex
+	// id>` (one quest: its class, stages, objectives, and the session's word on it).
 	[[nodiscard]] std::string Command(std::string_view a_args);
 	[[nodiscard]] std::string One(std::string_view a_args);
 }

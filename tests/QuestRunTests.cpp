@@ -36,6 +36,8 @@ namespace
 	AliasFill Ref(std::uint32_t a_alias, std::uint32_t a_ref) { return { a_alias, a_ref, AliasFill::kRef }; }
 	AliasFill Empty(std::uint32_t a_alias) { return { a_alias, 0, AliasFill::kEmpty }; }
 	AliasFill Runtime(std::uint32_t a_alias) { return { a_alias, 0, AliasFill::kRuntime }; }
+	AliasFill Loc(std::uint32_t a_alias, std::uint32_t a_loc) { return { a_alias, a_loc, AliasFill::kLoc }; }
+	AliasFill Unknown(std::uint32_t a_alias) { return { a_alias, 0, AliasFill::kUnknown }; }
 
 	QuestRun Start(std::uint32_t a_quest, std::uint32_t a_run, bool a_fresh = false)
 	{
@@ -114,7 +116,7 @@ TEST("quest runs: a run goes to the server and back, the host named on the way b
 	CHECK(*back == start);
 	CHECK(Protocol::PeekType(Protocol::Encode(start)) == MT::kQuestRun);
 
-	auto filled = Filled(0x0001F0A1, 3, { Ref(0, 0x00012345), Empty(1), Runtime(2), { 3, 0, AliasFill::kUnknown } });
+	auto filled = Filled(0x0001F0A1, 3, { Ref(0, 0x00012345), Empty(1), Runtime(2), { 3, 0, AliasFill::kUnknown }, Loc(4, 0x00018A5A) });
 	filled.playerId = 7;
 	const auto remote = Protocol::Encode(filled, MT::kRemoteQuestRun);
 	CHECK(Protocol::PeekType(remote) == MT::kRemoteQuestRun);
@@ -141,8 +143,10 @@ TEST("quest runs: a run that can't be read is none: no quest, run 0, flags not k
 	auto both = Filled(0x10, 1, {});
 	both.flags |= QuestRun::kStopped;
 	CHECK(!Protocol::DecodeQuestRun(Protocol::Encode(both)));
-	CHECK(!Protocol::DecodeQuestRun(Protocol::Encode(Filled(0x10, 1, { { 0, 5, 4 } }))));                  // kind past KIND_MAX
+	CHECK(!Protocol::DecodeQuestRun(Protocol::Encode(Filled(0x10, 1, { { 0, 5, 5 } }))));                  // kind past KIND_MAX
 	CHECK(!Protocol::DecodeQuestRun(Protocol::Encode(Filled(0x10, 1, { { 0, 0, AliasFill::kRef } }))));    // a reference of none
+	CHECK(!Protocol::DecodeQuestRun(Protocol::Encode(Filled(0x10, 1, { { 0, 0, AliasFill::kLoc } }))));    // a location of none
+	CHECK(!Protocol::DecodeQuestRun(Protocol::Encode(Filled(0x10, 1, { { 0, 5, AliasFill::kUnknown } }))));
 	CHECK(!Protocol::DecodeQuestRun(Protocol::Encode(Filled(0x10, 1, { { 0, 5, AliasFill::kEmpty } }))));  // empty, naming one
 	CHECK(!Protocol::DecodeQuestRun(Protocol::Encode(Filled(0x10, 1, { { 0, 5, AliasFill::kRuntime } }))));
 	auto packet = Protocol::Encode(Filled(0x10, 1, { Ref(0, 0x20) }));
@@ -181,8 +185,9 @@ TEST("quest runs: a run is named by its plugin on the wire; a quest the other ga
 	const FormIds::Mapper hostEdge(host, session);
 	const FormIds::Mapper guestEdge(guest, session);
 
-	// The host's quest of Skyrim.esm with an alias holding a reference of A.esp (the guest lacks it) and one of B.esp.
-	auto run = Filled(0x0001F0A1, 2, { Ref(0, 0x02000800), Ref(1, 0x03000D62), Ref(2, 0x00012345), Empty(3) });
+	// The host's quest of Skyrim.esm with an alias holding a reference of A.esp (the guest lacks it) and one of B.esp, and
+	// location aliases holding a location of A.esp and one of B.esp.
+	auto run = Filled(0x0001F0A1, 2, { Ref(0, 0x02000800), Ref(1, 0x03000D62), Ref(2, 0x00012345), Empty(3), Loc(4, 0x02000900), Loc(5, 0x03000A00) });
 	const auto out = FormTranslate::Translate(hostEdge, Way::kToSession, Protocol::Encode(run));
 	CHECK(out.kind != Result::Kind::kDrop);
 	auto remote = out.kind == Result::Kind::kChanged ? Protocol::DecodeQuestRun(out.packet) : Protocol::DecodeQuestRun(Protocol::Encode(run));
@@ -192,7 +197,9 @@ TEST("quest runs: a run is named by its plugin on the wire; a quest the other ga
 	REQUIRE(in.kind == Result::Kind::kChanged);
 	const auto heard = Protocol::DecodeQuestRun(in.packet);
 	REQUIRE(heard);
-	REQUIRE(heard->fills.size() == 4);
+	REQUIRE(heard->fills.size() == 6);
+	CHECK(heard->fills[4] == Unknown(4));          // A.esp's location: the guest's own pick stays
+	CHECK(heard->fills[5] == Loc(5, 0x02000A00));  // B.esp's, as the guest numbers it
 	CHECK(heard->questId == 0x0001F0A1);
 	CHECK(heard->fills[0] == (AliasFill{ 0, 0, AliasFill::kUnknown }));  // A.esp's: the guest's own pick stays
 	CHECK(heard->fills[1] == Ref(1, 0x02000D62));                         // B.esp is the guest's 02
@@ -322,14 +329,28 @@ TEST("quest keeper: each start is a new run, never numbered twice, fresh for a r
 	CHECK(keeper.Live(0x10));
 	CHECK(keeper.LiveQuests() == (std::vector<std::uint32_t>{ 0x10, 0x20 }));
 
-	auto said = keeper.Read(0x10, { Ref(1, 0x50), Empty(0) });
+	auto said = keeper.Read(0x10, { Ref(1, 0x50), Empty(0) }, T0);
 	REQUIRE(said);
 	CHECK(said->flags == QuestRun::kFilled);
 	CHECK(said->run == 1);
 	CHECK(said->fills == (std::vector<AliasFill>{ Empty(0), Ref(1, 0x50) }));
-	CHECK(!keeper.Read(0x10, { Empty(0), Ref(1, 0x50) }));
-	CHECK(keeper.Read(0x10, { Empty(0), Ref(1, 0x51) }));
-	CHECK(!keeper.Read(0x99, { Ref(1, 0x50) }));  // not a run
+	CHECK(!keeper.Read(0x10, { Empty(0), Ref(1, 0x50) }, T0 + 1s));
+	CHECK(keeper.Read(0x10, { Empty(0), Ref(1, 0x51) }, T0 + 2s));
+	CHECK(!keeper.Read(0x99, { Ref(1, 0x50) }, T0));  // not a run
+	// said again unchanged after RESAY_EVERY (a word the server's budget dropped is not lost for the run)
+	CHECK(!keeper.Read(0x10, { Empty(0), Ref(1, 0x51) }, T0 + 2s + QuestRunRules::RESAY_EVERY - 1s));
+	CHECK(keeper.Read(0x10, { Empty(0), Ref(1, 0x51) }, T0 + 2s + QuestRunRules::RESAY_EVERY));
+	// a radiant job's fills are said fresh (a fills word without its start begins the run as the start would), a
+	// snapshot's run is not
+	const auto jobFills = keeper.Read(0x20, { Ref(0, 0x1) }, T0);
+	REQUIRE(jobFills);
+	CHECK(jobFills->flags == (QuestRun::kFilled | QuestRun::kFresh));
+	CHECK(Protocol::DecodeQuestRun(Protocol::Encode(*jobFills)));
+	QuestRunRules::Keeper snap;
+	CHECK(snap.Started(0x30, true, false).flags == 0);
+	const auto snapFills = snap.Read(0x30, { Ref(0, 0x1) }, T0);
+	REQUIRE(snapFills);
+	CHECK(snapFills->flags == QuestRun::kFilled);
 
 	// A shared quest's stop is its own scripts' in every game; a radiant job's ends its run.
 	CHECK(!keeper.Stopped(0x10));
@@ -339,7 +360,7 @@ TEST("quest keeper: each start is a new run, never numbered twice, fresh for a r
 	CHECK(stop->flags == QuestRun::kStopped);
 	CHECK(stop->run == 2);
 	CHECK(!keeper.Stopped(0x20));
-	CHECK(!keeper.Read(0x20, { Ref(0, 0x1) }));
+	CHECK(!keeper.Read(0x20, { Ref(0, 0x1) }, T0));
 
 	keeper.Clear();
 	CHECK(keeper.LiveQuests().empty());
@@ -518,6 +539,263 @@ TEST("quest fills compared: the host's references not held here are forced; crea
 	CHECK(QuestRunRules::Describe({}) == "-");
 	CHECK(QuestRunRules::Describe({ Runtime(2), Ref(0, 0x00012345), Empty(1), { 3, 0, AliasFill::kUnknown } }) == "0:00012345,1:-,2:rt,3:?");
 	CHECK(QuestRunRules::PhaseName(QuestRunRules::Phase::kGaveUp) == "gaveup");
+}
+
+TEST("quest follower: a run given up for want of fills starts when they come late; a start that runs late is the run, its stages made again")
+{
+	using QuestRunRules::Act;
+	using QuestRunRules::Phase;
+	// (a) fills after START_WAIT: the run is given up, then started at once when they come
+	QuestRunRules::Follower f;
+	auto                    job = RunsHere(true);
+	f.Hear(Start(0x10, 1, true), job, T0);
+	CHECK(f.Due(0x10, job, T0 + QuestRunRules::START_WAIT) == Act::kGiveUp);
+	CHECK(f.Due(0x10, job, T0 + QuestRunRules::START_WAIT + 1s) == Act::kNothing);
+	f.Hear(Filled(0x10, 1, { Ref(0, 0x50) }), job, T0 + 20s);
+	CHECK(f.Due(0x10, job, T0 + 20s) == Act::kStart);
+	CHECK(f.PhaseOf(0x10) == Phase::kStarting);
+	CHECK(f.Hold(0x10));
+	CHECK(f.CountsOf(0x10).retries == 1);
+	f.StartMade(0x10, { .refs = 1, .forces = { { 0, 0x50 } } });
+	job.running = true;
+	CHECK(f.Due(0x10, job, T0 + 21s) == Act::kStarted);
+	CHECK(f.Ours(0x10));
+	CHECK(f.TakeLate(0x10));  // its stages dropped while it was given up are made again
+	CHECK(!f.TakeLate(0x10));
+	// a run started in time holds its stages meanwhile: nothing to make again
+	QuestRunRules::Follower t;
+	auto                    quick = RunsHere(true);
+	t.Hear(Filled(0x11, 1, { Ref(0, 0x50) }), quick, T0);
+	CHECK(t.Due(0x11, quick, T0) == Act::kStart);
+	t.StartMade(0x11, {});
+	quick.running = true;
+	CHECK(t.Due(0x11, quick, T0 + 1s) == Act::kStarted);
+	CHECK(!t.TakeLate(0x11));
+
+	// (b) our start runs only after START_WAIT: given up meanwhile, then the run's (kStarted, its dropped stages made again)
+	QuestRunRules::Follower g;
+	auto                    here = RunsHere(true);
+	g.Hear(Filled(0x20, 1, { Ref(0, 0x50) }), here, T0);
+	CHECK(g.Due(0x20, here, T0) == Act::kStart);
+	g.StartMade(0x20, {});
+	here.starting = true;
+	CHECK(g.Due(0x20, here, T0 + QuestRunRules::START_WAIT) == Act::kGiveUp);
+	CHECK(!g.Ours(0x20));
+	CHECK(!g.Hold(0x20));
+	CHECK(g.Due(0x20, here, T0 + QuestRunRules::START_WAIT + QuestRunRules::RETRY_EVERY) == Act::kNothing);  // still starting: not again
+	here.starting = false;
+	here.running = true;
+	CHECK(g.Due(0x20, here, T0 + 15s) == Act::kStarted);
+	CHECK(g.Ours(0x20));
+	CHECK(g.TakeLate(0x20));
+	CHECK(!g.TakeLate(0x20));  // once
+
+	// ... and the host's stop of it stops it here, even while it was given up (it may run yet)
+	QuestRunRules::Follower h;
+	auto                    late = RunsHere(true);
+	h.Hear(Filled(0x30, 4, { Ref(0, 0x50) }), late, T0);
+	CHECK(h.Due(0x30, late, T0) == Act::kStart);
+	h.StartMade(0x30, {});
+	late.starting = true;
+	CHECK(h.Due(0x30, late, T0 + QuestRunRules::START_WAIT) == Act::kGiveUp);
+	CHECK(h.Hear(Stop(0x30, 4), late, T0 + 11s));
+	CHECK(h.Due(0x30, late, T0 + 11s) == Act::kStop);
+
+	// a run given up that nothing of this game's started is not stopped here (a friend's own job stays its own)
+	QuestRunRules::Follower k;
+	auto                    none = RunsHere(true);
+	k.Hear(Start(0x40, 1, true), none, T0);
+	CHECK(k.Due(0x40, none, T0 + QuestRunRules::START_WAIT) == Act::kGiveUp);
+	none.running = true;
+	CHECK(k.Hear(Stop(0x40, 1), none, T0 + 11s));
+	CHECK(k.Due(0x40, none, T0 + 11s) == Act::kNothing);
+}
+
+TEST("quest follower: a start the game would not make is given up at once and tried again; one that cannot start waits for new fills")
+{
+	using QuestRunRules::Act;
+	using QuestRunRules::Phase;
+	QuestRunRules::Follower f;
+	auto                    here = RunsHere(true);
+	f.Hear(Filled(0x10, 1, { Ref(0, 0x50) }), here, T0);
+	CHECK(f.Due(0x10, here, T0) == Act::kStart);
+	f.StartFailed(0x10, T0, true);
+	CHECK(f.PhaseOf(0x10) == Phase::kGaveUp);
+	CHECK(!f.Hold(0x10));  // nothing runs: its stages are not held for START_WAIT
+	CHECK(f.GaveUp() == 1);
+	CHECK(f.Due(0x10, here, T0 + QuestRunRules::RETRY_EVERY - 1s) == Act::kNothing);
+	CHECK(f.Due(0x10, here, T0 + QuestRunRules::RETRY_EVERY) == Act::kStart);
+	CHECK(f.Retried() == 1);
+
+	// cannot start (an alias only the event fills had nothing forced): not tried again until the host's fills change
+	f.StartFailed(0x10, T0 + 30s, false);
+	CHECK(f.Due(0x10, here, T0 + 10min) == Act::kNothing);
+	f.Hear(Filled(0x10, 1, { Ref(0, 0x50), Loc(1, 0x60) }), here, T0 + 11min);
+	CHECK(f.Due(0x10, here, T0 + 11min) == Act::kStart);
+	// StartFailed only answers a start under way
+	f.StartMade(0x10, {});
+	here.running = true;
+	CHECK(f.Due(0x10, here, T0 + 11min + 1s) == Act::kStarted);
+	f.StartFailed(0x10, T0 + 12min, true);
+	CHECK(f.Ours(0x10));
+}
+
+TEST("quest follower: a radiant job taken with another location is stopped and started again once; forcings, missing references and locations apart said once")
+{
+	using QuestRunRules::Act;
+	using QuestRunRules::Force;
+	using QuestRunRules::Phase;
+	QuestRunRules::Follower f;
+	auto                    job = RunsHere(true);
+	job.running = true;
+	f.Hear(Filled(0x10, 1, { Ref(0, 0x50), Loc(1, 0x60) }), job, T0);
+	CHECK(f.Due(0x10, job, T0) == Act::kAdopt);
+	CHECK(f.Restart(0x10, T0));
+	CHECK(!f.Restart(0x10, T0));  // once a run
+	CHECK(f.PhaseOf(0x10) == Phase::kRestarting);
+	CHECK(f.Hold(0x10));
+	CHECK(!f.Ours(0x10));
+	CHECK(f.Due(0x10, job, T0 + 1s) == Act::kNothing);  // its stop not made yet
+	f.StoppedHere(0x10);                                 // the stop's event: the restart's, not an end
+	CHECK(f.PhaseOf(0x10) == Phase::kRestarting);
+	job.running = false;
+	CHECK(f.Due(0x10, job, T0 + 2s) == Act::kStart);
+	f.StartMade(0x10, { .refs = 1, .locs = 1, .forces = { { 0, 0x50 } } });
+	job.running = true;
+	CHECK(f.Due(0x10, job, T0 + 3s) == Act::kStarted);
+	CHECK(f.TakeLate(0x10));  // what its stop undid is made again
+	CHECK(f.CountsOf(0x10).restarted);
+	CHECK(f.Restarts() == 1);
+	CHECK(!f.Restart(0x10, T0 + 4s));
+
+	// a restart whose stop never comes is given up after START_WAIT
+	QuestRunRules::Follower s;
+	auto                    stuck = RunsHere(true);
+	stuck.running = true;
+	s.Hear(Start(0x20, 1, true), stuck, T0);
+	CHECK(s.Due(0x20, stuck, T0) == Act::kAdopt);
+	CHECK(s.Restart(0x20, T0));
+	CHECK(s.Due(0x20, stuck, T0 + QuestRunRules::START_WAIT) == Act::kGiveUp);
+
+	// said once each per run: a forcing (missed when the start gave it, else later), a reference not loaded, a location apart
+	CHECK(f.Forced(0x10, Force{ 0, 0x50 }));
+	CHECK(!f.Forced(0x10, Force{ 0, 0x50 }));
+	CHECK(f.Forced(0x10, Force{ 2, 0x52 }));
+	CHECK(f.CountsOf(0x10).missed == 1);
+	CHECK(f.CountsOf(0x10).later == 1);
+	CHECK(f.NotLoaded(0x10, Force{ 3, 0x53 }));
+	CHECK(!f.NotLoaded(0x10, Force{ 3, 0x53 }));
+	CHECK(f.NotLoaded(0x10, Force{ 4, 0x53 }));
+	CHECK(f.CountsOf(0x10).notLoaded == 2);
+	CHECK(f.NotLoadedCount() == 2);
+	CHECK(f.LocApart(0x10, Force{ 1, 0x61 }));
+	CHECK(!f.LocApart(0x10, Force{ 1, 0x61 }));
+	CHECK(f.LocApartCount() == 1);
+	// a new run says them afresh
+	f.Hear(Start(0x10, 2, true), job, T0 + 5s);
+	CHECK(f.NotLoaded(0x10, Force{ 3, 0x53 }));
+	CHECK(f.CountsOf(0x10).notLoaded == 1);
+	CHECK(f.CountsOf(0x10).missed == 0);
+}
+
+TEST("quest start plan: the host's references and locations forced, optional empties made empty, the rest this game's own; an event's alias left unfilled cannot start")
+{
+	using QuestRunRules::AliasRecord;
+	using QuestRunRules::FillType;
+	using QuestRunRules::PlanStep;
+	using QuestRunRules::Way;
+	const std::vector<AliasRecord> record{
+		{ 0, true, FillType::kFromEvent, false },    // the camp the bounty names (the Story Manager's event)
+		{ 1, false, FillType::kFromAlias, false },   // its leader (from the camp)
+		{ 2, false, FillType::kConditions, true },   // an optional witness
+		{ 3, false, FillType::kCreated, false },     // a courier the quest creates
+		{ 4, false, FillType::kConditions, false },  // a reference the friend has not loaded
+		{ 5, true, FillType::kConditions, true },    // an optional location the host left empty
+	};
+	const std::vector<AliasFill> fills{ Loc(0, 0x60), Ref(1, 0x51), Empty(2), Runtime(3), Ref(4, 0x54), Empty(5) };
+	const auto have = [](std::uint32_t a_form, bool) { return a_form != 0x54; };
+	const auto plan = QuestRunRules::PlanStart(record, &fills, true, have);
+	CHECK(plan.steps == (std::vector<PlanStep>{ { 0, true, Way::kLoc, 0x60 }, { 1, false, Way::kRef, 0x51 }, { 2, false, Way::kNone, 0 }, { 3, false, Way::kOwn, 0 },
+						   { 4, false, Way::kOwn, 0 }, { 5, true, Way::kNone, 0 } }));
+	CHECK(plan.note.refs == 1);
+	CHECK(plan.note.locs == 1);
+	CHECK(plan.note.nones == 2);
+	CHECK(plan.note.own == 2);
+	CHECK(plan.note.notLoaded == 1);
+	CHECK(plan.note.forces == (std::vector<QuestRunRules::Force>{ { 1, 0x51 } }));
+	CHECK(plan.CanStart());
+
+	// no location can be written in this game: the camp stays its own, and only the event fills it: it cannot start
+	const auto noLoc = QuestRunRules::PlanStart(record, &fills, false, have);
+	CHECK(noLoc.steps[0].way == Way::kOwn);
+	CHECK(noLoc.steps[5].way == Way::kOwn);
+	CHECK(noLoc.locsKept == 2);
+	CHECK(noLoc.needsEvent == (std::vector<std::uint32_t>{ 0 }));
+	CHECK(!noLoc.CanStart());
+	// the host's location unknown here (a plugin this game lacks, or not read there): the same
+	const std::vector<AliasFill> unknown{ Unknown(0), Ref(1, 0x51) };
+	CHECK(!QuestRunRules::PlanStart(record, &unknown, true, have).CanStart());
+	// no fills at all: every alias its own, and the event's alias cannot be filled
+	CHECK(!QuestRunRules::PlanStart(record, nullptr, true, have).CanStart());
+	// an optional alias the event fills may stay empty: it starts
+	const std::vector<AliasRecord> optional{ { 0, true, FillType::kFromEvent, true }, { 1, false, FillType::kConditions, false } };
+	CHECK(QuestRunRules::PlanStart(optional, nullptr, true, have).CanStart());
+	// a kind that is not the alias's (a location for a reference alias) is never forced
+	const std::vector<AliasFill> crossed{ Ref(0, 0x60), Loc(1, 0x51) };
+	const auto x = QuestRunRules::PlanStart(record, &crossed, true, have);
+	CHECK(x.steps[0].way == Way::kOwn);
+	CHECK(x.steps[1].way == Way::kOwn);
+}
+
+TEST("quest locations: the record's slot is the one every forced alias agrees on; the map is trusted only when it holds the forced locations")
+{
+	QuestRunRules::LocProbe probe;
+	for (std::size_t i = 0; i + 1 < QuestRunRules::LOC_PROBE_MIN; ++i) {
+		probe.Sample(0b000001);
+	}
+	CHECK(!probe.Slot());  // too few
+	probe.Sample(0b000101);
+	CHECK(probe.Slot() == std::optional<std::size_t>{ 0 });
+	probe.Sample(0b000100);  // one that disagrees: no slot agreed by all
+	CHECK(!probe.Slot());
+	QuestRunRules::LocProbe two;
+	for (std::size_t i = 0; i < QuestRunRules::LOC_PROBE_MIN; ++i) {
+		two.Sample(0b000011);
+	}
+	CHECK(!two.Slot());  // two slots agree: not known which
+
+	QuestRunRules::LocCheck good;
+	for (std::size_t i = 0; i < QuestRunRules::LOC_CHECK_MIN; ++i) {
+		CHECK(good.Now() == QuestRunRules::LocCheck::State::kUnread);
+		good.Sample(i != 0 || QuestRunRules::LOC_CHECK_MIN < 5);  // one of five off (a script moved it): still verified
+	}
+	CHECK(good.Now() == QuestRunRules::LocCheck::State::kVerified);
+	good.Sample(false);
+	CHECK(good.Now() == QuestRunRules::LocCheck::State::kVerified);  // decided for good
+	QuestRunRules::LocCheck bad;
+	for (std::size_t i = 0; i < QuestRunRules::LOC_CHECK_MIN; ++i) {
+		bad.Sample(i % 2 == 0);
+	}
+	CHECK(bad.Now() == QuestRunRules::LocCheck::State::kBad);
+	CHECK(QuestRunRules::LocStateName(bad.Now()) == "bad");
+
+	CHECK(QuestRunRules::LocFillOf(2, 0x60, true) == Loc(2, 0x60));
+	CHECK(QuestRunRules::LocFillOf(2, 0, true) == Empty(2));
+	CHECK(QuestRunRules::LocFillOf(2, 0x60, false) == Unknown(2));
+	CHECK(QuestRunRules::LocFillOf(2, 0xFF000060, true) == Runtime(2));
+	const std::vector<AliasFill> fills{ Ref(0, 0x50), Loc(1, 0x60), Ref(2, 0x52), Empty(3) };
+	CHECK(QuestRunRules::CountOf(fills, AliasFill::kRef) == 2);
+	CHECK(QuestRunRules::CountOf(fills, AliasFill::kLoc) == 1);
+	CHECK(QuestRunRules::Describe(fills) == "0:00000050,1:L00000060,2:00000052,3:-");
+
+	// a location apart is not forced (given only at a start), and the run is not the same until it holds
+	const auto c = QuestRunRules::Against({ Loc(1, 0x60), Ref(0, 0x50) }, { Loc(1, 0x61), Ref(0, 0x50) });
+	CHECK(c.force.empty());
+	CHECK(c.locs == (std::vector<QuestRunRules::Force>{ { 1, 0x60 } }));
+	CHECK(!c.Same());
+	CHECK(!c.LocsSame());
+	CHECK(QuestRunRules::Against({ Loc(1, 0x60) }, { Loc(1, 0x60) }).Same());
+	CHECK(!QuestRunRules::Against({ Loc(1, 0x60) }, { Unknown(1) }).LocsSame());  // not read here: not known to be the same
 }
 
 // ---- the hold, and forgetting one quest ----------------------------------------------------------------------------

@@ -52,8 +52,8 @@ namespace Protocol
 	//    the session agree with what each world holds after its welcome and every load. Written on top of 10 (loot) beside
 	//    10 (faces, another branch): whichever is merged later renumbers; the messages (49-54) do not clash.
 	// 12: quest runs and their aliases (QuestRun, docs/DESIGN.md "Quests", "Runs and aliases"): the host's game says each
-	//    shared quest and radiant job it starts, the references its aliases hold, and a radiant job's stop; a friend's
-	//    game starts the quest with those references in its aliases (or forces them into a quest running there), so
+	//    shared quest and radiant job it starts, the references and locations its aliases hold, and a radiant job's stop;
+	//    a friend's game starts the quest with those in its aliases (or forces them into a quest running there), so
 	//    every game does the same job, and a radiant job begun again is a new run whose old stages are not its own.
 	//    Written on top of 11 (drops) beside 11 (swimming, another branch): whichever is merged later renumbers; the
 	//    messages (55, 56) do not clash.
@@ -455,19 +455,21 @@ namespace Protocol
 		bool operator==(const QuestReset&) const = default;
 	};
 
-	// One reference alias of a quest as the host's game holds it filled (docs/DESIGN.md, "Quests", "Runs and aliases").
-	// aliasId is the quest's own numbering (the same in every game that has the quest); refId is in the session's
-	// numbering, and only with kRef.
+	// One alias of a quest, a reference alias or a location alias, as the host's game holds it filled (docs/DESIGN.md,
+	// "Quests", "Runs and aliases"). aliasId is the quest's own numbering (the same in every game that has the quest);
+	// refId is a form in the session's numbering, and only with kRef (a reference) or kLoc (a location).
 	struct AliasFill
 	{
 		enum Kind : std::uint8_t
 		{
 			kEmpty = 0,    // the alias holds nothing (an optional one the quest did not fill, or one a script cleared)
-			kRef = 1,      // it holds refId, a reference of the load order
-			kRuntime = 2,  // it holds a reference the host's game made as it ran (a created alias's actor): no other game has it
-			kUnknown = 3,  // it holds a reference of a plugin the reading game lacks (FormTranslate.h): that game's own pick stays
+			kRef = 1,      // a reference alias that holds refId, a reference of the load order
+			kRuntime = 2,  // it holds a form the host's game made as it ran (a created alias's actor): no other game has it
+			kUnknown = 3,  // it holds a form of a plugin the reading game lacks (FormTranslate.h), or one the host's game could
+			               // not read (a location while the engine's layout is not confirmed there): that game's own pick stays
+			kLoc = 4,      // a location alias that holds refId, a location of the load order
 		};
-		static constexpr std::uint8_t KIND_MAX = kUnknown;
+		static constexpr std::uint8_t KIND_MAX = kLoc;
 
 		std::uint32_t aliasId = 0;
 		std::uint32_t refId = 0;
@@ -496,8 +498,8 @@ namespace Protocol
 		std::vector<AliasFill> fills;  // with kFilled only, by alias id, at most MAX_ALIAS_FILLS
 		bool operator==(const QuestRun&) const = default;
 	};
-	// The most reference aliases a run names (a quest has a few dozen at most; the radiant trackers a few hundred, and
-	// those are untyped, never shared): past it the rest are each game's own picks.
+	// The most aliases a run names (a quest has a few dozen at most; the radiant trackers a few hundred, and those are
+	// untyped, never shared): past it the rest are each game's own picks.
 	inline constexpr std::size_t MAX_ALIAS_FILLS = 256;
 
 	// A game's clock and weather (kClock, playerId 0; kRemoteClock, the clock owner's player id). Its forms are the
@@ -1430,8 +1432,8 @@ namespace Protocol
 
 	// kQuestRun (no player id: the server knows whose it is) or kRemoteQuestRun (the host's player id first): questId,
 	// run, flags, then with kFilled a count (0 to MAX_ALIAS_FILLS) and each fill: aliasId, refId, kind. Without kFilled no
-	// fills are written. None for no quest, run 0, a flag not known, kFilled with kStopped, a kind not known, a reference
-	// with a kind that names none (or none with kRef), or a count past MAX_ALIAS_FILLS. Encode writes at most
+	// fills are written. None for no quest, run 0, a flag not known, kFilled with kStopped, a kind not known, a form with
+	// a kind that names none (or none with kRef or kLoc), or a count past MAX_ALIAS_FILLS. Encode writes at most
 	// MAX_ALIAS_FILLS fills.
 	inline std::vector<std::uint8_t> Encode(const QuestRun& a_msg, MessageType a_type)
 	{
@@ -1486,7 +1488,7 @@ namespace Protocol
 				f.aliasId = r.U32();
 				f.refId = r.U32();
 				f.kind = r.U8();
-				if (!r.Ok() || f.kind > AliasFill::KIND_MAX || (f.kind == AliasFill::kRef) != (f.refId != 0)) {
+				if (!r.Ok() || f.kind > AliasFill::KIND_MAX || (f.kind == AliasFill::kRef || f.kind == AliasFill::kLoc) != (f.refId != 0)) {
 					return std::nullopt;
 				}
 				msg.fills.push_back(f);

@@ -113,24 +113,41 @@ namespace QuestSync
 			std::uint64_t runsSent = 0;      // the host's game: run words sent (a start, its fills, a radiant job's stop)
 			std::uint64_t runsHeard = 0;     // a friend's game: run words heard
 			std::uint64_t forced = 0;        // references forced into an alias here (a quest running as the session's run)
-			std::uint64_t forcedAtStart = 0; // aliases a quest started here for its run filled with the host's reference
-			std::uint64_t ownAtStart = 0;    // ... left to this game's own pick (a created actor, a reference not loaded or lacking)
+			std::uint64_t forcedAtStart = 0; // reference aliases a quest started here for its run filled with the host's reference
+			std::uint64_t locsAtStart = 0;   // location aliases ... filled with the host's location
+			std::uint64_t ownAtStart = 0;    // ... left to this game's own pick (a created actor, a form not loaded or lacking)
 			std::uint64_t startFailed = 0;   // starts for a run the game would not make
+			std::uint64_t cannotStart = 0;   // starts for a run not tried: an alias only the Story Manager's event fills had nothing forced
 			std::uint64_t stopsMade = 0;     // radiant jobs stopped here for the host's stop
-			std::uint64_t notLoaded = 0;     // references a run names that were not loaded here when forced (tried again)
+			std::uint64_t restartsMade = 0;  // radiant jobs stopped here to start again with the host's location
+			std::uint64_t rewanted = 0;      // the session's word on a quest made again when its run came to run late
+			std::uint64_t locUnread = 0;     // a quest's location map held a value that is no location (not used)
 		};
 		Counts      counts;
 		QuestRunRules::Keeper   keeper;    // the host's game: the runs it says
 		QuestRunRules::Follower follower;  // a friend's game: the host's runs, made here
 		std::string lastRun = "none";
 
-		// An alias's record as it was before a start for a run rewrote it to a forced fill of the host's reference: put
-		// back once the quest runs (or the start is given up, or before a load). Records are the game's data, never saved.
+		// Location aliases (QuestRunRules::LocProbe, LocCheck): the slot of a location alias's record that holds its forced
+		// location (found at the catalog, or none), every location of the load order (a value read from the engine is used
+		// only when it is one of them: nothing unknown is ever read through), and whether the quests' location maps read as
+		// they must.
+		std::optional<std::size_t>          locSlot;
+		std::unordered_set<std::uintptr_t>  locations;
+		QuestRunRules::LocCheck             locCheck;
+		std::unordered_set<std::uint64_t>   locChecked;  // quest and alias ids checked already
+		constexpr std::size_t               LOC_SLOT_BASE = sizeof(RE::BGSBaseAlias);
+
+		// An alias's record as it was before a start for a run rewrote it to a forced fill of the host's reference or
+		// location: put back once the quest runs (or the start is given up, or before a load). Records are the game's data,
+		// never saved.
 		struct Rewrite
 		{
-			RE::BGSRefAlias*                                          alias = nullptr;
-			std::uint16_t                                             fillType = 0;
-			std::array<std::byte, sizeof(RE::BGSRefAlias::GenericFillData)> fillData{};
+			RE::BGSBaseAlias*          alias = nullptr;
+			std::uint16_t              fillType = 0;
+			std::size_t                offset = 0;  // the fill's bytes in the record
+			std::size_t                size = 0;
+			std::array<std::byte, 16>  bytes{};
 		};
 		struct Rewritten
 		{
@@ -297,26 +314,151 @@ namespace QuestSync
 		}
 
 		bool IsRefAlias(const RE::BGSBaseAlias* a_alias) { return a_alias && a_alias->GetVMTypeID() == RE::BGSRefAlias::VMTYPEID; }
+		bool IsLocAlias(const RE::BGSBaseAlias* a_alias) { return a_alias && a_alias->GetVMTypeID() == RE::BGSLocAlias::VMTYPEID; }
+		QuestRunRules::FillType FillTypeOf(const RE::BGSBaseAlias* a_alias) { return static_cast<QuestRunRules::FillType>(a_alias->fillType.underlying()); }
 
-		// What the quest's reference aliases hold here, in this game's numbering; a_locations counts its location aliases
-		// (each game's own pick: their engine layout is not known).
+		// A location alias's record: the base alias, LOC_SLOTS pointer-sized members not named yet, and its conditions.
+		static_assert(sizeof(RE::BGSBaseAlias) + QuestRunRules::LOC_SLOTS * sizeof(std::uintptr_t) + sizeof(RE::TESCondition*) == sizeof(RE::BGSLocAlias));
+
+		// Slot a_slot of a location alias's record, as a number (compared with the load order's locations, never read
+		// through).
+		std::uintptr_t SlotValue(const RE::BGSBaseAlias* a_alias, std::size_t a_slot)
+		{
+			std::uintptr_t value = 0;
+			std::memcpy(&value, reinterpret_cast<const std::byte*>(a_alias) + LOC_SLOT_BASE + a_slot * sizeof(std::uintptr_t), sizeof value);
+			return value;
+		}
+
+		// The location the quest's location alias holds here, read from the quest's map of filled aliases beside its
+		// references' (RE::TESQuest::unk0A0: alias id -> location, as the same engine's Fallout 4 keeps its aliasedLocMap),
+		// walked as the library lays it out (no hash of ours) under the quest's alias lock. A value is used only when it is
+		// a location of the load order (nothing else is read through); one that is not is counted (locUnread) and none.
+		// nullptr: the alias holds nothing.
+		std::optional<RE::BGSLocation*> LocationOf(RE::TESQuest* a_quest, std::uint32_t a_aliasId)
+		{
+			RE::BSReadLockGuard lock{ a_quest->aliasAccessLock };
+			for (const auto& entry : a_quest->unk0A0) {
+				if (static_cast<std::uint32_t>(entry.first) != a_aliasId) {
+					continue;
+				}
+				if (!locations.contains(entry.second)) {
+					++counts.locUnread;
+					return std::nullopt;
+				}
+				return reinterpret_cast<RE::BGSLocation*>(entry.second);
+			}
+			return nullptr;
+		}
+
+		// At the catalog: the load order's locations, and the slot of a location alias's record that holds the location
+		// it is forced to (QuestRunRules::LocProbe over every alias the load order forces to a specific location).
+		void ProbeLocations(RE::TESDataHandler* a_data)
+		{
+			for (const auto loc : a_data->GetFormArray<RE::BGSLocation>()) {
+				if (loc) {
+					locations.insert(reinterpret_cast<std::uintptr_t>(loc));
+				}
+			}
+			QuestRunRules::LocProbe probe;
+			std::size_t             none = 0;
+			for (const auto& known : catalog) {
+				for (const auto alias : known.quest->aliases) {
+					if (!IsLocAlias(alias) || FillTypeOf(alias) != QuestRunRules::FillType::kForced) {
+						continue;
+					}
+					std::uint8_t hits = 0;
+					for (std::size_t i = 0; i < QuestRunRules::LOC_SLOTS; ++i) {
+						if (locations.contains(SlotValue(alias, i))) {
+							hits = static_cast<std::uint8_t>(hits | (1u << i));
+						}
+					}
+					if (hits == 0) {
+						++none;  // forced to no location (or kept where this game does not look)
+						continue;
+					}
+					probe.Sample(hits);
+				}
+			}
+			locSlot = probe.Slot();
+			if (locSlot) {
+				logs::info("Quests: {} locations; a location alias's record keeps its forced location at +0x{:X} ({} aliases forced to a location agree, {} hold none): "
+						   "a run's locations are given at its start",
+					locations.size(), LOC_SLOT_BASE + *locSlot * sizeof(std::uintptr_t), probe.Samples(), none);
+			} else {
+				logs::warn("Quests: {} locations; where a location alias's record keeps its forced location was not found ({} aliases forced to a location read, "
+						   "{} hold none): a run's locations stay each game's own pick here",
+					locations.size(), probe.Samples(), none);
+			}
+		}
+
+		// Whether the quests' location maps read as they must (QuestRunRules::LocCheck): each running quest's location
+		// alias forced by its record to a location must hold that one. Every 10 s until decided.
+		Clock::time_point nextLocCheck{};
+		void CheckLocations(Clock::time_point a_now)
+		{
+			if (!locSlot || locCheck.Now() != QuestRunRules::LocCheck::State::kUnread || a_now < nextLocCheck) {
+				return;
+			}
+			nextLocCheck = a_now + std::chrono::seconds{ 10 };
+			for (const auto& known : catalog) {
+				const auto quest = known.quest;
+				if (!quest->IsEnabled() || quest->IsStarting()) {
+					continue;
+				}
+				for (const auto alias : quest->aliases) {
+					if (!IsLocAlias(alias) || FillTypeOf(alias) != QuestRunRules::FillType::kForced) {
+						continue;
+					}
+					const auto said = SlotValue(alias, *locSlot);
+					if (!locations.contains(said) || !locChecked.insert((std::uint64_t{ quest->GetFormID() } << 32) | alias->aliasID).second) {
+						continue;
+					}
+					const auto held = LocationOf(quest, alias->aliasID);
+					locCheck.Sample(held && *held && reinterpret_cast<std::uintptr_t>(*held) == said);
+					if (locCheck.Now() != QuestRunRules::LocCheck::State::kUnread) {
+						if (locCheck.Now() == QuestRunRules::LocCheck::State::kVerified) {
+							logs::info("Quests: the quests' location maps read as they must ({} of {} forced location aliases of running quests hold their location): "
+									   "a run's locations are said",
+								locCheck.Held(), locCheck.Samples());
+						} else {
+							logs::warn("Quests: the quests' location maps do not read as they must (only {} of {} forced location aliases of running quests hold "
+									   "their location): a run's locations are never said, each game's own pick",
+								locCheck.Held(), locCheck.Samples());
+						}
+						return;
+					}
+				}
+			}
+		}
+
+		bool LocationsRead() { return locSlot && locCheck.Now() == QuestRunRules::LocCheck::State::kVerified; }
+
+		// What the quest's aliases hold here, in this game's numbering: its reference aliases' references, and its
+		// location aliases' locations (unknown while the location map is not checked: QuestRunRules::LocFillOf);
+		// a_locations counts its location aliases.
 		std::vector<Fill> ReadFills(RE::TESQuest* a_quest, std::size_t* a_locations = nullptr)
 		{
 			std::vector<Fill> out;
 			if (!a_quest) {
 				return out;
 			}
+			const bool read = LocationsRead();
 			for (const auto alias : a_quest->aliases) {
-				if (!alias) {
+				if (!alias || out.size() >= Protocol::MAX_ALIAS_FILLS) {
 					continue;
 				}
-				if (alias->GetVMTypeID() == RE::BGSLocAlias::VMTYPEID) {
+				if (IsLocAlias(alias)) {
 					if (a_locations) {
 						++*a_locations;
 					}
+					std::optional<RE::BGSLocation*> loc;
+					if (read) {
+						loc = LocationOf(a_quest, alias->aliasID);
+					}
+					out.push_back(QuestRunRules::LocFillOf(alias->aliasID, loc && *loc ? (*loc)->GetFormID() : 0, loc.has_value()));
 					continue;
 				}
-				if (!IsRefAlias(alias) || out.size() >= Protocol::MAX_ALIAS_FILLS) {
+				if (!IsRefAlias(alias)) {
 					continue;
 				}
 				const auto ref = a_quest->GetAliasedRef(alias->aliasID).get();
@@ -330,8 +472,37 @@ namespace QuestSync
 			return a_refId != 0 && !FormIds::IsRuntime(a_refId) ? RE::TESForm::LookupByID<RE::TESObjectREFR>(a_refId) : nullptr;
 		}
 
+		RE::BGSLocation* LocOf(std::uint32_t a_locId)
+		{
+			if (a_locId == 0 || FormIds::IsRuntime(a_locId)) {
+				return nullptr;
+			}
+			const auto loc = RE::TESForm::LookupByID<RE::BGSLocation>(a_locId);
+			return loc && locations.contains(reinterpret_cast<std::uintptr_t>(loc)) ? loc : nullptr;
+		}
+
+		// A location is given only at a start: a radiant job this game took as the run (it ran here with its own pick) that
+		// holds a_apart locations other than the host's is stopped, to be started again for the run (once a run; its stages
+		// made again after). True when stopped. A shared quest is never stopped for it (its progress here is the
+		// session's): ForceFills says its locations apart once.
+		bool RestartForLocations(RE::TESQuest* a_quest, std::size_t a_apart, Clock::time_point a_now)
+		{
+			const auto id = a_quest->GetFormID();
+			if (a_apart == 0 || !locSlot || ClassOf(a_quest) != Class::kRadiant || follower.CountsOf(id).startedHere || !follower.Restart(id, a_now)) {
+				return false;
+			}
+			if (Run(std::format("stopquest {}", EditorId(a_quest)))) {
+				++counts.restartsMade;
+				logs::info("Quests: {} ran here with {} location(s) other than the host's run {}: stopped, to start again with the host's", QuestName(id), a_apart,
+					follower.RunOf(id));
+			}
+			return true;
+		}
+
 		// The run's references forced into the quest's aliases here where they do not hold. A reference not loaded here
-		// (not persistent, its cell not loaded) is tried again FORCE_EVERY.
+		// (not persistent, its cell not loaded) is tried again FORCE_EVERY, said once per run and alias; a location that
+		// differs (given only at a start) is said once per run and alias. Each forcing is said once per run, alias and
+		// reference (a script that fills the alias again every time is not a line every 2 s).
 		void ForceFills(RE::TESQuest* a_quest)
 		{
 			const auto id = a_quest->GetFormID();
@@ -339,24 +510,37 @@ namespace QuestSync
 			if (!fills) {
 				return;
 			}
-			const auto compare = QuestRunRules::Against(*fills, ReadFills(a_quest));
+			const auto  compare = QuestRunRules::Against(*fills, ReadFills(a_quest));
+			if (RestartForLocations(a_quest, compare.locs.size(), Clock::now())) {
+				return;
+			}
 			std::size_t forcedNow = 0;
-			std::size_t missing = 0;
+			std::size_t sayForced = 0;
 			for (const auto& f : compare.force) {
 				const auto ref = RefOf(f.refId);
 				if (!ref) {
-					++missing;
+					if (follower.NotLoaded(id, f)) {
+						logs::info("Quests: {} (the host's run {}): the host's reference {:08X} of its alias {} is not loaded here yet: forced once it is (said once)",
+							QuestName(id), follower.RunOf(id), f.refId, f.aliasId);
+					}
 					continue;
 				}
 				a_quest->ForceRefIntoAlias(f.aliasId, ref);
 				++forcedNow;
+				sayForced += follower.Forced(id, f) ? 1 : 0;
 			}
 			counts.forced += forcedNow;
-			counts.notLoaded += missing;
-			if (forcedNow != 0 || missing != 0) {
-				logs::info("Quests: {} (the host's run {}): {} of its aliases given the host's reference here, {} whose reference is not loaded here yet "
-						   "(tried again), {} the same already; {} the host's game made as it ran and {} of plugins this game lacks stay this game's own",
-					QuestName(id), follower.RunOf(id), forcedNow, missing, compare.same, compare.runtime, compare.unknown);
+			for (const auto& l : compare.locs) {
+				if (follower.LocApart(id, l)) {
+					logs::warn("Quests: {} (the host's run {}): its location alias {} holds another location here than the host's {:08X}; a location is given only at "
+							   "a start (said once)",
+						QuestName(id), follower.RunOf(id), l.aliasId, l.refId);
+				}
+			}
+			if (sayForced != 0) {
+				logs::info("Quests: {} (the host's run {}): {} of its aliases given the host's reference here, {} the same already; {} the host's game made as it ran "
+						   "and {} of plugins this game lacks stay this game's own",
+					QuestName(id), follower.RunOf(id), forcedNow, compare.same, compare.runtime, compare.unknown);
 			}
 		}
 
@@ -364,7 +548,7 @@ namespace QuestSync
 		{
 			for (auto& r : a_rewritten.rewrites) {
 				r.alias->fillType = static_cast<RE::BGSBaseAlias::FILL_TYPE>(r.fillType);
-				std::memcpy(&r.alias->fillData, r.fillData.data(), r.fillData.size());
+				std::memcpy(reinterpret_cast<std::byte*>(r.alias) + r.offset, r.bytes.data(), r.size);
 			}
 			a_rewritten.rewrites.clear();
 		}
@@ -396,51 +580,116 @@ namespace QuestSync
 			}
 		}
 
-		// Starts the quest here for the host's run: each reference alias the host's game filled with a reference this
-		// game has (loaded) is made a forced fill of it for the start (an optional one the host left empty, a forced
-		// fill of none), so the quest's start-up stage and scripts run with the host's references; its own pick stays in
-		// the rest (an actor the host's game created, a reference not loaded here or of a plugin this game lacks). The
-		// records are put back once the quest runs.
+		// Records of quests that run now put back (the host's dev start at a place, and a friend's start for a run), and
+		// any older than a start can take.
+		void RestoreSettled(Clock::time_point a_now)
+		{
+			for (auto it = rewritten.begin(); it != rewritten.end();) {
+				const auto quest = QuestOf(it->quest);
+				if (!quest || Running(quest) || it->since < a_now - QuestRunRules::START_WAIT - std::chrono::seconds{ 5 }) {
+					Restore(*it);
+					it = rewritten.erase(it);
+				} else {
+					++it;
+				}
+			}
+		}
+
+		// The quest's aliases as their records have them (QuestRunRules::PlanStart).
+		std::vector<QuestRunRules::AliasRecord> RecordsOf(RE::TESQuest* a_quest)
+		{
+			std::vector<QuestRunRules::AliasRecord> out;
+			for (const auto alias : a_quest->aliases) {
+				const bool loc = IsLocAlias(alias);
+				if (!loc && !IsRefAlias(alias)) {
+					continue;
+				}
+				out.push_back({ alias->aliasID, loc, FillTypeOf(alias), alias->flags.any(RE::BGSBaseAlias::FLAGS::kOptional) });
+			}
+			return out;
+		}
+
+		RE::BGSBaseAlias* AliasOf(RE::TESQuest* a_quest, std::uint32_t a_aliasId)
+		{
+			for (const auto alias : a_quest->aliases) {
+				if (alias && alias->aliasID == a_aliasId) {
+					return alias;
+				}
+			}
+			return nullptr;
+		}
+
+		// One alias's record made a forced fill for a start (QuestRunRules::PlanStep): of a reference (its handle), of a
+		// location (in the slot LocProbe found), or of none; as it was kept in a_done, to be put back.
+		void RewriteAlias(Rewritten& a_done, RE::BGSBaseAlias* a_alias, const QuestRunRules::PlanStep& a_step)
+		{
+			static_assert(sizeof(RE::BGSRefAlias::GenericFillData) <= sizeof(Rewrite::bytes));
+			Rewrite r;
+			r.alias = a_alias;
+			r.fillType = a_alias->fillType.underlying();
+			if (a_step.location) {
+				r.offset = LOC_SLOT_BASE + *locSlot * sizeof(std::uintptr_t);
+				r.size = sizeof(std::uintptr_t);
+			} else {
+				const auto ref = static_cast<RE::BGSRefAlias*>(a_alias);
+				r.offset = static_cast<std::size_t>(reinterpret_cast<std::byte*>(&ref->fillData) - reinterpret_cast<std::byte*>(a_alias));
+				r.size = sizeof(ref->fillData);
+			}
+			const auto bytes = reinterpret_cast<std::byte*>(a_alias) + r.offset;
+			std::memcpy(r.bytes.data(), bytes, r.size);
+			a_done.rewrites.push_back(r);
+			a_alias->fillType = RE::BGSBaseAlias::FILL_TYPE::kForced;
+			if (a_step.location) {
+				const auto loc = a_step.way == QuestRunRules::Way::kLoc ? LocOf(a_step.formId) : nullptr;
+				const auto value = reinterpret_cast<std::uintptr_t>(loc);
+				std::memcpy(bytes, &value, sizeof value);
+			} else {
+				const auto alias = static_cast<RE::BGSRefAlias*>(a_alias);
+				std::memset(&alias->fillData, 0, sizeof(alias->fillData));
+				if (a_step.way == QuestRunRules::Way::kRef) {
+					if (const auto ref = RefOf(a_step.formId)) {
+						alias->fillData.forced.forcedRef = ref->GetHandle();
+					}
+				}
+			}
+		}
+
+		// Starts the quest here for the host's run (QuestRunRules::PlanStart): each alias the host's game filled with a
+		// reference or a location this game has (loaded) is made a forced fill of it for the start (an optional one the
+		// host left empty, a forced fill of none), so the quest's start-up stage and scripts run with the host's references
+		// and locations, whatever filled them in the host's game (its conditions, the Story Manager's event, another alias);
+		// its own pick stays in the rest (an actor the host's game created, a form not loaded here or of a plugin this game
+		// lacks, a location while this game cannot write one). A plan that leaves an alias only the Story Manager's event
+		// fills is not tried: the start would fail. The records are put back once the quest runs. The run is told how it
+		// went (Follower::StartMade or StartFailed).
 		void StartForRun(RE::TESQuest* a_quest, Clock::time_point a_now)
 		{
 			const auto id = a_quest->GetFormID();
-			const auto fills = follower.Fills(id);
-			Rewritten done{ id, {}, a_now };
-			std::size_t forcedHere = 0;
-			std::size_t ownHere = 0;
-			for (const auto base : a_quest->aliases) {
-				if (!IsRefAlias(base)) {
-					continue;
+			const auto plan = QuestRunRules::PlanStart(RecordsOf(a_quest), follower.Fills(id), locSlot.has_value(),
+				[](std::uint32_t a_formId, bool a_location) { return a_location ? LocOf(a_formId) != nullptr : RefOf(a_formId) != nullptr; });
+			lastRun = std::format("{} run {}", QuestName(id), follower.RunOf(id));
+			if (!plan.CanStart()) {
+				++counts.cannotStart;
+				follower.StartFailed(id, a_now, false);
+				std::string aliases;
+				for (const auto alias : plan.needsEvent) {
+					aliases += std::format("{}{}", aliases.empty() ? "" : ",", alias);
 				}
-				const auto alias = static_cast<RE::BGSRefAlias*>(base);
-				const Fill* said = nullptr;
-				if (fills) {
-					const auto it = std::ranges::find(*fills, alias->aliasID, &Fill::aliasId);
-					said = it != fills->end() ? &*it : nullptr;
-				}
-				RE::TESObjectREFR* ref = nullptr;
-				const bool empty = said && said->kind == Fill::kEmpty && alias->flags.any(RE::BGSBaseAlias::FLAGS::kOptional);
-				if (said && said->kind == Fill::kRef) {
-					ref = RefOf(said->refId);
-				}
-				if (!ref && !empty) {
-					++ownHere;
-					continue;
-				}
-				Rewrite r;
-				r.alias = alias;
-				r.fillType = alias->fillType.underlying();
-				std::memcpy(r.fillData.data(), &alias->fillData, r.fillData.size());
-				done.rewrites.push_back(r);
-				alias->fillType = RE::BGSBaseAlias::FILL_TYPE::kForced;
-				std::memset(&alias->fillData, 0, sizeof(alias->fillData));
-				if (ref) {
-					alias->fillData.forced.forcedRef = ref->GetHandle();
-				}
-				++forcedHere;
+				logs::warn("Quests: {}: the host's run {} cannot start here: its aliases {} are filled only by the Story Manager's event, and the host's {} not "
+						   "given here ({} not loaded or lacking{}); tried again when the host's fills change, {}",
+					QuestName(id), follower.RunOf(id), aliases, plan.needsEvent.size() == 1 ? "is" : "are", plan.note.notLoaded,
+					locSlot ? "" : ", locations not written in this game", ClassOf(a_quest) == Class::kRadiant ? "its stages dropped meanwhile" : "its stages made as they come");
+				return;
 			}
-			counts.forcedAtStart += forcedHere;
-			counts.ownAtStart += ownHere;
+			Rewritten done{ id, {}, a_now };
+			for (const auto& step : plan.steps) {
+				if (step.way == QuestRunRules::Way::kOwn) {
+					continue;
+				}
+				if (const auto alias = AliasOf(a_quest, step.aliasId)) {
+					RewriteAlias(done, alias, step);
+				}
+			}
 			// a radiant job that ran here before starts afresh (the Story Manager resets one it starts again)
 			if (ClassOf(a_quest) == Class::kRadiant && a_quest->alreadyRun && !a_quest->IsEnabled()) {
 				a_quest->Reset();
@@ -448,17 +697,40 @@ namespace QuestSync
 			bool       result = false;
 			const bool started = a_quest->EnsureQuestStarted(result, true);
 			NoteThread();
-			lastRun = std::format("{} run {}", QuestName(id), follower.RunOf(id));
-			logs::info("Quests: started {} here for the host's run {} with {} of its aliases given the host's references ({} this game's own pick): {}",
-				QuestName(id), follower.RunOf(id), forcedHere, ownHere, started || result ? "starting" : "the game would not start it");
-			if (!started && !result) {
+			const bool took = started || result;
+			logs::info("Quests: started {} here for the host's run {} with {} of its aliases given the host's references, {} of its location aliases the host's "
+					   "locations and {} made empty as the host's ({} this game's own pick, {} of them not loaded here): {}",
+				QuestName(id), follower.RunOf(id), plan.note.refs, plan.note.locs, plan.note.nones, plan.note.own, plan.note.notLoaded,
+				took ? "starting" : "the game would not start it (tried again later)");
+			if (!took) {
 				++counts.startFailed;
 				Restore(done);
+				follower.StartFailed(id, a_now, true);
 				return;
 			}
+			counts.forcedAtStart += plan.note.refs;
+			counts.locsAtStart += plan.note.locs;
+			counts.ownAtStart += plan.note.own;
+			follower.StartMade(id, plan.note);
 			if (!done.rewrites.empty()) {
 				rewritten.push_back(std::move(done));
 			}
+		}
+
+		// The session's word on a quest its run came to run here late (after it was given up): what was dropped meanwhile
+		// is made again (the maker judges each again; what this game has is passed over).
+		void Rewant(std::uint32_t a_questId, Clock::time_point a_now)
+		{
+			std::size_t n = 0;
+			for (const auto& e : view.All()) {
+				if (e.questId == a_questId) {
+					maker.Add(e, 0, a_now);
+					++n;
+				}
+			}
+			counts.rewanted += n;
+			logs::info("Quests: {} runs here as the host's run {} after it was given up: the session's {} entries of it are made again as they apply",
+				QuestName(a_questId), follower.RunOf(a_questId), n);
 		}
 
 		// The session's word on a quest of the host's runs is forgotten here (a radiant job begun again or stopped).
@@ -506,6 +778,7 @@ namespace QuestSync
 					   "the stages' done bit is {} ({} of {} running quests read their current stage done, {} never run read a stage done)",
 				catalog.size(), classCounts[0], classCounts[1], classCounts[2], classCounts[3], classCounts[4], classCounts[5],
 				bit->trusted ? "trusted" : "NOT trusted: only stages seen set and current stages count as done", bit->currentDone, bit->currentChecked, bit->neverRunWithDone);
+			ProbeLocations(data);
 		}
 
 		void Queue(const StageEvent& a_event)
@@ -854,10 +1127,7 @@ namespace QuestSync
 		void BeginRun(const SendFn& a_send, RE::TESQuest* a_quest, Class a_class, bool a_fresh, Clock::time_point a_now, std::vector<Entry>& a_news)
 		{
 			const auto id = a_quest->GetFormID();
-			auto       run = keeper.Started(id, a_class == Class::kRadiant);
-			if (!a_fresh) {
-				run.flags = static_cast<std::uint8_t>(run.flags & ~Protocol::QuestRun::kFresh);
-			}
+			const auto run = keeper.Started(id, a_class == Class::kRadiant, a_fresh);
 			SendRun(a_send, run);
 			lastRun = std::format("{} run {}", QuestName(id), run.run);
 			if (a_class == Class::kRadiant && a_fresh) {
@@ -877,7 +1147,7 @@ namespace QuestSync
 				}
 			}
 			if (Running(a_quest)) {
-				if (auto filled = keeper.Read(id, ReadFills(a_quest))) {
+				if (auto filled = keeper.Read(id, ReadFills(a_quest), a_now)) {
 					SendRun(a_send, *filled);
 				}
 			}
@@ -999,19 +1269,20 @@ namespace QuestSync
 
 		// The runs: the host's game says its quests' aliases when first read and when they change; a friend's starts or
 		// adopts the host's runs, forces their references, and stops a radiant job the host's stopped.
+		CheckLocations(now);
+		RestoreSettled(now);
 		if (host) {
 			if (now >= nextPoll) {
 				for (const auto id : keeper.LiveQuests()) {
 					const auto quest = QuestOf(id);
 					if (quest && Running(quest)) {
-						if (auto filled = keeper.Read(id, ReadFills(quest))) {
+						if (auto filled = keeper.Read(id, ReadFills(quest), now)) {
 							SendRun(a_send, *filled);
 						}
 					}
 				}
 			}
 		} else {
-			RestoreRecords(now - QuestRunRules::START_WAIT - std::chrono::seconds{ 5 });
 			for (const auto id : follower.Quests()) {
 				const auto quest = QuestOf(id);
 				switch (follower.Due(id, HereRun(quest), now)) {
@@ -1021,11 +1292,25 @@ namespace QuestSync
 				case QuestRunRules::Act::kStarted:
 					RestoreRecords(id);
 					logs::info("Quests: {} runs here as the host's run {}", QuestName(id), follower.RunOf(id));
+					if (follower.TakeLate(id)) {
+						Rewant(id, now);
+					}
 					break;
 				case QuestRunRules::Act::kAdopt:
-					lastRun = std::format("{} run {}", QuestName(id), follower.RunOf(id));
-					logs::info("Quests: {} ran here already: it is the host's run {} now, with the host's references", QuestName(id), follower.RunOf(id));
-					break;
+					{
+						lastRun = std::format("{} run {}", QuestName(id), follower.RunOf(id));
+						logs::info("Quests: {} ran here already: it is the host's run {} now, with the host's references", QuestName(id), follower.RunOf(id));
+						// a location is given only at a start: a radiant job that runs here with another location than the
+						// host's is stopped and started again for the run (once a run); a shared quest's is said (ForceFills)
+						const auto fills = follower.Fills(id);
+						if (fills && RestartForLocations(quest, QuestRunRules::Against(*fills, ReadFills(quest)).locs.size(), now)) {
+							break;
+						}
+						if (follower.TakeLate(id)) {
+							Rewant(id, now);
+						}
+						break;
+					}
 				case QuestRunRules::Act::kGiveUp:
 					RestoreRecords(id);
 					logs::warn("Quests: {}: the host's run {} {} within {} s; {}", QuestName(id), follower.RunOf(id),
@@ -1272,12 +1557,64 @@ namespace QuestSync
 			return nullptr;
 		}
 
-		// `quests run <id>`: a quest's run as this game has it (the rig compares the two games' fills), and `quests start
-		// <id>`: the quest started here by the engine's own start (the Story Manager's way, as a radiant job starts).
+		// `quests start <id> [here | at <location hex>]`: the quest started here by the engine's own start (the Story
+		// Manager's way, as a radiant job starts). With a place, each of its location aliases the Story Manager's event
+		// fills is made a forced fill of that location for the start (the player's location for `here`), as the event
+		// would have filled it: a job that needs its event can be begun from the console (the rig's event leg). The
+		// records are put back once it runs.
+		std::string StartCommand(RE::TESQuest* a_quest, const std::vector<std::string_view>& a_words)
+		{
+			const auto id = a_quest->GetFormID();
+			if (a_quest->IsEnabled()) {
+				return std::format("error: {} runs here already", QuestName(id));
+			}
+			RE::BGSLocation* at = nullptr;
+			Rewritten        done{ id, {}, Clock::now() };
+			if (a_words.size() > 2) {
+				if (!locSlot) {
+					return "error: where a location alias's record keeps its location is not known in this game (quests: locSlot=none)";
+				}
+				if (a_words[2] == "here") {
+					at = Player() ? Player()->GetCurrentLocation() : nullptr;
+				} else if (const auto hex = FormsCommand::ParseHex(a_words[3])) {
+					at = LocOf(*hex);
+				}
+				if (!at) {
+					return a_words[2] == "here" ? "error: our player stands in no location" : "error: no such location (a hex form id of a location)";
+				}
+				for (const auto alias : a_quest->aliases) {
+					if (IsLocAlias(alias) && FillTypeOf(alias) == QuestRunRules::FillType::kFromEvent) {
+						RewriteAlias(done, alias, { alias->aliasID, true, QuestRunRules::Way::kLoc, at->GetFormID() });
+					}
+				}
+				if (done.rewrites.empty()) {
+					return std::format("error: {} has no location alias the Story Manager's event fills", QuestName(id));
+				}
+			}
+			if (ClassOf(a_quest) == Class::kRadiant && a_quest->alreadyRun) {
+				a_quest->Reset();
+			}
+			bool       result = false;
+			const bool started = a_quest->EnsureQuestStarted(result, true);
+			NoteThread();
+			const auto given = done.rewrites.size();
+			if (!started && !result) {
+				Restore(done);
+			} else if (!done.rewrites.empty()) {
+				rewritten.push_back(std::move(done));
+			}
+			return std::format("quest={} id={:08X} started={} result={} at={} given={}", QuestName(id), id, started ? 1 : 0, result ? 1 : 0,
+				at ? std::format("{:08X}", at->GetFormID()) : "-"s, given);
+		}
+
+		// `quests run <id>`: a quest's run as this game has it (the rig compares the two games' fills), and `quests start`.
 		std::string RunCommand(const std::vector<std::string_view>& a_words)
 		{
-			if (a_words.size() != 2) {
-				return std::format("error: usage: quests {} <editor id or hex form id>", a_words[0]);
+			const bool start = a_words[0] == "start";
+			const bool shape = a_words.size() == 2 || (start && a_words.size() == 3 && a_words[2] == "here") || (start && a_words.size() == 4 && a_words[2] == "at");
+			if (!shape) {
+				return start ? "error: usage: quests start <editor id or hex form id> [here | at <location hex form id>]"s
+				             : "error: usage: quests run <editor id or hex form id>"s;
 			}
 			if (!LocalPlayer::InWorld()) {
 				return "error: not in the world";
@@ -1286,49 +1623,51 @@ namespace QuestSync
 			if (!quest) {
 				return "error: no such quest here";
 			}
-			const auto id = quest->GetFormID();
-			if (a_words[0] == "start") {
-				if (quest->IsEnabled()) {
-					return std::format("error: {} runs here already", QuestName(id));
-				}
-				if (ClassOf(quest) == Class::kRadiant && quest->alreadyRun) {
-					quest->Reset();
-				}
-				bool       result = false;
-				const bool started = quest->EnsureQuestStarted(result, true);
-				NoteThread();
-				return std::format("quest={} id={:08X} started={} result={}", QuestName(id), id, started ? 1 : 0, result ? 1 : 0);
+			if (start) {
+				return StartCommand(quest, a_words);
 			}
+			const auto  id = quest->GetFormID();
 			std::size_t locations = 0;
 			const auto  fills = ReadFills(quest, &locations);
 			const auto  here = QuestRunRules::Describe(fills);
 			const auto  cls = QuestRules::ClassName(ClassOf(quest));
 			if (host) {
 				const auto said = keeper.Fills(id);
-				return std::format("quest={} id={:08X} class={} role=host run={} live={} fills={} here={} running={} locations={}", QuestName(id), id, cls,
-					keeper.RunOf(id), keeper.Live(id) ? 1 : 0, said ? QuestRunRules::Describe(*said) : "-"s, here, Running(quest) ? 1 : 0, locations);
+				return std::format("quest={} id={:08X} class={} role=host run={} live={} fills={} refs={} locs={} here={} running={} locations={}", QuestName(id), id,
+					cls, keeper.RunOf(id), keeper.Live(id) ? 1 : 0, said ? QuestRunRules::Describe(*said) : "-"s,
+					said ? QuestRunRules::CountOf(*said, Fill::kRef) : 0, said ? QuestRunRules::CountOf(*said, Fill::kLoc) : 0, here, Running(quest) ? 1 : 0,
+					locations);
 			}
 			const auto said = follower.Fills(id);
 			const auto compare = said ? QuestRunRules::Against(*said, fills) : QuestRunRules::Compare{};
 			const auto phase = follower.PhaseOf(id);
-			return std::format("quest={} id={:08X} class={} role=friend run={} phase={} heard={} here={} running={} same={} force={} matched={} runtime={} "
-							   "unknown={} extra={} locations={} wasOurs={}",
+			const auto c = follower.CountsOf(id);
+			return std::format("quest={} id={:08X} class={} role=friend run={} phase={} heard={} here={} running={} same={} locSame={} force={} locsApart={} "
+							   "matched={} runtime={} unknown={} extra={} locations={} wasOurs={} startedHere={} atStart={} locAtStart={} noneAtStart={} "
+							   "ownAtStart={} notLoadedAtStart={} missed={} later={} notLoaded={} locApart={} retries={} restarted={}",
 				QuestName(id), id, cls, follower.RunOf(id), phase ? QuestRunRules::PhaseName(*phase) : "none", said ? QuestRunRules::Describe(*said) : "-"s, here,
-				Running(quest) ? 1 : 0, said && compare.Same() ? 1 : 0, compare.force.size(), compare.same, compare.runtime, compare.unknown, compare.extra,
-				locations, follower.WasOurs(id) ? 1 : 0);
+				Running(quest) ? 1 : 0, said && compare.Same() ? 1 : 0, said && compare.LocsSame() ? 1 : 0, compare.force.size(), compare.locs.size(), compare.same,
+				compare.runtime, compare.unknown, compare.extra, locations, follower.WasOurs(id) ? 1 : 0, c.startedHere ? 1 : 0, c.start.refs, c.start.locs,
+				c.start.nones, c.start.own, c.start.notLoaded, c.missed, c.later, c.notLoaded, c.locApart, c.retries, c.restarted ? 1 : 0);
 		}
 
-		// `quests runpick <radiant|shared> [n]`: the n-th quest of the class (from 0) with an editor ID that does not run
-		// here and has not ended, with at least one reference alias the game fills by its conditions and none that needs an event's data
-		// (a quest a console start can begin): for the rig's runs leg.
+		// `quests runpick <radiant|shared> [n] [plain|loc|event]`: the n-th quest of the class (from 0) with an editor ID
+		// that does not run here and has not ended, for the rig's legs:
+		// - plain: a reference alias the game fills by its conditions, and no alias (reference or location) that needs the
+		//   Story Manager's event (a quest a console start can begin);
+		// - loc: a location alias the game fills by its conditions (find a matching location: two games may pick apart),
+		//   and none that needs the event;
+		// - event: a location alias that needs the event (begun with `quests start <id> here`), no reference alias that
+		//   does.
 		std::string RunPick(const std::vector<std::string_view>& a_words)
 		{
-			const auto usage = "error: usage: quests runpick <radiant|shared> [n 0-4096]";
-			if (a_words.size() < 2 || a_words.size() > 3 || (a_words[1] != "radiant" && a_words[1] != "shared")) {
+			const auto usage = "error: usage: quests runpick <radiant|shared> [n 0-4096] [plain|loc|event]";
+			if (a_words.size() < 2 || a_words.size() > 4 || (a_words[1] != "radiant" && a_words[1] != "shared")) {
 				return usage;
 			}
-			const auto skip = a_words.size() == 3 ? DevLine::Number(a_words[2]) : std::optional<std::uint64_t>{ 0 };
-			if (!skip || *skip > 4096) {
+			const auto skip = a_words.size() >= 3 ? DevLine::Number(a_words[2]) : std::optional<std::uint64_t>{ 0 };
+			const auto mode = a_words.size() == 4 ? a_words[3] : std::string_view{ "plain" };
+			if (!skip || *skip > 4096 || (mode != "plain" && mode != "loc" && mode != "event")) {
 				return usage;
 			}
 			if (!LocalPlayer::InWorld()) {
@@ -1343,28 +1682,30 @@ namespace QuestSync
 					EditorId(quest).empty()) {
 					continue;
 				}
-				std::size_t byConditions = 0;
-				bool        needsEvent = false;
-				std::size_t refs = 0;
-				for (const auto base : quest->aliases) {
-					if (!IsRefAlias(base)) {
-						continue;
-					}
-					++refs;
-					const auto type = base->fillType.get();
-					if (type == RE::BGSBaseAlias::FILL_TYPE::kConditions) {
-						++byConditions;
-					} else if (type == RE::BGSBaseAlias::FILL_TYPE::kFromEvent && !base->flags.any(RE::BGSBaseAlias::FLAGS::kOptional)) {
-						needsEvent = true;
+				std::size_t refs = 0, byConditions = 0, refEvent = 0, locs = 0, locByConditions = 0, locEvent = 0;
+				for (const auto& alias : RecordsOf(quest)) {
+					const bool byEvent = alias.fill == QuestRunRules::FillType::kFromEvent && !alias.optional;
+					const bool byConds = alias.fill == QuestRunRules::FillType::kConditions;
+					if (alias.location) {
+						++locs;
+						locByConditions += byConds ? 1 : 0;
+						locEvent += byEvent ? 1 : 0;
+					} else {
+						++refs;
+						byConditions += byConds ? 1 : 0;
+						refEvent += byEvent ? 1 : 0;
 					}
 				}
-				if (byConditions == 0 || needsEvent || n++ < *skip) {
+				const bool fits = mode == "plain" ? byConditions != 0 && refEvent == 0 && locEvent == 0 :
+				                  mode == "loc"   ? locByConditions != 0 && refEvent == 0 && locEvent == 0 :
+				                                    locEvent != 0 && refEvent == 0;
+				if (!fits || n++ < *skip) {
 					continue;
 				}
-				return std::format("quest={} id={:08X} class={} refs={} byConditions={}", EditorId(quest), quest->GetFormID(), QuestRules::ClassName(known.cls), refs,
-					byConditions);
+				return std::format("quest={} id={:08X} class={} refs={} byConditions={} locs={} locByConditions={} locEvent={}", EditorId(quest), quest->GetFormID(),
+					QuestRules::ClassName(known.cls), refs, byConditions, locs, locByConditions, locEvent);
 			}
-			return std::format("error: no {}-th {} quest that a console start can begin here", *skip, a_words[1]);
+			return std::format("error: no {}-th {} quest ({}) that a console start can begin here", *skip, a_words[1], mode);
 		}
 	}
 
@@ -1383,7 +1724,8 @@ namespace QuestSync
 							   "passed={} notStarted={} failedKept={} answered={} busy={} refused={} stuck={} lastStuck={} asks={} resets={} rebases={} snapshots={}/{} "
 							   "apart={} lastApart={} apartStages={} apartHeld={} moved={} lastMoved={} lastMade={} unmade={} lastUnmade={} wantsDropped={} "
 							   "eventsDropped={} offmain={} norun={} runs={} runsSent={} runsHeard={} runsStarted={} runsAdopted={} runsGaveUp={} forced={} "
-							   "forcedAtStart={} ownAtStart={} startFailed={} stopsMade={} notLoaded={} rewritten={} lastRun={}",
+							   "forcedAtStart={} locsAtStart={} ownAtStart={} startFailed={} cannotStart={} runsRetried={} stopsMade={} restarts={} rewanted={} "
+							   "notLoaded={} locApart={} rewritten={} locSlot={} locMap={} locChecked={}/{} locUnread={} lastRun={}",
 				installed ? 1 : 0, host ? 1 : 0, catalog.size(), classCounts[0], classCounts[1], classCounts[2], classCounts[3], classCounts[4], classCounts[5],
 				!bit ? "unread" : bit->trusted ? "trusted" : "untrusted", view.Quests(), view.Entries(), view.Outstanding(), view.Based(), view.Kept(), maker.Size(),
 				maker.InFlight(), maker.Held(look), Counted(counts.events), Counted(counts.sent), Counted(counts.heard), Counted(counts.made), Counted(counts.has),
@@ -1394,8 +1736,11 @@ namespace QuestSync
 				apart.Quests() ? QuestName(apart.LastQuest()) : "none"s, Counted(counts.apartStages), heldStages.size(), Counted(guard.Moves()), lastMoved, lastMade,
 				Counted(counts.unmade), lastUnmade, Counted(maker.Dropped()), Counted(dropped), Counted(counts.offMain), Counted(counts.noRun),
 				host ? keeper.LiveQuests().size() : follower.Live(), Counted(counts.runsSent), Counted(counts.runsHeard), Counted(follower.Started()),
-				Counted(follower.Adopted()), Counted(follower.GaveUp()), Counted(counts.forced), Counted(counts.forcedAtStart), Counted(counts.ownAtStart),
-				Counted(counts.startFailed), Counted(counts.stopsMade), Counted(counts.notLoaded), rewritten.size(), lastRun);
+				Counted(follower.Adopted()), Counted(follower.GaveUp()), Counted(counts.forced), Counted(counts.forcedAtStart), Counted(counts.locsAtStart),
+				Counted(counts.ownAtStart), Counted(counts.startFailed), Counted(counts.cannotStart), Counted(follower.Retried()), Counted(counts.stopsMade),
+				Counted(counts.restartsMade), Counted(counts.rewanted), Counted(follower.NotLoadedCount()), Counted(follower.LocApartCount()), rewritten.size(),
+				locSlot ? std::format("+0x{:X}", LOC_SLOT_BASE + *locSlot * sizeof(std::uintptr_t)) : "none"s, QuestRunRules::LocStateName(locCheck.Now()),
+				locCheck.Held(), locCheck.Samples(), Counted(counts.locUnread), lastRun);
 		}
 		if (words[0] == "run" || words[0] == "start") {
 			return RunCommand(words);
@@ -1404,7 +1749,7 @@ namespace QuestSync
 			return RunPick(words);
 		}
 		if (words[0] != "pick" || words.size() > 2) {
-			return "error: usage: quests [pick [n] | runpick <radiant|shared> [n] | run <id> | start <id>]";
+			return "error: usage: quests [pick [n] | runpick <radiant|shared> [n] [plain|loc|event] | run <id> | start <id> [here | at <location>]]";
 		}
 		// The n-th shared quest (from 0) that has not started here and has at least six stages past its start-up stage,
 		// for the rig to step through (it sets four or five of them, and passes over any its fragments set themselves):
