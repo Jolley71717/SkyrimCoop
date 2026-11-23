@@ -857,8 +857,8 @@ namespace RemotePlayers
 			// (the rig's `forms` step checks a chosen item by its ID here).
 			std::string wornIds;
 			if (remote.looks) {
-				for (const auto id : remote.looks->worn) {
-					wornIds += std::format("{}{:08X}", wornIds.empty() ? "" : ",", id);
+				for (const auto item : remote.looks->worn) {
+					wornIds += std::format("{}{:08X}", wornIds.empty() ? "" : ",", item);
 				}
 			}
 			out += std::format(" named={} aimed={} race={:08X} worn={}/{} wornIds={}", named, aimed ? 1 : 0, remote.looks ? remote.looks->race : 0u, remote.wornShown,
