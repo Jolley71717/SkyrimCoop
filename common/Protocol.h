@@ -30,7 +30,10 @@ namespace Protocol
 	// 3: a hello carries a whole Skyrim load order (MAX_PLUGINS names, in at most MAX_PLUGIN_LIST_BYTES), not 512 names.
 	// 4: form ids on the wire are the session's (PluginTable, kPluginTable): a form is named by its plugin's file name,
 	//    never by a game's load order, so games whose mods are in another order, or differ, play together.
-	inline constexpr std::uint16_t VERSION = 4;
+	// 5: doors, locks and mechanisms (RefState, Activation; docs/DESIGN.md "Doors, locks and mechanisms"): a reference's
+	//    open state and lock are the session's, kept by the server for whoever joins or loads later, and a mechanism a
+	//    player uses (a lever, a pull chain, a pillar) is used in every game by that player's stand-in.
+	inline constexpr std::uint16_t VERSION = 5;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -79,6 +82,11 @@ namespace Protocol
 		kPlayerLooks = 10,  // client -> server, reliable: what my character looks like (again whenever it changes)
 		kRemoteLooks = 11,  // server -> the others (and each one there, to the one who joined): that player's looks
 		kPluginTable = 12,  // server -> client, reliable: the session's plugin table, before the welcome and when it grows
+		kRefState = 13,        // client -> server, reliable: a door's (or a chest's) open state or lock changed here
+		kRemoteRefState = 14,  // server -> everyone, the reporter too: the session's word on it (and each kept one, to a joiner)
+		kActivate = 15,        // client -> server, reliable: our player used a mechanism (a lever, a pull chain, a pillar)
+		kRemoteActivate = 16,  // server -> the others: that player used it, so their stand-in uses it here too
+		kAskRefStates = 17,    // client -> server, reliable: send me every kept RefState again (after a load)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -245,6 +253,69 @@ namespace Protocol
 		PlayerLooks   looks;
 		bool operator==(const RemoteLooks&) const = default;
 	};
+
+	// A reference's open state and lock, as the session knows them (docs/DESIGN.md, "Doors, locks and mechanisms"): a
+	// door, a gate that opens like one, a chest's lock. refId is in the session's numbering (PluginTable); 0 is no
+	// reference (one the reading game lacks reads 0, FormTranslate.h) and is never kept nor applied. A part a report
+	// leaves kUnknown is not said: the receiver leaves that part as it is.
+	struct RefState
+	{
+		enum Value : std::uint8_t
+		{
+			kNo = 0,
+			kYes = 1,
+			kUnknown = 2,  // not said: leave it as it is
+		};
+		// The lock's level, as the game numbers it (RE::LOCK_LEVEL): 0 very easy to 4 very hard, 5 needs its key.
+		static constexpr std::uint8_t LEVEL_MAX = 5;
+		static constexpr std::uint8_t LEVEL_UNKNOWN = 0xFF;
+
+		std::uint32_t refId = 0;
+		std::uint8_t  open = kUnknown;
+		std::uint8_t  locked = kUnknown;
+		std::uint8_t  lockLevel = LEVEL_UNKNOWN;
+		// Who said it (set by the server; what a client sends carries none). 0: the session's word as kept, sent again
+		// (to a joiner, or to a game that loaded a save).
+		std::uint32_t playerId = 0;
+
+		// The same state, whoever said it.
+		[[nodiscard]] bool SameState(const RefState& a_other) const
+		{
+			return refId == a_other.refId && open == a_other.open && locked == a_other.locked && lockLevel == a_other.lockLevel;
+		}
+		[[nodiscard]] bool Says() const { return open != kUnknown || locked != kUnknown || lockLevel != LEVEL_UNKNOWN; }
+		bool operator==(const RefState&) const = default;
+	};
+
+	// a_said laid over a_known: each part a_said says replaces a_known's, the rest stays (the reference is a_said's).
+	[[nodiscard]] inline RefState MergeRefState(RefState a_known, const RefState& a_said)
+	{
+		a_known.refId = a_said.refId;
+		a_known.playerId = a_said.playerId;
+		if (a_said.open != RefState::kUnknown) {
+			a_known.open = a_said.open;
+		}
+		if (a_said.locked != RefState::kUnknown) {
+			a_known.locked = a_said.locked;
+		}
+		if (a_said.lockLevel != RefState::LEVEL_UNKNOWN) {
+			a_known.lockLevel = a_said.lockLevel;
+		}
+		return a_known;
+	}
+
+	// A player used a mechanism: an activator such as a lever, a pull chain, a button, a rotating pillar or a claw door's
+	// keyhole. refId in the session's numbering; playerId set by the server (kRemoteActivate), none in kActivate.
+	struct Activation
+	{
+		std::uint32_t refId = 0;
+		std::uint32_t playerId = 0;
+		bool operator==(const Activation&) const = default;
+	};
+
+	// The most reference states the server keeps for a session: a long evening opens a few hundred doors; past this the
+	// oldest word is not dropped, a new reference is refused (common/RefBook.h).
+	inline constexpr std::size_t MAX_REF_STATES = 16384;
 
 	// ---- serialization -------------------------------------------------------------
 
@@ -755,6 +826,76 @@ namespace Protocol
 			return std::nullopt;
 		}
 		return PluginTable{ std::move(*plugins) };
+	}
+
+	// kRefState: refId, open, locked, lockLevel. kRemoteRefState: the same, then playerId. None for a part out of its
+	// range (open or locked past kUnknown, a level past LEVEL_MAX that is not LEVEL_UNKNOWN).
+	inline std::vector<std::uint8_t> Encode(const RefState& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		w.U32(a_msg.refId);
+		w.U8(a_msg.open);
+		w.U8(a_msg.locked);
+		w.U8(a_msg.lockLevel);
+		if (a_type == MessageType::kRemoteRefState) {
+			w.U32(a_msg.playerId);
+		}
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const RefState& a_msg) { return Encode(a_msg, MessageType::kRefState); }
+
+	inline std::optional<RefState> DecodeRefState(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kRefState && type != MessageType::kRemoteRefState) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		RefState msg;
+		msg.refId = r.U32();
+		msg.open = r.U8();
+		msg.locked = r.U8();
+		msg.lockLevel = r.U8();
+		if (type == MessageType::kRemoteRefState) {
+			msg.playerId = r.U32();
+		}
+		if (!r.AtEnd() || msg.open > RefState::kUnknown || msg.locked > RefState::kUnknown ||
+			(msg.lockLevel > RefState::LEVEL_MAX && msg.lockLevel != RefState::LEVEL_UNKNOWN)) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kActivate: refId. kRemoteActivate: refId, then playerId.
+	inline std::vector<std::uint8_t> Encode(const Activation& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		w.U32(a_msg.refId);
+		if (a_type == MessageType::kRemoteActivate) {
+			w.U32(a_msg.playerId);
+		}
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const Activation& a_msg) { return Encode(a_msg, MessageType::kActivate); }
+
+	inline std::optional<Activation> DecodeActivation(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kActivate && type != MessageType::kRemoteActivate) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		Activation msg;
+		msg.refId = r.U32();
+		if (type == MessageType::kRemoteActivate) {
+			msg.playerId = r.U32();
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
 	}
 
 	// ---- load orders ---------------------------------------------------------------

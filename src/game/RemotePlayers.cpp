@@ -811,6 +811,19 @@ namespace RemotePlayers
 		return players.size();
 	}
 
+	RE::Actor* StandInOf(std::uint32_t a_playerId)
+	{
+		const auto it = players.find(a_playerId);
+		if (it == players.end()) {
+			return nullptr;
+		}
+		const auto actor = it->second.standIn.get();
+		if (!actor || actor->IsDisabled() || actor->IsDeleted() || !actor->Is3DLoaded()) {
+			return nullptr;
+		}
+		return actor.get();
+	}
+
 	std::string Describe()
 	{
 		std::size_t disabled = 0;

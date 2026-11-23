@@ -9,6 +9,7 @@
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/RemotePlayers.h"
+#include "game/WorldObjects.h"
 #include "net/FormsCommand.h"
 #include "net/Identity.h"
 #include "net/LaunchArgs.h"
@@ -211,6 +212,7 @@ namespace Session
 					hostId = msg->hostId;
 					sentLooks.reset();
 					nextState = nextLooks = nextBeat = Clock::now();
+					WorldObjects::Welcomed(playerId);  // the session's doors follow the welcome
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -240,6 +242,16 @@ namespace Session
 			case Protocol::MessageType::kRemoteLooks:
 				if (const auto msg = Protocol::DecodeRemoteLooks(a_data); msg && msg->playerId != playerId) {
 					RemotePlayers::Looked(msg->playerId, msg->looks);
+				}
+				break;
+			case Protocol::MessageType::kRemoteRefState:
+				if (const auto msg = Protocol::DecodeRefState(a_data); msg && welcomed) {
+					WorldObjects::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kRemoteActivate:
+				if (const auto msg = Protocol::DecodeActivation(a_data); msg && welcomed && msg->playerId != playerId) {
+					WorldObjects::Used(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -376,6 +388,7 @@ namespace Session
 			}
 		}
 		RemotePlayers::Clear();
+		WorldObjects::Clear();
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -411,6 +424,7 @@ namespace Session
 		}
 		if (welcomed) {
 			SendOurs(Clock::now());
+			WorldObjects::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 		}
 		RemotePlayers::Frame();
 	}

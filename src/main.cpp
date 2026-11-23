@@ -13,6 +13,7 @@
 #include "game/LocalPlayer.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
+#include "game/WorldObjects.h"
 #include "net/Session.h"
 #include "steam/Steam.h"
 #include "steam/SteamProbe.h"
@@ -169,6 +170,9 @@ namespace
 		} else {
 			logs::info("Steam: left alone (bSteam = false)");
 		}
+		if (!WorldObjects::Install()) {
+			logs::warn("World: doors, locks and mechanisms are not shared in this game; a session still runs");
+		}
 		if (!RemotePlayers::Install()) {
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
 		}
@@ -209,11 +213,13 @@ namespace
 			// data is not a pointer here: it is whether the load worked.
 			logs::info("Load: {}", a_msg->data ? "done" : "failed");
 			RemotePlayers::AfterLoad();  // any stand-in the save brought back goes
+			WorldObjects::AfterLoad();   // the loaded world's doors are the save's: the session's words are asked for again
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
 			RemotePlayers::ForgetStandIns();
+			WorldObjects::AfterLoad();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:

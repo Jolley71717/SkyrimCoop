@@ -24,7 +24,9 @@
 // - a place (a player state's cell and worldspace, as a pair) becomes "nowhere this game has" (both 0), so the reader
 //   shows no one there rather than someone in the wrong cell;
 // - an entry of a list is left out: a worn item;
-// - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has).
+// - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has);
+// - the reference a door's state or a mechanism's use is about becomes 0, which no game applies and the server keeps
+//   nothing of: a door of a plugin some game lacks is that game's own.
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -68,6 +70,10 @@ namespace FormTranslate
 		case MT::kRemoteState:
 		case MT::kPlayerLooks:
 		case MT::kRemoteLooks:
+		case MT::kRefState:
+		case MT::kRemoteRefState:
+		case MT::kActivate:
+		case MT::kRemoteActivate:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -77,6 +83,7 @@ namespace FormTranslate
 		case MT::kHeartbeat:
 		case MT::kHeartbeatAck:
 		case MT::kPluginTable:
+		case MT::kAskRefStates:
 			return false;
 		}
 		return false;  // a type this version does not know
@@ -176,6 +183,22 @@ namespace FormTranslate
 			}
 		}
 
+		// A message about one reference, written back with its own type (kRefState or kRemoteRefState, kActivate or
+		// kRemoteActivate): the reference, or 0 when it has none on the other side.
+		template <class T, class Decode>
+		void ApplyRef(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type, Decode a_decode)
+		{
+			auto msg = a_decode(a_packet);
+			if (!msg) {
+				return;
+			}
+			a_ctx.Detail(msg->refId);
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(static_cast<const T&>(*msg), a_type);
+			}
+		}
+
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
@@ -207,6 +230,14 @@ namespace FormTranslate
 			break;
 		case MT::kRemoteLooks:
 			detail::Apply<Protocol::RemoteLooks>(a_packet, ctx, Protocol::DecodeRemoteLooks, [&](Protocol::RemoteLooks& a_msg) { detail::MapLooks(ctx, a_msg.looks); });
+			break;
+		case MT::kRefState:
+		case MT::kRemoteRefState:
+			detail::ApplyRef<Protocol::RefState>(a_packet, ctx, *type, Protocol::DecodeRefState);
+			break;
+		case MT::kActivate:
+		case MT::kRemoteActivate:
+			detail::ApplyRef<Protocol::Activation>(a_packet, ctx, *type, Protocol::DecodeActivation);
 			break;
 		default:
 			break;
