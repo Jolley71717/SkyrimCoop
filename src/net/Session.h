@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Protocol.h"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -31,6 +33,10 @@ namespace Session
 
 	// For the developer channel's `session`: one line, key=value, never a name or a Steam id.
 	[[nodiscard]] std::string Describe();
+
+	// A face's fingerprint (FaceRules::Hash) with its forms in the session's numbering, as it goes out: the same face is
+	// the same number in every game of the session whatever its load order (the developer channel's `faces`, the rig's).
+	[[nodiscard]] std::uint32_t SessionFaceHash(const Protocol::PlayerFace& a_face);
 
 	// For the developer channel's `forms` (net/FormsCommand.h): this game's edge to the session's form IDs, and one form
 	// looked up by ID, or by its plugin's file name and its number within the plugin.

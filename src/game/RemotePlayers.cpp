@@ -178,6 +178,9 @@ namespace RemotePlayers
 			std::uint64_t                    disabledTick = 0;
 			bool                             deleted = false;
 			bool                             toldStuck = false;
+			// The copy of a preset it stood on with its friend's face (Face.h), until its 3D is gone and it is deleted: no
+			// other face is written into that copy meanwhile (FaceRules::CopyBook, a_inUse).
+			const RE::TESNPC* copy = nullptr;
 		};
 		std::vector<Grave> graveyard;
 
@@ -212,6 +215,8 @@ namespace RemotePlayers
 		std::uint64_t                    facesGivenUp = 0;
 		std::uint64_t                    oursGivenUp = 0;
 		std::uint64_t                    presetsPutBack = 0;
+		std::uint64_t                    presetsNamed = 0;   // stand-ins on a copy sent out, their preset named for the co-save
+		std::uint64_t                    putBackLoading = 0;  // ... given their preset back before a save while their 3D was still loading
 		std::optional<Clock::time_point> repairOursAt;
 		bool                             oursRepaired = false;
 		constexpr auto                   REPAIR_OURS_AFTER = 2s;
@@ -680,7 +685,12 @@ namespace RemotePlayers
 			const auto base = a_actor->GetObjectReference();
 			const auto preset = Face::PresetOf(base);
 			const auto named = preset ? static_cast<const RE::TESBoundObject*>(preset) : base;
-			graveyard.push_back({ .actor = a_actor->GetHandle(), .id = id, .base = named ? named->GetFormID() : 0, .placedAt = a_placedAt });
+			presetsNamed += preset ? 1 : 0;
+			graveyard.push_back({ .actor = a_actor->GetHandle(),
+				.id = id,
+				.base = named ? named->GetFormID() : 0,
+				.placedAt = a_placedAt,
+				.copy = preset ? base->As<RE::TESNPC>() : nullptr });
 			std::scoped_lock l{ lock };
 			retiring[a_actor] = id;
 			CountWatched();
@@ -745,6 +755,7 @@ namespace RemotePlayers
 					break;
 				case Retire::Step::kDelete:
 					PutPresetBack(actor.get());
+					a_grave.copy = nullptr;  // its 3D is gone: the copy may hold another face now
 					actor->SetDelete(true);
 					a_grave.deleted = true;
 					logs::info("Players: stand-in {:08X} marked for deletion, {} ms and {} ticks after it was disabled", a_grave.id,
@@ -761,7 +772,15 @@ namespace RemotePlayers
 					break;
 				}
 				if (a_save) {
-					PutPresetBack(actor.get());  // the save holds it on its preset, whatever step it is at
+					// The save holds it on its preset, whatever step it is at. One still loading its 3D (never disabled)
+					// may be building its head from the copy on a job thread as its base changes: counted and said, so a
+					// rig run sees whether it happens (its copy stays in use, never written again, until it is deleted).
+					if (!a_grave.disabledAt && a_grave.copy && actor->GetObjectReference() == a_grave.copy) {
+						++putBackLoading;
+						logs::warn("Players: stand-in {:08X} given its preset back for the save while its 3D was still loading from copy {:08X} ({} times so far)", a_grave.id,
+							a_grave.copy->GetFormID(), putBackLoading);
+					}
+					PutPresetBack(actor.get());
 				}
 				return false;
 			});
@@ -851,6 +870,13 @@ namespace RemotePlayers
 			return FitOf(a_remote, a_preset, false) == FaceRules::Fit::kOwn ? FaceRules::Hash(*a_remote.face) : 0;
 		}
 
+		// Whether an actor stands on that copy: a stand-in here, or one on its way out whose 3D may still be built from it.
+		bool CopyInUse(const RE::TESNPC* a_copy)
+		{
+			return std::ranges::any_of(players, [&](const auto& a_entry) { return a_entry.second.copy == a_copy; }) ||
+			       std::ranges::any_of(graveyard, [&](const Grave& a_grave) { return a_grave.copy == a_copy; });
+		}
+
 		void Place(std::uint32_t a_id, Remote& a_remote, const Protocol::PlayerState& a_at)
 		{
 			const auto player = RE::PlayerCharacter::GetSingleton();
@@ -864,7 +890,7 @@ namespace RemotePlayers
 			auto fit = FitOf(a_remote, preset, Face::Full());
 			RE::TESNPC* base = preset;
 			if (fit == FaceRules::Fit::kOwn) {
-				const auto copy = Face::CopyFor(a_id, preset, *a_remote.face, a_remote.looks->weight);
+				const auto copy = Face::CopyFor(a_id, preset, *a_remote.face, a_remote.looks->weight, CopyInUse);
 				if (copy.base) {
 					base = copy.base;
 				} else if (copy.full) {
@@ -950,11 +976,13 @@ namespace RemotePlayers
 				return false;
 			}
 			using Step = FaceRules::Watch::Step;
+			const auto                    ourHead = Face::OurHead();
 			const FaceRules::Watch::Facts facts{
 				.loaded = a_actor->Is3DLoaded(),
 				.head = Face::HasHead(a_actor),
-				.oursLoaded = Face::OursLoaded(),
-				.oursHead = Face::OursHasHead(),
+				.oursLoaded = ourHead.loaded,
+				.oursHead = ourHead.head,
+				.oursJudged = ourHead.judged,
 			};
 			const auto step = a_remote.watch.Next(facts, a_now);
 			switch (step) {
@@ -996,9 +1024,9 @@ namespace RemotePlayers
 				return;
 			}
 			repairOursAt.reset();
-			if (!oursRepaired && Face::OursLoaded() && !Face::OursHasHead()) {
-				oursRepaired = true;
-				Face::RepairOurs();
+			const auto ours = Face::OurHead();
+			if (!oursRepaired && ours.loaded && ours.judged && !ours.head) {
+				oursRepaired = Face::RepairOurs();  // never a beast form's, first person's or a face editor's 3D
 			}
 		}
 
@@ -1722,19 +1750,23 @@ namespace RemotePlayers
 		return out;
 	}
 
-	std::string Faces()
+	std::string Faces(const std::function<std::uint32_t(const Protocol::PlayerFace&)>& a_sessionHash)
 	{
-		std::string out = std::format("facesGivenUp={} oursGivenUp={} presetsPutBack={} oursRepaired={}", facesGivenUp, oursGivenUp, presetsPutBack, oursRepaired ? 1 : 0);
+		std::string out = std::format("facesGivenUp={} oursGivenUp={} presetsPutBack={} presetsNamed={} putBackLoading={} oursRepaired={}", facesGivenUp, oursGivenUp,
+			presetsPutBack, presetsNamed, putBackLoading, oursRepaired ? 1 : 0);
 		for (const auto& [id, remote] : players) {
 			const auto actor = remote.standIn.get();
 			const bool here = actor && actor->GetFormID() == remote.standInId;
 			const auto on = here ? actor->GetActorBase() : nullptr;
-			out += std::format(" | player {} face={} in={} fit={} standin={:08X} base={:08X} preset={:08X} copy={:08X} shown={:08X} ownBase={} head={} watch={} givenUp={} remakes={}", id,
-				remote.face ? std::format("{:08X}", FaceRules::Hash(*remote.face)) : std::string{ "none" }, remote.facesIn, FaceRules::FitName(remote.fit), remote.standInId,
+			out += std::format(" | player {} face={} sessionFace={:08X} in={} fit={} standin={:08X} base={:08X} preset={:08X} copy={:08X} shown={:08X} ownBase={} head={} watch={} givenUp={} remakes={}", id,
+				remote.face ? std::format("{:08X}", FaceRules::Hash(*remote.face)) : std::string{ "none" }, remote.face && a_sessionHash ? a_sessionHash(*remote.face) : 0u, remote.facesIn, FaceRules::FitName(remote.fit), remote.standInId,
 				on ? on->GetFormID() : 0u, remote.base ? remote.base->GetFormID() : 0u, remote.copy ? remote.copy->GetFormID() : 0u, remote.faceShown,
 				here && remote.copy && on == remote.copy ? 1 : 0, here && Face::HasHead(actor.get()) ? 1 : 0, remote.watch.State(), remote.faceGivenUp ? 1 : 0, remote.faceRemakes);
-			// What the copy it stands on holds against what came: all equal when the face went on whole.
+			// What its built head shows, read from its 3D: the copy's head parts under its face node, none of the preset's
+			// the copy left out, its hair the colour that came. Then what the copy holds against what came (all equal when
+			// the face went on the form whole; it says nothing of what the engine built from it).
 			if (remote.face && remote.copy) {
+				out += " " + FaceRules::Line(Face::Shown3D(here ? actor.get() : nullptr, remote.copy, remote.base, remote.face->hairRgb));
 				if (const auto shown = Face::ReadBase(remote.copy)) {
 					const auto agreement = FaceRules::Compare(*remote.face, *shown);
 					out += std::format(" agree={} {}", agreement.All() ? 1 : 0, FaceRules::Line(agreement));

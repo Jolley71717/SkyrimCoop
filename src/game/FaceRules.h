@@ -6,11 +6,15 @@
 #include <algorithm>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // A friend's face on their stand-in (docs/DESIGN.md, "Players": "Its face"): the rules free of the game. Which tint mask
@@ -204,43 +208,65 @@ namespace FaceRules
 
 	// ---- sending our own ----
 
-	// Our face is read each second. The first read of a session goes at once (the others have none of ours yet); after
-	// that, a face that changed goes once two reads in a row agree, so a slider dragged in a race menu or a barber's chair
-	// sends where it stops, not every step of the way.
+	// Our face is read each second, on a timer of its own (Session: nothing else makes a read come early). The first read
+	// of a session goes at once (the others have none of ours yet); after that, a face that changed goes once two reads in
+	// a row agree, so a slider dragged in a barber's chair sends where it stops, not every step of the way. While a menu
+	// that edits faces is open (the race menu, which face editor mods use too, or any menu that pauses the game), nothing
+	// goes: a face being edited is not sent at every slider stop, and goes once, at the first read after the menu closes.
 	class Settle
 	{
 	public:
-		// The face to send now, if any (a_sent: what this session already has of ours).
-		[[nodiscard]] std::optional<Protocol::PlayerFace> Next(const Protocol::PlayerFace& a_read, const std::optional<Protocol::PlayerFace>& a_sent)
+		// The face to send now, if any (a_sent: what this session already has of ours; a_editing: a face editor is open).
+		[[nodiscard]] std::optional<Protocol::PlayerFace> Next(const Protocol::PlayerFace& a_read, const std::optional<Protocol::PlayerFace>& a_sent, bool a_editing = false)
 		{
+			if (a_editing) {
+				editing = true;
+				last.reset();
+				return std::nullopt;
+			}
+			const bool closed = std::exchange(editing, false);
 			const bool steady = last && *last == a_read;
 			last = a_read;
 			if (a_sent && *a_sent == a_read) {
 				return std::nullopt;
 			}
-			if (!a_sent || steady) {
+			if (!a_sent || steady || closed) {
 				return a_read;
 			}
 			return std::nullopt;
 		}
 
-		void Reset() { last.reset(); }
+		void Reset()
+		{
+			last.reset();
+			editing = false;
+		}
+
+		[[nodiscard]] bool Editing() const { return editing; }
 
 	private:
 		std::optional<Protocol::PlayerFace> last;
+		bool                                editing = false;
 	};
 
 	// ---- copies of presets ----
 
-	// A stand-in with its friend's face stands on a copy of its preset made at run time (a form the game can never free).
-	// One per friend and face is kept and placed again (after a save, a cell change); at most MAX_MADE are made in a game
-	// run, after which a stand-in gets its preset's face. None is kept across a load: a load may free forms made before
-	// it, so the game forgets them all then (Forget) and makes new ones.
+	// A stand-in with its friend's face stands on a copy of its preset made at run time (a form the game never frees).
+	// Each copy holds one face at a time, that of one friend. A stand-in placed again for the same face goes on the copy
+	// that holds it. A new face is written into a copy of the same preset that no actor stands on any more (a_inUse: no
+	// stand-in here, and none on its way out, has it as its base), the one written longest ago; only when every copy of
+	// that preset is in use is a new one made. So the copies made follow how many stand-ins show a face at once, not how
+	// often faces change (a friend at a barber's, an editor's slider stops). At most MAX_MADE are made in a game run, after
+	// which a stand-in that needs a new copy gets its preset's face. None is kept across a load: a load may free forms
+	// made before it, so the game forgets them all then (Forget) and makes new ones.
 	class CopyBook
 	{
 	public:
 		static constexpr std::size_t MAX_MADE = 64;
 
+		using InUse = std::function<bool(std::uintptr_t)>;
+
+		// The copy that holds a_player's face of that hash now.
 		[[nodiscard]] std::optional<std::uintptr_t> Find(std::uint32_t a_player, std::uint32_t a_hash) const
 		{
 			for (const auto& entry : entries) {
@@ -251,43 +277,67 @@ namespace FaceRules
 			return std::nullopt;
 		}
 
+		// A copy of a_preset no actor stands on, to write a new face into: the one written longest ago.
+		[[nodiscard]] std::optional<std::uintptr_t> Free(std::uintptr_t a_preset, const InUse& a_inUse) const
+		{
+			const Entry* best = nullptr;
+			for (const auto& entry : entries) {
+				if (entry.preset == a_preset && (!a_inUse || !a_inUse(entry.copy)) && (!best || entry.written < best->written)) {
+					best = &entry;
+				}
+			}
+			return best ? std::optional{ best->copy } : std::nullopt;
+		}
+
 		[[nodiscard]] bool CanMake() const { return made < MAX_MADE; }
 
-		// A copy made for a_player's face: their older ones are no longer placed.
-		void Made(std::uint32_t a_player, std::uint32_t a_hash, std::uintptr_t a_copy)
+		// A new copy of a_preset, holding a_player's face a_hash.
+		void Made(std::uint32_t a_player, std::uint32_t a_hash, std::uintptr_t a_preset, std::uintptr_t a_copy)
 		{
 			++made;
-			std::erase_if(entries, [&](const Entry& a_entry) { return a_entry.player == a_player; });
-			entries.push_back({ a_player, a_hash, a_copy });
+			entries.push_back({ a_player, a_hash, a_preset, a_copy, ++writes });
+		}
+
+		// A copy this book has (Free) now holds a_player's face a_hash instead of what it held.
+		void Rewritten(std::uintptr_t a_copy, std::uint32_t a_player, std::uint32_t a_hash)
+		{
+			for (auto& entry : entries) {
+				if (entry.copy == a_copy) {
+					entry.player = a_player;
+					entry.hash = a_hash;
+					entry.written = ++writes;
+					++rewrites;
+					return;
+				}
+			}
 		}
 
 		// Whether a base is one of the copies made (since the last load).
 		[[nodiscard]] bool IsCopy(std::uintptr_t a_base) const
 		{
-			return a_base != 0 && std::ranges::find(all, a_base) != all.end();
+			return a_base != 0 && std::ranges::any_of(entries, [&](const Entry& a_entry) { return a_entry.copy == a_base; });
 		}
-		void Track(std::uintptr_t a_copy) { all.push_back(a_copy); }
 
-		// Before a load: none is placed again. What was made still counts towards MAX_MADE.
-		void Forget()
-		{
-			entries.clear();
-			all.clear();
-		}
+		// Before a load: none is placed again or written into. What was made still counts towards MAX_MADE.
+		void Forget() { entries.clear(); }
 
 		[[nodiscard]] std::size_t Made() const { return made; }
 		[[nodiscard]] std::size_t Kept() const { return entries.size(); }
+		[[nodiscard]] std::size_t Rewrites() const { return rewrites; }
 
 	private:
 		struct Entry
 		{
 			std::uint32_t  player = 0;
 			std::uint32_t  hash = 0;
+			std::uintptr_t preset = 0;
 			std::uintptr_t copy = 0;
+			std::uint64_t  written = 0;
 		};
-		std::vector<Entry>          entries;
-		std::vector<std::uintptr_t> all;
-		std::size_t                 made = 0;
+		std::vector<Entry> entries;
+		std::size_t        made = 0;
+		std::size_t        rewrites = 0;
+		std::uint64_t      writes = 0;
 	};
 
 	// ---- watching a stand-in's own head ----
@@ -296,7 +346,10 @@ namespace FaceRules
 	// NO_HEAD_FOR, is asked to build its 3D again once (kRebuild); with still none NO_HEAD_FOR after that, its friend's face
 	// is given up for the session (kGiveUp: placed again with the preset's). And our own player's face node gone for
 	// OURS_GONE_FOR while it is loaded (seen once by the sister project: a copy and the player seemed to share one face)
-	// gives it up too (kGiveUpOurs), and ours is asked back.
+	// gives it up too (kGiveUpOurs), and ours is asked back. Ours is judged only while it can have a face node at all
+	// (oursJudged): read from its third-person 3D, in the race it last had a head in (not a werewolf's or a vampire lord's
+	// form, which have no face; the sister project skipped power armor the same way), not in first person, and not while
+	// a face editor rebuilds it.
 	class Watch
 	{
 	public:
@@ -318,6 +371,7 @@ namespace FaceRules
 			bool head = false;     // a face node on it
 			bool oursLoaded = false;
 			bool oursHead = false;
+			bool oursJudged = false;  // ours can have a face node now (above): only then is its going counted
 		};
 
 		Step Next(const Facts& a_facts, Clock::time_point a_now)
@@ -330,7 +384,7 @@ namespace FaceRules
 				oursGoneSince.reset();
 				return Step::kNone;
 			}
-			if (a_facts.oursLoaded && !a_facts.oursHead) {
+			if (a_facts.oursLoaded && a_facts.oursJudged && !a_facts.oursHead) {
 				if (!oursGoneSince) {
 					oursGoneSince = a_now;
 				} else if (a_now - *oursGoneSince >= OURS_GONE_FOR) {
@@ -375,6 +429,66 @@ namespace FaceRules
 		bool                             rebuilt = false;
 		bool                             done = false;
 	};
+
+	// ---- what a stand-in's head shows ----
+
+	// A hair tint as the engine set it on a head's hair (a colour 0-1 a channel, or 0-2 at the scale the library's
+	// UpdateHairColor uses) against the colour a face asked for (Protocol::PackColor, its alpha left out): the same at
+	// either scale, within two steps of 255 a channel.
+	[[nodiscard]] inline bool HairTintSame(std::uint32_t a_rgb, float a_red, float a_green, float a_blue)
+	{
+		const float want[3] = { static_cast<float>(a_rgb & 0xFF), static_cast<float>((a_rgb >> 8) & 0xFF), static_cast<float>((a_rgb >> 16) & 0xFF) };
+		const float got[3] = { a_red, a_green, a_blue };
+		for (const float scale : { 255.0f, 128.0f }) {
+			bool same = true;
+			for (std::size_t i = 0; i < 3; ++i) {
+				same = same && std::isfinite(got[i]) && std::abs(got[i] * scale - want[i]) <= 2.01f;
+			}
+			if (same) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// What a stand-in's built head shows, read from its 3D (Face::Shown3D): under its face node, a node named by each
+	// head part of the copy it stands on (the engine names each part's geometry by the part's editor id, which the
+	// library's Actor::GetHeadPartObject relies on), none of its preset's parts the copy left out (the preset's face would
+	// show those), and its hair tinted the colour that came.
+	struct Head3D
+	{
+		bool          face = false;        // a face node at all
+		std::size_t   parts = 0;           // the copy's head parts
+		std::size_t   partsFound = 0;      // of those, a node named by it
+		std::size_t   presetLeft = 0;      // the preset's parts the copy does not have
+		std::size_t   presetFound = 0;     // of those, a node named by it: the preset's face
+		bool          hairWanted = false;  // a hair part and a colour to look for
+		bool          hairSeen = false;    // a hair-tinted geometry under the hair's node
+		bool          hairSame = false;    // its tint the colour that came (HairTintSame)
+		std::uint32_t hairWant = 0;
+		float         hairGot[3] = { 0.0f, 0.0f, 0.0f };
+		std::size_t   others = 0;          // the face node's children named by no part of the copy (said, not judged)
+		std::string   othersNames;
+
+		[[nodiscard]] bool All() const
+		{
+			return face && parts > 0 && partsFound == parts && presetFound == 0 && (!hairWanted || (hairSeen && hairSame));
+		}
+	};
+
+	// As the developer channel says it: "shown3d=1 face3d=1 parts3d=7/7 presetShown=0/2 hairTint=1 others3d=0".
+	[[nodiscard]] inline std::string Line(const Head3D& a_head)
+	{
+		std::string hair = !a_head.hairWanted ? "none" : !a_head.hairSeen ? "unseen" : a_head.hairSame ? "1" : "0";
+		if (a_head.hairWanted && a_head.hairSeen && !a_head.hairSame) {
+			char got[64];
+			std::snprintf(got, sizeof(got), "(want=%06X,got=%.3f/%.3f/%.3f)", static_cast<unsigned>(a_head.hairWant & 0x00FFFFFF), a_head.hairGot[0], a_head.hairGot[1], a_head.hairGot[2]);
+			hair += got;
+		}
+		return std::string{ "shown3d=" } + (a_head.All() ? "1" : "0") + " face3d=" + (a_head.face ? "1" : "0") + " parts3d=" + std::to_string(a_head.partsFound) + "/" +
+		       std::to_string(a_head.parts) + " presetShown=" + std::to_string(a_head.presetFound) + "/" + std::to_string(a_head.presetLeft) + " hairTint=" + hair +
+		       " others3d=" + std::to_string(a_head.others) + (a_head.othersNames.empty() ? std::string{} : "(" + a_head.othersNames + ")");
+	}
 
 	// ---- what a stand-in shows against what came ----
 

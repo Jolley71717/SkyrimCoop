@@ -34,6 +34,7 @@ namespace Session
 		// What the hands hold is read this often alone, and the looks go at once when it changed: a sword taken out, a
 		// spell readied or a bow put away is on the others' stand-in before the swing, cast or shot that follows it.
 		constexpr auto HANDS_EVERY = 100ms;
+		constexpr auto FACE_EVERY = 1s;  // our face is read this often, on its own timer (FaceRules::Settle counts on it)
 		constexpr auto BEAT_EVERY = 2s;
 
 		enum class Role
@@ -53,6 +54,7 @@ namespace Session
 		Clock::time_point                 nextState{};
 		Clock::time_point                 nextLooks{};
 		Clock::time_point                 nextHands{};
+		Clock::time_point                 nextFace{};
 		Clock::time_point                 nextBeat{};
 		Clock::time_point                 joinedAt{};
 		// The looks last sent on this connection. The contract with the server: a game sends its looks after every
@@ -228,7 +230,7 @@ namespace Session
 					sentLooks.reset();
 					sentFace.reset();
 					faceSettle.Reset();
-					nextState = nextLooks = nextHands = nextBeat = Clock::now();
+					nextState = nextLooks = nextHands = nextFace = nextBeat = Clock::now();
 					PlayerActions::Recording(true);
 					NpcSync::Started(playerId, hostId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
@@ -357,9 +359,18 @@ namespace Session
 						logs::info("Session: sent our looks (race {:08X}, {}, {} worn items)", looks->race, looks->female ? "female" : "male", looks->worn.size());
 					}
 				}
-				// Our face, read at the same pace: the first of the session at once, a change once it holds still.
+			}
+			// Our face, on its own timer (a change of hands starts the looks early, never this): the first of the session at
+			// once, a change once two reads a second apart agree, and nothing while a face editor is open, then the face as
+			// it was left once it closes (FaceRules::Settle).
+			if (a_now >= nextFace) {
+				nextFace = a_now + FACE_EVERY;
 				if (const auto read = Face::Read()) {
-					if (const auto face = faceSettle.Next(*read, sentFace)) {
+					const bool editing = Face::Editing();
+					if (editing && !faceSettle.Editing()) {
+						logs::info("Session: a face editor is open: our face is sent when it closes");
+					}
+					if (const auto face = faceSettle.Next(*read, sentFace, editing)) {
 						Send(Protocol::Encode(*face), true);
 						sentFace = face;
 						++facesSent;
@@ -545,6 +556,14 @@ namespace Session
 			break;
 		}
 		return std::string{ FormsCommand::USAGE };
+	}
+
+	std::uint32_t SessionFaceHash(const Protocol::PlayerFace& a_face)
+	{
+		const auto bytes = Protocol::Encode(a_face);
+		const auto result = FormTranslate::Translate(forms, FormTranslate::Way::kToSession, bytes);
+		const auto face = Protocol::DecodePlayerFace(result.kind == FormTranslate::Result::Kind::kChanged ? std::span<const std::uint8_t>{ result.packet } : std::span<const std::uint8_t>{ bytes });
+		return face ? FaceRules::Hash(*face) : 0;
 	}
 
 	std::string Describe()

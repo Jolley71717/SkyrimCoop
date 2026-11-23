@@ -173,7 +173,7 @@ namespace DevCommands
 			if (!words.empty()) {
 				return "error: usage: faces [nudge [undo]]";
 			}
-			return Face::Describe() + " | " + RemotePlayers::Faces();
+			return Face::Describe(Session::SessionFaceHash) + " | " + RemotePlayers::Faces(Session::SessionFaceHash);
 		}
 
 		std::string Npcs(std::string_view a_args)

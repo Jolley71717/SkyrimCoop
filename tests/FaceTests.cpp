@@ -476,51 +476,167 @@ TEST("face rules: our face goes at once the first time, and a change only once i
 	CHECK(settle.Next(b, std::nullopt).has_value());
 }
 
-TEST("face rules: a copy is kept per friend and face, a friend's new face replaces theirs, and a game run makes at most 64")
+TEST("face rules: nothing goes while a face editor is open, and the face as it was left goes once it closes")
 {
+	FaceRules::Settle                   settle;
+	std::optional<Protocol::PlayerFace> sent = FaceOf();
+	CHECK(!settle.Next(*sent, sent));
+
+	// Two minutes in a race menu, a slider stopping on a new value every few reads: not one goes.
+	std::size_t gone = 0;
+	auto        face = *sent;
+	for (int i = 0; i < 120; ++i) {
+		face.morphs[i % Protocol::FACE_MORPHS] = static_cast<float>(i % 7) * 0.1f;
+		for (int read = 0; read < 3; ++read) {
+			gone += settle.Next(face, sent, true).has_value() ? 1 : 0;
+		}
+	}
+	CHECK(gone == 0u);
+	CHECK(settle.Editing());
+
+	// Closed: the first read sends the face as it was left, at once (no second read waited for), and only once.
+	const auto closed = settle.Next(face, sent, false);
+	REQUIRE(closed);
+	CHECK(*closed == face);
+	CHECK(!settle.Editing());
+	sent = closed;
+	CHECK(!settle.Next(face, sent, false));
+	CHECK(!settle.Next(face, sent, false));
+
+	// Opened and closed with nothing changed: nothing goes.
+	CHECK(!settle.Next(face, sent, true));
+	CHECK(!settle.Next(face, sent, false));
+
+	// A first face of the session while an editor is open waits for it to close too.
+	FaceRules::Settle fresh;
+	CHECK(!fresh.Next(face, std::nullopt, true));
+	CHECK(fresh.Next(face, std::nullopt, false).has_value());
+}
+
+TEST("face rules: a copy holds one friend's face; the same face is placed on it again, a new one goes into a copy no actor stands on")
+{
+	constexpr std::uintptr_t NORD_M = 0x10;
+	constexpr std::uintptr_t NORD_F = 0x20;
+	std::vector<std::uintptr_t> used;
+	const FaceRules::CopyBook::InUse inUse = [&](std::uintptr_t a_copy) { return std::ranges::find(used, a_copy) != used.end(); };
+
 	FaceRules::CopyBook book;
 	CHECK(!book.Find(1, 0xAA));
+	CHECK(!book.Free(NORD_M, inUse));
 	CHECK(book.CanMake());
-	book.Made(1, 0xAA, 0x1000);
-	book.Track(0x1000);
-	book.Made(2, 0xAA, 0x2000);
-	book.Track(0x2000);
+	book.Made(1, 0xAA, NORD_M, 0x1000);
+	book.Made(2, 0xAA, NORD_M, 0x2000);
+	used = { 0x1000, 0x2000 };
 	CHECK(book.Find(1, 0xAA) == std::optional<std::uintptr_t>{ 0x1000 });
 	CHECK(book.Find(2, 0xAA) == std::optional<std::uintptr_t>{ 0x2000 });
 	CHECK(!book.Find(1, 0xBB));
 	CHECK(book.IsCopy(0x1000));
 	CHECK(!book.IsCopy(0x3000));
 	CHECK(!book.IsCopy(0));
+	CHECK(!book.Free(NORD_M, inUse));  // both stood on
 
-	book.Made(1, 0xBB, 0x1100);  // their face changed
-	book.Track(0x1100);
-	CHECK(!book.Find(1, 0xAA));
+	// Player 1's face changed: their old stand-in is still on its way out (its copy in use), so a new copy is made.
+	CHECK(!book.Free(NORD_M, inUse));
+	book.Made(1, 0xBB, NORD_M, 0x1100);
+	used = { 0x1000, 0x1100, 0x2000 };
 	CHECK(book.Find(1, 0xBB) == std::optional<std::uintptr_t>{ 0x1100 });
-	CHECK(book.IsCopy(0x1000));  // still one of ours (a stand-in on its way out may stand on it)
-	CHECK(book.Kept() == 2u);
+	CHECK(book.Find(1, 0xAA) == std::optional<std::uintptr_t>{ 0x1000 });  // still holds it, until written again
 	CHECK(book.Made() == 3u);
 
-	for (std::size_t i = book.Made(); i < FaceRules::CopyBook::MAX_MADE; ++i) {
+	// The old stand-in gone: its copy is free, for a copy of the same preset only.
+	used = { 0x1100, 0x2000 };
+	CHECK(!book.Free(NORD_F, inUse));
+	REQUIRE(book.Free(NORD_M, inUse) == std::optional<std::uintptr_t>{ 0x1000 });
+	book.Rewritten(0x1000, 1, 0xCC);
+	CHECK(book.Find(1, 0xCC) == std::optional<std::uintptr_t>{ 0x1000 });
+	CHECK(!book.Find(1, 0xAA));  // written over
+	CHECK(book.Made() == 3u);
+	CHECK(book.Rewrites() == 1u);
+	CHECK(book.Kept() == 3u);
+
+	// Of two free copies, the one written longest ago.
+	used = {};
+	CHECK(book.Free(NORD_M, inUse) == std::optional<std::uintptr_t>{ 0x2000 });
+	// None in use given: any copy of the preset is free.
+	CHECK(book.Free(NORD_M, nullptr).has_value());
+
+	// A load: none placed again or written into; what was made still counts.
+	book.Forget();
+	CHECK(!book.Find(1, 0xCC));
+	CHECK(!book.IsCopy(0x2000));
+	CHECK(!book.Free(NORD_M, inUse));
+	CHECK(book.Kept() == 0u);
+	CHECK(book.Made() == 3u);
+}
+
+TEST("face rules: a friend editing their face for a long while makes a few copies, never the game run's 64")
+{
+	// The game's way, as RemotePlayers and Face do it: each new face places the stand-in again; the one taken away stays
+	// in use until its 3D is gone and it is deleted (about two seconds), so it overlaps the new one by a face or two.
+	constexpr std::uintptr_t PRESET = 0x10;
+	FaceRules::CopyBook      book;
+	std::vector<std::uintptr_t> standing;  // the stand-in's copy, then those of the stand-ins on their way out, newest first
+	std::uintptr_t           next = 0x1000;
+	const FaceRules::CopyBook::InUse inUse = [&](std::uintptr_t a_copy) { return std::ranges::find(standing, a_copy) != standing.end(); };
+	for (std::uint32_t change = 1; change <= 500; ++change) {
+		std::uintptr_t copy = 0;
+		if (const auto found = book.Find(7, change)) {
+			copy = *found;
+		} else if (const auto free = book.Free(PRESET, inUse)) {
+			copy = *free;
+			book.Rewritten(copy, 7, change);
+		} else {
+			REQUIRE(book.CanMake());
+			copy = next++;
+			book.Made(7, change, PRESET, copy);
+		}
+		standing.insert(standing.begin(), copy);
+		if (standing.size() > 3) {
+			standing.pop_back();  // the oldest one on its way out is deleted
+		}
+	}
+	CHECK(book.Made() <= 4u);
+	CHECK(book.CanMake());
+	CHECK(book.Rewrites() >= 496u);
+
+	// A second friend editing at the same time: a few more, still far from the limit.
+	for (std::uint32_t change = 1; change <= 500; ++change) {
+		if (!book.Find(8, change)) {
+			if (const auto free = book.Free(PRESET, inUse)) {
+				book.Rewritten(*free, 8, change);
+				standing.insert(standing.begin(), *free);
+			} else {
+				book.Made(8, change, PRESET, next);
+				standing.insert(standing.begin(), next++);
+			}
+		}
+		if (standing.size() > 6) {
+			standing.pop_back();
+		}
+	}
+	CHECK(book.Made() <= 7u);
+	CHECK(book.CanMake());
+}
+
+TEST("face rules: a game run makes at most 64 copies, then a stand-in that needs a new one gets its preset's face")
+{
+	FaceRules::CopyBook book;
+	const FaceRules::CopyBook::InUse all = [](std::uintptr_t) { return true; };  // every one stood on
+	for (std::size_t i = 0; i < FaceRules::CopyBook::MAX_MADE; ++i) {
 		CHECK(book.CanMake());
-		book.Made(3, static_cast<std::uint32_t>(i), 0x9000 + i);
+		CHECK(!book.Free(0x10, all));
+		book.Made(static_cast<std::uint32_t>(i), 0xAA, 0x10, 0x9000 + i);
 	}
 	CHECK(!book.CanMake());
-
-	// A load: none placed again, none known as a copy; what was made still counts.
-	book.Forget();
-	CHECK(!book.Find(2, 0xAA));
-	CHECK(!book.IsCopy(0x2000));
-	CHECK(book.Kept() == 0u);
-	CHECK(book.Made() == FaceRules::CopyBook::MAX_MADE);
-	CHECK(!book.CanMake());
+	CHECK(Fit::kFull == FaceRules::Fits(FaceOf(), NORD, false, false, !book.CanMake()));
 }
 
 TEST("face rules: a stand-in with no head is built again once, then its friend's face is given up; one with a head is left")
 {
 	using Facts = FaceRules::Watch::Facts;
 	const auto t0 = FaceRules::Clock::now();
-	const Facts headless{ .loaded = true, .head = false, .oursLoaded = true, .oursHead = true };
-	const Facts headed{ .loaded = true, .head = true, .oursLoaded = true, .oursHead = true };
+	const Facts headless{ .loaded = true, .head = false, .oursLoaded = true, .oursHead = true, .oursJudged = true };
+	const Facts headed{ .loaded = true, .head = true, .oursLoaded = true, .oursHead = true, .oursJudged = true };
 	const Facts unloaded{};
 
 	FaceRules::Watch good;
@@ -563,9 +679,9 @@ TEST("face rules: our own head gone while a stand-in stands on a copy gives its 
 {
 	using Facts = FaceRules::Watch::Facts;
 	const auto t0 = FaceRules::Clock::now();
-	const Facts oursGone{ .loaded = true, .head = true, .oursLoaded = true, .oursHead = false };
-	const Facts oursAway{ .loaded = true, .head = true, .oursLoaded = false, .oursHead = false };
-	const Facts fine{ .loaded = true, .head = true, .oursLoaded = true, .oursHead = true };
+	const Facts oursGone{ .loaded = true, .head = true, .oursLoaded = true, .oursHead = false, .oursJudged = true };
+	const Facts oursAway{ .loaded = true, .head = true, .oursLoaded = false, .oursHead = false, .oursJudged = true };
+	const Facts fine{ .loaded = true, .head = true, .oursLoaded = true, .oursHead = true, .oursJudged = true };
 
 	FaceRules::Watch watch;
 	CHECK(watch.Next(oursGone, t0) == Step::kBuilt);
@@ -584,6 +700,69 @@ TEST("face rules: our own head gone while a stand-in stands on a copy gives its 
 	for (int i = 0; i < 10; ++i) {
 		CHECK(loading.Next(oursAway, t0 + std::chrono::seconds(i)) != Step::kGiveUpOurs);
 	}
+}
+
+TEST("face rules: our head that can't be judged (a werewolf, a vampire lord, first person, a face editor) never gives a face up")
+{
+	using Facts = FaceRules::Watch::Facts;
+	const auto t0 = FaceRules::Clock::now();
+	// Loaded, no face node, and not judged: what OurHead says in a beast form (a race it never had a head in), in first
+	// person, or with the race menu open.
+	const Facts unjudged{ .loaded = true, .head = true, .oursLoaded = true, .oursHead = false, .oursJudged = false };
+	const Facts gone{ .loaded = true, .head = true, .oursLoaded = true, .oursHead = false, .oursJudged = true };
+
+	FaceRules::Watch beast;
+	for (int i = 0; i < 600; ++i) {
+		CHECK(beast.Next(unjudged, t0 + std::chrono::seconds(i)) != Step::kGiveUpOurs);
+	}
+	CHECK(beast.State() == "built");
+
+	// Back to its own race (or third person): the wait starts then, not from when the face node went.
+	FaceRules::Watch back;
+	(void)back.Next(unjudged, t0);
+	CHECK(back.Next(unjudged, t0 + 30s) == Step::kNone);
+	CHECK(back.Next(gone, t0 + 31s) == Step::kNone);
+	CHECK(back.Next(gone, t0 + 32s) == Step::kNone);
+	CHECK(back.Next(unjudged, t0 + 32500ms) == Step::kNone);  // first person again: the count stops
+	CHECK(back.Next(gone, t0 + 34s) == Step::kNone);
+	CHECK(back.Next(gone, t0 + 36s) == Step::kGiveUpOurs);
+}
+
+TEST("face rules: a stand-in's built head is judged from its 3D: the copy's parts there, none of the preset's, its hair's tint")
+{
+	FaceRules::Head3D head{ .face = true, .parts = 5, .partsFound = 5, .presetLeft = 2, .presetFound = 0, .hairWanted = true, .hairSeen = true, .hairSame = true };
+	CHECK(head.All());
+	CHECK(FaceRules::Line(head) == "shown3d=1 face3d=1 parts3d=5/5 presetShown=0/2 hairTint=1 others3d=0");
+
+	auto preset = head;
+	preset.presetFound = 2;  // the preset's face built
+	CHECK(!preset.All());
+	auto missing = head;
+	missing.partsFound = 4;
+	CHECK(!missing.All());
+	auto unseen = head;
+	unseen.hairSeen = false;
+	unseen.hairSame = false;
+	CHECK(!unseen.All());
+	CHECK(FaceRules::Line(unseen).find("hairTint=unseen") != std::string::npos);
+	auto bald = head;
+	bald.hairWanted = false;
+	bald.hairSeen = false;
+	CHECK(bald.All());
+	CHECK(!FaceRules::Head3D{}.All());  // no face node
+	auto others = head;
+	others.others = 2;
+	others.othersNames = "Overlay0,Overlay1";
+	CHECK(others.All());  // said, not judged
+	CHECK(FaceRules::Line(others).ends_with("others3d=2(Overlay0,Overlay1)"));
+
+	// The tint as the engine keeps it (0-1 a channel), or at the library's scale (0-2): the same colour either way.
+	const auto rgb = Protocol::PackColor(0x40, 0x20, 0x10, 0xFF);
+	CHECK(FaceRules::HairTintSame(rgb, 0x40 / 255.0f, 0x20 / 255.0f, 0x10 / 255.0f));
+	CHECK(FaceRules::HairTintSame(rgb, 0x40 / 128.0f, 0x20 / 128.0f, 0x10 / 128.0f));
+	CHECK(FaceRules::HairTintSame(rgb, 0x41 / 255.0f, 0x1F / 255.0f, 0x10 / 255.0f));
+	CHECK(!FaceRules::HairTintSame(rgb, 0x60 / 255.0f, 0x20 / 255.0f, 0x10 / 255.0f));
+	CHECK(!FaceRules::HairTintSame(rgb, std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f));
 }
 
 TEST("face rules: what a stand-in's copy holds is compared with what came, piece by piece")

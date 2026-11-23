@@ -97,10 +97,13 @@ namespace RemotePlayers
 	// (its spells' effects refused, blows, casts, health taken and given back).
 	[[nodiscard]] std::string Actions();
 	[[nodiscard]] std::string Strays();
-	// Developer channel `faces` (the stand-ins' part): per player, the face that came (its hash), whether it goes on
-	// (fit=), the base the stand-in stands on, its preset and its copy, whether it has a head, its watch, and how much of
-	// the face the copy holds (agree=1: all of it); and the faces given up, and the presets put back for saves.
-	[[nodiscard]] std::string Faces();
+	// Developer channel `faces` (the stand-ins' part): per player, the face that came (its hash, and a_sessionHash's: with
+	// its forms in the session's numbering, the same in every game), whether it goes on (fit=), the base the stand-in
+	// stands on, its preset and its copy, whether it has a head, its watch, what its built head shows (shown3d=: the
+	// copy's head parts under its face node, none of the preset's left out, its hair's tint) and how much of the face the
+	// copy holds (agree=1: all of it); and the faces given up, the presets put back and named for saves, and those put
+	// back while still loading.
+	[[nodiscard]] std::string Faces(const std::function<std::uint32_t(const Protocol::PlayerFace&)>& a_sessionHash);
 	[[nodiscard]] std::string Graph(std::string_view a_args);
 
 	// The co-save record's type: "SKST" (stand-ins).

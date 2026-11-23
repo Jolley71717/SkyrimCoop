@@ -12,6 +12,11 @@ namespace Face
 
 		FaceRules::CopyBook                                book;
 		std::unordered_map<const RE::TESNPC*, RE::TESNPC*> presets;  // copy -> the preset it was made from (until a load)
+		// Every copy this game run made, with the id it was given: what CountRuntimePresets does not count as a save's.
+		std::vector<std::pair<const RE::TESNPC*, RE::FormID>> everMade;
+		// The race our player last had a face node in (OurHead): our head is judged only in it.
+		RE::FormID                 ourHeadRace = 0;
+		constexpr std::string_view FACE_NODE = "BSFaceGenNiNodeSkinned";
 		// Hair colours made for friends whose colour this game has no form of (a face editor's own colour, or a mod's):
 		// one per colour, kept for the game run (made by the factory, never given a form id, so no load frees them).
 		std::unordered_map<std::uint32_t, RE::BGSColorForm*> colors;
@@ -24,6 +29,7 @@ namespace Face
 		std::uint64_t ourTintsLeft = 0;  // our tint masks our race has no mask of (not sent)
 		std::uint64_t facesSent = 0;
 		std::uint32_t sentHash = 0;
+		std::uint64_t repairsRefused = 0;  // our head asked back while it could not be judged: not done
 		bool          toldRefused = false;
 
 		// What `faces nudge` changed on our player, to put back.
@@ -197,7 +203,10 @@ namespace Face
 		}
 
 		// a_face on the copy: what the engine builds a character's head and body from. The preset's own arrays are never
-		// written to: the copy gets its own (a duplicate may share the preset's).
+		// written to: the copy gets its own (a duplicate may share the preset's). Every field is set from the face or, where
+		// it has none, from the preset, so a copy written again (CopyBook::Free) keeps nothing of the face it held. The
+		// arrays of that earlier face are left as they were (a few hundred bytes a change, never freed: the engine may
+		// still hold one of them from the stand-in that stood on it).
 		void Apply(RE::TESNPC* a_copy, const RE::TESNPC* a_preset, const Protocol::PlayerFace& a_face, float a_weight)
 		{
 			const auto race = a_preset->race;
@@ -214,16 +223,22 @@ namespace Face
 					its.push_back({ part->GetFormID(), static_cast<std::uint8_t>(part->type.underlying()) });
 				}
 			}
-			const auto plan = FaceRules::PlanParts(theirs, a_face.partTypes, its);
-			if (!plan.ids.empty()) {
-				const auto parts = RE::calloc<RE::BGSHeadPart*>(plan.ids.size());
-				if (parts) {
-					for (std::size_t i = 0; i < plan.ids.size(); ++i) {
-						parts[i] = RE::TESForm::LookupByID<RE::BGSHeadPart>(plan.ids[i]);
-					}
-					a_copy->headParts = parts;
-					a_copy->numHeadParts = static_cast<std::int8_t>(plan.ids.size());
+			auto plan = FaceRules::PlanParts(theirs, a_face.partTypes, its);
+			if (plan.ids.empty()) {
+				for (const auto& part : its) {
+					plan.ids.push_back(part.id);  // none came that this game has: the preset's head
 				}
+			}
+			const auto parts = plan.ids.empty() ? nullptr : RE::calloc<RE::BGSHeadPart*>(plan.ids.size());
+			if (parts) {
+				for (std::size_t i = 0; i < plan.ids.size(); ++i) {
+					parts[i] = RE::TESForm::LookupByID<RE::BGSHeadPart>(plan.ids[i]);
+				}
+				a_copy->headParts = parts;
+				a_copy->numHeadParts = static_cast<std::int8_t>(plan.ids.size());
+			} else {
+				a_copy->headParts = a_preset->headParts;  // shared, never written to
+				a_copy->numHeadParts = a_preset->numHeadParts;
 			}
 
 			if (const auto head = RE::calloc<RE::TESNPC::HeadRelatedData>(1)) {
@@ -239,13 +254,14 @@ namespace Face
 					head->faceDetails = details;
 				}
 				a_copy->headRelatedData = head;
+			} else {
+				a_copy->headRelatedData = a_preset->headRelatedData;  // shared, never written to
 			}
 
-			if (const auto skin = a_face.skin != 0 ? RE::TESForm::LookupByID<RE::TESObjectARMO>(a_face.skin) : nullptr) {
-				a_copy->skin = skin;
-			}
+			const auto skin = a_face.skin != 0 ? RE::TESForm::LookupByID<RE::TESObjectARMO>(a_face.skin) : nullptr;
+			a_copy->skin = skin ? skin : a_preset->skin;
 			a_copy->height = a_face.height;
-			a_copy->weight = std::isfinite(a_weight) ? std::clamp(a_weight, 0.0f, 100.0f) : a_copy->weight;
+			a_copy->weight = std::isfinite(a_weight) ? std::clamp(a_weight, 0.0f, 100.0f) : a_preset->weight;
 
 			if (const auto data = RE::calloc<RE::TESNPC::FaceData>(1)) {
 				if (a_preset->faceData) {
@@ -258,6 +274,8 @@ namespace Face
 					data->parts[i] = static_cast<std::int32_t>(a_face.presets[i]);
 				}
 				a_copy->faceData = data;
+			} else {
+				a_copy->faceData = a_preset->faceData;
 			}
 
 			const auto raceTints = RaceTints(race, a_face.female);
@@ -284,6 +302,37 @@ namespace Face
 			if (plan.fellBack != 0) {
 				logs::info("Face: copy {:08X}: head parts of kinds {:#04x} came from a mod this game lacks; the preset's kept there", a_copy->GetFormID(), plan.fellBack);
 			}
+		}
+	}
+
+	namespace
+	{
+		// An actor's face node, from its third-person 3D (the player's first-person 3D has none): the node the engine
+		// builds a head under, found by its name; else the engine's own reader, for any actor but our player in first
+		// person (it reads the 3D of the view shown).
+		RE::NiAVObject* FaceNodeOf(RE::Actor* a_actor)
+		{
+			const auto root = a_actor ? a_actor->Get3D(false) : nullptr;
+			if (!root) {
+				return nullptr;
+			}
+			static const RE::BSFixedString name{ FACE_NODE };
+			if (const auto node = root->GetObjectByName(name)) {
+				return node;
+			}
+			if (a_actor->IsPlayerRef()) {
+				const auto camera = RE::PlayerCamera::GetSingleton();
+				if (!camera || camera->IsInFirstPerson()) {
+					return nullptr;
+				}
+			}
+			return a_actor->GetFaceNodeSkinned();
+		}
+
+		bool FirstPerson()
+		{
+			const auto camera = RE::PlayerCamera::GetSingleton();
+			return camera && camera->IsInFirstPerson();
 		}
 	}
 
@@ -346,7 +395,7 @@ namespace Face
 		return face;
 	}
 
-	Copy CopyFor(std::uint32_t a_player, RE::TESNPC* a_preset, const Protocol::PlayerFace& a_face, float a_weight)
+	Copy CopyFor(std::uint32_t a_player, RE::TESNPC* a_preset, const Protocol::PlayerFace& a_face, float a_weight, const std::function<bool(const RE::TESNPC*)>& a_inUse)
 	{
 		if (!a_preset) {
 			return {};
@@ -354,6 +403,17 @@ namespace Face
 		const auto key = FaceRules::Hash(a_face) ^ (std::bit_cast<std::uint32_t>(a_weight) * 2654435761u);
 		if (const auto found = book.Find(a_player, key)) {
 			return { .base = reinterpret_cast<RE::TESNPC*>(*found) };
+		}
+		// A copy of this preset no actor stands on any more: written again with this face, not one more made.
+		const auto inUse = [&](std::uintptr_t a_copy) { return a_inUse && a_inUse(reinterpret_cast<const RE::TESNPC*>(a_copy)); };
+		if (const auto free = book.Free(reinterpret_cast<std::uintptr_t>(a_preset), inUse)) {
+			const auto copy = reinterpret_cast<RE::TESNPC*>(*free);
+			book.Rewritten(*free, a_player, key);
+			Apply(copy, a_preset, a_face, a_weight);
+			logs::info("Face: player {}'s face written into copy {:08X} of preset {:08X}, which no actor stood on ({} head parts, {} tints, face {:08X}; {} made, {} written again this run)",
+				a_player, copy->GetFormID(), a_preset->GetFormID(), copy->numHeadParts, copy->tintLayers ? copy->tintLayers->size() : 0u, FaceRules::Hash(a_face), book.Made(),
+				book.Rewrites());
+			return { .base = copy, .rewritten = true };
 		}
 		if (!book.CanMake()) {
 			return { .full = true };
@@ -368,9 +428,9 @@ namespace Face
 			}
 			return {};
 		}
-		book.Made(a_player, key, reinterpret_cast<std::uintptr_t>(copy));
-		book.Track(reinterpret_cast<std::uintptr_t>(copy));
+		book.Made(a_player, key, reinterpret_cast<std::uintptr_t>(a_preset), reinterpret_cast<std::uintptr_t>(copy));
 		presets[copy] = a_preset;
+		everMade.emplace_back(copy, copy->GetFormID());
 		Apply(copy, a_preset, a_face, a_weight);
 		logs::info("Face: player {}'s face on copy {:08X} of preset {:08X} ({} head parts, {} tints, face {:08X}; {} copies made this run)", a_player, copy->GetFormID(),
 			a_preset->GetFormID(), copy->numHeadParts, copy->tintLayers ? copy->tintLayers->size() : 0u, FaceRules::Hash(a_face), book.Made());
@@ -400,19 +460,139 @@ namespace Face
 
 	bool HasHead(RE::Actor* a_actor)
 	{
-		return a_actor && a_actor->Get3D() && a_actor->GetFaceNodeSkinned() != nullptr;
+		return FaceNodeOf(a_actor) != nullptr;
 	}
 
-	bool OursLoaded()
+	bool Editing()
 	{
-		const auto player = RE::PlayerCharacter::GetSingleton();
-		return player && player->Get3D(false) != nullptr;
+		const auto ui = RE::UI::GetSingleton();
+		return ui && (ui->IsMenuOpen(RE::RaceSexMenu::MENU_NAME) || ui->GameIsPaused());
 	}
 
-	bool OursHasHead()
+	Ours OurHead()
 	{
+		Ours       out;
 		const auto player = RE::PlayerCharacter::GetSingleton();
-		return player && player->Get3D(false) && player->GetFaceNodeSkinned() != nullptr;
+		if (!player || !player->Get3D(false)) {
+			return out;
+		}
+		out.loaded = true;
+		out.head = FaceNodeOf(player) != nullptr;
+		const auto race = player->GetRace();
+		const auto raceId = race ? race->GetFormID() : 0;
+		if (out.head && raceId != 0) {
+			ourHeadRace = raceId;
+		}
+		out.judged = raceId != 0 && raceId == ourHeadRace && !FirstPerson() && !Editing();
+		return out;
+	}
+
+	FaceRules::Head3D Shown3D(RE::Actor* a_actor, const RE::TESNPC* a_copy, const RE::TESNPC* a_preset, std::uint32_t a_hairRgb)
+	{
+		FaceRules::Head3D out;
+		const auto        face = FaceNodeOf(a_actor);
+		out.face = face != nullptr;
+		if (!a_copy) {
+			return out;
+		}
+		const auto found = [&](const RE::BGSHeadPart* a_part) {
+			return face && !a_part->formEditorID.empty() && face->GetObjectByName(a_part->formEditorID) != nullptr;
+		};
+		// The copy's parts and each one's extra parts (a hairline, a mouth's teeth): all of its head.
+		std::vector<const RE::BGSHeadPart*> ofCopy;
+		const RE::BGSHeadPart*              hair = nullptr;
+		for (std::int8_t i = 0; a_copy->headParts && i < a_copy->numHeadParts; ++i) {
+			const auto part = a_copy->headParts[i];
+			if (!part || part->formEditorID.empty()) {
+				continue;  // no name to find it by
+			}
+			ofCopy.push_back(part);
+			for (const auto extra : part->extraParts) {
+				if (extra) {
+					ofCopy.push_back(extra);
+				}
+			}
+			++out.parts;
+			out.partsFound += found(part) ? 1 : 0;
+			if (part->type.underlying() == std::to_underlying(RE::BGSHeadPart::HeadPartType::kHair) && !hair) {
+				hair = part;
+			}
+		}
+		for (std::int8_t i = 0; a_preset && a_preset->headParts && i < a_preset->numHeadParts; ++i) {
+			const auto part = a_preset->headParts[i];
+			if (!part || part->formEditorID.empty() || std::ranges::find(ofCopy, part) != ofCopy.end()) {
+				continue;
+			}
+			++out.presetLeft;
+			out.presetFound += found(part) ? 1 : 0;
+		}
+		// The face node's own children not named by any part of the copy: another face's (a copy written again that
+		// still shows what it held), or a face editor's overlay. Said, for a person to read; not a failure by itself.
+		if (const auto node = face ? face->AsNode() : nullptr) {
+			for (const auto& child : node->GetChildren()) {
+				if (!child || child->name.empty()) {
+					continue;
+				}
+				const bool ours = std::ranges::any_of(ofCopy, [&](const RE::BGSHeadPart* a_part) { return a_part->formEditorID == child->name; });
+				if (!ours) {
+					++out.others;
+					if (out.othersNames.size() < 120) {
+						std::string named{ child->name.c_str() };
+						std::ranges::replace(named, ' ', '_');  // one word on the developer channel
+						out.othersNames += (out.othersNames.empty() ? "" : ",") + named;
+					}
+				}
+			}
+		}
+		std::uint32_t want = a_hairRgb;
+		if (want == 0 && a_copy->headRelatedData && a_copy->headRelatedData->hairColor) {
+			want = Pack(a_copy->headRelatedData->hairColor->color);
+		}
+		out.hairWanted = hair != nullptr && (want & 0x00FFFFFF) != 0;
+		out.hairWant = want;
+		if (out.hairWanted && face) {
+			if (const auto node = face->GetObjectByName(hair->formEditorID)) {
+				RE::BSVisit::TraverseScenegraphGeometries(node, [&](RE::BSGeometry* a_geometry) -> RE::BSVisit::BSVisitControl {
+					const auto property = a_geometry->GetGeometryRuntimeData().shaderProperty.get();
+					const auto lighting = property ? RE::netimmerse_cast<RE::BSLightingShaderProperty*>(property) : nullptr;
+					const auto material = lighting ? lighting->material : nullptr;
+					if (!material || material->GetFeature() != RE::BSShaderMaterial::Feature::kHairTint) {
+						return RE::BSVisit::BSVisitControl::kContinue;
+					}
+					const auto tint = static_cast<RE::BSLightingShaderMaterialHairTint*>(material)->tintColor;
+					out.hairSeen = true;
+					out.hairGot[0] = tint.red;
+					out.hairGot[1] = tint.green;
+					out.hairGot[2] = tint.blue;
+					out.hairSame = FaceRules::HairTintSame(want, tint.red, tint.green, tint.blue);
+					return RE::BSVisit::BSVisitControl::kStop;
+				});
+			}
+		}
+		return out;
+	}
+
+	RuntimePresets CountRuntimePresets()
+	{
+		RuntimePresets out;
+		const auto [map, mapLock] = RE::TESForm::GetAllForms();
+		if (!map) {
+			return out;
+		}
+		RE::BSReadLockGuard guard{ mapLock };
+		for (const auto& [id, form] : *map) {
+			if (!form || !FormIds::IsRuntime(id) || form->GetFormType() != RE::FormType::NPC) {
+				continue;
+			}
+			const auto npc = static_cast<const RE::TESNPC*>(form);
+			if (!npc->IsPreset()) {
+				continue;
+			}
+			++out.all;
+			const bool ours = std::ranges::any_of(everMade, [&](const auto& a_made) { return a_made.first == npc && a_made.second == id; });
+			out.notOurs += ours ? 0 : 1;
+		}
+		return out;
 	}
 
 	void Rebuild(RE::Actor* a_actor)
@@ -425,15 +605,21 @@ namespace Face
 		a_actor->DoReset3D(false);
 	}
 
-	void RepairOurs()
+	bool RepairOurs()
 	{
 		const auto player = RE::PlayerCharacter::GetSingleton();
 		if (!player) {
-			return;
+			return false;
+		}
+		if (!OurHead().judged) {
+			++repairsRefused;  // a beast form, first person or a face editor: its 3D is not ours to build again
+			logs::info("Face: our own head not asked back: it can't be judged now (another race than the one it had a head in, first person, or a face editor open)");
+			return false;
 		}
 		++repairs;
 		logs::warn("Face: our own player's head is still gone after the stand-in that seemed to take it went; asked the engine for it again");
 		player->DoReset3D(false);
+		return true;
 	}
 
 	void Sent(const Protocol::PlayerFace& a_face)
@@ -443,7 +629,7 @@ namespace Face
 		logs::info("Session: sent our face {:08X} ({} head parts, {} tints)", sentHash, a_face.headParts.size(), a_face.tints.size());
 	}
 
-	std::string Describe()
+	std::string Describe(const std::function<std::uint32_t(const Protocol::PlayerFace&)>& a_sessionHash)
 	{
 		const auto face = Read();
 		std::string out;
@@ -451,12 +637,17 @@ namespace Face
 			out = "read=0";
 		} else {
 			const auto set = std::ranges::count_if(face->morphs, [](float a_v) { return std::bit_cast<std::uint32_t>(a_v) != Protocol::FACE_UNSET; });
-			out = std::format("read=1 hash={:08X} race={:08X} female={} parts={} types={:#04x} hair={:08X}/{:08X} details={:08X} skin={:08X} height={:.3f} morphsSet={} tints={} body={:08X}",
-				FaceRules::Hash(*face), face->race, face->female ? 1 : 0, face->headParts.size(), face->partTypes, face->hairColor, face->hairRgb, face->faceDetails, face->skin,
+			out = std::format("read=1 hash={:08X} sessionHash={:08X} race={:08X} female={} parts={} types={:#04x} hair={:08X}/{:08X} details={:08X} skin={:08X} height={:.3f} morphsSet={} tints={} body={:08X}",
+				FaceRules::Hash(*face), a_sessionHash ? a_sessionHash(*face) : 0u, face->race, face->female ? 1 : 0, face->headParts.size(), face->partTypes, face->hairColor, face->hairRgb, face->faceDetails, face->skin,
 				face->height, set, face->tints.size(), face->bodyTint);
 		}
-		out += std::format(" ourTintsLeft={} sent={} sentHash={:08X} nudged={} copiesMade={} copiesKept={} full={} refused={} colors={} tintsLeft={} rebuilds={} repairs={}", ourTintsLeft,
-			facesSent, sentHash, nudged ? 1 : 0, book.Made(), book.Kept(), book.CanMake() ? 0 : 1, refused, colors.size(), tintsLeft, rebuilds, repairs);
+		const auto ours = OurHead();
+		const auto runtime = CountRuntimePresets();
+		out += std::format(
+			" ourTintsLeft={} sent={} sentHash={:08X} nudged={} copiesMade={} copiesKept={} copiesRewritten={} full={} refused={} colors={} tintsLeft={} rebuilds={} repairs={}"
+			" repairsRefused={} firstPerson={} editing={} ourHead={} ourHeadJudged={} ourHeadRace={:08X} runtimePresets={} savedCopies={}",
+			ourTintsLeft, facesSent, sentHash, nudged ? 1 : 0, book.Made(), book.Kept(), book.Rewrites(), book.CanMake() ? 0 : 1, refused, colors.size(), tintsLeft, rebuilds, repairs,
+			repairsRefused, FirstPerson() ? 1 : 0, Editing() ? 1 : 0, ours.head ? 1 : 0, ours.judged ? 1 : 0, ourHeadRace, runtime.all, runtime.notOurs);
 		return out;
 	}
 
