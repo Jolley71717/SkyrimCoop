@@ -78,7 +78,7 @@ TEST("stand-in protocol: a cut, a longer or a packet with too many actions or an
 	const auto check = [](const std::vector<std::uint8_t>& a_packet, auto a_decode) {
 		CHECK(a_decode(a_packet).has_value());
 		for (std::size_t length = 0; length < a_packet.size(); ++length) {
-			CHECK(!a_decode(std::span<const std::uint8_t>{ a_packet.data(), length }).has_value());
+			CHECK((!a_decode(std::span<const std::uint8_t>{ a_packet.data(), length }).has_value()));
 		}
 		auto longer = a_packet;
 		longer.push_back(0);
@@ -325,8 +325,8 @@ TEST("stand-in rules: the outbox keeps what a stand-in plays, in order, with its
 	CHECK(box.Waiting() == 2);
 	const auto taken = box.Take();
 	REQUIRE(taken.size() == 2);
-	CHECK(taken[0] == Protocol::PlayerAction{ 100, "attackStart" });
-	CHECK(taken[1] == Protocol::PlayerAction{ 103, "blockStart" });
+	CHECK((taken[0] == Protocol::PlayerAction{ 100, "attackStart" }));
+	CHECK((taken[1] == Protocol::PlayerAction{ 103, "blockStart" }));
 	CHECK(box.sent == 2);
 	CHECK(box.Take().empty());
 }
