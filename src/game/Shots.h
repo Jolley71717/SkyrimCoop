@@ -17,11 +17,16 @@
 //   engine aims it elsewhere). What it hits there is that game's business: a stand-in deals no harm (its attack damage
 //   and its spells are refused, RemotePlayers.cpp), a copy's deals what the local game runs (as its blows do).
 // - A projectile a stand-in's or a moved copy's own graph launches (its replayed release or cast) is ended before it
-//   moves: the wire's launch is the one that flies.
+//   moves: the wire's launch is the one that flies. One still there and not ended after a while is counted (survived=).
 // - The launches of this game are ended once their flight is over (an arrow that stuck after a short while, a rune
 //   after its life), and all of them before a save: no save holds one.
+// - What they hit is counted (`shots` hits: a launch's first hit, on our player apart, and any hit again).
 //
-// Main thread, but the update hook (any thread).
+// Projectiles are known by object and form id together (ShotRules::Ident): either alone may name another by the next
+// frame. A launch of ours is written only in its own update (its aim, in the hook) or after a claim that holds while
+// no update of it runs (its end): the tick runs on the game's job threads, and projectiles may update on others.
+//
+// Main thread (the tick), but the update hook and the hit events (any thread).
 namespace Shots
 {
 	using SendFn = std::function<void(std::vector<std::uint8_t>, bool)>;
@@ -48,6 +53,7 @@ namespace Shots
 	// ended, the launches ended and how (stuck, old, at a save), the ones flying now, the aim (turned back, the worst
 	// error before and after), per player. `shots find <missile|flame|beam|lobber|cone|crossbow>`: a spell of the load
 	// order whose projectile is that kind (aimed, fire and forget or held), or a crossbow and a bolt, for the rig.
-	// `shots last`: the last shot said and the last launched.
+	// `shots last`: the last shot said and the last launched. `shots strays [record]`: the projectiles in the world whose
+	// shooter is missing or a stand-in (of that record only, when named), for the rig after a load of a save.
 	[[nodiscard]] std::string Command(std::string_view a_args);
 }

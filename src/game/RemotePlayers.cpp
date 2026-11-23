@@ -1612,6 +1612,12 @@ namespace RemotePlayers
 		return byActor.contains(actor) || retiring.contains(actor);
 	}
 
+	bool MadeAsStandIn(const RE::Actor* a_actor)
+	{
+		return a_actor && a_actor->GetFormID() >= 0xFF000000 && a_actor != RE::PlayerCharacter::GetSingleton() &&
+		       IsStandInBase(a_actor->GetObjectReference());
+	}
+
 	RE::NiPointer<RE::Actor> StandInOf(std::uint32_t a_playerId)
 	{
 		RE::ActorHandle handle;

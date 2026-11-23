@@ -30,10 +30,16 @@
 //   straight at the local player): a launch flying more than AIM_FIX off the shooter's aim is turned back to it (AimError).
 // - Natives: a projectile a stand-in's or a moved copy's own graph launches (its replayed release or cast) is ended
 //   before it moves, so nothing flies twice; one this game launched for the wire is told apart even when its first
-//   update runs before the launch returns (Pending).
-// - Ended: the ones this game launched are ended once their flight is over (Live): an arrow DWELL after it stopped (an
+//   update runs before the launch returns (Pending). A projectile is known by its object and its form id together
+//   (Ident): the game reuses a freed one's memory, and may give its freed 0xFF id to the next reference it makes.
+// - Written only in its own update: a launch of ours is turned to its shooter's aim inside the update hook, on the
+//   thread that updates it (Tracker::Enter), and the main thread ends one only while no update of it runs
+//   (Tracker::Claim). The tick runs on the game's job threads, maybe while projectiles update on others.
+// - Ended:the ones this game launched are ended once their flight is over (Live): an arrow DWELL after it stopped (an
 //   arrow that sticks is real ammunition a player could pick up), a rune or other lobbed one after its record's life
 //   (at most LOBBER_LIFE), any other after MAX_LIFE, and all before a save. At most MAX_LIVE fly at once.
+// - Hit: the hits the game reports of each launch of ours are counted (HitBook), so a hit is told from a miss, and one
+//   hit from two.
 // No game here: tests/ShotTests.cpp.
 namespace ShotRules
 {
@@ -52,6 +58,10 @@ namespace ShotRules
 	inline constexpr auto  PENDING_FOR = 500ms;   // a launch of ours is told apart from a native this long
 	inline constexpr float PENDING_REACH = 4.0f;  // u: its first update is this near the origin it was launched at
 	inline constexpr std::size_t MAX_LIVE = 64;   // launches of ours flying at once; a 65th is not launched
+	inline constexpr int   AIM_UPDATES = 2;       // a launch of ours is turned to its aim in its first this many updates
+	inline constexpr auto  ENDING_FOR = 2s;       // a native's updates are skipped this long (it is killed meanwhile)
+	inline constexpr auto  SURVIVOR_HOLD = 30s;   // a native still there after ENDING_FOR: skipped this long more
+	inline constexpr auto  HIT_FOR = 32s;         // a hit is put on a launch of ours this long after it (past LOBBER_LIFE)
 
 	inline constexpr std::array<std::string_view, Protocol::SHOT_KIND_COUNT> KIND_NAMES{ "other", "arrow", "missile", "lobber", "beam", "flame", "cone", "barrier" };
 
@@ -128,6 +138,23 @@ namespace ShotRules
 			}
 			return out.empty() ? "none" : out;
 		}
+	};
+
+	// A projectile as the hook and the main thread know it: its object and its form id, both. The game reuses a freed
+	// projectile's memory, and may give its freed 0xFF id to the next reference it makes: either alone may name another
+	// projectile by then (the main thread looks one up by its id and acts on it only when it is the object it knew).
+	struct Ident
+	{
+		std::uintptr_t object = 0;
+		std::uint32_t  id = 0;
+		auto           operator<=>(const Ident&) const = default;
+	};
+
+	// A shooter's aim: the game's angle x (pitch) and z (heading), radians.
+	struct Aim
+	{
+		float pitch = 0.0f;
+		float heading = 0.0f;
 	};
 
 	// ---- aim ----
@@ -337,11 +364,11 @@ namespace ShotRules
 	class Pending
 	{
 	public:
-		// A token for Cancel.
-		std::uint64_t Add(std::uintptr_t a_shooter, std::uint32_t a_base, float a_x, float a_y, float a_z, Clock::time_point a_now)
+		// A token for Cancel. a_aim: the shooter's, which its first update turns it to.
+		std::uint64_t Add(std::uintptr_t a_shooter, std::uint32_t a_base, float a_x, float a_y, float a_z, Aim a_aim, Clock::time_point a_now)
 		{
 			std::erase_if(entries, [&](const Entry& a_e) { return a_now - a_e.at > PENDING_FOR; });
-			entries.push_back({ a_shooter, a_base, a_x, a_y, a_z, a_now, ++last });
+			entries.push_back({ a_shooter, a_base, a_x, a_y, a_z, a_aim, a_now, ++last });
 			return last;
 		}
 
@@ -351,8 +378,9 @@ namespace ShotRules
 			return std::erase_if(entries, [&](const Entry& a_e) { return a_e.token == a_token; }) > 0;
 		}
 
-		// Whether a projectile of a_shooter's of record a_base at x y z is a launch of ours (each launch matches once).
-		bool Match(std::uintptr_t a_shooter, std::uint32_t a_base, float a_x, float a_y, float a_z, Clock::time_point a_now)
+		// Whether a projectile of a_shooter's of record a_base at x y z is a launch of ours (each launch matches once): its
+		// aim when it is.
+		std::optional<Aim> Match(std::uintptr_t a_shooter, std::uint32_t a_base, float a_x, float a_y, float a_z, Clock::time_point a_now)
 		{
 			for (auto it = entries.begin(); it != entries.end(); ++it) {
 				if (it->shooter != a_shooter || it->base != a_base || a_now - it->at > PENDING_FOR) {
@@ -360,11 +388,12 @@ namespace ShotRules
 				}
 				const float dx = it->x - a_x, dy = it->y - a_y, dz = it->z - a_z;
 				if (dx * dx + dy * dy + dz * dz <= PENDING_REACH * PENDING_REACH) {
+					const auto aim = it->aim;
 					entries.erase(it);
-					return true;
+					return aim;
 				}
 			}
-			return false;
+			return std::nullopt;
 		}
 
 		void Clear() { entries.clear(); }
@@ -376,11 +405,249 @@ namespace ShotRules
 			std::uintptr_t    shooter;
 			std::uint32_t     base;
 			float             x, y, z;
+			Aim               aim;
 			Clock::time_point at;
 			std::uint64_t     token;
 		};
 		std::vector<Entry> entries;
 		std::uint64_t      last = 0;
+	};
+
+	// The projectiles the update hook acts on, under the caller's lock (the hook's thread and the main thread share it):
+	// - natives of stand-ins and moved copies: never updated for ENDING_FOR, killed by the main thread meanwhile (they
+	//   never update, so that is never under an update), then looked at once more: one still there and not ended is a
+	//   survivor, held (skipped) SURVIVOR_HOLD more;
+	// - launches of ours: turned to their shooter's aim in their first AIM_UPDATES updates, inside the hook (before and
+	//   after the game's update, which may turn them itself), and read once more after (left); ended by the main thread
+	//   only after a Claim, which holds while no update of theirs runs and makes the hook skip any that starts until
+	//   Release.
+	class Tracker
+	{
+	public:
+		enum class Role : std::uint8_t
+		{
+			kNative,
+			kOurs
+		};
+
+		// What the hook does at one update of a tracked projectile.
+		struct Update
+		{
+			bool               skip = false;   // the update is not run: a native, or one the main thread is ending
+			std::optional<Aim> aim;            // a launch of ours in its first updates: its shooter's aim
+			bool               fix = false;    // turned to aim before and after the update; else aim is only read (left)
+			bool               first = false;  // the first update of a launch of ours that runs
+		};
+
+		void AddNative(Ident a_p, Clock::time_point a_now)
+		{
+			entries[a_p] = Entry{ .role = Role::kNative, .at = a_now };
+		}
+
+		// A launch of ours (matched by its pending entry in the hook, or as the launch returned), aimed at a_aim. A native
+		// under the same ident (its first update ran before the launch returned, and no pending entry matched it) becomes
+		// ours: true then. One already ours keeps its updates and aim.
+		bool AddOurs(Ident a_p, std::optional<Aim> a_aim, Clock::time_point a_now)
+		{
+			const auto it = entries.find(a_p);
+			if (it != entries.end() && it->second.role == Role::kOurs) {
+				return false;
+			}
+			const bool raced = it != entries.end();
+			entries[a_p] = Entry{ .role = Role::kOurs, .at = a_now, .aim = a_aim };
+			return raced;
+		}
+
+		// At an update of a_p: none when it is not tracked. When the update runs (skip false), it is in flight until Left.
+		std::optional<Update> Enter(Ident a_p)
+		{
+			const auto it = entries.find(a_p);
+			if (it == entries.end()) {
+				return std::nullopt;
+			}
+			auto&  e = it->second;
+			Update u;
+			if (e.role == Role::kNative || e.claimed) {
+				u.skip = true;
+				return u;
+			}
+			++e.inFlight;
+			u.first = e.updates == 0;
+			if (e.aim && e.updates <= AIM_UPDATES) {
+				u.aim = e.aim;
+				u.fix = e.updates < AIM_UPDATES;
+			}
+			++e.updates;
+			return u;
+		}
+
+		// The update that Enter let run is over.
+		void Left(Ident a_p)
+		{
+			if (const auto it = entries.find(a_p); it != entries.end() && it->second.inFlight > 0) {
+				--it->second.inFlight;
+			}
+		}
+
+		[[nodiscard]] bool IsOurs(Ident a_p) const
+		{
+			const auto it = entries.find(a_p);
+			return it != entries.end() && it->second.role == Role::kOurs;
+		}
+
+		// The main thread is to end a_p: true when no update of it runs now (until Release, any that starts is skipped).
+		// False while one runs (try again later), or when a_p is not tracked (nothing tells whether one runs).
+		bool Claim(Ident a_p)
+		{
+			const auto it = entries.find(a_p);
+			if (it == entries.end() || it->second.inFlight > 0) {
+				return false;
+			}
+			it->second.claimed = true;
+			return true;
+		}
+
+		// The end of a claimed (or any) one is done: forgotten, its updates are the game's again.
+		void Forget(Ident a_p) { entries.erase(a_p); }
+
+		// The natives to kill now, each once.
+		[[nodiscard]] std::vector<Ident> NativesToKill()
+		{
+			std::vector<Ident> out;
+			for (auto& [p, e] : entries) {
+				if (e.role == Role::kNative && !e.killed) {
+					e.killed = true;
+					out.push_back(p);
+				}
+			}
+			return out;
+		}
+
+		// The natives ENDING_FOR after they were first seen, each once: still skipped until the main thread has looked
+		// at it and says Forget (ended) or HoldSurvivor (still there). A survivor whose hold is over is let go here.
+		[[nodiscard]] std::vector<Ident> NativesLapsed(Clock::time_point a_now)
+		{
+			std::vector<Ident> out;
+			for (auto it = entries.begin(); it != entries.end();) {
+				auto& e = it->second;
+				if (e.role != Role::kNative) {
+					++it;
+					continue;
+				}
+				if (e.survivor && a_now - e.at > ENDING_FOR + SURVIVOR_HOLD) {
+					it = entries.erase(it);
+					continue;
+				}
+				if (!e.survivor && !e.lapsed && a_now - e.at > ENDING_FOR) {
+					e.lapsed = true;
+					out.push_back(it->first);
+				}
+				++it;
+			}
+			return out;
+		}
+
+		// A lapsed native still there and not ended: skipped again until SURVIVOR_HOLD is over (it would fly twice).
+		void HoldSurvivor(Ident a_p, Clock::time_point a_now)
+		{
+			entries[a_p] = Entry{ .role = Role::kNative, .at = a_now - ENDING_FOR, .killed = true, .survivor = true };
+		}
+
+		[[nodiscard]] std::size_t Count() const { return entries.size(); }
+		[[nodiscard]] std::size_t Count(Role a_role) const
+		{
+			return static_cast<std::size_t>(std::ranges::count_if(entries, [&](const auto& a_entry) { return a_entry.second.role == a_role; }));
+		}
+		void Clear() { entries.clear(); }
+
+	private:
+		struct Entry
+		{
+			Role               role = Role::kNative;
+			Clock::time_point  at;
+			std::optional<Aim> aim;
+			int                updates = 0;
+			int                inFlight = 0;
+			bool               claimed = false;
+			bool               killed = false;
+			bool               survivor = false;
+			bool               lapsed = false;
+		};
+		std::map<Ident, Entry> entries;
+	};
+
+	// What this game's launches for friends hit, as the game reports its hits (the shooter, the projectile's record): a
+	// hit goes on the oldest launch of that shooter and record not hit yet (within HIT_FOR of it), else it is that
+	// launch's hit again. On our player is counted apart: what the rig reads to tell one hit from none or two.
+	class HitBook
+	{
+	public:
+		static constexpr std::size_t MAX = 128;
+
+		enum class Took : std::uint8_t
+		{
+			kNone,   // no launch of ours of that shooter and record
+			kFirst,  // a launch's first hit
+			kAgain,  // a launch hit already
+		};
+
+		void Launched(std::uintptr_t a_shooter, std::uint32_t a_base, Clock::time_point a_now)
+		{
+			Prune(a_now);
+			if (entries.size() >= MAX) {
+				entries.pop_front();
+			}
+			entries.push_back({ a_shooter, a_base, a_now, false });
+		}
+
+		Took Hit(std::uintptr_t a_shooter, std::uint32_t a_base, bool a_onPlayer, Clock::time_point a_now)
+		{
+			Prune(a_now);
+			Entry* again = nullptr;
+			for (auto& e : entries) {
+				if (e.shooter != a_shooter || e.base != a_base) {
+					continue;
+				}
+				if (!e.hit) {
+					e.hit = true;
+					++hits;
+					onPlayer += a_onPlayer ? 1 : 0;
+					return Took::kFirst;
+				}
+				again = &e;
+			}
+			if (!again) {
+				return Took::kNone;
+			}
+			++hitsAgain;
+			onPlayerAgain += a_onPlayer ? 1 : 0;
+			return Took::kAgain;
+		}
+
+		void Clear() { entries.clear(); }
+		[[nodiscard]] std::size_t Size() const { return entries.size(); }
+
+		std::uint64_t hits = 0;           // launches of ours that hit something
+		std::uint64_t onPlayer = 0;       // of those, our player
+		std::uint64_t hitsAgain = 0;      // a launch's second hit or more
+		std::uint64_t onPlayerAgain = 0;  // of those, on our player
+
+	private:
+		void Prune(Clock::time_point a_now)
+		{
+			while (!entries.empty() && a_now - entries.front().at > HIT_FOR) {
+				entries.pop_front();
+			}
+		}
+
+		struct Entry
+		{
+			std::uintptr_t    shooter;
+			std::uint32_t     base;
+			Clock::time_point at;
+			bool              hit;
+		};
+		std::deque<Entry> entries;
 	};
 
 	// A friend's shots, each launched when the actor that shows its shooter is drawn at the moment it left. One that says
@@ -439,7 +706,7 @@ namespace ShotRules
 		[[nodiscard]] bool Room() const { return entries.size() < MAX_LIVE; }
 
 		// a_life: its record's own life in seconds (0: none said).
-		void Add(std::uint32_t a_id, Kind a_kind, float a_life, Clock::time_point a_now)
+		void Add(Ident a_id, Kind a_kind, float a_life, Clock::time_point a_now)
 		{
 			auto limit = std::chrono::duration_cast<Clock::duration>(MAX_LIFE);
 			if (a_kind == Kind::kLobber) {
@@ -454,7 +721,7 @@ namespace ShotRules
 
 		// What the game says of one now: gone (ended by the game itself: it hit, its life ran out), or stopped (it moves no
 		// more: an arrow in a wall). True when it is to be ended now; a gone one is forgotten either way.
-		bool Step(std::uint32_t a_id, bool a_gone, bool a_stopped, Clock::time_point a_now)
+		bool Step(Ident a_id, bool a_gone, bool a_stopped, Clock::time_point a_now)
 		{
 			const auto it = entries.find(a_id);
 			if (it == entries.end()) {
@@ -479,9 +746,9 @@ namespace ShotRules
 		}
 
 		// Every one, to be ended now (a save, the session's end, a load): forgotten.
-		[[nodiscard]] std::vector<std::uint32_t> TakeAll()
+		[[nodiscard]] std::vector<Ident> TakeAll()
 		{
-			std::vector<std::uint32_t> out;
+			std::vector<Ident> out;
 			out.reserve(entries.size());
 			for (const auto& [id, entry] : entries) {
 				out.push_back(id);
@@ -490,9 +757,9 @@ namespace ShotRules
 			return out;
 		}
 
-		[[nodiscard]] std::vector<std::uint32_t> Ids() const
+		[[nodiscard]] std::vector<Ident> Ids() const
 		{
-			std::vector<std::uint32_t> out;
+			std::vector<Ident> out;
 			out.reserve(entries.size());
 			for (const auto& [id, entry] : entries) {
 				out.push_back(id);
@@ -518,6 +785,6 @@ namespace ShotRules
 			Clock::time_point                endAt;
 			std::optional<Clock::time_point> stoppedAt;
 		};
-		std::map<std::uint32_t, Entry> entries;
+		std::map<Ident, Entry> entries;
 	};
 }

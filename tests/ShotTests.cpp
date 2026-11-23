@@ -28,6 +28,12 @@ namespace
 	constexpr Protocol::NpcKey SPAWN_OF_1{ 0xFF000801, 1 };
 	constexpr float            PI = std::numbers::pi_v<float>;
 
+	// A projectile n: its object and its form id.
+	constexpr ShotRules::Ident P(std::uint32_t a_n)
+	{
+		return ShotRules::Ident{ 0x10000u + a_n * 0x100u, 0xFF000000u + a_n };
+	}
+
 	Shot PlayerShot(std::uint32_t a_player, Kind a_kind = Kind::kArrow)
 	{
 		Shot shot;
@@ -463,19 +469,22 @@ TEST("shot rules: pending: a launch of ours is told by its shooter, record and o
 {
 	ShotRules::Pending pending;
 	const auto         t0 = Steady::now();
-	const auto         token = pending.Add(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, t0);
+	const ShotRules::Aim AIM{ 0.25f, 1.5f };
+	const auto         token = pending.Add(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, AIM, t0);
 	CHECK(!pending.Match(0xB000, 0x0003BE11, 10.0f, 20.0f, 30.0f, t0));  // another shooter
 	CHECK(!pending.Match(0xA000, 0x0003BE12, 10.0f, 20.0f, 30.0f, t0));  // another record
 	CHECK(!pending.Match(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f + ShotRules::PENDING_REACH + 1.0f, t0));  // moved off
-	CHECK(pending.Match(0xA000, 0x0003BE11, 11.0f, 20.0f, 30.0f, t0 + 10ms));
+	const auto matched = pending.Match(0xA000, 0x0003BE11, 11.0f, 20.0f, 30.0f, t0 + 10ms);
+	REQUIRE(matched.has_value());
+	CHECK(matched->pitch == AIM.pitch && matched->heading == AIM.heading);  // its first update is turned to it
 	CHECK(!pending.Match(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, t0 + 10ms));  // once
 	CHECK(!pending.Cancel(token));  // already matched
 
-	const auto second = pending.Add(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, t0);
+	const auto second = pending.Add(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, AIM, t0);
 	CHECK(pending.Cancel(second));  // returned before its first update: taken back
 	CHECK(!pending.Match(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, t0));  // and no native takes its place
 
-	(void)pending.Add(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, t0);
+	(void)pending.Add(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, AIM, t0);
 	CHECK(!pending.Match(0xA000, 0x0003BE11, 10.0f, 20.0f, 30.0f, t0 + ShotRules::PENDING_FOR + 1ms));  // too late
 	pending.Clear();
 	CHECK(pending.Size() == 0u);
@@ -521,44 +530,192 @@ TEST("shot rules: live: an arrow of ours that stopped ends after the dwell; a ru
 {
 	ShotRules::Live live;
 	const auto      t0 = Steady::now();
-	live.Add(1, Kind::kArrow, 0.0f, t0);
-	live.Add(2, Kind::kMissile, 0.0f, t0);
-	live.Add(3, Kind::kLobber, 20.0f, t0);  // a rune whose record lasts 20 s
-	live.Add(4, Kind::kLobber, 0.0f, t0);   // one whose record says none
-	live.Add(5, Kind::kArrow, 0.0f, t0);
+	live.Add(P(1), Kind::kArrow, 0.0f, t0);
+	live.Add(P(2), Kind::kMissile, 0.0f, t0);
+	live.Add(P(3), Kind::kLobber, 20.0f, t0);  // a rune whose record lasts 20 s
+	live.Add(P(4), Kind::kLobber, 0.0f, t0);   // one whose record says none
+	live.Add(P(5), Kind::kArrow, 0.0f, t0);
 	CHECK(live.Count() == 5u);
 	CHECK(live.Count(Kind::kArrow) == 2u);
 
-	CHECK(!live.Step(1, false, false, t0 + 100ms));  // flying
-	CHECK(!live.Step(1, false, true, t0 + 1s));      // stuck in a wall
-	CHECK(!live.Step(1, false, true, t0 + 2s));
-	CHECK(live.Step(1, false, true, t0 + 1s + ShotRules::DWELL));
+	CHECK(!live.Step(P(1), false, false, t0 + 100ms));  // flying
+	CHECK(!live.Step(P(1), false, true, t0 + 1s));      // stuck in a wall
+	CHECK(!live.Step(P(1), false, true, t0 + 2s));
+	CHECK(live.Step(P(1), false, true, t0 + 1s + ShotRules::DWELL));
 	CHECK(live.endedStuck == 1u);
-	CHECK(!live.Step(1, false, true, t0 + 10s));  // forgotten
+	CHECK(!live.Step(P(1), false, true, t0 + 10s));  // forgotten
 
-	CHECK(!live.Step(5, true, false, t0 + 1s));  // it hit: the game ended it
+	CHECK(!live.Step(P(5), true, false, t0 + 1s));  // it hit: the game ended it
 	CHECK(live.gone == 1u);
 
-	CHECK(!live.Step(2, false, true, t0 + 5s));  // a missile that stopped is no arrow: it lies until its life
-	CHECK(live.Step(2, false, false, t0 + ShotRules::MAX_LIFE));
-	CHECK(!live.Step(3, false, false, t0 + 19s));
-	CHECK(live.Step(3, false, false, t0 + 20s));
-	CHECK(!live.Step(4, false, false, t0 + 29s));
-	CHECK(live.Step(4, false, false, t0 + ShotRules::LOBBER_LIFE));
+	CHECK(!live.Step(P(2), false, true, t0 + 5s));  // a missile that stopped is no arrow: it lies until its life
+	CHECK(live.Step(P(2), false, false, t0 + ShotRules::MAX_LIFE));
+	CHECK(!live.Step(P(3), false, false, t0 + 19s));
+	CHECK(live.Step(P(3), false, false, t0 + 20s));
+	CHECK(!live.Step(P(4), false, false, t0 + 29s));
+	CHECK(live.Step(P(4), false, false, t0 + ShotRules::LOBBER_LIFE));
 	CHECK(live.endedOld == 3u);
 	CHECK(live.Count() == 0u);
 
 	// A rune whose record is shorter than MAX_LIFE still lies MAX_LIFE.
-	live.Add(6, Kind::kLobber, 2.0f, t0);
-	CHECK(!live.Step(6, false, false, t0 + 5s));
-	CHECK(live.Step(6, false, false, t0 + ShotRules::MAX_LIFE));
+	live.Add(P(6), Kind::kLobber, 2.0f, t0);
+	CHECK(!live.Step(P(6), false, false, t0 + 5s));
+	CHECK(live.Step(P(6), false, false, t0 + ShotRules::MAX_LIFE));
 
 	for (std::uint32_t id = 100; live.Room(); ++id) {
-		live.Add(id, Kind::kMissile, 0.0f, t0);
+		live.Add(P(id), Kind::kMissile, 0.0f, t0);
 	}
 	CHECK(live.Count() == ShotRules::MAX_LIVE);
 	CHECK(live.Ids().size() == ShotRules::MAX_LIVE);
 	CHECK(live.TakeAll().size() == ShotRules::MAX_LIVE);
 	CHECK(live.Count() == 0u);
 	CHECK(live.Room());
+}
+
+TEST("shot rules: a projectile is its object and its id together: a freed id given to another, or another in a freed one's memory, is another")
+{
+	ShotRules::Live live;
+	const auto      t0 = Steady::now();
+	const ShotRules::Ident fireball{ 0x5000, 0xFF000AAA };
+	const ShotRules::Ident sameId{ 0x6000, 0xFF000AAA };      // our player's rune, given the fireball's freed id
+	const ShotRules::Ident sameMemory{ 0x5000, 0xFF000BBB };  // a new projectile in the fireball's memory
+	live.Add(fireball, Kind::kMissile, 0.0f, t0);
+	CHECK(!live.Step(sameId, false, false, t0 + ShotRules::MAX_LIFE));  // not ours: never ended for it
+	CHECK(!live.Step(sameMemory, false, false, t0 + ShotRules::MAX_LIFE));
+	CHECK(live.Count() == 1u);
+	CHECK(live.Step(fireball, false, false, t0 + ShotRules::MAX_LIFE));
+
+	ShotRules::Tracker tracker;
+	tracker.AddNative(fireball, t0);
+	CHECK(!tracker.Enter(sameId).has_value());  // our player's arrow with that id flies: not skipped, nothing changed
+	CHECK(!tracker.Enter(sameMemory).has_value());
+	CHECK(tracker.Enter(fireball)->skip);
+	CHECK(!tracker.IsOurs(sameId));
+
+	ShotRules::HitBook hits;
+	hits.Launched(0xA000, 0x0003BE11, t0);
+	CHECK(hits.Hit(0xB000, 0x0003BE11, true, t0) == ShotRules::HitBook::Took::kNone);  // another shooter's
+	CHECK(hits.Hit(0xA000, 0x0003BE12, true, t0) == ShotRules::HitBook::Took::kNone);  // another record
+	CHECK(hits.onPlayer == 0u);
+}
+
+TEST("shot rules: tracker: a native is skipped at every update, killed once, looked at once when its time is over, and a survivor held")
+{
+	ShotRules::Tracker tracker;
+	const auto         t0 = Steady::now();
+	tracker.AddNative(P(1), t0);
+	CHECK(tracker.Count(ShotRules::Tracker::Role::kNative) == 1u);
+	for (int i = 0; i < 3; ++i) {
+		const auto u = tracker.Enter(P(1));
+		REQUIRE(u.has_value());
+		CHECK(u->skip);
+		CHECK(!u->aim.has_value());
+	}
+	auto kill = tracker.NativesToKill();
+	REQUIRE(kill.size() == 1u);
+	CHECK(kill[0] == P(1));
+	CHECK(tracker.NativesToKill().empty());  // once
+	CHECK(tracker.Claim(P(1)));              // never in flight: always claimable
+	CHECK(tracker.NativesLapsed(t0 + 1s).empty());
+	auto lapsed = tracker.NativesLapsed(t0 + ShotRules::ENDING_FOR + 1ms);
+	REQUIRE(lapsed.size() == 1u);
+	CHECK(lapsed[0] == P(1));
+	CHECK(tracker.Enter(P(1))->skip);  // still skipped until the main thread says (Forget or HoldSurvivor)
+
+	// Still there and not ended: held, skipped SURVIVOR_HOLD more, not killed again by NativesToKill (the main thread did)
+	const auto t1 = t0 + ShotRules::ENDING_FOR + 1ms;
+	tracker.HoldSurvivor(P(1), t1);
+	CHECK(tracker.Enter(P(1))->skip);
+	CHECK(tracker.NativesToKill().empty());
+	CHECK(tracker.NativesLapsed(t1 + ShotRules::SURVIVOR_HOLD - 1s).empty());
+	CHECK(tracker.NativesLapsed(t1 + ShotRules::SURVIVOR_HOLD + 1ms).empty());  // let go, not looked at again
+	CHECK(!tracker.Enter(P(1)).has_value());
+
+	// Gone in time: forgotten.
+	tracker.AddNative(P(2), t0);
+	(void)tracker.NativesLapsed(t0 + ShotRules::ENDING_FOR + 1ms);
+	tracker.Forget(P(2));
+	CHECK(tracker.Count() == 0u);
+}
+
+TEST("shot rules: tracker: a launch of ours is turned to its aim in its own first updates, read once after, and ended only while no update of it runs")
+{
+	ShotRules::Tracker   tracker;
+	const auto           t0 = Steady::now();
+	const ShotRules::Aim aim{ 0.1f, 2.0f };
+	CHECK(!tracker.AddOurs(P(1), aim, t0));
+	CHECK(tracker.IsOurs(P(1)));
+	for (int i = 0; i < ShotRules::AIM_UPDATES; ++i) {
+		const auto u = tracker.Enter(P(1));
+		REQUIRE(u.has_value());
+		CHECK(!u->skip);
+		CHECK(u->first == (i == 0));
+		REQUIRE(u->aim.has_value());
+		CHECK(u->aim->heading == aim.heading);
+		CHECK(u->fix);
+		CHECK(!tracker.Claim(P(1)));  // its update runs: the main thread waits
+		tracker.Left(P(1));
+	}
+	auto u = tracker.Enter(P(1));  // read once, not turned: what is left of the aim
+	REQUIRE(u.has_value() && u->aim.has_value());
+	CHECK(!u->fix);
+	tracker.Left(P(1));
+	u = tracker.Enter(P(1));  // then the game's alone
+	REQUIRE(u.has_value());
+	CHECK(!u->aim.has_value());
+	CHECK(!u->skip);
+	tracker.Left(P(1));
+
+	CHECK(tracker.Claim(P(1)));
+	CHECK(tracker.Enter(P(1))->skip);  // an update that starts while the main thread ends it is skipped
+	tracker.Forget(P(1));
+	CHECK(!tracker.Enter(P(1)).has_value());  // then it is the game's
+	CHECK(!tracker.Claim(P(1)));               // and nothing claims what is not known
+
+	// Matched by its pending entry in the hook first, then the launch returns: one launch, its updates kept.
+	CHECK(!tracker.AddOurs(P(2), aim, t0));
+	CHECK(tracker.Enter(P(2))->first);
+	tracker.Left(P(2));
+	CHECK(!tracker.AddOurs(P(2), aim, t0));
+	CHECK(!tracker.Enter(P(2))->first);
+	tracker.Left(P(2));
+
+	// Its first update ran before the launch returned and was taken for a native: ours after all (raced).
+	tracker.AddNative(P(3), t0);
+	CHECK(tracker.AddOurs(P(3), aim, t0));
+	CHECK(tracker.IsOurs(P(3)));
+	CHECK(tracker.NativesToKill().empty());
+	CHECK(tracker.Enter(P(3))->first);
+	tracker.Left(P(3));
+
+	// Launched with no aim to read (a beam): never turned.
+	CHECK(!tracker.AddOurs(P(4), std::nullopt, t0));
+	CHECK(!tracker.Enter(P(4))->aim.has_value());
+	tracker.Left(P(4));
+	CHECK(tracker.Count(ShotRules::Tracker::Role::kOurs) == 3u);
+	tracker.Clear();
+	CHECK(tracker.Count() == 0u);
+}
+
+TEST("shot rules: hit book: a launch's first hit counts once, on our player apart; a second hit of it is counted again; old launches are let go")
+{
+	ShotRules::HitBook hits;
+	const auto         t0 = Steady::now();
+	hits.Launched(0xA000, 0x0003BE11, t0);
+	hits.Launched(0xA000, 0x0003BE11, t0 + 100ms);
+	CHECK(hits.Hit(0xA000, 0x0003BE11, true, t0 + 200ms) == ShotRules::HitBook::Took::kFirst);
+	CHECK(hits.Hit(0xA000, 0x0003BE11, false, t0 + 300ms) == ShotRules::HitBook::Took::kFirst);  // the second launch
+	CHECK(hits.Hit(0xA000, 0x0003BE11, true, t0 + 400ms) == ShotRules::HitBook::Took::kAgain);   // a third hit: twice
+	CHECK(hits.hits == 2u);
+	CHECK(hits.onPlayer == 1u);
+	CHECK(hits.hitsAgain == 1u);
+	CHECK(hits.onPlayerAgain == 1u);
+	CHECK(hits.Hit(0xA000, 0x0003BE11, true, t0 + ShotRules::HIT_FOR + 1s) == ShotRules::HitBook::Took::kNone);
+	CHECK(hits.Size() == 0u);
+	for (std::size_t i = 0; i < ShotRules::HitBook::MAX + 5; ++i) {
+		hits.Launched(0xA000, 0x0003BE11, t0 + std::chrono::milliseconds(i));
+	}
+	CHECK(hits.Size() == ShotRules::HitBook::MAX);
+	hits.Clear();
+	CHECK(hits.Size() == 0u);
 }
