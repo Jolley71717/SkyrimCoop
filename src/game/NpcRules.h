@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -41,7 +42,10 @@ namespace NpcRules
 	// where it is seen from close by: the friend's game asks for it (an NPC fought here or following our player stays).
 	inline constexpr float HANDOFF_FAR = 6000.0f;
 	inline constexpr float HANDOFF_MARGIN = 1000.0f;
-	// An NPC that follows our player but is run by another game is asked for this often (it may follow theirs too).
+	// An NPC that follows our player but is run by another game is asked for this often (it may follow theirs too). One
+	// we run that follows our player is said to (kFollower) as it starts following and this often after, however we got
+	// it, so the server's book (common/NpcBook.h, FOLLOWS_LAPSE) keeps it from a friend's stray blow or talk; once it
+	// stops following, we say kHave once, and a friend who hired it can have it.
 	inline constexpr auto FOLLOWER_EVERY = 15s;
 
 	enum class Owner
@@ -70,6 +74,9 @@ namespace NpcRules
 		bool                             followsUs = false;   // it follows our player (a follower, a summon, a mount)
 		bool                             spawn = false;       // made as this game ran (a summon): no other game has it to run
 		std::optional<Clock::time_point> lastClaim;     // our last claim of it, of any kind
+		// Our last kFollower claim of it, kept until we say kHave or kRelease of it: none, the book has not heard from us
+		// that it follows our player (or has heard that it stopped).
+		std::optional<Clock::time_point> saidFollows;
 	};
 
 	// A friend's game is the better place for it: our player is in another space than it (it walked through a door our
@@ -92,6 +99,15 @@ namespace NpcRules
 		}
 		switch (a_facts.owner) {
 		case Owner::kUs:
+			if (a_facts.followsUs) {
+				// The book hears it follows our player, whether we got it as a follower or hired it after.
+				if (!a_facts.saidFollows || a_now - *a_facts.saidFollows >= FOLLOWER_EVERY) {
+					return Ask::kFollower;
+				}
+			} else if (a_facts.saidFollows) {
+				// It stopped following our player (dismissed): the book hears so.
+				return Ask::kHave;
+			}
 			if (a_facts.fighting) {
 				return since(FIGHT_EVERY) ? Ask::kFight : Ask::kNone;
 			}
@@ -155,7 +171,42 @@ namespace NpcRules
 		return a_inCombat || (a_nearestPlayer && *a_nearestPlayer < FAST_WITHIN) ? Clock::duration{ FAST_EVERY } : Clock::duration{ SLOW_EVERY };
 	}
 
+	// The numbers of each NPC's states, for the whole session. A copy takes only a state newer than the newest it holds
+	// (StateBuffer::Push), so a runner that let go of an NPC and has it again (a scan that missed it for a moment: a
+	// script disabled it, its 3D was not loaded for a frame; a load; a door there and back) goes on from its last number
+	// instead of starting at 1 again, which a copy would refuse until it passed the old count.
+	class Sequences
+	{
+	public:
+		std::uint32_t Next(const Protocol::NpcKey& a_key) { return ++numbers[a_key]; }
+		void          Clear() { numbers.clear(); }
+
+	private:
+		std::map<Protocol::NpcKey, std::uint32_t> numbers;
+	};
+
 	// ---- its copies ----
+
+	// Whose states a copy holds. They are dropped, to start over from the next one, when states come from another runner
+	// than the one held, or from the same runner after the NPC changed hands (through nobody too): whatever the runner
+	// numbered them, the copy never refuses its runner's new states for being older than ones it was sent before.
+	struct Feed
+	{
+		std::uint32_t runner = 0;
+		bool          handsChanged = false;
+
+		// The server said someone else runs it now, or nobody.
+		void HandsChanged() { handsChanged = true; }
+
+		// States (or gear) of it from a_runner came: true when the copy's states and events must be dropped first.
+		bool From(std::uint32_t a_runner)
+		{
+			const bool over = handsChanged || runner != a_runner;
+			runner = a_runner;
+			handsChanged = false;
+			return over;
+		}
+	};
 
 	// A copy follows its runner's states (its AI off, placed where the runner's NPC is, its graph told what that NPC's
 	// does) while there is a recent state in the space our player is in, within reach of our loaded world. Else it is
@@ -435,6 +486,60 @@ namespace NpcRules
 			putOn(a_gear.ammo, Hand::kNone, 1);
 		}
 		return plan;
+	}
+
+	// What a copy wears and holds, read back from it a while after it was dressed, against its runner's gear: the equip
+	// and unequip calls say nothing of what the game did (an equip it refused, a bow left on the back by an unequip of
+	// the wrong slot). Judged as PlanGear plans: what the runner's game could not name to this one (an unnamed hand,
+	// unnamed slots, a runtime form) is not looked at.
+	struct GearShown
+	{
+		std::size_t named = 0;    // the runner's NPC's worn items this game can name
+		std::size_t matched = 0;  // of those, worn by the copy
+		std::size_t extra = 0;    // worn by the copy, named by the runner's game, and not worn by the runner's NPC: left on
+		bool        right = true;  // the right hand holds what the runner's NPC's does
+		bool        left = true;
+		bool        ammo = true;
+
+		// What is not on that should be.
+		[[nodiscard]] std::size_t Short() const { return (named - matched) + (right ? 0 : 1) + (left ? 0 : 1) + (ammo ? 0 : 1); }
+		// All of it on, apart from what the copy lacks (a_missing: PlanGear's count when it was dressed), and nothing left
+		// on that its runner's NPC took off.
+		[[nodiscard]] bool Complete(std::size_t a_missing) const { return extra == 0 && Short() <= a_missing; }
+	};
+
+	[[nodiscard]] inline GearShown CheckGear(const Protocol::NpcGear& a_gear, const Wearing& a_now)
+	{
+		GearShown  out;
+		const auto named = [](std::uint32_t a_id) { return a_id != 0 && !FormIds::IsRuntime(a_id); };
+		const auto inGear = [&](std::uint32_t a_id) { return std::ranges::any_of(a_gear.worn, [&](const Protocol::WornItem& a_w) { return a_w.id == a_id; }); };
+		std::vector<std::uint32_t> seen;
+		for (const auto& item : a_gear.worn) {
+			if (!named(item.id) || std::ranges::find(seen, item.id) != seen.end()) {
+				continue;
+			}
+			seen.push_back(item.id);
+			++out.named;
+			if (std::ranges::any_of(a_now.armor, [&](const Wearing::Armor& a_a) { return a_a.shared == item.id; })) {
+				++out.matched;
+			}
+		}
+		for (const auto& armor : a_now.armor) {
+			if (named(armor.shared) && !inGear(armor.shared) && (armor.slots & a_gear.unnamedSlots) == 0) {
+				++out.extra;
+			}
+		}
+		const auto same = [&](std::uint32_t a_held, std::uint32_t a_wanted, std::uint8_t a_unnamedBit) {
+			if ((a_gear.unnamed & a_unnamedBit) != 0 || (a_wanted != 0 && !named(a_wanted))) {
+				return true;
+			}
+			// A shield is worn armor too: the worn items count it, on or lacking; the hand need only hold nothing else.
+			return a_held == a_wanted || (inGear(a_wanted) && a_held == 0);
+		};
+		out.right = same(a_now.right, a_gear.right, Protocol::kRightUnnamed);
+		out.left = same(a_now.left, a_gear.left, Protocol::kLeftUnnamed);
+		out.ammo = same(a_now.ammo, a_gear.ammo, Protocol::kAmmoUnnamed);
+		return out;
 	}
 
 	// ---- which actors made as a game ran are shared ----

@@ -35,6 +35,10 @@ namespace NpcSync
 		constexpr auto GEAR_EVERY = 1s;      // what an NPC we run wears is read this often, and sent when it changed
 		constexpr auto FORGET_COPY = 10s;    // a copy with no state for this long, that nobody else runs, is forgotten
 		constexpr auto RESPAWN_AFTER = 1s;   // a spawn's copy taken away is placed again no sooner than this
+		// A copy's gear is read back this long after it was dressed (the game's equips may land a frame or two later), and
+		// this often after that (its own scripts may change it).
+		constexpr auto WEAR_CHECK_AFTER = 500ms;
+		constexpr auto WEAR_CHECK_EVERY = 2s;
 		constexpr std::size_t MAX_PENDING_EVENTS = 512;
 		// Skyrim.esm's keyword for people (every race a person is of has it).
 		constexpr RE::FormID ACTOR_TYPE_NPC = 0x00013794;
@@ -52,11 +56,13 @@ namespace NpcSync
 			std::optional<Clock::time_point> unownedSince;
 			std::optional<Clock::time_point> lastClaim;
 			Clock::time_point                nextState{};
-			std::uint32_t                    sequence = 0;
+			std::optional<Clock::time_point> saidFollows;  // NpcRules::Facts::saidFollows
 			std::optional<Protocol::NpcGear> sentGear;
 			Clock::time_point                nextGear{};
 		};
 		std::map<Key, Loaded> loaded;
+		// The numbers of the states of every NPC we ran this session (not forgotten with its loaded entry).
+		NpcRules::Sequences sequences;
 		// Who runs each NPC, as the server said (0 is never kept: nobody).
 		std::map<Key, std::uint32_t> owners;
 		Clock::time_point            nextScan{};
@@ -64,7 +70,7 @@ namespace NpcSync
 		// The copies of NPCs other games run that this game knows states of. The hook reads them, so under copyLock.
 		struct Copy
 		{
-			std::uint32_t         runner = 0;
+			NpcRules::Feed        feed;  // whose states it holds
 			std::uint32_t         base = 0;
 			StateBuffer::Buffer   buffer;
 			Gait::Shown           shown;
@@ -78,6 +84,9 @@ namespace NpcSync
 			Clock::time_point     placeAfter{};
 			std::optional<Protocol::NpcGear> gear;
 			bool                  geared = false;
+			std::size_t           gearLacks = 0;  // what its last dressing counted missing (PlanGear)
+			std::optional<NpcRules::GearShown> wears;  // its gear read back after it was dressed (none: not yet)
+			Clock::time_point     nextWearCheck{};
 			bool                  saidLook = false;
 			Protocol::PlayerState lastDrawn;
 			bool                  hasDrawn = false;
@@ -519,21 +528,18 @@ namespace NpcSync
 			std::size_t skipped = 0;
 		};
 
-		Dressed Dress(const Protocol::NpcGear& a_gear, bool a_mayAdd, RE::Actor* a_actor)
+		// What a copy wears and holds now (and, given a_carried, what it carries), as NpcRules::PlanGear and CheckGear take it.
+		NpcRules::Wearing WearingOf(RE::Actor* a_actor, std::vector<NpcRules::Count>* a_carried)
 		{
-			Dressed    out;
-			const auto manager = RE::ActorEquipManager::GetSingleton();
-			if (!manager) {
-				return out;
-			}
-			NpcRules::Wearing                now;
-			std::vector<NpcRules::Count>     carried;
+			NpcRules::Wearing now;
 			for (const auto& [item, data] : a_actor->GetInventory()) {
 				const auto& [count, entry] = data;
 				if (count <= 0) {
 					continue;
 				}
-				carried.push_back({ item->GetFormID(), count });
+				if (a_carried) {
+					a_carried->push_back({ item->GetFormID(), count });
+				}
 				if (entry && entry->IsWorn() && item->IsArmor()) {
 					now.armor.push_back({ item->GetFormID(), FormIds::Shareable(item->GetFormID(), ArmorTemplateOf).value_or(0), SlotsOf(item) });
 				}
@@ -543,16 +549,45 @@ namespace NpcSync
 			now.right = idOf(right);
 			now.left = idOf(left);
 			now.ammo = idOf(a_actor->GetCurrentAmmo());
+			return now;
+		}
+
+		bool IsSpell(std::uint32_t a_id)
+		{
+			const auto form = a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
+			return form && form->Is(RE::FormType::Spell);
+		}
+
+		// The copy's gear read back against its runner's (NpcRules::CheckGear). A hand with a spell in it, the runner's NPC's
+		// or the copy's own, is not judged: spells in a copy's hands come with the magic work, and Dress leaves them be.
+		NpcRules::GearShown CheckWorn(const Protocol::NpcGear& a_gear, RE::Actor* a_actor)
+		{
+			const auto now = WearingOf(a_actor, nullptr);
+			auto       judged = a_gear;
+			if (IsSpell(judged.right) || IsSpell(now.right)) {
+				judged.unnamed = static_cast<std::uint8_t>(judged.unnamed | Protocol::kRightUnnamed);
+			}
+			if (IsSpell(judged.left) || IsSpell(now.left)) {
+				judged.unnamed = static_cast<std::uint8_t>(judged.unnamed | Protocol::kLeftUnnamed);
+			}
+			return NpcRules::CheckGear(judged, now);
+		}
+
+		Dressed Dress(const Protocol::NpcGear& a_gear, bool a_mayAdd, RE::Actor* a_actor)
+		{
+			Dressed    out;
+			const auto manager = RE::ActorEquipManager::GetSingleton();
+			if (!manager) {
+				return out;
+			}
+			std::vector<NpcRules::Count> carried;
+			const auto                   now = WearingOf(a_actor, &carried);
 			// A spell in the runner's NPC's hand is never in an inventory, so it is not looked for (a load-order copy would
 			// count it missing): the hand is planned as empty and the spell counted skipped. Spells in a copy's hands come
 			// with the magic work.
-			auto       wanted = a_gear;
-			const auto spell = [](std::uint32_t a_id) {
-				const auto form = a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
-				return form && form->Is(RE::FormType::Spell);
-			};
+			auto wanted = a_gear;
 			for (auto* hand : { &wanted.right, &wanted.left }) {
-				if (spell(*hand)) {
+				if (IsSpell(*hand)) {
 					*hand = 0;
 					++out.skipped;
 				}
@@ -714,6 +749,7 @@ namespace NpcSync
 				}
 				facts.unownedSince = npc.unownedSince;
 				facts.lastClaim = npc.lastClaim;
+				facts.saidFollows = npc.saidFollows;
 				const auto at = Read(actor.get());
 				if (at && a_here && SameSpace(*at, *a_here)) {
 					facts.ours = Distance(*at, *a_here);
@@ -736,6 +772,11 @@ namespace NpcSync
 					continue;
 				}
 				npc.lastClaim = a_now;
+				if (ask == NpcRules::Ask::kFollower) {
+					npc.saidFollows = a_now;
+				} else if (ask == NpcRules::Ask::kHave || ask == NpcRules::Ask::kRelease) {
+					npc.saidFollows.reset();  // the book holds it as no follower of ours after this
+				}
 				msg.claims.push_back({ key, NpcRules::WhyOf(ask) });
 				if (msg.claims.size() >= Protocol::MAX_NPC_CLAIMS) {
 					flush();
@@ -796,7 +837,7 @@ namespace NpcSync
 				}
 				const auto every = NpcRules::SendEvery(actor->IsInCombat(), nearest);
 				npc.nextState = a_now - npc.nextState < every ? npc.nextState + every : a_now + every;
-				state->sequence = ++npc.sequence;
+				state->sequence = sequences.Next(key);
 				state->sentMs = Protocol::SentMs(a_now);
 				states.npcs.push_back({ key, BaseOf(actor.get()), *state });
 				if (states.npcs.size() >= Protocol::MAX_NPC_STATES) {
@@ -847,6 +888,7 @@ namespace NpcSync
 			{
 				Key                   key;
 				bool                  place = false;
+				bool                  check = false;  // read its gear back (else: dress it)
 				std::uint32_t         base = 0;
 				Protocol::PlayerState at;
 			};
@@ -932,6 +974,9 @@ namespace NpcSync
 					if (actor) {
 						if (copy.gear && !copy.geared) {
 							work.push_back({ .key = key });
+						} else if (copy.gear && a_now >= copy.nextWearCheck) {
+							copy.nextWearCheck = a_now + WEAR_CHECK_EVERY;
+							work.push_back({ .key = key, .check = true });
 						}
 						if (!copy.saidLook && copy.base != 0 && !key.IsSpawn()) {
 							copy.saidLook = true;
@@ -1004,10 +1049,27 @@ namespace NpcSync
 				if (!actor || !actor->Is3DLoaded()) {
 					continue;
 				}
+				if (job.check) {
+					// Read back what it wears and holds now, a while after it was dressed.
+					const auto shown = CheckWorn(gear, actor.get());
+					std::scoped_lock l{ copyLock };
+					if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID() && it->second.gear == gear && it->second.geared) {
+						if (!shown.Complete(it->second.gearLacks) && (!it->second.wears || it->second.wears->Complete(it->second.gearLacks))) {
+							logs::info("NPCs: copy {:08X} of {:08X} does not show its runner's gear: wears {}/{} of it, {} left on, hands {}/{}, ammo {} ({} it lacks)", actor->GetFormID(),
+								job.key.id, shown.matched, shown.named, shown.extra, shown.right ? "ok" : "differ", shown.left ? "ok" : "differ", shown.ammo ? "ok" : "differs",
+								it->second.gearLacks);
+						}
+						it->second.wears = shown;
+					}
+					continue;
+				}
 				const auto dressed = Dress(gear, mayAdd, actor.get());
 				std::scoped_lock l{ copyLock };
 				if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID() && it->second.gear == gear) {
 					it->second.geared = true;
+					it->second.gearLacks = dressed.missing;
+					it->second.wears.reset();
+					it->second.nextWearCheck = a_now + WEAR_CHECK_AFTER;
 				}
 				counts.gearMissing += dressed.missing;
 				counts.gearSkipped += dressed.skipped;
@@ -1020,9 +1082,8 @@ namespace NpcSync
 		Copy& CopyOf(const Key& a_key, std::uint32_t a_runner)  // under copyLock
 		{
 			auto& copy = copies[a_key];
-			if (copy.runner != a_runner) {
-				// A new runner: its states count and its clock start over.
-				copy.runner = a_runner;
+			if (copy.feed.From(a_runner)) {
+				// A new runner, or its runner again after it changed hands: its states count and its clock start over.
 				copy.buffer.Clear();
 				copy.actions.Clear();
 				copy.shown = {};
@@ -1112,6 +1173,7 @@ namespace NpcSync
 			fights.clear();
 		}
 		loaded.clear();
+		sequences.Clear();
 		owners.clear();
 		active = false;
 		ourId = 0;
@@ -1122,12 +1184,25 @@ namespace NpcSync
 		if (!active) {
 			return;
 		}
+		std::map<Key, std::uint32_t> before;  // a full list's: who ran each before it
 		if (a_msg.full) {
-			owners.clear();
+			before.swap(owners);
 		}
 		for (const auto& [key, owner] : a_msg.owners) {
 			const auto it = owners.find(key);
 			const auto was = it == owners.end() ? 0u : it->second;
+			{
+				// Changed hands (through nobody too): its copy's states start over with the next runner's next state,
+				// whatever that runner numbers it (NpcRules::Feed).
+				const auto old = before.find(key);
+				const auto previous = a_msg.full ? (old == before.end() ? 0u : old->second) : was;
+				if (previous != owner) {
+					std::scoped_lock l{ copyLock };
+					if (const auto copy = copies.find(key); copy != copies.end()) {
+						copy->second.feed.HandsChanged();
+					}
+				}
+			}
 			if (owner == 0) {
 				owners.erase(key);
 				counts.released += was != 0 ? 1 : 0;
@@ -1193,7 +1268,7 @@ namespace NpcSync
 		std::scoped_lock l{ copyLock };
 		for (const auto& action : a_msg.actions) {
 			const auto it = copies.find(action.key);
-			if (it == copies.end() || it->second.runner != a_msg.runner || !NpcRules::Replayed(action.event)) {
+			if (it == copies.end() || it->second.feed.runner != a_msg.runner || !NpcRules::Replayed(action.event)) {
 				continue;
 			}
 			it->second.actions.Push(action.event, it->second.buffer.sender.At(action.sentMs), now);
@@ -1378,8 +1453,16 @@ namespace NpcSync
 				at = std::format("({:.0f},{:.0f},{:.0f})", p.x, p.y, p.z);
 			}
 			const auto role = runner == ourId ? "run" : copy != copies.end() && copy->second.mirror ? "copy" : runner != 0 ? "other" : "none";
-			out += std::format(" | {:08X}{} local={:08X} owner={} role={} kind={} at={} dead={}", key.id, key.IsSpawn() ? std::format(" spawner={}", key.spawner) : "", localId,
-				runner, role, npc != loaded.end() ? NpcRules::KindName(npc->second.kind) : "?", at, actor && actor->IsDead() ? 1 : 0);
+			// child: a child (kind human includes children); weapon: its weapon or hands drawn; combat: in combat.
+			out += std::format(" | {:08X}{} local={:08X} owner={} role={} kind={} at={} dead={} child={} weapon={} combat={}", key.id,
+				key.IsSpawn() ? std::format(" spawner={}", key.spawner) : "", localId, runner, role, npc != loaded.end() ? NpcRules::KindName(npc->second.kind) : "?", at,
+				actor && actor->IsDead() ? 1 : 0, actor && actor->IsChild() ? 1 : 0, actor && actor->AsActorState() && actor->AsActorState()->IsWeaponDrawn() ? 1 : 0, actor && actor->IsInCombat() ? 1 : 0);
+			if (only && actor) {
+				// One NPC asked for: its base confidence and aggression too (the rig sets them for a fight and puts them back).
+				if (const auto values = actor->AsActorValueOwner()) {
+					out += std::format(" confidence={:.0f} aggression={:.0f}", values->GetBaseActorValue(RE::ActorValue::kConfidence), values->GetBaseActorValue(RE::ActorValue::kAggression));
+				}
+			}
 			if (copy != copies.end()) {
 				const auto& c = copy->second;
 				std::string target = "none";
@@ -1394,10 +1477,18 @@ namespace NpcSync
 				float graphSpeed = 0.0f;
 				const bool hasSpeed = actor && actor->GetGraphVariableFloat(Name("Speed"), graphSpeed);
 				// played/refused: the runner's events; walkRefused: the walk's own (Gait.h); gear: its runner's gear came,
-				// geared: it is on.
-				out += std::format(" runner={} mode={} target={} apart={} base={:08X} states={} drawn={} played={} refused={} walkRefused={}{} gear={} geared={} graphSpeed={}",
-					c.runner, NpcRules::ModeName(c.mode), target, apart, c.base, c.buffer.snapshots.size(), c.drawn, c.played, c.refused, c.walkRefused,
-					c.lastRefused.empty() ? "" : " last=" + c.lastRefused, c.gear ? 1 : 0, c.geared ? 1 : 0, hasSpeed ? std::format("{:.0f}", graphSpeed) : "none");
+				// geared: it was dressed; wears/left/hands/ammo/lacks: what it wears and holds, read back after (NpcRules::CheckGear),
+				// and dressed=1 when that is all of it apart from what it lacks (?: not read back yet).
+				std::string wears = " wears=? dressed=?";
+				if (c.gear && c.geared && c.wears) {
+					const auto& w = *c.wears;
+					wears = std::format(" wears={}/{} leftOn={} hands={} ammo={} lacks={} dressed={}", w.matched, w.named, w.extra,
+						w.right && w.left ? std::string{ "ok" } : std::format("{}/{}", w.right ? "ok" : "differs", w.left ? "ok" : "differs"), w.ammo ? "ok" : "differs", c.gearLacks,
+						w.Complete(c.gearLacks) ? 1 : 0);
+				}
+				out += std::format(" runner={} mode={} target={} apart={} base={:08X} states={} drawn={} played={} refused={} walkRefused={}{} gear={} geared={}{} graphSpeed={}",
+					c.feed.runner, NpcRules::ModeName(c.mode), target, apart, c.base, c.buffer.snapshots.size(), c.drawn, c.played, c.refused, c.walkRefused,
+					c.lastRefused.empty() ? "" : " last=" + c.lastRefused, c.gear ? 1 : 0, c.geared ? 1 : 0, wears, hasSpeed ? std::format("{:.0f}", graphSpeed) : "none");
 			}
 		}
 		return out;

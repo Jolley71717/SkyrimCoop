@@ -14,15 +14,19 @@
 #      games are read one after the other and a copy is drawn about 120 ms behind: a walking NPC is a few dozen units
 #      off). And in each game on its own, each copy's actor stands where it was last drawn (apart=, one machine, no
 #      read gap): NPC_APART_LIMIT, for NPC_APART_SHARE % of them.
-#   3. Gear: every copy whose runner's gear came (gear=1) has it on (geared=1) within NPC_WAIT; the items copies lack
-#      are said (gearMissing=).
+#   3. Gear: every copy whose runner's gear came (gear=1) has it on within NPC_WAIT, as the plugin reads it back from
+#      the copy's actor after dressing it (dressed=1: every worn item of the runner's on but those it lacks, each hand and
+#      the quiver as the runner's, nothing left on that the runner's NPC took off); the items copies lack are said
+#      (gearMissing=).
 #   4. The kinds seen, in either game (`npcs`: kinds=): people are required (the cell has them); a creature missing is a
 #      WARN (none may be near); dragons, horses, followers and summons are said, not required.
-#   5. Actions, both ways: an NPC one game runs, shown as a copy in the other, is set on that game's player with the
-#      console (`<ref>.startcombat player`, the scene's set-up, as the harness's injected attacks are; the player is
-#      given NPC_FIGHT_HEALTH health first and it is taken back after). The other game's copy plays its runner's events
-#      (played= goes up) within NPC_FIGHT_WAIT, and turns fewer away than it plays. A runner whose hook heard nothing
-#      (actionsSent= not up) is a FAIL: copies would show the walk and no attack.
+#   5. Actions, both ways: an NPC one game runs (no child: children flee), shown as a copy in the other, is set on that
+#      game's player with the console (`<ref>.startcombat player`, the scene's set-up, as the harness's injected attacks
+#      are; the NPC's confidence and aggression are set so it stands and fights, and the player is given
+#      NPC_FIGHT_HEALTH health; all put back after). The other game's copy plays its runner's events (played= goes up)
+#      within NPC_FIGHT_WAIT, and turns fewer away than it plays. An NPC that never drew a weapon nor entered combat in
+#      its runner's game is the scene's (RIG); one that fought while its runner's hook heard nothing (actionsSent= not
+#      up) is a FAIL: copies would show the walk and no attack.
 #   6. Summons, both ways: each player in turn learns Conjure Familiar (console addspell, set-up) and casts it with the
 #      virtual pad (X readies the hands, the right trigger casts); should the pad make no summon, the console casts it
 #      (a HEAL line says so). The caster's game shares it as its spawn (role=run, key <id>:<player>), the other shows a
@@ -30,9 +34,12 @@
 #      spell is taken back after.
 #   7. Hand-over, both ways, by real movement along a fixed route (NPC_ROUTE: Riverwood's road north towards Whiterun,
 #      from the coc marker): the walker walks the route with the virtual pad's walkto, side-stepping NPC_DETOUR u when
-#      something stops it (a cart, a fence), until it is about NPC_WALK u from the stayer; every NPC the walker ran near
-#      the stayer goes to the stayer's game in both books; the walker walks the route back. A walk that cannot get far
-#      enough is a rig fault (RIG), not a FAIL: NPC_ROUTE then wants new points.
+#      something stops it (a cart, a fence), until it is about NPC_WALK u from the stayer. Of the NPCs the walker ran near
+#      the stayer before the walk, those the release rule lets go of from where both players are after it (past
+#      NPC_HANDOFF_FAR from the walker, the stayer NPC_HANDOFF_MARGIN nearer, NPC_RULE_SLACK to spare; or no longer
+#      loaded in the walker's game) go to the stayer's game in both books; the rest are said, not checked (none left is a
+#      WARN). The walker walks the route back. A walk that cannot get far enough is a rig fault (RIG), not a FAIL:
+#      NPC_ROUTE then wants new points.
 #   8. No graph event of an NPC a game runs was lost (eventsLost=0); over the step some copy played an event (a WARN
 #      if none: the scene made none) and no game's copies turned away more of their runners' events than they played.
 #
@@ -45,6 +52,11 @@ NPC_APART_LIMIT=${NPC_APART_LIMIT:-40}   # u: a copy's actor from the runner's s
 NPC_APART_SHARE=${NPC_APART_SHARE:-90}   # %: of the mirrored copies, at least this many within NPC_APART_LIMIT
 NPC_NEAR=${NPC_NEAR:-2000}               # u: the NPCs near the staying player that the hand-over check follows
 NPC_WALK=${NPC_WALK:-9000}               # u: how far the walker gets (NpcRules.h: a runner lets go past 6000 with a friend 1000 nearer)
+NPC_HANDOFF_FAR=${NPC_HANDOFF_FAR:-6000}       # u: NpcRules.h's HANDOFF_FAR
+NPC_HANDOFF_MARGIN=${NPC_HANDOFF_MARGIN:-1000} # u: NpcRules.h's HANDOFF_MARGIN
+NPC_RULE_SLACK=${NPC_RULE_SLACK:-500}    # u: an NPC checked in the hand-over is past the release rule by this much (it walks)
+NPC_FIGHT_CONFIDENCE=${NPC_FIGHT_CONFIDENCE:-4}  # the fight's NPC's confidence (4: foolhardy, never flees) and aggression
+NPC_FIGHT_AGGRESSION=${NPC_FIGHT_AGGRESSION:-1}  # (1: aggressive), set for the fight and put back after
 NPC_WAIT=${NPC_WAIT:-20}                 # s: for the books to agree, for gear, for a hand-over, for a summon's copy
 NPC_FIGHT_WAIT=${NPC_FIGHT_WAIT:-20}     # s: for a copy to play its fighting runner's events
 NPC_FIGHT_HEALTH=${NPC_FIGHT_HEALTH:-5000}  # the health a player is given for the fight (taken back after)
@@ -58,13 +70,16 @@ NPC_ROUTE=${NPC_ROUTE:-"17300,-46200 17500,-44800 17900,-43200 18300,-41500 1870
 
 # npc_rows <reply of `npcs list`>: one line per NPC, its columns:
 #   1 key (its id, and :<spawner> for a spawn)  2 owner  3 role  4 kind  5 x  6 y  7 z (- when its actor is not in this
-#   game's world)  8 played  9 refused  10 gear  11 geared  12 apart  13 mode  14 local  15 dead (- for none: not a copy)
+#   game's world)  8 played  9 refused  10 gear  11 geared  12 apart  13 mode  14 local  15 dead  16 child  17 weapon
+#   (drawn)  18 combat  19 dressed (its gear read back: all of it on but what it lacks, 1; ? not read back yet)
+#   20 wears (<worn of the runner's>/<the runner's named>)  (- for none: not listed, or not a copy)
 npc_rows() {
 	awk 'BEGIN { RS = " [|] " }
 		NR > 1 {
 			sub(/\n$/, "")
 			n = split($0, f, " "); key = f[1]; if (length(key) != 8 || key !~ /^[0-9A-F]+$/) next
 			owner = "-"; role = "-"; kind = "-"; x = "-"; y = "-"; z = "-"; played = "-"; refused = "-"; gear = "-"; geared = "-"; apart = "-"; mode = "-"; local = "-"; dead = "-"
+			child = "-"; weapon = "-"; combat = "-"; dressed = "-"; wears = "-"
 			for (i = 2; i <= n; i++) {
 				split(f[i], kv, "=")
 				if (kv[1] == "spawner") key = key ":" kv[2]
@@ -79,9 +94,14 @@ npc_rows() {
 				else if (kv[1] == "mode") mode = kv[2]
 				else if (kv[1] == "local") local = kv[2]
 				else if (kv[1] == "dead") dead = kv[2]
+				else if (kv[1] == "child") child = kv[2]
+				else if (kv[1] == "weapon") weapon = kv[2]
+				else if (kv[1] == "combat") combat = kv[2]
+				else if (kv[1] == "dressed") dressed = kv[2]
+				else if (kv[1] == "wears") wears = kv[2]
 				else if (kv[1] == "at" && f[i] ~ /^at=\(/) { s = substr(f[i], 5, length(f[i]) - 5); split(s, p, ","); x = p[1]; y = p[2]; z = p[3] }
 			}
-			print key, owner, role, kind, x, y, z, played, refused, gear, geared, apart, mode, local, dead
+			print key, owner, role, kind, x, y, z, played, refused, gear, geared, apart, mode, local, dead, child, weapon, combat, dressed, wears
 		}' <<<"$1"
 }
 
@@ -120,11 +140,16 @@ npcs_apart() {
 		END { printf "copies=%d within=%d share=%d max=%.0f off=%s\n", n, within, n ? int(100 * within / n) : 0, max, off ? off : "none" }' <<<"$1"
 }
 
-# npcs_gear <rows>: "withgear=N geared=N ungeared=<key>,...": the mirrored copies whose runner's gear came (gear=1), and
-# of those, the ones that have it on (geared=1)
+# npcs_gear <rows>: "withgear=N dressed=N undressed=<key>:<why>,...": the mirrored copies whose runner's gear came
+# (gear=1), and of those, the ones dressed (geared=1) whose gear read back from the actor is all of it on, apart from
+# the items they lack, with nothing left on that the runner's NPC took off (dressed=1). Why not: geared=0 (never
+# dressed), wears=? (not read back yet), or wears=<worn>/<named> (the read-back fell short: `npcs <id>` says which part)
 npcs_gear() {
-	awk '$3 == "copy" && $10 == "1" { n++; if ($11 == "1") g++; else bad = bad (bad ? "," : "") $1 }
-		END { printf "withgear=%d geared=%d ungeared=%s\n", n, g, bad ? bad : "none" }' <<<"$1"
+	awk '$3 == "copy" && $10 == "1" { n++
+			if ($11 == "1" && $19 == "1") g++
+			else bad = bad (bad ? "," : "") $1 ":" ($11 != "1" ? "geared=0" : ($19 == "?" || $19 == "-") ? "wears=?" : "wears=" $20)
+		}
+		END { printf "withgear=%d dressed=%d undressed=%s\n", n, g, bad ? bad : "none" }' <<<"$1"
 }
 
 # npcs_events <rows>: "copies=N played=P refused=R": the runner's events the mirrored copies played and turned away
@@ -146,6 +171,29 @@ npcs_near() {
 		$2 == me && $1 !~ /:/ && $4 != "follower" && $4 != "summon" && $5 != "-" && sqrt(($5 - q[1]) ^ 2 + ($6 - q[2]) ^ 2) <= lim { printf "%s ", $1 }' <<<"$1" | sed 's/ $//'
 }
 
+# npcs_releasable <walker rows> <stayer rows> <walker x y z> <stayer x y z> <keys...>: one line per key, "<key> yes|no
+# <from the walker> <from the stayer>": yes when the walker's game lets go of it and the stayer's takes it by the
+# release rule (NpcRules.h: the walker's player past HANDOFF_FAR, the stayer's HANDOFF_MARGIN nearer), each with
+# NPC_RULE_SLACK to spare for an NPC that walks its sandbox meanwhile; also yes when the walker's game no longer has it
+# loaded (let go of as gone). The NPC's place is the stayer's game's (its copy or its own); no when the stayer's game
+# does not have it in its world (gone: it cannot take it).
+npcs_releasable() {
+	local wr=$1 sr=$2 wp=$3 sp=$4; shift 4
+	awk -v keys="$*" -v wp="$wp" -v sp="$sp" -v far="$NPC_HANDOFF_FAR" -v margin="$NPC_HANDOFF_MARGIN" -v slack="$NPC_RULE_SLACK" '
+		BEGIN { split(wp, w, " "); split(sp, s, " ") } NF == 0 { next }
+		FILENAME == ARGV[1] { if ($5 != "-") inWalker[$1] = 1; next }
+		{ if ($5 != "-") { x[$1] = $5; y[$1] = $6 } }
+		END {
+			n = split(keys, k, " ")
+			for (i = 1; i <= n; i++) {
+				if (!(k[i] in x)) { print k[i], "no", "?", "gone"; continue }
+				dw = sqrt((x[k[i]] - w[1]) ^ 2 + (y[k[i]] - w[2]) ^ 2); ds = sqrt((x[k[i]] - s[1]) ^ 2 + (y[k[i]] - s[2]) ^ 2)
+				ok = !(k[i] in inWalker) || (dw > far + slack && ds + margin + slack < dw)
+				printf "%s %s %.0f %.0f\n", k[i], ok ? "yes" : "no", dw, ds
+			}
+		}' <(printf '%s\n' "$wr") <(printf '%s\n' "$sr")
+}
+
 # npcs_owned_by <rows> <id> <keys...>: 0 when every key is in the rows with that owner; else prints the ones not
 npcs_owned_by() {
 	local rows=$1 id=$2 k o not=""; shift 2
@@ -155,12 +203,13 @@ npcs_owned_by() {
 }
 
 # npcs_pick_foe <runner rows> <watcher rows> <runner id> <x y z>: "<key> <local id>" of the NPC to set on the runner's
-# player: one the runner runs (a load-order NPC, alive, in its world, no follower or summon) that the watcher shows as a
-# mirrored copy; a person before a creature, then the nearest to that place. Empty when there is none.
+# player: one the runner runs (a load-order NPC, alive, in its world, no follower or summon, no child: a child flees and
+# never draws) that the watcher shows as a mirrored copy; a person before a creature, then the nearest to that place.
+# Empty when there is none.
 npcs_pick_foe() {
 	awk -v me="$3" -v p="$4" 'BEGIN { split(p, q, " ") } NF == 0 { next }
 		FILENAME == ARGV[1] { if ($3 == "copy") shown[$1] = 1; next }
-		$2 == me && $3 == "run" && $1 !~ /:/ && $15 == "0" && $5 != "-" && ($4 == "human" || $4 == "creature") && ($1 in shown) {
+		$2 == me && $3 == "run" && $1 !~ /:/ && $15 == "0" && $16 != "1" && $5 != "-" && ($4 == "human" || $4 == "creature") && ($1 in shown) {
 			d = sqrt(($5 - q[1]) ^ 2 + ($6 - q[2]) ^ 2) + ($4 == "human" ? 0 : 1e9)
 			if (best == "" || d < bestd) { best = $1 " " $14; bestd = d }
 		}
@@ -193,8 +242,15 @@ _npcs_agreed() {
 }
 _npcs_handed() { npcs_owned_by "$(_npcs_rows host)" "$1" "${@:2}" >/dev/null && npcs_owned_by "$(_npcs_rows vm)" "$1" "${@:2}" >/dev/null; }
 _npcs_walk_over() { [[ $(dc "$1" walkto) == "not walking"* ]]; }
-_npcs_geared() { [ "$(field ungeared "$(npcs_gear "$(_npcs_rows "$1")")")" = none ]; }
+_npcs_geared() { [ "$(field undressed "$(npcs_gear "$(_npcs_rows "$1")")")" = none ]; }
 _npcs_played() { local p; p=$(npc_col "$(_npcs_rows "$1")" "$2" 8); is_num "$p" && [ "$p" -gt "$3" ]; }
+# _npcs_fight_played <watcher> <key> <played before> <runner>: _npcs_played, and NPCS_FOUGHT=1 once the runner's own row
+# shows the NPC with its weapon drawn or in combat
+_npcs_fight_played() {
+	local r; r=$(_npcs_rows "$4")
+	{ [ "$(npc_col "$r" "$2" 17)" = 1 ] || [ "$(npc_col "$r" "$2" 18)" = 1 ]; } && NPCS_FOUGHT=1
+	_npcs_played "$1" "$2" "$3"
+}
 _npcs_spawned() { [ -n "$(npcs_spawn_of "$(_npcs_rows "$1")" "$2")" ]; }
 _npcs_copy_shown() { local r; r=$(_npcs_rows "$1"); [ "$(npc_col "$r" "$2" 3)" = copy ] && [ "$(npc_col "$r" "$2" 5)" != - ]; }
 _npcs_spawn_gone() { local t; t=$(field spawnsTaken "$(dc "$1" npcs)"); is_num "$t" && [ "$t" -gt "$3" ] && [ "$(npc_col "$(_npcs_rows "$1")" "$2" 3)" != copy ]; }
@@ -232,7 +288,7 @@ npcs_walk_route() {
 # npcs_handover <walker> <stayer>: the walker's player walks NPC_ROUTE away; the NPCs it ran near the stayer go to the
 # stayer's game in both books; the walker walks the route back to where it began
 npcs_handover() {
-	local walker=$1 stayer=$2 label="npcs: the $1 walks away, the $2 takes its NPCs" wid sid p0 sp keys moved why back
+	local walker=$1 stayer=$2 label="npcs: the $1 walks away, the $2 takes its NPCs" wid sid p0 sp keys moved why back rel ready left
 	section "$label"
 	wid=$(field player "$(dc "$walker" 'session status')"); sid=$(field player "$(dc "$stayer" 'session status')")
 	if ! is_num "$wid" || ! is_num "$sid"; then rig_broken game "$label" "no player ids (walker '$wid', stayer '$sid')"; return; fi
@@ -255,12 +311,23 @@ npcs_handover() {
 		npcs_walk_route "$walker" "$back" >/dev/null; return
 	fi
 	pass "$label: the walk" "the $walker is $moved u from the $stayer, along the road"
+	# Only the NPCs the release rule lets go of from where the players are now (they were picked before the walk, and
+	# they walk their own ways meanwhile): the rest are said, not checked.
 	# shellcheck disable=SC2086
-	if wait_until "$NPC_WAIT" _npcs_handed "$sid" $keys; then
-		pass "$label: both books say the $stayer runs them" "$(wc -w <<<"$keys") NPC(s)"
+	rel=$(npcs_releasable "$(_npcs_rows "$walker")" "$(_npcs_rows "$stayer")" "$(pos_of "$walker")" "$(pos_of "$stayer")" $keys)
+	ready=$(awk '$2 == "yes" { printf "%s ", $1 }' <<<"$rel" | sed 's/ $//')
+	left=$(awk '$2 == "no" { printf "%s%s:%s/%s", (n++ ? "," : ""), $1, $3, $4 }' <<<"$rel")
+	[ -n "$left" ] && say "$label: not checked, not past the release rule from where the players are now (key:u from the $walker/u from the $stayer): $left"
+	if [ -z "$ready" ]; then
+		warn "$label: NPCs to hand over" "none of the $(wc -w <<<"$keys") NPC(s) is past the release rule after the walk ($left): nothing to check this way"
+		npcs_walk_route "$walker" "$back" >/dev/null; return
+	fi
+	# shellcheck disable=SC2086
+	if wait_until "$NPC_WAIT" _npcs_handed "$sid" $ready; then
+		pass "$label: both books say the $stayer runs them" "$(wc -w <<<"$ready") NPC(s) past the release rule: $ready"
 	else
 		# shellcheck disable=SC2086
-		why="host: $(npcs_owned_by "$(_npcs_rows host)" "$sid" $keys); vm: $(npcs_owned_by "$(_npcs_rows vm)" "$sid" $keys)"
+		why="host: $(npcs_owned_by "$(_npcs_rows host)" "$sid" $ready); vm: $(npcs_owned_by "$(_npcs_rows vm)" "$sid" $ready)"
 		fail "$label: both books say the $stayer runs them" "after $NPC_WAIT s, not the $stayer's (key:owner): $why"
 	fi
 	# no check: the next step puts the players together again if the way back falls short
@@ -270,36 +337,54 @@ npcs_handover() {
 # npcs_fight <runner> <watcher>: an NPC the runner runs is set on the runner's player (console set-up); the watcher's
 # copy of it plays its runner's events
 npcs_fight() {
-	local runner=$1 watcher=$2 label="npcs: an NPC the $1 runs fights, the $2's copy plays its actions" rid pick key local p0 sent0 sent1 played refused
+	local runner=$1 watcher=$2 label="npcs: an NPC the $1 runs fights, the $2's copy plays its actions" rid pick key local p0 sent0 sent1 played refused one conf0 aggr0 setav=0
 	section "$label"
 	rid=$(field player "$(dc "$runner" 'session status')")
 	is_num "$rid" || { rig_broken game "$label" "no player id for the $runner"; return; }
 	pick=$(npcs_pick_foe "$(_npcs_rows "$runner")" "$(_npcs_rows "$watcher")" "$rid" "$(pos_of "$runner")")
 	if [ -z "$pick" ]; then
-		warn "$label: an NPC to fight" "the $runner runs no living person or creature the $watcher shows as a copy: no fight this way"
+		warn "$label: an NPC to fight" "the $runner runs no living grown person or creature the $watcher shows as a copy: no fight this way"
 		return
 	fi
 	read -r key local <<<"$pick"
 	p0=$(npc_col "$(_npcs_rows "$watcher")" "$key" 8); is_num "$p0" || p0=0
 	sent0=$(field actionsSent "$(dc "$runner" npcs)")
+	# set-up: a civilian of low confidence flees instead of fighting (a flee sends only the walk's events, which are never
+	# sent): it is made to stand and fight, and its own values are put back after
+	one=$(dc "$runner" "npcs $local"); conf0=$(field confidence "$one"); aggr0=$(field aggression "$one")
+	if is_num "$conf0" && is_num "$aggr0"; then
+		dc "$runner" "console $local.setav confidence $NPC_FIGHT_CONFIDENCE" >/dev/null; dc "$runner" "console $local.setav aggression $NPC_FIGHT_AGGRESSION" >/dev/null; setav=1
+	fi
 	if [ "$(dc "$runner" "console player.modav health $NPC_FIGHT_HEALTH")" != ran ] || [ "$(dc "$runner" "console $local.startcombat player")" != ran ]; then
 		rig_broken input "$label: the fight's set-up" "the $runner's console refused modav or startcombat"
+		[ "$setav" = 1 ] && { dc "$runner" "console $local.setav confidence $conf0" >/dev/null; dc "$runner" "console $local.setav aggression $aggr0" >/dev/null; }
 		dc "$runner" "console player.modav health -$NPC_FIGHT_HEALTH" >/dev/null; return
 	fi
-	say "$label: set-up (console): the $runner's player +$NPC_FIGHT_HEALTH health; $local ($key) set on it with startcombat"
-	if wait_until "$NPC_FIGHT_WAIT" _npcs_played "$watcher" "$key" "$p0"; then
+	if [ "$setav" = 1 ]; then
+		say "$label: set-up (console): the $runner's player +$NPC_FIGHT_HEALTH health; $local ($key) confidence $conf0 -> $NPC_FIGHT_CONFIDENCE, aggression $aggr0 -> $NPC_FIGHT_AGGRESSION, set on it with startcombat"
+	else
+		say "$label: set-up (console): the $runner's player +$NPC_FIGHT_HEALTH health; $local ($key) set on it with startcombat (its confidence and aggression unread, left as they are)"
+	fi
+	NPCS_FOUGHT=0
+	if wait_until "$NPC_FIGHT_WAIT" _npcs_fight_played "$watcher" "$key" "$p0" "$runner"; then
 		played=$(npc_col "$(_npcs_rows "$watcher")" "$key" 8); refused=$(npc_col "$(_npcs_rows "$watcher")" "$key" 9)
 		pass "$label: the copy played its runner's events" "$key: played $p0 -> $played (refused $refused)"
 		expect_le "$label: the copy turns away fewer of its runner's events than it plays" "$((refused))" "$((played - p0))" "refused, of $((played - p0)) played"
 	else
 		sent1=$(field actionsSent "$(dc "$runner" npcs)")
-		if is_num "$sent0" && is_num "$sent1" && [ "$sent1" -le "$sent0" ]; then
-			fail "$label: the copy played its runner's events" "the $runner's graph event hook heard nothing of the fight (actionsSent $sent0 -> $sent1): copies show the walk and no attack"
+		if [ "$NPCS_FOUGHT" != 1 ]; then
+			# the scene's, not the mod's: an NPC that never drew nor fought makes no attack to show
+			rig_fault state "$label: the copy played its runner's events" "$local ($key) never drew a weapon nor entered combat in the $runner's game in $NPC_FIGHT_WAIT s (actionsSent $sent0 -> $sent1): no fight to show"
+		elif is_num "$sent0" && is_num "$sent1" && [ "$sent1" -le "$sent0" ]; then
+			fail "$label: the copy played its runner's events" "$local fought in the $runner's game but its graph event hook heard nothing of it (actionsSent $sent0 -> $sent1): copies show the walk and no attack"
 		else
 			fail "$label: the copy played its runner's events" "the $runner sent events (actionsSent $sent0 -> $sent1) but the $watcher's copy played none in $NPC_FIGHT_WAIT s: $(dc "$watcher" "npcs $key" | cut -c1-240)"
 		fi
 	fi
 	dc "$runner" "console $local.stopcombat" >/dev/null
+	if [ "$setav" = 1 ]; then
+		dc "$runner" "console $local.setav confidence $conf0" >/dev/null; dc "$runner" "console $local.setav aggression $aggr0" >/dev/null
+	fi
 	dc "$runner" "console player.modav health -$NPC_FIGHT_HEALTH" >/dev/null
 }
 
@@ -379,14 +464,16 @@ step_npcs() {
 		[ "$(field copies "$c")" = 0 ] && continue
 		expect_ge "npcs: the $w's copies stand where they were last drawn (apart, within $NPC_APART_LIMIT u)" "$(field share "$c")" "$NPC_APART_SHARE" "% ($c)"
 	done
-	# gear: every copy whose runner's gear came has it on
+	# gear: every copy whose runner's gear came has it on, as read back from the copy's actor (dressed=1: all of it but
+	# what the copy lacks, nothing left on that the runner's NPC took off)
 	for w in host vm; do
 		if wait_until "$NPC_WAIT" _npcs_geared "$w"; then
 			g=$(npcs_gear "$(_npcs_rows $w)")
 			if [ "$(field withgear "$g")" = 0 ]; then warn "npcs: the $w's copies have their runners' gear on" "no copy has its runner's gear yet ($g)"
 			else pass "npcs: the $w's copies have their runners' gear on" "$g; gearMissing=$(field gearMissing "$(dc $w npcs)") gearTakenOff=$(field gearTakenOff "$(dc $w npcs)")"; fi
 		else
-			fail "npcs: the $w's copies have their runners' gear on" "after $NPC_WAIT s: $(npcs_gear "$(_npcs_rows $w)")"
+			g=$(npcs_gear "$(_npcs_rows $w)"); s=$(field undressed "$g"); s=${s%%,*}
+			fail "npcs: the $w's copies have their runners' gear on" "after $NPC_WAIT s: $g; the first: $(dc $w "npcs ${s%%:*}" | cut -c1-400)"
 		fi
 	done
 	hs=$(dc host npcs); vs=$(dc vm npcs)
@@ -423,17 +510,17 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	sleep() { :; }; lock_keepalive() { :; }
 
 	# replies in the format NpcSync::Describe writes
-	HOST_LIST='npcs=3 | 0001A67C local=0001A67C owner=1 role=run kind=human at=(100,200,0) dead=0 | 0001A680 local=0001A680 owner=2 role=copy kind=creature at=(500,500,0) dead=0 runner=2 mode=mirror target=(505,500,0) apart=5 base=00023A8F states=2 drawn=40 played=1 refused=0 walkRefused=7 gear=1 geared=1 graphSpeed=0 | FF000801 spawner=1 local=FF000801 owner=1 role=run kind=summon at=(150,250,0) dead=0'
-	VM_LIST='npcs=3 | 0001A67C local=0001A67C owner=1 role=copy kind=human at=(130,200,0) dead=0 runner=1 mode=mirror target=(128,200,0) apart=2 base=00013BA2 states=2 drawn=40 played=3 refused=1 walkRefused=0 last=IdleChairSitting gear=1 geared=1 graphSpeed=150 | 0001A680 local=0001A680 owner=2 role=run kind=creature at=(510,500,0) dead=0 | FF000801 spawner=1 local=FF000AAA owner=1 role=copy kind=? at=(450,250,0) dead=0 runner=1 mode=mirror target=(160,250,0) apart=290 base=000204C0 states=2 drawn=4 played=0 refused=0 walkRefused=0 gear=0 geared=0 graphSpeed=none'
+	HOST_LIST='npcs=3 | 0001A67C local=0001A67C owner=1 role=run kind=human at=(100,200,0) dead=0 child=0 weapon=0 combat=0 | 0001A680 local=0001A680 owner=2 role=copy kind=creature at=(500,500,0) dead=0 child=0 weapon=0 combat=0 runner=2 mode=mirror target=(505,500,0) apart=5 base=00023A8F states=2 drawn=40 played=1 refused=0 walkRefused=7 gear=1 geared=1 wears=2/2 leftOn=0 hands=ok ammo=ok lacks=0 dressed=1 graphSpeed=0 | FF000801 spawner=1 local=FF000801 owner=1 role=run kind=summon at=(150,250,0) dead=0 child=0 weapon=0 combat=0'
+	VM_LIST='npcs=3 | 0001A67C local=0001A67C owner=1 role=copy kind=human at=(130,200,0) dead=0 child=0 weapon=0 combat=0 runner=1 mode=mirror target=(128,200,0) apart=2 base=00013BA2 states=2 drawn=40 played=3 refused=1 walkRefused=0 last=IdleChairSitting gear=1 geared=1 wears=3/3 leftOn=0 hands=ok ammo=ok lacks=0 dressed=1 graphSpeed=150 | 0001A680 local=0001A680 owner=2 role=run kind=creature at=(510,500,0) dead=0 child=0 weapon=0 combat=0 | FF000801 spawner=1 local=FF000AAA owner=1 role=copy kind=? at=(450,250,0) dead=0 child=0 weapon=0 combat=0 runner=1 mode=mirror target=(160,250,0) apart=290 base=000204C0 states=2 drawn=4 played=0 refused=0 walkRefused=0 gear=0 geared=0 wears=? dressed=? graphSpeed=none'
 	NEAR_LIST=${VM_LIST/at=(450,250,0)/at=(170,250,0)}  # the spawn's copy where the host has it
 	NEAR_LIST=${NEAR_LIST/apart=290/apart=10}
 	H=$(npc_rows "$HOST_LIST"); V=$(npc_rows "$VM_LIST")
 	t "rows: one per NPC" "$(wc -l <<<"$H" | tr -d ' ')" 3
-	t "rows: a load-order NPC" "$(head -1 <<<"$H")" "0001A67C 1 run human 100 200 0 - - - - - - 0001A67C 0"
+	t "rows: a load-order NPC" "$(head -1 <<<"$H")" "0001A67C 1 run human 100 200 0 - - - - - - 0001A67C 0 0 0 0 - -"
 	t "rows: a spawn's key names its spawner" "$(sed -n 3p <<<"$H" | cut -d' ' -f1-3)" "FF000801:1 1 run"
-	t "rows: a copy" "$(sed -n 2p <<<"$H")" "0001A680 2 copy creature 500 500 0 1 0 1 1 5 mirror 0001A680 0"
+	t "rows: a copy" "$(sed -n 2p <<<"$H")" "0001A680 2 copy creature 500 500 0 1 0 1 1 5 mirror 0001A680 0 0 0 0 1 2/2"
 	t "rows: a copy's events, gear and apart (the last= word is not the refused count)" "$(head -1 <<<"$V" | cut -d' ' -f8-13)" "3 1 1 1 2 mirror"
-	t "rows: an actor not in the world" "$(npc_rows 'npcs=1 | 0001A67C local=00000000 owner=0 role=none kind=? at=none dead=0')" "0001A67C 0 none ? - - - - - - - - - 00000000 0"
+	t "rows: an actor not in the world" "$(npc_rows 'npcs=1 | 0001A67C local=00000000 owner=0 role=none kind=? at=none dead=0')" "0001A67C 0 none ? - - - - - - - - - 00000000 0 - - - - -"
 	t "rows: the list's end" "$(npc_rows "npcs=61 | 0001A67C local=0001A67C owner=1 role=run kind=human at=(1,2,3) dead=0 | ..." | wc -l | tr -d ' ')" 1
 	t "rows: none" "$(npc_rows 'npcs=0')" ""
 	t "col: a column of a row" "$(npc_col "$V" 0001A67C 8)" 3
@@ -450,8 +537,11 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "apart: the VM's copies, the spawn's 290 u from where it was drawn" "$(npcs_apart "$V")" "copies=2 within=1 share=50 max=290 off=FF000801:1:290"
 	t "apart: the host's" "$(npcs_apart "$H")" "copies=1 within=1 share=100 max=5 off=none"
 	t "apart: none drawn" "$(npcs_apart "$(npc_rows 'npcs=1 | 0001A67C local=0001A67C owner=2 role=copy kind=human at=none dead=0 runner=2 mode=mirror target=none apart=? played=0 refused=0 gear=0 geared=0')")" "copies=0 within=0 share=0 max=0 off=none"
-	t "gear: the VM's copy with gear has it on, the spawn's has none yet" "$(npcs_gear "$V")" "withgear=1 geared=1 ungeared=none"
-	t "gear: one with gear not on" "$(npcs_gear "$(sed 's/^\(0001A67C .* \)1 1 2 mirror/\11 0 2 mirror/' <<<"$V")")" "withgear=1 geared=0 ungeared=0001A67C"
+	t "gear: the VM's copy with gear has it on, the spawn's has none yet" "$(npcs_gear "$V")" "withgear=1 dressed=1 undressed=none"
+	t "gear: one with gear not on" "$(npcs_gear "$(sed 's/^\(0001A67C .* \)1 1 2 mirror/\11 0 2 mirror/' <<<"$V")")" "withgear=1 dressed=0 undressed=0001A67C:geared=0"
+	t "gear: dressed, but the read-back finds an item not on (a refused equip)" "$(npcs_gear "$(npc_rows "${VM_LIST/wears=3\/3 leftOn=0 hands=ok ammo=ok lacks=0 dressed=1/wears=2/3 leftOn=0 hands=ok ammo=ok lacks=0 dressed=0}")")" "withgear=1 dressed=0 undressed=0001A67C:wears=2/3"
+	t "gear: dressed, a bow left on its back (all worn, the hand differs)" "$(npcs_gear "$(npc_rows "${VM_LIST/hands=ok ammo=ok lacks=0 dressed=1/hands=differs ammo=ok lacks=0 dressed=0}")")" "withgear=1 dressed=0 undressed=0001A67C:wears=3/3"
+	t "gear: dressed, not read back yet" "$(npcs_gear "$(npc_rows "${VM_LIST/wears=3\/3 leftOn=0 hands=ok ammo=ok lacks=0 dressed=1/wears=? dressed=?}")")" "withgear=1 dressed=0 undressed=0001A67C:wears=?"
 	t "events: the VM's copies" "$(npcs_events "$V")" "copies=2 played=3 refused=1"
 	S1='active=1 loaded=4 run=2 owners=4 copies=2 shown=2 mirrored=2 spawnCopies=1 kinds=human:3,creature:1,dragon:0,horse:0,follower:0,summon:1 claims=9 actionsSent=4 played=4 refusedEvents=1 eventsLost=0 spawnsTaken=0 unshared=0 hooked=1'
 	S2='active=1 loaded=3 run=1 owners=4 kinds=human:2,creature:0,dragon:0,horse:1,follower:0,summon:0 hooked=1'
@@ -466,10 +556,17 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "foe: the host's person the VM shows as a copy" "$(npcs_pick_foe "$H" "$V" 1 "100 200 0")" "0001A67C 0001A67C"
 	t "foe: the VM's creature the host shows" "$(npcs_pick_foe "$V" "$H" 2 "510 500 0")" "0001A680 0001A680"
 	t "foe: none when the other shows no copy of it" "$(npcs_pick_foe "$H" "$(sed 's/^0001A67C 1 copy/0001A67C 1 other/' <<<"$V")" 1 "100 200 0")" ""
-	t "foe: never a dead one" "$(npcs_pick_foe "$(sed 's/ 0001A67C 0$/ 0001A67C 1/' <<<"$H")" "$V" 1 "100 200 0")" ""
+	t "foe: never a dead one" "$(npcs_pick_foe "$(sed 's/ 0001A67C 0 / 0001A67C 1 /' <<<"$H")" "$V" 1 "100 200 0")" ""
 	PEOPLE=$(printf '%s\n%s\n%s\n' '00000A01 1 run creature 0 0 0 - - - - - - 00000A01 0' '00000A02 1 run human 900 0 0 - - - - - - 00000A02 0' '00000A03 1 run human 300 0 0 - - - - - - 00000A03 0')
 	SHOWN=$(printf '%s\n%s\n%s\n' '00000A01 1 copy creature 0 0 0' '00000A02 1 copy human 900 0 0' '00000A03 1 copy human 300 0 0')
 	t "foe: a person before a creature, then the nearest" "$(npcs_pick_foe "$PEOPLE" "$SHOWN" 1 "0 0 0")" "00000A03 00000A03"
+	t "foe: never a child (it flees)" "$(npcs_pick_foe "$(sed 's/^\(00000A03 .* 00000A03 0\)$/\1 1/' <<<"$PEOPLE")" "$SHOWN" 1 "0 0 0")" "00000A02 00000A02"
+	t "foe: a child row from the list" "$(npcs_pick_foe "$(sed 's/ 0001A67C 0 0 / 0001A67C 0 1 /' <<<"$H")" "$V" 1 "100 200 0")" ""
+	t "releasable: past the rule from where the players are" "$(npcs_releasable "$H" "$V" "9200 200 0" "120 200 0" 0001A67C)" "0001A67C yes 9070 10"
+	t "releasable: still near the walker's end of the route" "$(npcs_releasable "$H" "$V" "5000 200 0" "120 200 0" 0001A67C)" "0001A67C no 4870 10"
+	t "releasable: past HANDOFF_FAR but by less than the slack" "$(npcs_releasable "$H" "$V" "6400 200 0" "120 200 0" 0001A67C)" "0001A67C no 6270 10"
+	t "releasable: no longer loaded in the walker's game" "$(npcs_releasable "" "$V" "5000 200 0" "120 200 0" 0001A67C)" "0001A67C yes 4870 10"
+	t "releasable: not in the stayer's world" "$(npcs_releasable "$H" "$V" "9200 200 0" "120 200 0" 00099999)" "00099999 no ? gone"
 	t "spawn of: the host's summon" "$(npcs_spawn_of "$H" 1)" "FF000801:1 FF000801"
 	t "spawn of: none of player 2's" "$(npcs_spawn_of "$H" 2)" ""
 	t "spawn of: a copy is not the caster's" "$(npcs_spawn_of "$V" 1)" ""
@@ -516,15 +613,18 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "step: ... no FAIL" "$(grep -c '^FAIL' <<<"$o")" 0
 
 	# the fight, faked: the runner's console sets the NPC on its player; the watcher's copy plays (or not)
-	fight() {  # fight <watcher plays: yes|no> <runner sends: yes|no>: the fight's verdicts
-		FT=$d/ft; echo 0 > "$FT"; FT_PLAYS=$1; FT_SENDS=$2
+	fight() {  # fight <watcher plays: yes|no> <runner sends: yes|no> [<runner's NPC draws: yes|no>]: the fight's verdicts
+		FT=$d/ft; echo 0 > "$FT"; FT_PLAYS=$1; FT_SENDS=$2; FT_DRAWS=${3:-yes}; FT_AV=$d/ft.av; : > "$FT_AV"
 		dc() { local n; n=$(cat "$FT"); case "$2" in
-			'npcs list') if [ "$1" = host ]; then echo "$HOST_LIST"
+			'npcs list') if [ "$1" = host ]; then
+					if [ "$n" -ge 1 ] && [ "$FT_DRAWS" = yes ]; then echo "${HOST_LIST/dead=0 child=0 weapon=0 combat=0/dead=0 child=0 weapon=1 combat=1}"; else echo "$HOST_LIST"; fi
 				elif [ "$n" -ge 1 ] && [ "$FT_PLAYS" = yes ]; then echo "${NEAR_LIST/played=3 refused=1/played=9 refused=1}"; else echo "$NEAR_LIST"; fi ;;
+			'npcs 0001A67C') echo 'npcs=1 | 0001A67C local=0001A67C owner=1 role=run kind=human at=(100,200,0) dead=0 child=0 weapon=0 combat=0 confidence=0 aggression=0' ;;
 			npcs) if [ "$1" = host ] && [ "$n" -ge 1 ] && [ "$FT_SENDS" = yes ]; then echo 'actionsSent=12'; else echo 'actionsSent=4'; fi ;;
 			'session status') if [ "$1" = host ]; then echo 'player=1'; else echo 'player=2'; fi ;;
 			where) echo 'cell=00000000 world=0000003C pos=(120,200,0) modal=0' ;;
 			*startcombat*) echo 1 > "$FT"; echo ran ;;
+			*setav*) echo "${2#console }" >> "$FT_AV"; echo ran ;;
 			console*) echo ran ;;
 			*) echo ok ;; esac; }
 		( A_OUT=$d/ft$RANDOM; mkdir -p "$A_OUT"; a_init ft >/dev/null; npcs_fight host vm >/dev/null; cut -f1,4 "$A_RESULTS" | tr '\t\n' ': ' )
@@ -532,8 +632,12 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	o=$(fight yes yes)
 	t "fight: the copy plays its runner's events: passes" "$(grep -o 'PASS:0001A67C: played 3 -> 9' <<<"$o")" "PASS:0001A67C: played 3 -> 9"
 	t "fight: ... and turns fewer away than it plays" "$(grep -c 'FAIL' <<<"$o")" 0
-	t "fight: a deaf hook fails as such" "$(grep -c 'FAIL:.*hook heard nothing' <<<"$(fight no no)")" 1
+	t "fight: ... the NPC made to stand and fight, its own values put back after" "$(tr '\n' ';' < "$d/ft.av")" "0001A67C.setav confidence 4;0001A67C.setav aggression 1;0001A67C.setav confidence 0;0001A67C.setav aggression 0;"
+	t "fight: a deaf hook, the NPC fighting, fails as such" "$(grep -c 'FAIL:.*hook heard nothing' <<<"$(fight no no)")" 1
 	t "fight: events sent but not played fails as such" "$(grep -c 'FAIL:.*sent events' <<<"$(fight no yes)")" 1
+	o=$(fight no no no)
+	t "fight: an NPC that never drew nor fought is the scene's (RIG), not the mod's" "$(grep -c 'RIG:.*never drew' <<<"$o")" 1
+	t "fight: ... no FAIL" "$(grep -c 'FAIL' <<<"$o")" 0
 
 	# the summon, faked: the pad's cast makes one (or only the console's does); the watcher shows it, then takes it away
 	spawn() {  # spawn <made by: pad|console|none> <watcher shows: yes|no>: the summon's verdicts
@@ -596,6 +700,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "handover: the walk, then both books the VM's: passes" "$(ho "$HANDED_H" "$HANDED_V")" "PASS PASS "
 	t "handover: the host kept it: FAIL" "$(ho "$HOST_LIST" "$NEAR_LIST")" "PASS FAIL "
 	t "handover: one book only: FAIL" "$(ho "$HOST_LIST" "$HANDED_V")" "PASS FAIL "
+	# picked within NPC_NEAR of the stayer before the walk, but after it the NPC is not past the release rule (it walked
+	# towards the walker's end of the road): not checked, a WARN, never the mod's FAIL
+	t "handover: an NPC not past the release rule after the walk is said, not failed" "$(ho "$HOST_LIST" "${NEAR_LIST/at=(130,200,0)/at=(6000,200,0)}")" "PASS WARN "
 	t "handover: a route that stops is a rig fault, not a FAIL" "$( npcs_walk_route() { echo 'point 2 (x) not reached'; return 1; }; ho_route_stops() { :; }; HO_N=$d/ho_n; echo 0 > "$HO_N"
 		dc() { case "$2" in 'npcs list') if [ "$1" = host ]; then echo "$HOST_LIST"; else echo "$NEAR_LIST"; fi ;; 'session status') if [ "$1" = host ]; then echo 'player=1'; else echo 'player=2'; fi ;;
 			where) echo 'cell=00000000 world=0000003C pos=(120,200,0) modal=0' ;; *) echo ok ;; esac; }

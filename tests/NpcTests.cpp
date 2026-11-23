@@ -5,6 +5,7 @@
 #include "ServerFixture.h"
 #include "game/NpcRules.h"
 #include "game/Prediction.h"
+#include "game/StateBuffer.h"
 
 #include <string>
 #include <vector>
@@ -339,6 +340,55 @@ TEST("npc book: a follower goes to its player's game, and stays with the first p
 	CHECK(book.Owner(GUARD) == 2u);
 }
 
+// A runner says its NPC follows its player every FOLLOWER_EVERY; the book holds it as a follower a little over two of them.
+static_assert(NpcBook::FOLLOWS_LAPSE > 2 * NpcRules::FOLLOWER_EVERY);
+
+TEST("npc book: a follower its runner hired after it had it is held as one: a friend's stray blow or talk does not take it")
+{
+	NpcBook::Book book;
+	const auto    t = Steady::now();
+	// Player 1's game got Lydia because its player was nearest (a plain ask), then its player hired her.
+	REQUIRE(book.Claim(1, { GUARD, Why::kHave }, t) == NpcBook::Outcome::kGranted);
+	CHECK(book.Claim(1, { GUARD, Why::kFollower }, t + 1min) == NpcBook::Outcome::kKept);
+	// Player 2 hits her by accident in a fight, or talks to her: refused.
+	CHECK(book.Claim(2, { GUARD, Why::kFight }, t + 1min + 1s) == NpcBook::Outcome::kRefused);
+	// Her runner says so again every FOLLOWER_EVERY: still refused long after.
+	CHECK(book.Claim(1, { GUARD, Why::kFollower }, t + 1min + NpcRules::FOLLOWER_EVERY) == NpcBook::Outcome::kKept);
+	CHECK(book.Claim(1, { GUARD, Why::kFollower }, t + 1min + 2 * NpcRules::FOLLOWER_EVERY) == NpcBook::Outcome::kKept);
+	CHECK(book.Claim(2, { GUARD, Why::kFight }, t + 1min + 2 * NpcRules::FOLLOWER_EVERY + 1s) == NpcBook::Outcome::kRefused);
+	CHECK(book.Owner(GUARD) == 1u);
+}
+
+TEST("npc book: a follower dismissed by its runner's player is no longer held: a friend who hired her has her")
+{
+	const auto t = Steady::now();
+	{
+		// Player 1's game got her as a follower; its player dismissed her and its game says so (kHave).
+		NpcBook::Book book;
+		REQUIRE(book.Claim(1, { GUARD, Why::kFollower }, t) == NpcBook::Outcome::kGranted);
+		CHECK(book.Claim(2, { GUARD, Why::kFollower }, t + 10s) == NpcBook::Outcome::kRefused);
+		CHECK(book.Claim(1, { GUARD, Why::kHave }, t + 11s) == NpcBook::Outcome::kKept);
+		// Player 2 hired her in their own game: theirs at the next ask.
+		CHECK(book.Claim(2, { GUARD, Why::kFollower }, t + 12s) == NpcBook::Outcome::kGranted);
+		CHECK(book.Owner(GUARD) == 2u);
+	}
+	{
+		// Its runner never says either (its game lost track of her): she is held no longer than FOLLOWS_LAPSE.
+		NpcBook::Book book;
+		REQUIRE(book.Claim(1, { GUARD, Why::kFollower }, t) == NpcBook::Outcome::kGranted);
+		CHECK(book.Claim(2, { GUARD, Why::kFight }, t + NpcBook::FOLLOWS_LAPSE - 1s) == NpcBook::Outcome::kRefused);
+		CHECK(book.Claim(2, { GUARD, Why::kFight }, t + NpcBook::FOLLOWS_LAPSE) == NpcBook::Outcome::kGranted);
+		CHECK(book.Owner(GUARD) == 2u);
+	}
+	{
+		// A fight claim of its runner's says nothing of following: she stays held.
+		NpcBook::Book book;
+		REQUIRE(book.Claim(1, { GUARD, Why::kFollower }, t) == NpcBook::Outcome::kGranted);
+		CHECK(book.Claim(1, { GUARD, Why::kFight }, t + 10s) == NpcBook::Outcome::kKept);
+		CHECK(book.Claim(2, { GUARD, Why::kFollower }, t + 20s) == NpcBook::Outcome::kRefused);
+	}
+}
+
 TEST("npc book: a spawn is only ever its spawner's")
 {
 	NpcBook::Book book;
@@ -444,6 +494,7 @@ TEST("npc rules: the runner lets go of an NPC its player left behind for a frien
 	CHECK(Decide(lonely, t) == Ask::kNone);
 	auto follower = behind;
 	follower.followsUs = true;
+	follower.saidFollows = t;  // the book has heard it follows us (the next test)
 	CHECK(Decide(follower, t) == Ask::kNone);
 	auto fought = behind;
 	fought.fighting = true;
@@ -452,6 +503,35 @@ TEST("npc rules: the runner lets go of an NPC its player left behind for a frien
 	CHECK(WhyOf(Ask::kHave) == Why::kHave);
 	CHECK(WhyOf(Ask::kFight) == Why::kFight);
 	CHECK(WhyOf(Ask::kFollower) == Why::kFollower);
+}
+
+TEST("npc rules: the runner says its NPC follows its player as it starts and every fifteen seconds, and says when it stopped")
+{
+	using namespace NpcRules;
+	const auto t = Steady::now();
+	// Hired after we got it with a plain ask: said at once, however we got it.
+	Facts hired{ .owner = Owner::kUs, .ours = 200.0f, .nearestFriend = 300.0f, .followsUs = true, .lastClaim = t - 1s };
+	CHECK(Decide(hired, t) == Ask::kFollower);
+	// Said: not again within FOLLOWER_EVERY, again after it.
+	hired.saidFollows = t;
+	hired.lastClaim = t;
+	CHECK(Decide(hired, t + FOLLOWER_EVERY - 1s) == Ask::kNone);
+	CHECK(Decide(hired, t + FOLLOWER_EVERY) == Ask::kFollower);
+	// Our player hits it by accident: the fight is said between the follower's turns, the follower's turn first.
+	auto hit = hired;
+	hit.fighting = true;
+	CHECK(Decide(hit, t + 3s) == Ask::kFight);
+	CHECK(Decide(hit, t + FOLLOWER_EVERY) == Ask::kFollower);
+	// Dismissed: said once (kHave), then nothing (the caller forgets saidFollows after a kHave).
+	auto dismissed = hired;
+	dismissed.followsUs = false;
+	CHECK(Decide(dismissed, t + 2s) == Ask::kHave);
+	dismissed.saidFollows.reset();
+	dismissed.lastClaim = t + 2s;
+	CHECK(Decide(dismissed, t + 3s) == Ask::kNone);
+	// One that never followed us is never said to: nothing changes for it.
+	Facts plain{ .owner = Owner::kUs, .ours = 200.0f, .nearestFriend = 300.0f };
+	CHECK(Decide(plain, t) == Ask::kNone);
 }
 
 TEST("npc rules: an NPC let go of for a friend whose game lacks it is not asked for again, so it never trades back and forth")
@@ -729,6 +809,90 @@ TEST("npc rules: sword to bow and bow to sword, each carried once, needs nothing
 	CHECK(spawn.equip == Items({ { GREATSWORD, Hand::kRight } }));
 	CHECK(spawn.add == std::vector<Count>({ { GREATSWORD, 1 } }));
 	CHECK(spawn.missing == 0u);
+}
+
+TEST("npc rules: a copy's gear read back is complete only with all of it on but what it lacks, and nothing left on")
+{
+	using namespace NpcRules;
+	const Protocol::NpcGear gear{ .key = GUARD, .worn = { { CUIRASS, BODY }, { HELMET, HEAD }, { SHIELD, SHIELD_SLOT } }, .right = SWORD, .left = SHIELD, .ammo = ARROWS };
+	const Wearing           all{ .armor = { { CUIRASS, CUIRASS, BODY }, { HELMET, HELMET, HEAD }, { SHIELD, SHIELD, SHIELD_SLOT } }, .right = SWORD, .left = SHIELD, .ammo = ARROWS };
+	const auto              ok = CheckGear(gear, all);
+	CHECK(ok.named == 3u);
+	CHECK(ok.matched == 3u);
+	CHECK(ok.extra == 0u);
+	CHECK(ok.Complete(0));
+	// An equip the game refused: the helmet is not on. Short by one: complete only if the copy lacked it.
+	auto noHelmet = all;
+	noHelmet.armor.erase(noHelmet.armor.begin() + 1);
+	CHECK(!CheckGear(gear, noHelmet).Complete(0));
+	CHECK(CheckGear(gear, noHelmet).Complete(1));
+	// The shield lacking: counted once (as armor), and the left hand holds nothing else: complete with one missing.
+	Wearing noShield{ .armor = { { CUIRASS, CUIRASS, BODY }, { HELMET, HELMET, HEAD } }, .right = SWORD, .ammo = ARROWS };
+	CHECK(CheckGear(gear, noShield).Short() == 1u);
+	CHECK(CheckGear(gear, noShield).Complete(1));
+	// A bow left in hand by an unequip that did nothing: the right hand differs, whatever is worn.
+	auto bow = all;
+	bow.right = BOW;
+	CHECK(!CheckGear(gear, bow).right);
+	CHECK(!CheckGear(gear, bow).Complete(0));
+	// A torch still in the left hand where the shield should be.
+	auto torch = noShield;
+	torch.left = TORCH;
+	CHECK(!CheckGear(gear, torch).left);
+	// The helmet the runner's NPC took off, still on: left on, never complete, whatever it lacks.
+	const Protocol::NpcGear bare{ .key = GUARD, .worn = { { CUIRASS, BODY }, { SHIELD, SHIELD_SLOT } }, .right = SWORD, .left = SHIELD, .ammo = ARROWS };
+	CHECK(CheckGear(bare, all).extra == 1u);
+	CHECK(!CheckGear(bare, all).Complete(5));
+	// ... unless the runner's game could not name what it wears there (its own kept: PlanGear never takes it off).
+	auto unnamedHead = bare;
+	unnamedHead.unnamedSlots = HEAD;
+	CHECK(CheckGear(unnamedHead, all).Complete(0));
+	// A hand the runner's game could not name is not judged, nor the arrows.
+	auto unnamedHands = gear;
+	unnamedHands.unnamed = static_cast<std::uint8_t>(Protocol::kRightUnnamed | Protocol::kAmmoUnnamed);
+	auto own = all;
+	own.right = BOW;
+	own.ammo = 0;
+	CHECK(CheckGear(unnamedHands, own).Complete(0));
+	// An enchanted copy of the cuirass (a runtime form made from it) counts as the cuirass.
+	auto enchanted = all;
+	enchanted.armor[0] = { 0xFF000A00, CUIRASS, BODY };
+	CHECK(CheckGear(gear, enchanted).Complete(0));
+}
+
+TEST("npc rules: a copy follows its runner again after the NPC changed hands and came back, whatever the runner numbered it")
+{
+	using namespace NpcRules;
+	const auto start = Steady::now();
+	// The runner numbers each NPC's states for the whole session: having it again (its loaded entry made anew) goes on.
+	Sequences numbers;
+	for (std::uint32_t i = 1; i <= 5; ++i) {
+		CHECK(numbers.Next(GUARD) == i);
+	}
+	CHECK(numbers.Next(WOLF) == 1u);  // each NPC its own
+	CHECK(numbers.Next(GUARD) == 6u);
+	numbers.Clear();  // a new session
+	CHECK(numbers.Next(GUARD) == 1u);
+
+	// The watcher's copy held states 1..N of runner 1; the NPC went to nobody and back to runner 1, whose numbers
+	// started over (a runner built before the session-long count, or any other reason): the copy takes them.
+	Feed                feed;
+	StateBuffer::Buffer buffer;
+	REQUIRE(feed.From(1));  // the first states: nothing held to drop
+	for (std::uint32_t i = 1; i <= 50; ++i) {
+		REQUIRE(buffer.Push(StateAt(i, static_cast<float>(i)), start + std::chrono::milliseconds(50 * i)));
+	}
+	CHECK(!feed.From(1));  // the same runner, no change of hands: kept
+	CHECK(!buffer.Push(StateAt(1, 0.0f), start + 3s));  // what a copy that kept its states would do: refuse it
+	feed.HandsChanged();   // to nobody
+	feed.HandsChanged();   // and back to runner 1
+	REQUIRE(feed.From(1));
+	buffer.Clear();
+	CHECK(buffer.Push(StateAt(1, 0.0f), start + 3s));
+	CHECK(buffer.Push(StateAt(2, 1.0f), start + 3s + 50ms));
+	CHECK(!feed.From(1));
+	// Another runner: dropped as before.
+	CHECK(feed.From(2));
 }
 
 TEST("npc rules: every kind of actor is told apart, the most telling first")

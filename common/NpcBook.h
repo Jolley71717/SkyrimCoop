@@ -16,7 +16,9 @@
 //   unless it changed hands, or its runner's own player fought it, in the last TAKEOVER_COOLDOWN: two players fighting
 //   one NPC leave it with the first instead of trading it, and its AI starting over, every few seconds;
 // - an NPC that follows a player goes to that player's game, unless it follows the runner's player too (two players
-//   who each hired the same follower: the first keeps it);
+//   who each hired the same follower: the first keeps it). Its runner says so (kFollower) when it starts following
+//   their player and every FOLLOWER_EVERY after, however the runner first got it. A runner that stops saying so, or
+//   says kHave instead (it was dismissed), no longer holds it as a follower;
 // - a spawn (an NPC one player's game made as it ran: a summon) is only ever its spawner's;
 // - a game lets go of an NPC it no longer has loaded, or whose player went far; a player who leaves lets go of all of
 //   theirs (their spawns are gone with them).
@@ -27,6 +29,9 @@ namespace NpcBook
 	using namespace std::chrono_literals;
 
 	inline constexpr auto TAKEOVER_COOLDOWN = 5s;
+	// A runner says its NPC follows its player every 15 s (src/game/NpcRules.h, FOLLOWER_EVERY). Not said for this long
+	// (two missed, and some slack), it follows nobody as far as the book knows.
+	inline constexpr auto FOLLOWS_LAPSE = 35s;
 
 	enum class Outcome
 	{
@@ -63,7 +68,7 @@ namespace NpcBook
 												 .owner = a_player,
 												 .since = a_now,
 												 .fought = a_claim.why == Why::kFight ? std::optional{ a_now } : std::nullopt,
-												 .follows = a_claim.why == Why::kFollower,
+												 .follows = a_claim.why == Why::kFollower ? std::optional{ a_now } : std::nullopt,
 											 });
 				return Outcome::kGranted;
 			}
@@ -73,7 +78,9 @@ namespace NpcBook
 					entry.fought = a_now;
 				}
 				if (a_claim.why == Why::kFollower) {
-					entry.follows = true;
+					entry.follows = a_now;
+				} else if (a_claim.why == Why::kHave) {
+					entry.follows.reset();  // its runner has it, no more than that: dismissed, or it never followed
 				}
 				return Outcome::kKept;
 			}
@@ -82,12 +89,12 @@ namespace NpcBook
 			}
 			switch (a_claim.why) {
 			case Why::kFight:
-				if (entry.follows || (entry.fought && a_now - *entry.fought < TAKEOVER_COOLDOWN)) {
+				if (Follows(entry, a_now) || (entry.fought && a_now - *entry.fought < TAKEOVER_COOLDOWN)) {
 					return Outcome::kRefused;
 				}
 				break;
 			case Why::kFollower:
-				if (entry.follows) {
+				if (Follows(entry, a_now)) {
 					return Outcome::kRefused;
 				}
 				break;
@@ -98,7 +105,7 @@ namespace NpcBook
 				.owner = a_player,
 				.since = a_now,
 				.fought = a_claim.why == Why::kFight ? std::optional{ a_now } : std::nullopt,
-				.follows = a_claim.why == Why::kFollower,
+				.follows = a_claim.why == Why::kFollower ? std::optional{ a_now } : std::nullopt,
 			};
 			return Outcome::kGranted;
 		}
@@ -146,8 +153,13 @@ namespace NpcBook
 			std::uint32_t                    owner = 0;
 			Clock::time_point                since{};   // when it came to this owner
 			std::optional<Clock::time_point> fought;    // the owner's player last fought it (their game's kFight)
-			bool                             follows = false;  // it follows the owner's player (their kFollower)
+			std::optional<Clock::time_point> follows;   // the owner last said it follows their player (their kFollower)
 		};
+
+		[[nodiscard]] static bool Follows(const Entry& a_entry, Clock::time_point a_now)
+		{
+			return a_entry.follows && a_now - *a_entry.follows < FOLLOWS_LAPSE;
+		}
 		std::map<Protocol::NpcKey, Entry> entries;
 	};
 }
