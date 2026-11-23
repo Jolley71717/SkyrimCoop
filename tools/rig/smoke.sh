@@ -77,6 +77,7 @@ smoke_backup() {
 	_saves_host > "$b/host-saves.tsv"; _saves_vm > "$b/vm-saves.tsv"
 	dll_md5 host > "$b/host-dll.md5"; dll_md5 vm > "$b/vm-dll.md5"
 	if [ "$(wc -l < "$b/host.md5")" = 2 ] && [ "$(wc -l < "$b/vm.md5")" = 2 ] && [ -s "$b/host/Skyrim.ini" ] && [ -s "$b/vm/Skyrim.ini" ]; then
+		BACKUP_OK=1
 		pass "backup: both machines' Skyrim.ini and SkyrimPrefs.ini" "$b ($(wc -l < "$b/host-saves.tsv") host saves and $(wc -l < "$b/vm-saves.tsv") VM saves listed)"
 	else
 		_rig_stop "no backup" "the ini files of both machines could not all be copied into $b: nothing is changed without a backup"
@@ -101,7 +102,7 @@ smoke_restore() {
 	[ -n "$SMOKE_ENDED" ] && return; SMOKE_ENDED=1
 	local b=$A_OUT/backup w r stamp
 	section "restore"
-	if [ ! -s "$b/host.md5" ]; then warn "restore: nothing to put back" "the run stopped before its backup was made: nothing on either machine was changed by it"; return; fi
+	if [ -z "${BACKUP_OK:-}" ]; then warn "restore: nothing to put back" "the run stopped before its backup was whole: it changed nothing on either machine, and leaves them as they are"; return; fi
 	for w in host vm; do still $w; done
 	dc vm 'session leave' >/dev/null; dc host 'session leave' >/dev/null; dc host 'steam stophost' >/dev/null
 	stamp=$(date +%Y%m%d-%H%M%S)
