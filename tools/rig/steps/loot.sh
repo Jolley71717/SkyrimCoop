@@ -363,7 +363,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "personal: a book shared fails, and so does its count" "$(grep -c '^FAIL host: its copy of 0001A6B0 holds no more of the book' <<<"$o"),$(grep -c '^FAIL vm: kept the move as its own' <<<"$o")" 1,1
 
 	# the step is wired into the harness: in STEPS before final, a session step, in the default run
-	t "loot is a step, before final" "$(case " $STEPS " in *" loot "*" final "*) echo yes;; esac)" yes
+	t "loot is a step, before final" "$(case " $STEPS " in *" loot "*"final "*) echo yes;; esac)" yes
 	t "loot needs a session" "$(case " $SESSION_STEPS " in *" loot "*) echo yes;; esac)" yes
 	t "loot runs by default" "$(case " $OPTIN_STEPS " in *" loot "*) echo no;; *) echo yes;; esac)" yes
 	t "loot has its line" "$([ -n "${STEP_INFO[loot]:-}" ] && echo yes)" yes

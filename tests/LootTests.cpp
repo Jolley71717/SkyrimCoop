@@ -274,61 +274,61 @@ TEST("loot: holders and items are named by their plugin on the wire; a move anot
 
 TEST("loot log: moves are numbered from 1 with their player; no holder, a runtime form or a move no game could make is refused")
 {
-	LootLog   log;
+	LootLog   book;
 	LootEntry out;
-	CHECK(log.Report(Take(0x1A332, 0xF, 5), 2, out) == LootLog::Take::kNews);
+	CHECK(book.Report(Take(0x1A332, 0xF, 5), 2, out) == LootLog::Take::kNews);
 	CHECK(out == Numbered(Take(0x1A332, 0xF, 5), 1, 2));
-	CHECK(log.Report(Emptied(0x1A332, 2), 3, out) == LootLog::Take::kNews);
+	CHECK(book.Report(Emptied(0x1A332, 2), 3, out) == LootLog::Take::kNews);
 	CHECK(out.number == 2);
 	CHECK(out.playerId == 3);
-	CHECK(log.Next() == 3);
+	CHECK(book.Next() == 3);
 
-	CHECK(log.Report(Take(0, 0xF, 5), 2, out) == LootLog::Take::kRefused);
-	CHECK(log.Report(Take(0xFF000800, 0xF, 5), 2, out) == LootLog::Take::kRefused);
-	CHECK(log.Report(Put(0x1A332, 0xFF000801, 1), 2, out) == LootLog::Take::kRefused);
-	CHECK(log.Report(Take(0x1A332, 0, 1), 2, out) == LootLog::Take::kRefused);  // an item the session can't name
-	CHECK(log.Report(Take(0x1A332, 0xF, 0), 2, out) == LootLog::Take::kRefused);
-	CHECK(log.Next() == 3);
-	CHECK(log.Size() == 2);
+	CHECK(book.Report(Take(0, 0xF, 5), 2, out) == LootLog::Take::kRefused);
+	CHECK(book.Report(Take(0xFF000800, 0xF, 5), 2, out) == LootLog::Take::kRefused);
+	CHECK(book.Report(Put(0x1A332, 0xFF000801, 1), 2, out) == LootLog::Take::kRefused);
+	CHECK(book.Report(Take(0x1A332, 0, 1), 2, out) == LootLog::Take::kRefused);  // an item the session can't name
+	CHECK(book.Report(Take(0x1A332, 0xF, 0), 2, out) == LootLog::Take::kRefused);
+	CHECK(book.Next() == 3);
+	CHECK(book.Size() == 2);
 }
 
 TEST("loot log: past its most a new move is full, never the oldest dropped; the moves from a number come back in order")
 {
-	LootLog   log{ 3 };
+	LootLog   book{ 3 };
 	LootEntry out;
 	for (std::uint32_t i = 1; i <= 3; ++i) {
-		REQUIRE(log.Report(Take(0x1A332, 0x100 + i, 1), 1, out) == LootLog::Take::kNews);
+		REQUIRE(book.Report(Take(0x1A332, 0x100 + i, 1), 1, out) == LootLog::Take::kNews);
 	}
-	CHECK(log.Report(Take(0x1A332, 0x200, 1), 1, out) == LootLog::Take::kFull);
-	CHECK(log.Size() == 3);
-	CHECK(log.From(0).size() == 3);
-	CHECK(log.From(1).size() == 3);
-	const auto later = log.From(2);
+	CHECK(book.Report(Take(0x1A332, 0x200, 1), 1, out) == LootLog::Take::kFull);
+	CHECK(book.Size() == 3);
+	CHECK(book.From(0).size() == 3);
+	CHECK(book.From(1).size() == 3);
+	const auto later = book.From(2);
 	REQUIRE(later.size() == 2);
 	CHECK(later[0].number == 2);
 	CHECK(later[1].number == 3);
-	CHECK(log.From(4).empty());
+	CHECK(book.From(4).empty());
 }
 
 TEST("loot log: a catch-up starts at a ledger of this log; another session's, none, or one past the end starts at 1; a restart is a new log")
 {
-	LootLog log;
-	log.Restart(0xABCD);
+	LootLog book;
+	book.Restart(0xABCD);
 	LootEntry out;
 	for (int i = 0; i < 4; ++i) {
-		log.Report(Take(0x1A332, 0xF, 1), 1, out);
+		book.Report(Take(0x1A332, 0xF, 1), 1, out);
 	}
-	CHECK(log.StartFor(0xABCD, 3) == 3);
-	CHECK(log.StartFor(0xABCD, 5) == 5);  // holds them all: nothing to send
-	CHECK(log.StartFor(0xABCD, 6) == 1);  // past this log's end: not this log's ledger after all
-	CHECK(log.StartFor(0xABCE, 3) == 1);
-	CHECK(log.StartFor(0, 3) == 1);
+	CHECK(book.StartFor(0xABCD, 3) == 3);
+	CHECK(book.StartFor(0xABCD, 5) == 5);  // holds them all: nothing to send
+	CHECK(book.StartFor(0xABCD, 6) == 1);  // past this log's end: not this log's ledger after all
+	CHECK(book.StartFor(0xABCE, 3) == 1);
+	CHECK(book.StartFor(0, 3) == 1);
 
-	log.Restart(0);
-	CHECK(log.Id() != 0);
-	CHECK(log.Next() == 1);
-	CHECK(log.Size() == 0);
-	CHECK(log.StartFor(0xABCD, 3) == 1);
+	book.Restart(0);
+	CHECK(book.Id() != 0);
+	CHECK(book.Next() == 1);
+	CHECK(book.Size() == 0);
+	CHECK(book.StartFor(0xABCD, 3) == 1);
 }
 
 // ---- the server ---------------------------------------------------------------------------------------------------
