@@ -21,6 +21,7 @@
 #     a_summary                            # one screen: counts, every FAIL, RIGFAULT, RIG, HEAL, VOID and WARN, the times;
 #                                          # exits with the number of failed checks (0 = PASS)
 #     trap a_interrupted INT TERM          # a run stopped by a signal is a FAIL ("run interrupted"), never a short PASS
+#     a_log_to <file>                      # all output also into that file, through a tee that Ctrl-C does not kill
 #
 # Reading the games (env.sh's host and vm send one developer-channel command):
 #     dc host|vm "<command>"               # that game's reply line (empty when it gives none)
@@ -248,10 +249,19 @@ a_summary() {  # prints the one-screen summary, writes $A_OUT/summary.txt, exits
 }
 
 a_interrupted() {  # the INT/TERM trap of a run: an interrupted run is a FAILED run, never a PASS with fewer checks
+	# Nothing stops the stop work once it has begun: a second Ctrl-C is ignored, and so is a dead pipe (a write to a tee
+	# that died fails, it no longer ends the run before its restore)
+	trap '' INT TERM PIPE
 	fail "run interrupted" "stopped by a signal before the end: the checks after this point were not made"
 	echo "interrupted"
 	declare -F a_on_stop >/dev/null && a_on_stop
 	a_summary
+}
+# a_log_to <file>: from here on, all the run prints goes to the terminal and to that file. Ctrl-C sends INT to every
+# process of the terminal's group, the tee too: a tee that died with it would take the run down at the trap's first
+# line (SIGPIPE) before the restore ran. So the tee ignores INT and TERM, and ends when the run does (its pipe closed).
+a_log_to() {
+	exec > >(trap '' INT TERM; exec tee -i "$1") 2>&1
 }
 
 # --- self-test: the helpers without a game ---------------------------------------------------------------------
@@ -318,6 +328,33 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	rm -rf "$sd"
 	[ "$r" -ge 1 ] && echo "ok   interrupted run exits non-zero ($r)" || { echo "FAIL interrupted run exits non-zero: got $r"; bad=1; }
 	case "$sigout" in *"run interrupted"*"VERDICT: FAIL"*) echo "ok   interrupted run says VERDICT FAIL";; *) echo "FAIL interrupted run says VERDICT FAIL: [$sigout]"; bad=1;; esac
+	# Ctrl-C in a terminal: INT (or TERM) to the run's whole process group, its tee included. The stop work (smoke.sh's
+	# restore) must still run, and the log keep the end. The run is started in a group of its own with INT and TERM at
+	# their defaults (a background job of a script starts with INT ignored), then the group is signalled as a terminal does.
+	for sig in INT TERM; do
+		sd=$(mktemp -d)
+		cat > "$sd/run.sh" <<-EOF
+			export VM_SSH=selftest-no-vm SKYRIMCOOP_STAGE="$SKYRIMCOOP_STAGE"
+			. "$RIG/assert.sh"
+			A_OUT="$sd/out"; a_init grouprun >/dev/null
+			a_on_stop() { echo ran > "$sd/stopwork"; echo "the stop work ran"; }
+			a_log_to "$sd/run.log"
+			trap a_interrupted INT TERM
+			pass "a check" ok
+			: > "$sd/ready"
+			sleep 30
+		EOF
+		perl -e '$SIG{INT} = $SIG{TERM} = "DEFAULT"; setpgrp(0, 0); exec @ARGV' bash "$sd/run.sh" >/dev/null 2>&1 &
+		pid=$!
+		for ((i = 0; i < 100; i++)); do [ -e "$sd/ready" ] && break; command sleep 0.1; done
+		command sleep 0.3
+		kill -"$sig" -- -"$pid" 2>/dev/null
+		for ((i = 0; i < 100; i++)); do grep -q 'VERDICT' "$sd/run.log" 2>/dev/null && break; command sleep 0.1; done
+		wait "$pid" 2>/dev/null
+		t "Ctrl-C ($sig to the whole group, the tee too): the stop work still runs" "$(cat "$sd/stopwork" 2>/dev/null)" ran
+		t "Ctrl-C ($sig to the whole group): the log keeps the end" "$(grep -c 'the stop work ran\|VERDICT: FAIL' "$sd/run.log" 2>/dev/null)" 2
+		rm -rf "$sd"
+	done
 	# each case below is a run of its own (a subshell with its own folder): "<exit code>|<output>"
 	brk() {
 		local o r sd; sd=$(mktemp -d); o=$( ( A_OUT=$sd; A_RIG_STOPPED=""; A_SECTION=""; a_init brk >/dev/null; section b1 >/dev/null; eval "$1"; echo "REACHED"; a_summary ) 2>&1 ); r=$?; rm -rf "$sd"; echo "$r|$o"

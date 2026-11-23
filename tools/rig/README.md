@@ -26,7 +26,7 @@ bash tools/rig/smoke.sh --list                                      # the steps,
 bash $STAGE/rigq.sh free <name>
 ```
 
-`--build` installs that build on both machines first (a CI build: `gh run download`), and takes it out again at the end. Without it the run tests what is installed. The games are started if they are not running, with `coc` from the main menu (`--cell`, default Riverwood): a run never uses Continue or Load on the host, whose Saves folder may hold the maintainer's own saves.
+`--build` installs that build on both machines first (a CI build: `gh run download`), and takes it out again at the end. Without it the run tests what is installed. The games are started if they are not running, with `coc` from the main menu (`--cell`, default Riverwood): a run never uses Continue or Load on the host, whose Saves folder may hold the maintainer's own saves. Every run, whatever steps it picks, stops in its set-up if the host's game has loaded a save since it started.
 
 A run's folder is `$STAGE/checks/skyrim-smoke-<time>/`: `run.log` (everything it printed), `results.tsv` (one line per check), `summary.txt`, the movement samples, the plugin log lines of the run, and copies of any crash log. It holds the two machines' ini files as they were before the run, and the listings of both Saves folders, so it stays in the rig's folder: never attach it as it is.
 
@@ -36,7 +36,7 @@ Every check is one line: `PASS`, `FAIL` or `WARN`, with what was read. Four more
 
 - `RIG`: a check the rig could not make this time (a scripted walk that stuck before it got anywhere, a button press the game never saw). A step that meets one runs once more; the lines of the first attempt from the fault on are set aside (`VOID`), and a check that fails in both attempts stays a `FAIL`.
 - `HEAL`: the rig was found in a wrong state and put right before a step (a player at the main menu put in the world with `coc`, a walk left going stopped, the two games put in one session again). No verdict either way; listed.
-- `RIGFAULT`: a wrong state that could not be put right; that step's checks were not made.
+- `RIGFAULT`: a wrong state that could not be put right; that step's checks were not made. A game drawing fewer than 20 frames a second (ticks a second, read twice 3 s apart before each step that times something: a display asleep, a starved machine) is one: its stand-ins and walks would lag, and the step would measure the rig. The harness says so and never changes a machine's power settings.
 - `rig broken` (inside a `FAIL`): a game not answering, ssh to the VM down, the pad moving nobody. Two of them end the run at once: the rest would measure the rig.
 
 The last line is `VERDICT: PASS` (every check made and passed), `VERDICT: FAIL` (a check failed: the mod's), or `VERDICT: RIG` (nothing failed, but the rig kept some checks from being made: fix the rig and run again). The exit code is the number of failed checks, and a run that made no check never passes.
@@ -45,17 +45,17 @@ The last line is `VERDICT: PASS` (every check made and passed), `VERDICT: FAIL` 
 
 | Step | What it checks |
 |---|---|
-| `preflight` | both games run the same build of the plugin on 1.7.104 with the Address Library, Steam usable, the tick running; the host's game loaded no save since it started (the run stops if it did) |
+| `preflight` | both games run the same build of the plugin on 1.7.104 with the Address Library, Steam usable, the tick running and its rate (a `WARN` under 20 a second); the host's game loaded no save since it started (the run stops if it did; the set-up checks this on every run too) |
 | `world` | both players in the world with no box open, near each other (`coc` from the main menu when not: console placement, said as a `HEAL`) |
 | `join` | the host hosts; the VM joins over Steam through `steam://joinlobby` (the path an accepted invite takes; `--join dev` joins by lobby id); both say so; the join's time; nobody turned away |
-| `see` | each game has a stand-in of the other: placed, dressed, named as its friend, standing where its friend stands (within 60 u); its friend's states keep coming; no stray stand-ins |
-| `move_vm` | the VM's player runs out and walks back (the virtual pad); on the host the stand-in follows the whole way (mean and largest distance, the share of the way it covers), its legs move while its friend moves, and it stops where its friend stopped |
+| `see` | each game has a stand-in of the other: placed (a form id and a place, not the reply's `placed=` count), dressed, named as its friend, standing where its friend stands (within 60 u) and facing the way it faces (within 0.15 rad); its friend's states keep coming; no stray stand-ins |
+| `move_vm` | the VM's player runs, sprints (`lb` held) and walks round a square (the virtual pad); on the host the stand-in follows the whole way (mean and largest distance, the share of the way it covers), its legs move while its friend moves, it shows a sprint while its friend sprints and none while it does not, and after each leg it stops where its friend stopped, facing the way its friend faces |
 | `move_host` | the same, the host's player moving and the VM watching |
 | `gait` | sneak and stand up, then jump, each way: the watcher's stand-in shows it |
 | `save_rejoin` | the VM saves mid-session (no stand-in written into the save, the game lives through it), leaves (its stand-in goes on the host, nothing stray), joins again, loads its own save in the session (no stand-in comes back from it); then the host ends the session (the VM's stand-in of it goes) and hosts again |
 | `final` | both games still up, no stray stand-ins; each plugin log since the start (no error or assertion line; warnings counted per prefix; no Steam id, IP address or private name); the host never saved or loaded; no new crash log on either machine |
 
-After the steps, always (also after the breaker or Ctrl-C), the restore: virtual pads off, sessions left, the VM's test save moved aside into the project's folder on the VM (never deleted), any join task left on the VM removed; then both games closed, both machines' `Skyrim.ini` and `SkyrimPrefs.ini` put back byte for byte, `--build`'s install undone and both DLLs checked to be the ones from before, and both Saves folders compared with their listings from before (the host's must not have changed). `--keep` leaves the games running; their ini files are then put back with `smoke.sh --restore <run folder>` once both are closed.
+After the steps, always (also after the breaker or Ctrl-C: the run's log goes through a tee that Ctrl-C does not kill), the restore: virtual pads off, sessions left, the VM's test save moved aside into the project's folder on the VM (never deleted), any join task left on the VM removed; then both games closed, both machines' `Skyrim.ini` and `SkyrimPrefs.ini` put back byte for byte, `--build`'s install undone and both DLLs checked to be the ones from before, `start.ps1`'s game tasks removed from the VM, and both Saves folders compared with their listings from before (the host's must not have changed). `--keep` leaves the games running; once both are closed, `smoke.sh --restore <run folder>` does the rest of the restore (the ini files, the install undone and both DLLs checked, the game tasks, the Saves listings). A run folder is put back once only.
 
 ## Adding a step for a new feature
 
