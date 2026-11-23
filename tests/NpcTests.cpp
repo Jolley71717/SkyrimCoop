@@ -334,7 +334,10 @@ TEST("npc book: a follower goes to its player's game, and stays with the first p
 	REQUIRE(book.Claim(1, { GUARD, Why::kHave }, t) == NpcBook::Outcome::kGranted);
 	CHECK(book.Claim(2, { GUARD, Why::kFollower }, t + 10s) == NpcBook::Outcome::kGranted);
 	CHECK(book.Owner(GUARD) == 2u);
-	// It follows player 2: player 1's follower claim and fights don't take it.
+	// It follows player 2 (player 2's game says so every FOLLOWER_EVERY): player 1's follower claim and fights don't take it.
+	CHECK(book.Claim(2, { GUARD, Why::kFollower }, t + 25s) == NpcBook::Outcome::kKept);
+	CHECK(book.Claim(2, { GUARD, Why::kFollower }, t + 40s) == NpcBook::Outcome::kKept);
+	CHECK(book.Claim(2, { GUARD, Why::kFollower }, t + 55s) == NpcBook::Outcome::kKept);
 	CHECK(book.Claim(1, { GUARD, Why::kFollower }, t + 1min) == NpcBook::Outcome::kRefused);
 	CHECK(book.Claim(1, { GUARD, Why::kFight }, t + 1min) == NpcBook::Outcome::kRefused);
 	CHECK(book.Owner(GUARD) == 2u);
