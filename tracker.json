@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-22T08:51:26+00:00",
+ "updated": "2026-11-23T09:33:55+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -13,6 +13,14 @@
   "Shipped"
  ],
  "items": [
+  {
+   "id": "a-failed-quest-end-is-counted-but-not-made-in-the-other-game",
+   "title": "A failed quest end is counted but not made in the other games",
+   "kind": "bug",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
   {
    "id": "a-friend-going-through-a-door-into-a-cave-or-out-of-town-lea",
    "title": "A friend going through a door, into a cave or out of town leaves and arrives properly",
@@ -36,6 +44,14 @@
    "kind": "bug",
    "priority": 2,
    "stage": 1,
+   "note": ""
+  },
+  {
+   "id": "a-friend-s-enchanted-weapons-and-armor-don-t-glow-on-their-s",
+   "title": "A friend's enchanted weapons and armor don't glow on their stand-in yet",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
    "note": ""
   },
   {
@@ -143,9 +159,25 @@
    "note": "An idea, not planned or promised yet."
   },
   {
+   "id": "check-the-quest-stage-done-bit-on-the-rig",
+   "title": "Check the quest stage done bit on the rig",
+   "kind": "task",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "chests-and-containers-what-one-player-takes-is-gone-for-the",
    "title": "Chests and containers: what one player takes is gone for the other",
    "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "claw-doors-and-item-checking-levers-used-by-a-friend",
+   "title": "Claw doors and item-checking levers used by a friend",
+   "kind": "bug",
    "priority": 2,
    "stage": 0,
    "note": ""
@@ -207,12 +239,21 @@
    "note": ""
   },
   {
+   "id": "doors-and-locks-kept-across-a-hosted-session-s-restart",
+   "title": "Doors and locks kept across a hosted session's restart",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "doors-and-locks-opened-or-picked-for-everyone",
    "title": "Doors and locks: opened or picked for everyone",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
-   "note": ""
+   "stage": 3,
+   "note": "Built and reviewed (PR 17, protocol 5); waits for its rig step; not tested in a game",
+   "pr": 17
   },
   {
    "id": "dragon-attacks-are-shared",
@@ -234,6 +275,14 @@
    "id": "dragons-fly-land-and-fight-the-same-in-both-games",
    "title": "Dragons fly, land and fight the same in both games",
    "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "dragons-fly-the-same-in-both-games",
+   "title": "Dragons fly the same in both games",
+   "kind": "task",
    "priority": 2,
    "stage": 0,
    "note": ""
@@ -297,6 +346,14 @@
    "note": "To be decided first; nothing is built yet."
   },
   {
+   "id": "fill-the-quest-stage-rules-from-a-scan-of-quest-fragments",
+   "title": "Fill the quest stage rules from a scan of quest fragments",
+   "kind": "task",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "fire-frost-and-shock-spells-hit-in-both-games",
    "title": "Fire, frost and shock spells hit in both games",
    "kind": "feature",
@@ -341,8 +398,9 @@
    "title": "Friends whose mod lists differ only a little can't join yet, and aren't told which mods differ",
    "kind": "feature",
    "priority": 3,
-   "stage": 0,
-   "note": ""
+   "stage": 2,
+   "note": "Rebased onto the rig harness's latest head; needs its review again at the new head; waits for its rig step",
+   "pr": 16
   },
   {
    "id": "giving-an-item-to-a-friend",
@@ -418,12 +476,21 @@
    "note": "To be decided first; nothing is built yet."
   },
   {
+   "id": "leveled-npcs-look-the-same",
+   "title": "Leveled NPCs look the same",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "levers-puzzles-and-claw-doors-in-dungeons",
    "title": "Levers, puzzles and claw doors in dungeons",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
-   "note": ""
+   "stage": 3,
+   "note": "Built and reviewed (PR 17, protocol 5); waits for its rig step; not tested in a game",
+   "pr": 17
   },
   {
    "id": "load-orders-with-more-than-512-plugins-can-t-join-a-session",
@@ -435,6 +502,14 @@
    "pr": 11
   },
   {
+   "id": "mages-spells-on-copies",
+   "title": "Mages' spells on copies",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "marriage-and-spouses-are-each-player-s-own-to-confirm",
    "title": "Marriage and spouses are each player's own (to confirm)",
    "kind": "feature",
@@ -443,10 +518,34 @@
    "note": "To be decided first; nothing is built yet."
   },
   {
+   "id": "misc-quests-find-which-play-the-same-in-every-game-and-share",
+   "title": "Misc quests: find which play the same in every game, and share those",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "no-leftover-script-data-in-saves",
    "title": "No leftover script data in saves",
    "kind": "feature",
    "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "npc-deaths-in-both-games",
+   "title": "NPC deaths in both games",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "npcs-sit-in-both-games",
+   "title": "NPCs sit in both games",
+   "kind": "feature",
+   "priority": 3,
    "stage": 0,
    "note": ""
   },
@@ -499,6 +598,30 @@
    "note": "An idea, not planned or promised yet."
   },
   {
+   "id": "quest-aliases-an-npc-a-quest-creates-is-the-same-one-in-ever",
+   "title": "Quest aliases: an NPC a quest creates is the same one in every game",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "quest-and-encounter-npcs-shared",
+   "title": "Quest and encounter NPCs shared",
+   "kind": "feature",
+   "priority": 2,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "quest-choices-kept-in-script-variables-are-not-shared",
+   "title": "Quest choices kept in script variables are not shared",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "quest-items-and-rewards-for-everyone",
    "title": "Quest items and rewards for everyone",
    "kind": "feature",
@@ -511,12 +634,29 @@
    "title": "Quests shared: whoever does the step moves everyone on",
    "kind": "feature",
    "priority": 2,
+   "stage": 2,
+   "note": "PR 19 open (protocol 7, stacked on the doors PR): CI running; not tested in a game",
+   "pr": 19
+  },
+  {
+   "id": "quests-the-host-finished-before-the-session-are-not-in-its-s",
+   "title": "Quests the host finished before the session are not in its snapshot",
+   "kind": "feature",
+   "priority": 3,
    "stage": 0,
    "note": ""
   },
   {
    "id": "radiant-jobs-and-bounties",
    "title": "Radiant jobs and bounties",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "radiant-quests-share-the-job-the-host-s-story-manager-picked",
+   "title": "Radiant quests: share the job the host's Story Manager picked",
    "kind": "feature",
    "priority": 3,
    "stage": 0,
@@ -539,8 +679,24 @@
    "note": "An idea, not planned or promised yet."
   },
   {
+   "id": "rig-walk-legs-arrive-with-the-wrong-radius",
+   "title": "Rig walk legs arrive with the wrong radius",
+   "kind": "bug",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "scenes-written-for-one-player",
    "title": "Scenes written for one player",
+   "kind": "feature",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "server-checks-a-door-report-is-within-reach",
+   "title": "Server checks a door report is within reach",
    "kind": "feature",
    "priority": 3,
    "stage": 0,
@@ -673,8 +829,9 @@
    "title": "The same enemies in both games",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
-   "note": ""
+   "stage": 2,
+   "note": "PR 18 open, CI green after review fixes (stacked on form identity): awaiting re-review and a rig run",
+   "pr": 18
   },
   {
    "id": "the-save-clean-up-runs-even-when-no-session-was-played",
