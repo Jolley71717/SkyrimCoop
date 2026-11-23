@@ -1,5 +1,6 @@
 #include "Server.h"
 
+#include "DropStore.h"
 #include "EnetTransport.h"
 #include "FormIds.h"
 #include "LootLog.h"
@@ -78,6 +79,14 @@ namespace
 		TokenBucket                         lootAskBudget{ 4.0, 0.5 };
 		std::optional<Protocol::LootAsk>    lootAskOwed;
 		std::uint64_t                       lootDropped = 0;
+		// Dropped items (docs/DESIGN.md, "Dropped items"): reports, a burst of 32 then 4 a second (a player drops by hand);
+		// one past its budget is refused, and the item stays its dropper's own. Claims are not budgeted: a claim lost
+		// would leave an item in two worlds or none, and each answers one item. Records (a welcome, a load) 4 then one in
+		// 2 s; one past its budget is owed (the newest kept) and answered from the server's loop once there is room.
+		TokenBucket                         dropBudget{ 32.0, 4.0 };
+		TokenBucket                         dropRecordBudget{ 4.0, 0.5 };
+		std::optional<Protocol::DropRecord> dropRecordOwed;
+		std::uint64_t                       dropsRefused = 0;
 		bool        toldNotHost = false;
 		bool        toldUnknown = false;
 	};
@@ -197,6 +206,9 @@ void Server::Run()
 	LootLog loot;
 	bool    lootFullSaid = false;
 	loot.Restart((std::uint64_t{ random() } << 32) | random());
+	// The items dropped for the others to take (common/DropStore.h): the server grants each one to a single taker.
+	DropStore drops;
+	std::uint64_t dupRisk = 0;
 
 	const auto send = [&](const PeerKey& a_to, const std::vector<std::uint8_t>& a_packet, bool a_reliable) {
 		transports[a_to.first]->Send(a_to.second, a_packet, a_reliable);
@@ -220,6 +232,14 @@ void Server::Run()
 	const auto left = [&](const PeerKey& a_key, const Peer& a_peer, std::string_view a_why) {
 		log(std::format("server: player {} left ({})", a_peer.playerId, a_why));
 		broadcast(Protocol::Encode(Protocol::PlayerLeft{ a_peer.playerId }), true, &a_key);
+		// Their drops still lying go with them: their game puts each back in its world as it leaves the session.
+		const auto withdrawn = drops.Left(a_peer.playerId);
+		for (const auto& gone : withdrawn) {
+			broadcast(Protocol::Encode(gone), true, &a_key);
+		}
+		if (!withdrawn.empty()) {
+			log(std::format("server: {} item(s) player {} dropped went with them", withdrawn.size(), a_peer.playerId));
+		}
 		if (a_peer.playerId == hostId) {
 			hostId = 0;
 		}
@@ -266,6 +286,36 @@ void Server::Run()
 			send(a_to, packet, true);
 		}
 		send(a_to, Protocol::Encode(Protocol::LootCaughtUp{ .ask = a_ask.ask, .logId = loot.Id(), .from = start, .next = loot.Next() }), true);
+	};
+
+	// A game's record of what its world holds of the drops (a welcome, a load): the book made to agree with it, every
+	// game told what changed (its own offers its world still has to it alone), then every item lying there, to it.
+	const auto reconcileDrops = [&](const PeerKey& a_key, const Peer& a_peer, const Protocol::DropRecord& a_record) {
+		const auto result = drops.Reconcile(a_peer.playerId, a_record, sessionId);
+		for (const auto& gone : result.withdrawn) {
+			broadcast(Protocol::Encode(gone), true, nullptr);
+		}
+		for (const auto& drop : result.returned) {
+			broadcast(Protocol::Encode(drop, MT::kDropPlaced), true, nullptr);
+		}
+		for (const auto& drop : result.confirmed) {
+			broadcast(Protocol::Encode(drop, MT::kDropPlaced), true, nullptr);
+		}
+		for (const auto& gone : result.unoffered) {
+			send(a_key, Protocol::Encode(gone), true);
+		}
+		if (result.dupRisk != 0) {
+			dupRisk += result.dupRisk;
+			log(std::format("server: player {}'s world holds {} item(s) another player took too (a save from before they dropped it); both keep it ({} so far)",
+				a_peer.playerId, result.dupRisk, dupRisk));
+		}
+		if (!result.withdrawn.empty() || !result.returned.empty()) {
+			log(std::format("server: player {}'s world: {} dropped item(s) are in it, {} lie there again", a_peer.playerId, result.withdrawn.size(),
+				result.returned.size()));
+		}
+		for (const auto& packet : Protocol::DropLists(drops.Lying())) {
+			send(a_key, packet, true);
+		}
 	};
 
 	const auto onHello = [&](const PeerKey& a_key, Peer& a_peer, std::span<const std::uint8_t> a_data) {
@@ -327,6 +377,7 @@ void Server::Run()
 			sessionClock.reset();  // ... and its clock was another world's
 			loot.Restart((std::uint64_t{ random() } << 32) | random());  // ... and its loot, under a new log id
 			lootFullSaid = false;
+			drops.Clear();  // ... and what lay about in it (its numbers go on)
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -641,6 +692,83 @@ void Server::Run()
 				}
 			}
 			break;
+		case MT::kReportDrop:
+			// Offered to its dropper alone; it lies there for everyone once their game says the item left its world
+			// (kClaimDrop kPlaced). A report not taken is answered with no number: the item stays its dropper's own.
+			if (auto drop = Protocol::DecodeDroppedItem(a_data)) {
+				const auto refuse = [&](std::string_view a_why) {
+					if (a_peer.dropsRefused++ == 0) {
+						log(std::format("server: an item player {} dropped is not given ({}); it stays theirs", a_peer.playerId, a_why));
+					}
+					auto answer = *drop;
+					answer.dropId = 0;
+					answer.ownerId = a_peer.playerId;
+					send(a_key, Protocol::Encode(answer, MT::kDropPlaced), true);
+				};
+				if (!a_peer.dropBudget.Take(Clock::now())) {
+					refuse("dropped faster than the server takes them");
+					break;
+				}
+				const auto added = drops.Add(a_peer.playerId, *drop);
+				switch (added.outcome) {
+				case DropStore::Outcome::kAdded:
+					send(a_key, Protocol::Encode(*added.drop, MT::kDropPlaced), true);
+					break;
+				case DropStore::Outcome::kRepeat:
+					if (added.drop) {
+						send(a_key, Protocol::Encode(*added.drop, MT::kDropPlaced), true);  // the offer again, or that it lies there
+					}
+					break;
+				case DropStore::Outcome::kFull:
+					refuse("the session holds as many dropped items as it keeps");
+					break;
+				case DropStore::Outcome::kOwnerFull:
+					refuse("they have as many items lying about as one player may");
+					break;
+				case DropStore::Outcome::kInvalid:
+					refuse("an item or a place the session can't name");
+					break;
+				}
+			}
+			break;
+		case MT::kClaimDrop:
+			if (const auto claim = Protocol::DecodeClaimDrop(a_data)) {
+				using C = Protocol::DropClaim;
+				switch (claim->op) {
+				case C::kPlaced:
+					if (const auto drop = drops.Confirm(a_peer.playerId, claim->dropId)) {
+						broadcast(Protocol::Encode(*drop, MT::kDropPlaced), true, nullptr);  // its dropper's game hears it too
+					}
+					break;
+				case C::kKept:
+					(void)drops.Keep(a_peer.playerId, claim->dropId);
+					break;
+				case C::kTake:
+					if (const auto gone = drops.Take(a_peer.playerId, claim->dropId)) {
+						broadcast(Protocol::Encode(*gone), true, nullptr);
+					} else {
+						// Taken already (or never lying): the claimer alone hears who has it, so it stops asking.
+						send(a_key, Protocol::Encode(Protocol::DropGone{ claim->dropId, drops.TakerOf(claim->dropId) }), true);
+					}
+					break;
+				case C::kGiveBack:
+					if (const auto drop = drops.GiveBack(a_peer.playerId, claim->dropId)) {
+						broadcast(Protocol::Encode(*drop, MT::kDropPlaced), true, nullptr);
+					}
+					break;
+				}
+			}
+			break;
+		case MT::kDropRecord:
+			if (const auto record = Protocol::DecodeDropRecord(a_data)) {
+				if (a_peer.dropRecordBudget.Take(Clock::now())) {
+					a_peer.dropRecordOwed.reset();
+					reconcileDrops(a_key, a_peer, *record);
+				} else {
+					a_peer.dropRecordOwed = *record;  // the newest: its world is the one that counts
+				}
+			}
+			break;
 		case MT::kHeartbeat:
 			if (const auto beat = Protocol::DecodeHeartbeat(a_data); beat && a_peer.heartbeats.Take(Clock::now())) {
 				// Unreliable, as the heartbeat itself is sent: a resend would measure the resend, not the connection.
@@ -711,6 +839,10 @@ void Server::Run()
 			if (peer.joined && peer.lootAskOwed && peer.lootAskBudget.Take(now)) {
 				const auto ask = *std::exchange(peer.lootAskOwed, std::nullopt);
 				sendLoot(key, ask);
+			}
+			if (peer.joined && peer.dropRecordOwed && peer.dropRecordBudget.Take(now)) {
+				const auto record = *std::exchange(peer.dropRecordOwed, std::nullopt);
+				reconcileDrops(key, peer, record);
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {
 				log(std::format("server: dropped {}: no hello", transports[key.first]->Describe(key.second)));

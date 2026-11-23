@@ -6,6 +6,7 @@
 #include "Protocol.h"
 #include "Redact.h"
 #include "Server.h"
+#include "game/DropSync.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/LootSync.h"
@@ -225,6 +226,7 @@ namespace Session
 					QuestSync::Welcomed(playerId, playerId == hostId);  // ... and its quests (the host's game says its own)
 					WorldClock::Welcomed(playerId);  // ... and its clock: lined up afresh with the owner's
 					LootSync::Welcomed(playerId);    // ... and its loot: the moves this world lacks asked for
+					DropSync::Welcomed(playerId, msg->sessionId);  // ... and its dropped items: this world's record told
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -305,6 +307,21 @@ namespace Session
 			case Protocol::MessageType::kLootAnswer:
 				if (const auto msg = Protocol::DecodeLootBatch(a_data); msg && welcomed) {
 					LootSync::Answered(*msg);
+				}
+				break;
+			case Protocol::MessageType::kDropPlaced:
+				if (const auto msg = Protocol::DecodeDroppedItem(a_data); msg && welcomed) {
+					DropSync::Placed(*msg);
+				}
+				break;
+			case Protocol::MessageType::kDropGone:
+				if (const auto msg = Protocol::DecodeDropGone(a_data); msg && welcomed) {
+					DropSync::Gone(*msg);
+				}
+				break;
+			case Protocol::MessageType::kDropList:
+				if (const auto msg = Protocol::DecodeDropList(a_data); msg && welcomed) {
+					DropSync::Listed(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -445,6 +462,7 @@ namespace Session
 		QuestSync::Clear();
 		WorldClock::Clear();
 		LootSync::Clear();
+		DropSync::Clear();  // our items lying there go back to our world
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -454,6 +472,7 @@ namespace Session
 	void Frame()
 	{
 		LookForJoin();
+		DropSync::Idle();  // in a session or not: copies on their way out, our items back after one
 		if (Config::Get().host && !autoHosted && role == Role::kNone && LocalPlayer::InWorld()) {
 			autoHosted = true;
 			std::string why;
@@ -484,6 +503,7 @@ namespace Session
 			QuestSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			WorldClock::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			LootSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
+			DropSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 		}
 		RemotePlayers::Frame();
 	}

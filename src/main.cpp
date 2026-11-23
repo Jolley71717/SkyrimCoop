@@ -14,6 +14,7 @@
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "game/WorldClock.h"
+#include "game/DropSync.h"
 #include "game/LootSync.h"
 #include "game/QuestSync.h"
 #include "game/WorldObjects.h"
@@ -182,6 +183,9 @@ namespace
 		if (!LootSync::Install()) {
 			logs::warn("Loot: containers and loot are not shared in this game; a session still runs");
 		}
+		if (!DropSync::Install()) {
+			logs::warn("Drops: dropped items are not given in this game; a session still runs");
+		}
 		if (!RemotePlayers::Install()) {
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
 		}
@@ -226,6 +230,7 @@ namespace
 			QuestSync::AfterLoad();      // ... and its quests: the host says them again, a friend asks for the session's
 			WorldClock::AfterLoad();     // ... and its clock: the save's day count and timescale, lined up with the owner's again
 			LootSync::AfterLoad();       // ... and its loot: the save's ledger, the session's moves it lacks asked for
+			DropSync::AfterLoad();       // ... and its dropped items: the save's record, told to the session
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
@@ -235,6 +240,7 @@ namespace
 			QuestSync::AfterLoad();
 			WorldClock::AfterLoad();
 			LootSync::AfterLoad();
+			DropSync::NewGame();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:
@@ -242,6 +248,7 @@ namespace
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
 			RemotePlayers::BeforeSave();
 			WorldClock::BeforeSave();  // ... and our own timescale goes into it, not the session's
+			DropSync::BeforeSave();    // ... and no copy of a dropped item is in it
 			break;
 		case SKSE::MessagingInterface::kDeleteGame:
 			logs::debug("Save: \"{}\" was deleted", MessageText(a_msg));
@@ -253,11 +260,13 @@ namespace
 
 	// The co-save: the list of stand-ins taken out of the world for the save (RemotePlayers), so a load can remove any
 	// that the save brought back, and the loot ledger (LootSync): which of the session's moves of loot this world holds,
-	// and the ones still waiting for their holder. Nothing else of a session is kept.
+	// and the ones still waiting for their holder; and the dropped items' record (DropSync): which of the session's drops
+	// left this world and which it took in, and the copies taken out for the save. Nothing else of a session is kept.
 	void OnSave(SKSE::SerializationInterface* a_intf)
 	{
 		RemotePlayers::WriteCoSave(a_intf);
 		LootSync::WriteCoSave(a_intf);
+		DropSync::WriteCoSave(a_intf);
 	}
 
 	void OnLoad(SKSE::SerializationInterface* a_intf)
@@ -270,6 +279,8 @@ namespace
 				RemotePlayers::ReadCoSave(a_intf, version, length);
 			} else if (type == LootSync::COSAVE_LOOT) {
 				LootSync::ReadCoSave(a_intf, version, length);
+			} else if (type == DropSync::COSAVE_DROPS) {
+				DropSync::ReadCoSave(a_intf, version, length);
 			} else {
 				logs::warn("Co-save: a record of a type this version does not know ({:08X}); skipped", type);
 			}
@@ -280,6 +291,7 @@ namespace
 	{
 		RemotePlayers::ForgetStandIns();
 		LootSync::RevertCoSave();
+		DropSync::RevertCoSave();
 	}
 
 	// False when the plugin must not load into this game.

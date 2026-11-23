@@ -56,11 +56,12 @@ declare -A STEP_INFO=(
 	[quests]="a shared quest neither game has started: a stage, an objective and an end one game does is made in the other by the session's word (its made= count and its log say so), both ways; after the VM loads a save, joins again and the host hosts anew (its snapshot) the VM makes the session's stages; MQ101 is each player's own; no stage made moved a player (steps/quests.sh)"
 	[clock]="the host's clock is the session's: its wait through midnight (as long as asked) is the VM's too (the date rolled over, the day count moved with the hours); the VM's own wait runs untouched, its menu shuts by itself, and it is undone once after it, the host's clock never moving; the host's timescale is the VM's, the VM's own goes into its save (read back after a load) and comes back when it leaves; a rejoin and a load line it up again; outside, the host's weather is the VM's, inside a walled city's walls or outside them, and no weather override is left (steps/clock.sh)"
 	[loot]="gold and a dagger one player puts into or takes from a container are so in the other's copy, both ways; a book stays its player's own; after the VM loads a save and joins again its copy is the session's; a Take All empties the other's copy of what was taken; a living creature's inventory is its own, a put into a body waits in the other game until it dies there too (steps/loot.sh)"
+	[drops]="gold and a dagger one player drops lie in the other's world as a copy blocked from activation; the player who takes it has it and it lies in neither, both ways; two taking at once give it to one; the dropper leaving takes what still lies there back to their world; a save from before a drop, loaded, takes it back from the session (steps/drops.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
-STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors quests clock loot final"
+STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors quests clock loot drops final"
 # Steps that need the two games in one session; the state guard puts them back in one first (smoke.sh run()).
-SESSION_STEPS="see move_vm move_host gait save_rejoin forms doors quests clock loot"
+SESSION_STEPS="see move_vm move_host gait save_rejoin forms doors quests clock loot drops"
 # Steps a run makes only when --only names them: they change a game's files for a while (each puts them back, and the
 # set-up heals what a run that died left), which the maintainer agrees to before they run by default.
 OPTIN_STEPS="forms"
@@ -486,6 +487,7 @@ declare -F step_doors >/dev/null || . "$RIG/steps/doors.sh"
 declare -F step_quests >/dev/null || . "$RIG/steps/quests.sh"
 declare -F step_clock >/dev/null || . "$RIG/steps/clock.sh"
 declare -F step_loot >/dev/null || . "$RIG/steps/loot.sh"
+declare -F step_drops >/dev/null || . "$RIG/steps/drops.sh"
 
 # --- self-test: the steps' reading of the games, both games faked ------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then

@@ -33,7 +33,11 @@
 // - a move of loot the session passes on (kRemoteLoot) whose holder or item has no ID is left out (a mod's chest or
 //   item some game lacks is that game's own), a batch left with none dropped; in a game's own moves going out (kLoot) and
 //   in the answers to them (kLootAnswer) each becomes 0 instead, so every move is still answered once (the server
-//   refuses a move of no holder).
+//   refuses a move of no holder);
+// - a dropped item (kReportDrop, kDropPlaced, each of a kDropList) whose base, enchantment or poison has no ID on the
+//   other side has its base made 0: going out, the server refuses it (the session can't name that item, so it stays its
+//   dropper's own); coming in, this game places no copy of it (it would be another item), and still knows the drop, so
+//   it hears who takes it. Its place is a place or nowhere (both 0), as a player's state's is: nowhere is placed by none.
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -91,7 +95,13 @@ namespace FormTranslate
 		case MT::kLoot:
 		case MT::kRemoteLoot:
 		case MT::kLootAnswer:
+		case MT::kReportDrop:
+		case MT::kDropPlaced:
+		case MT::kDropList:
 			return true;
+		case MT::kClaimDrop:  // drop numbers, no forms
+		case MT::kDropGone:
+		case MT::kDropRecord:
 		case MT::kAskLoot:  // a ledger: numbers, no forms
 		case MT::kLootCaughtUp:
 		case MT::kHello:  // a load order is plugin names, not form IDs
@@ -311,6 +321,54 @@ namespace FormTranslate
 			}
 		}
 
+		// A dropped item's forms: its base, enchantment and poison all, or its base 0 (this side lacks one of them: another
+		// item); its place, or nowhere.
+		inline void MapDrop(Context& a_ctx, Protocol::DroppedItem& a_drop)
+		{
+			auto base = a_drop.base;
+			auto enchantment = a_drop.enchantment;
+			auto poison = a_drop.poison;
+			if (a_ctx.Key(base) && a_ctx.Key(enchantment) && a_ctx.Key(poison)) {
+				a_drop.base = base;
+				a_drop.enchantment = enchantment;
+				a_drop.poison = poison;
+			} else if (a_drop.base != 0) {
+				a_drop.base = 0;
+				++a_ctx.out.fields;
+				a_ctx.changed = true;
+			}
+			a_ctx.Place(a_drop.cell, a_drop.worldspace);
+		}
+
+		inline void ApplyDrop(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeDroppedItem(a_packet);
+			if (!msg) {
+				return;
+			}
+			MapDrop(a_ctx, *msg);
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
+		// Every drop of a list is kept (a game removes its copies of the ones a list lacks), each mapped as one.
+		inline void ApplyDropList(std::span<const std::uint8_t> a_packet, Context& a_ctx)
+		{
+			auto msg = Protocol::DecodeDropList(a_packet);
+			if (!msg) {
+				return;
+			}
+			for (auto& drop : msg->drops) {
+				MapDrop(a_ctx, drop);
+			}
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg);
+			}
+		}
+
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
@@ -367,6 +425,13 @@ namespace FormTranslate
 		case MT::kRemoteLoot:
 		case MT::kLootAnswer:
 			detail::ApplyLoot(a_packet, ctx, *type);
+			break;
+		case MT::kReportDrop:
+		case MT::kDropPlaced:
+			detail::ApplyDrop(a_packet, ctx, *type);
+			break;
+		case MT::kDropList:
+			detail::ApplyDropList(a_packet, ctx);
 			break;
 		default:
 			break;
