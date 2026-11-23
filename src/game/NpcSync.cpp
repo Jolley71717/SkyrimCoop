@@ -1313,9 +1313,9 @@ namespace NpcSync
 				}
 				const auto archetype = base->GetArchetype();
 				const bool drains = archetype == Archetype::kValueModifier || archetype == Archetype::kDualValueModifier || archetype == Archetype::kAbsorb;
-				const bool health = base->data.primaryAV == RE::ActorValue::kHealth || (archetype == Archetype::kDualValueModifier && base->data.secondaryAV == RE::ActorValue::kHealth);
+				const bool onHealth = base->data.primaryAV == RE::ActorValue::kHealth || (archetype == Archetype::kDualValueModifier && base->data.secondaryAV == RE::ActorValue::kHealth);
 				const bool lasts = a_effect->duration > 0.0f || (a_effect->spell && a_effect->spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration);
-				if (drains && health && lasts && std::isfinite(a_effect->magnitude)) {
+				if (drains && onHealth && lasts && std::isfinite(a_effect->magnitude)) {
 					perSecond += std::fabs(a_effect->magnitude);
 				}
 				return RE::BSContainer::ForEachResult::kContinue;
