@@ -11,8 +11,8 @@
 // a follower takes one over, the runner lets go of the ones its player left behind) and hears who runs each. Of the
 // ones it runs it sends where each is and how it moves, 20 or 10 times a second (kNpcStates), the events its graph
 // takes (kNpcActions: an attack, a block, a dragon's take-off) and what it wears and holds (kNpcGear). Every kind of
-// actor is one: people, creatures, dragons, horses, followers, and what a player summons (a spawn: a reference this
-// game made as it ran, which the others place a copy of from its base).
+// actor is one: people, creatures, dragons, horses, followers, and what our player or an NPC this game runs summons (a
+// spawn: a reference this game made as it ran, which the others place a copy of from its base).
 //
 // A copy of an NPC another game runs is that NPC in this game (a spawn's copy: one this game placed). While its
 // runner's states are recent and in this player's space, its AI never runs: the actor update hook (RemotePlayers.cpp)

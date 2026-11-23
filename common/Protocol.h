@@ -31,9 +31,11 @@ namespace Protocol
 	// 3: a hello carries a whole Skyrim load order (MAX_PLUGINS names, in at most MAX_PLUGIN_LIST_BYTES), not 512 names.
 	// 4: form ids on the wire are the session's (PluginTable, kPluginTable): a form is named by its plugin's file name,
 	//    never by a game's load order, so games whose mods are in another order, or differ, play together.
-	// 5: NPCs are shared: one game runs each (kNpcClaims, kNpcOwners) and the others show a copy of it (kNpcStates,
-	//    kNpcActions, kNpcGear); a state's kFlying.
-	inline constexpr std::uint16_t VERSION = 5;
+	// 5: doors, locks and mechanisms are shared (message types 13-17, in their own change).
+	// 6: NPCs are shared: one game runs each (kNpcClaims, kNpcOwners) and the others show a copy of it (kNpcStates,
+	//    kNpcActions, kNpcGear: message types 18-22); a state's kFlying. Of the doors' change and this one, whichever
+	//    lands second takes the number after the other's.
+	inline constexpr std::uint16_t VERSION = 6;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -82,11 +84,12 @@ namespace Protocol
 		kPlayerLooks = 10,  // client -> server, reliable: what my character looks like (again whenever it changes)
 		kRemoteLooks = 11,  // server -> the others (and each one there, to the one who joined): that player's looks
 		kPluginTable = 12,  // server -> client, reliable: the session's plugin table, before the welcome and when it grows
-		kNpcClaims = 13,    // client -> server, reliable: NPCs this game asks to run, or lets go of
-		kNpcOwners = 14,    // server -> client, reliable: who runs each NPC (every one to a joiner, then each change)
-		kNpcStates = 15,    // both ways, on the state channel: where the NPCs a game runs are (the server names the runner)
-		kNpcActions = 16,   // both ways, reliable: the graph events of the NPCs a game runs, for their copies to play
-		kNpcGear = 17,      // both ways, reliable: what an NPC wears and holds, from the game that runs it
+		// 13-17: the doors' messages (protocol 5).
+		kNpcClaims = 18,    // client -> server, reliable: NPCs this game asks to run, or lets go of
+		kNpcOwners = 19,    // server -> client, reliable: who runs each NPC (every one to a joiner, then each change)
+		kNpcStates = 20,    // both ways, on the state channel: where the NPCs a game runs are (the server names the runner)
+		kNpcActions = 21,   // both ways, reliable: the graph events of the NPCs a game runs, for their copies to play
+		kNpcGear = 22,      // both ways, reliable: what an NPC wears and holds, from the game that runs it
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -355,16 +358,39 @@ namespace Protocol
 		bool operator==(const NpcActions&) const = default;
 	};
 
-	// What an NPC wears (armor, as base form ids, at most MAX_WORN) and holds: each hand's weapon, spell, shield or
-	// torch, and its ammunition; 0 for none.
+	// An item an NPC wears: its base form and the body slots it covers (BGSBipedObjectForm's mask), so that a game whose
+	// copy lacks the form still knows which of the copy's own items it stands for.
+	struct WornItem
+	{
+		std::uint32_t id = 0;
+		std::uint32_t slots = 0;
+		bool operator==(const WornItem&) const = default;
+		auto operator<=>(const WornItem&) const = default;
+	};
+
+	// NpcGear::unnamed: a hand (or the quiver) holds something the runner's game could not name to this one (a form made
+	// as that game ran, or a mod's this game lacks), which is not the same as holding nothing: the copy keeps its own.
+	enum GearUnnamed : std::uint8_t
+	{
+		kRightUnnamed = 1 << 0,
+		kLeftUnnamed = 1 << 1,
+		kAmmoUnnamed = 1 << 2,
+		kAllUnnamed = kRightUnnamed | kLeftUnnamed | kAmmoUnnamed,
+	};
+
+	// What an NPC wears (armor, at most MAX_WORN) and holds: each hand's weapon, spell, shield or torch, and its
+	// ammunition; 0 for none. unnamedSlots: the body slots of worn items left out (none named to this game), so a copy
+	// keeps what it wears there.
 	struct NpcGear
 	{
-		std::uint32_t              runner = 0;
-		NpcKey                     key;
-		std::vector<std::uint32_t> worn;
-		std::uint32_t              right = 0;
-		std::uint32_t              left = 0;
-		std::uint32_t              ammo = 0;
+		std::uint32_t         runner = 0;
+		NpcKey                key;
+		std::vector<WornItem> worn;
+		std::uint32_t         right = 0;
+		std::uint32_t         left = 0;
+		std::uint32_t         ammo = 0;
+		std::uint8_t          unnamed = 0;  // GearUnnamed
+		std::uint32_t         unnamedSlots = 0;
 		bool operator==(const NpcGear&) const = default;
 	};
 
@@ -1064,16 +1090,19 @@ namespace Protocol
 		const auto count = (std::min)(a_msg.worn.size(), MAX_WORN);
 		w.U8(static_cast<std::uint8_t>(count));
 		for (std::size_t i = 0; i < count; ++i) {
-			w.U32(a_msg.worn[i]);
+			w.U32(a_msg.worn[i].id);
+			w.U32(a_msg.worn[i].slots);
 		}
 		w.U32(a_msg.right);
 		w.U32(a_msg.left);
 		w.U32(a_msg.ammo);
+		w.U8(a_msg.unnamed);
+		w.U32(a_msg.unnamedSlots);
 		return w.Data();
 	}
 
-	// None for more than MAX_WORN worn items. An NPC of id 0 reads: the translation left it out (FormTranslate.h), and
-	// the reader skips it.
+	// None for more than MAX_WORN worn items, or an unknown unnamed bit. An NPC of id 0 reads: the translation left it
+	// out (FormTranslate.h), and the reader skips it.
 	inline std::optional<NpcGear> DecodeNpcGear(std::span<const std::uint8_t> a_data)
 	{
 		Reader r{ a_data };
@@ -1087,12 +1116,15 @@ namespace Protocol
 		}
 		msg.worn.reserve(count);
 		for (std::uint8_t i = 0; i < count; ++i) {
-			msg.worn.push_back(r.U32());
+			const auto id = r.U32();
+			msg.worn.push_back({ id, r.U32() });
 		}
 		msg.right = r.U32();
 		msg.left = r.U32();
 		msg.ammo = r.U32();
-		if (!r.AtEnd()) {
+		msg.unnamed = r.U8();
+		msg.unnamedSlots = r.U32();
+		if (!r.AtEnd() || (msg.unnamed & ~kAllUnnamed) != 0) {
 			return std::nullopt;
 		}
 		return msg;

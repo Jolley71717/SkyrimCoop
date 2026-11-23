@@ -68,12 +68,28 @@ namespace NpcRules
 		std::optional<float>             nearestFriend;  // the nearest friend's distance from it, in its space; none: no friend there
 		bool                             fighting = false;    // our player fought or talked to it within FIGHT_HOLD
 		bool                             followsUs = false;   // it follows our player (a follower, a summon, a mount)
+		bool                             spawn = false;       // made as this game ran (a summon): no other game has it to run
 		std::optional<Clock::time_point> lastClaim;     // our last claim of it, of any kind
 	};
+
+	// A friend's game is the better place for it: our player is in another space than it (it walked through a door our
+	// player didn't) or far from it, and a friend is in its space, HANDOFF_MARGIN nearer.
+	[[nodiscard]] inline bool BetterThere(const Facts& a_facts)
+	{
+		if (!a_facts.nearestFriend) {
+			return false;
+		}
+		return !a_facts.ours || (*a_facts.ours > HANDOFF_FAR && *a_facts.nearestFriend + HANDOFF_MARGIN < *a_facts.ours);
+	}
 
 	[[nodiscard]] inline Ask Decide(const Facts& a_facts, Clock::time_point a_now)
 	{
 		const auto since = [&](Clock::duration a_every) { return !a_facts.lastClaim || a_now - *a_facts.lastClaim >= a_every; };
+		if (a_facts.spawn) {
+			// Ours alone (common/NpcBook.h refuses it to anyone else): kept while it is loaded here, and asked for at once
+			// when nobody runs it. Letting it go would only have it asked for again.
+			return a_facts.owner == Owner::kNobody && since(CLAIM_EVERY) ? Ask::kHave : Ask::kNone;
+		}
 		switch (a_facts.owner) {
 		case Owner::kUs:
 			if (a_facts.fighting) {
@@ -82,12 +98,8 @@ namespace NpcRules
 			if (a_facts.followsUs) {
 				return Ask::kNone;
 			}
-			if (!a_facts.ours || (a_facts.nearestFriend && *a_facts.ours > HANDOFF_FAR && *a_facts.nearestFriend + HANDOFF_MARGIN < *a_facts.ours)) {
-				// Another space than our player (it walked through a door our player didn't): the friend there takes it,
-				// and with no friend near, nobody needs it run here more than anywhere.
-				return a_facts.nearestFriend ? Ask::kRelease : Ask::kNone;
-			}
-			return Ask::kNone;
+			// With no friend near, nobody needs it run elsewhere more than here.
+			return BetterThere(a_facts) ? Ask::kRelease : Ask::kNone;
 		case Owner::kOther:
 			if (a_facts.fighting) {
 				return since(FIGHT_EVERY) ? Ask::kFight : Ask::kNone;
@@ -109,7 +121,10 @@ namespace NpcRules
 			return Ask::kFight;
 		}
 		const bool nearest = !a_facts.nearestFriend || (a_facts.ours && *a_facts.ours <= *a_facts.nearestFriend + CLAIM_MARGIN);
-		const bool waited = a_facts.unownedSince && a_now - *a_facts.unownedSince >= CLAIM_ANYWAY_AFTER;
+		// After the wait, any game that has it asks (the nearest friend's game may not list it: disabled in that save, or
+		// not among its loaded actors), but never one that would let go of it again at once (BetterThere): that would
+		// trade it back and forth every few seconds. Nobody runs it then, and each game's own AI shows it.
+		const bool waited = a_facts.unownedSince && a_now - *a_facts.unownedSince >= CLAIM_ANYWAY_AFTER && !BetterThere(a_facts);
 		return nearest || waited ? Ask::kHave : Ask::kNone;
 	}
 
@@ -272,43 +287,149 @@ namespace NpcRules
 
 	// ---- its gear ----
 
-	// What a copy puts on of its runner's gear. A copy of a load-order NPC is a real NPC of this game, which goes into its
-	// saves: it equips only what it carries already, and nothing is ever added to it (a corpse holds only its own
-	// game's roll). A spawn's copy is this game's own and never saved (src/game/RemotePlayers.cpp's save guard takes it
-	// out): it is given what it lacks. Runtime forms (FF) name nothing here and are never looked at.
-	struct GearPlan
+	// What a copy takes off and puts on to wear and hold what its runner's NPC does. A copy of a load-order NPC is a real
+	// NPC of this game, which goes into its saves: it equips only what it carries already, and nothing is ever added to it
+	// (a corpse holds only its own game's roll). A spawn's copy is this game's own and never saved
+	// (src/game/RemotePlayers.cpp's save guard takes it out): it is given what it lacks. Taking off is the same for both
+	// (nothing leaves its inventory): what it wears or holds that its runner's NPC does not, so a torch put away, a helmet
+	// taken off, a shield put on the back or a bow swapped for a sword is seen in every game. What the runner's game could
+	// not name to this one (a form made as it ran, a mod's this game lacks) is never taken off: the copy keeps its own
+	// there (Protocol::NpcGear's unnamed and unnamedSlots). Runtime forms (FF) name nothing here and are never looked at.
+	enum class Hand : std::uint8_t
 	{
-		std::vector<std::uint32_t> equip;  // in the order to equip: worn armor, then the hands and the ammunition
-		std::vector<std::uint32_t> add;    // of those, the ones to add first (a spawn's copy only)
-		std::size_t                missing = 0;  // the runner's items this copy lacks and may not be given
+		kNone,  // worn armor, the ammunition, or whatever hand the game picks (a torch, a shield)
+		kRight,
+		kLeft,
 	};
 
-	[[nodiscard]] inline GearPlan PlanGear(const Protocol::NpcGear& a_gear, const std::vector<std::uint32_t>& a_wornNow, const std::vector<std::uint32_t>& a_carried, bool a_mayAdd)
+	struct GearItem
 	{
-		GearPlan                   plan;
-		std::vector<std::uint32_t> wanted = a_gear.worn;
-		for (const auto id : { a_gear.right, a_gear.left, a_gear.ammo }) {
-			wanted.push_back(id);
+		std::uint32_t id = 0;
+		Hand          hand = Hand::kNone;
+		bool operator==(const GearItem&) const = default;
+	};
+
+	// What a copy wears and holds now: each worn armor as its own form, the form its runner's game names it by (its
+	// plugin form, or the one a runtime armor was made from; 0: none) and its body slots; each hand's object and its
+	// ammunition (0: none).
+	struct Wearing
+	{
+		struct Armor
+		{
+			std::uint32_t id = 0;
+			std::uint32_t shared = 0;
+			std::uint32_t slots = 0;
+		};
+		std::vector<Armor> armor;
+		std::uint32_t      right = 0;
+		std::uint32_t      left = 0;
+		std::uint32_t      ammo = 0;
+	};
+
+	struct Count
+	{
+		std::uint32_t id = 0;
+		std::int32_t  count = 0;
+		bool operator==(const Count&) const = default;
+	};
+
+	struct GearPlan
+	{
+		std::vector<GearItem> unequip;  // first, so a hand or a slot is free for what comes
+		std::vector<Count>    add;      // then given (a spawn's copy only): each form and how many
+		std::vector<GearItem> equip;    // then put on: worn armor, then the right hand, the left, the ammunition
+		std::size_t           missing = 0;  // the runner's items this copy lacks and may not be given
+	};
+
+	[[nodiscard]] inline GearPlan PlanGear(const Protocol::NpcGear& a_gear, const Wearing& a_now, const std::vector<Count>& a_carried, bool a_mayAdd)
+	{
+		GearPlan   plan;
+		const auto named = [](std::uint32_t a_id) { return a_id != 0 && !FormIds::IsRuntime(a_id); };
+		const auto inGear = [&](std::uint32_t a_id) { return std::ranges::any_of(a_gear.worn, [&](const Protocol::WornItem& a_w) { return a_w.id == a_id; }); };
+		const auto wearsAsArmor = [&](std::uint32_t a_id) { return std::ranges::any_of(a_now.armor, [&](const Wearing::Armor& a_a) { return a_a.id == a_id || a_a.shared == a_id; }); };
+		const auto takeOff = [&](std::uint32_t a_id, Hand a_hand) {
+			if (std::ranges::none_of(plan.unequip, [&](const GearItem& a_i) { return a_i.id == a_id && a_i.hand == a_hand; })) {
+				plan.unequip.push_back({ a_id, a_hand });
+			}
+		};
+		// ---- off ----
+		for (const auto& armor : a_now.armor) {
+			// Only what the runner's game named, and not over a slot it could not name to us.
+			if (named(armor.shared) && !inGear(armor.shared) && (armor.slots & a_gear.unnamedSlots) == 0) {
+				takeOff(armor.id, Hand::kNone);
+			}
 		}
-		std::vector<std::uint32_t> seen;
-		for (const auto id : wanted) {
-			if (id == 0 || FormIds::IsRuntime(id) || std::ranges::find(seen, id) != seen.end()) {
-				continue;
+		const auto hand = [&](std::uint32_t a_now, std::uint32_t a_wanted, std::uint8_t a_unnamedBit, Hand a_hand) {
+			// A shield is worn armor too: the armor's own rule takes it off.
+			if (a_now != 0 && a_now != a_wanted && (a_gear.unnamed & a_unnamedBit) == 0 && !wearsAsArmor(a_now)) {
+				takeOff(a_now, a_hand);
 			}
-			seen.push_back(id);
-			if (std::ranges::find(a_wornNow, id) != a_wornNow.end()) {
-				continue;
+		};
+		hand(a_now.right, a_gear.right, Protocol::kRightUnnamed, Hand::kRight);
+		hand(a_now.left, a_gear.left, Protocol::kLeftUnnamed, Hand::kLeft);
+		hand(a_now.ammo, a_gear.ammo, Protocol::kAmmoUnnamed, Hand::kNone);
+		// ---- on ----
+		const auto has = [&](std::uint32_t a_id) {
+			std::int32_t n = 0;
+			for (const auto& c : a_carried) {
+				n += c.id == a_id ? c.count : 0;
 			}
-			if (std::ranges::find(a_carried, id) != a_carried.end()) {
-				plan.equip.push_back(id);
+			for (const auto& c : plan.add) {
+				n += c.id == a_id ? c.count : 0;
+			}
+			return n;
+		};
+		const auto putOn = [&](std::uint32_t a_id, Hand a_hand, std::int32_t a_need) {
+			const auto have = has(a_id);
+			if (have >= a_need) {
+				plan.equip.push_back({ a_id, a_hand });
 			} else if (a_mayAdd) {
-				plan.add.push_back(id);
-				plan.equip.push_back(id);
+				plan.add.push_back({ a_id, a_need - have });
+				plan.equip.push_back({ a_id, a_hand });
 			} else {
 				++plan.missing;
 			}
+		};
+		std::vector<std::uint32_t> seen;
+		for (const auto& item : a_gear.worn) {
+			if (!named(item.id) || std::ranges::find(seen, item.id) != seen.end()) {
+				continue;
+			}
+			seen.push_back(item.id);
+			if (std::ranges::none_of(a_now.armor, [&](const Wearing::Armor& a_a) { return a_a.shared == item.id; })) {
+				putOn(item.id, Hand::kNone, 1);
+			}
+		}
+		// The hands: a shield the worn list has put on already. One weapon in both hands needs two of it.
+		if (named(a_gear.right) && a_gear.right != a_now.right && !inGear(a_gear.right)) {
+			putOn(a_gear.right, Hand::kRight, 1);
+		}
+		if (named(a_gear.left) && a_gear.left != a_now.left && !inGear(a_gear.left)) {
+			putOn(a_gear.left, Hand::kLeft, a_gear.left == a_gear.right ? 2 : 1);
+		}
+		if (named(a_gear.ammo) && a_gear.ammo != a_now.ammo) {
+			putOn(a_gear.ammo, Hand::kNone, 1);
 		}
 		return plan;
+	}
+
+	// ---- which actors made as a game ran are shared ----
+
+	// Who commands an actor this game made as it ran (a runtime reference, FF).
+	enum class Commander
+	{
+		kNobody,
+		kOurPlayer,
+		kOurNpc,  // an NPC this game runs (a load-order one, or a spawn of ours)
+		kOther,   // a friend's stand-in, an NPC another game runs, one nobody runs, or one not shared
+	};
+
+	// Such an actor is shared as this game's spawn when our player or an NPC this game runs commands it: every summon,
+	// raised corpse and thrall, whoever cast it (a conjurer the host's game runs, a follower, our player). Any other (a
+	// quest's or an encounter's, which every game makes its own of; one a copy conjured while its own AI ran) is not.
+	[[nodiscard]] constexpr bool SharedAsSpawn(Commander a_commander)
+	{
+		return a_commander == Commander::kOurPlayer || a_commander == Commander::kOurNpc;
 	}
 
 	// ---- what kind of NPC ----
@@ -322,7 +443,7 @@ namespace NpcRules
 		kDragon,    // a creature of a race that flies
 		kHorse,     // a creature that can be ridden
 		kFollower,  // anyone following a player
-		kSummon,    // anyone a player commands (a conjured atronach, a raised corpse, a thrall)
+		kSummon,    // anyone a player or an NPC commands (a conjured atronach, a raised corpse, a thrall)
 		kCount,
 	};
 
@@ -334,9 +455,9 @@ namespace NpcRules
 	}
 
 	// The kind from what the game says of it: the most telling first (a summoned dragon priest is a summon).
-	[[nodiscard]] constexpr Kind KindOf(bool a_commandedByPlayer, bool a_follower, bool a_flies, bool a_mount, bool a_person)
+	[[nodiscard]] constexpr Kind KindOf(bool a_commanded, bool a_follower, bool a_flies, bool a_mount, bool a_person)
 	{
-		if (a_commandedByPlayer) {
+		if (a_commanded) {
 			return Kind::kSummon;
 		}
 		if (a_follower) {

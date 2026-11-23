@@ -287,10 +287,30 @@ namespace FormTranslate
 					++ctx.out.fields;
 					ctx.changed = true;
 				}
-				ctx.Ids(a_msg.worn);
-				ctx.Detail(a_msg.right);
-				ctx.Detail(a_msg.left);
-				ctx.Detail(a_msg.ammo);
+				// A worn item with no ID on the other side is left out, its body slots said (the copy keeps its own
+				// there); a held one is 0, the hand said to hold something unnamed (not an empty hand).
+				std::vector<Protocol::WornItem> kept;
+				kept.reserve(a_msg.worn.size());
+				for (auto item : a_msg.worn) {
+					if (ctx.Key(item.id)) {
+						kept.push_back(item);
+					} else {
+						a_msg.unnamedSlots |= item.slots;
+						++ctx.out.entries;
+						ctx.changed = true;
+					}
+				}
+				a_msg.worn = std::move(kept);
+				const auto held = [&](std::uint32_t& a_id, std::uint8_t a_bit) {
+					const bool had = a_id != 0;
+					ctx.Detail(a_id);
+					if (had && a_id == 0) {
+						a_msg.unnamed |= a_bit;
+					}
+				};
+				held(a_msg.right, Protocol::kRightUnnamed);
+				held(a_msg.left, Protocol::kLeftUnnamed);
+				held(a_msg.ammo, Protocol::kAmmoUnnamed);
 			});
 			break;
 		default:

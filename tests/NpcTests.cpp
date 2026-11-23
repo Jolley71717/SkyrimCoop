@@ -96,7 +96,7 @@ TEST("npc protocol: claims, owners, states, actions and gear read back as they w
 	const Protocol::NpcActions actions{ .runner = 2, .actions = { { GUARD, 1234, "attackStart" }, { WOLF, 0, "FlyStartCruise" } } };
 	CHECK(Protocol::DecodeNpcActions(Protocol::Encode(actions)) == actions);
 
-	const Protocol::NpcGear gear{ .runner = 2, .key = GUARD, .worn = { 0x00012E49, 0x00012E4B }, .right = 0x00012EB7, .left = 0x00012EB6, .ammo = 0x0001397D };
+	const Protocol::NpcGear gear{ .runner = 2, .key = GUARD, .worn = { { 0x00012E49, 0x4 }, { 0x00012E4B, 0x80 } }, .right = 0x00012EB7, .left = 0x00012EB6, .ammo = 0x0001397D, .unnamed = Protocol::kAmmoUnnamed, .unnamedSlots = 0x2 };
 	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(gear)) == gear);
 }
 
@@ -134,7 +134,7 @@ TEST("npc protocol: the longest of each message fits its limit, and one past a l
 	CHECK(!Protocol::DecodeNpcClaims(tooMany));
 
 	for (auto bytes : { Protocol::Encode(Claims({ { GUARD, Why::kHave } })), allBytes, stateBytes, actionBytes,
-			 Protocol::Encode(Protocol::NpcGear{ .key = GUARD, .worn = { 1, 2 } }) }) {
+			 Protocol::Encode(Protocol::NpcGear{ .key = GUARD, .worn = { { 1, 4 }, { 2, 8 } } }) }) {
 		bytes.pop_back();
 		const auto type = Protocol::PeekType(bytes);
 		REQUIRE(type);
@@ -174,14 +174,20 @@ TEST("npc protocol: a claim of no NPC or of an unknown reason, a state of no NPC
 	CHECK(!Protocol::DecodeNpcActions(Protocol::Encode(Protocol::NpcActions{ .actions = { { { 0, 0 }, 1, "attackStart" } } })));
 	// Gear of no NPC reads (the translation leaves that for an NPC the other game lacks); its reader skips it.
 	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(Protocol::NpcGear{ .key = {} })));
+	// An unnamed bit this version does not know is refused.
+	auto unknownBit = Protocol::Encode(Protocol::NpcGear{ .key = GUARD });
+	unknownBit[unknownBit.size() - 5] = 0x08;
+	CHECK(!Protocol::DecodeNpcGear(unknownBit));
+	unknownBit[unknownBit.size() - 5] = Protocol::kAllUnnamed;
+	CHECK(Protocol::DecodeNpcGear(unknownBit));
 }
 
-TEST("npc protocol: every NPC message carries forms, and this protocol is version 5")
+TEST("npc protocol: every NPC message carries forms, and this protocol is version 6")
 {
 	for (const auto type : { MT::kNpcClaims, MT::kNpcOwners, MT::kNpcStates, MT::kNpcActions, MT::kNpcGear }) {
 		CHECK(FormTranslate::CarriesForms(type));
 	}
-	static_assert(Protocol::VERSION == 5);
+	static_assert(Protocol::VERSION == 6);
 }
 
 // ---- each game's edge ----
@@ -268,14 +274,18 @@ TEST("npc form translate: an NPC of a plugin both games have is named as each ga
 	CHECK(actions->actions[0].key.id == 0x01000ABCu);
 	CHECK(actions->actions[0].event == "blockStart");
 
-	// Gear: worn items and held objects the guest lacks go; gear of an NPC it lacks names none.
-	const auto gear = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofB, .worn = { 0x00012E49, 0x04000901 }, .right = 0x04000902, .left = 0x03000903 })));
+	// Gear: worn items and held objects the guest lacks go, said as unnamed (their body slots, the hand), never as
+	// nothing worn or an empty hand; gear of an NPC it lacks names none.
+	const auto gear = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(
+		Protocol::NpcGear{ .key = ofB, .worn = { { 0x00012E49, 0x4 }, { 0x04000901, 0x1 | 0x2 } }, .right = 0x04000902, .left = 0x03000903, .ammo = 0 })));
 	REQUIRE(gear);
 	CHECK(gear->key.id == 0x01000ABCu);
-	CHECK(gear->worn == std::vector<std::uint32_t>{ 0x00012E49 });
+	CHECK(gear->worn == std::vector<Protocol::WornItem>{ { 0x00012E49, 0x4 } });
+	CHECK(gear->unnamedSlots == 0x3u);
 	CHECK(gear->right == 0u);
 	CHECK(gear->left == 0x01000903u);
-	const auto lacked = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofExtra, .worn = { 0x00012E49 } })));
+	CHECK(gear->unnamed == Protocol::kRightUnnamed);  // the left's is known, and no ammunition is none, not unnamed
+	const auto lacked = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofExtra, .worn = { { 0x00012E49, 0x4 } } })));
 	REQUIRE(lacked);
 	CHECK(lacked->key.id == 0u);
 }
@@ -444,6 +454,64 @@ TEST("npc rules: the runner lets go of an NPC its player left behind for a frien
 	CHECK(WhyOf(Ask::kFollower) == Why::kFollower);
 }
 
+TEST("npc rules: an NPC let go of for a friend whose game lacks it is not asked for again, so it never trades back and forth")
+{
+	using namespace NpcRules;
+	const auto t = Steady::now();
+	// The host runs a bandit its player left 6500 u behind; the VM's player stands 300 u from it, but the VM's game does
+	// not list it (disabled in its save, or not among its loaded actors). The host lets go of it ...
+	const Facts run{ .owner = Owner::kUs, .ours = 6500.0f, .nearestFriend = 300.0f };
+	CHECK(Decide(run, t) == Ask::kRelease);
+	// ... and nobody runs it two seconds on: the host's game does not ask for it again, now or later.
+	const Facts after{ .owner = Owner::kNobody, .unownedSince = t - 2s, .ours = 6500.0f, .nearestFriend = 300.0f, .lastClaim = t - 1s };
+	CHECK(Decide(after, t) == Ask::kNone);
+	CHECK(Decide(after, t + 1min) == Ask::kNone);
+	// The same through a door: our player in another space, a friend in its own.
+	const Facts elsewhere{ .owner = Owner::kNobody, .unownedSince = t - 2s, .nearestFriend = 300.0f };
+	CHECK(Decide(elsewhere, t) == Ask::kNone);
+	// Once our player comes back near (or the friend walks off), it is ours to ask for again.
+	auto back = after;
+	back.ours = 400.0f;
+	CHECK(Decide(back, t) == Ask::kHave);
+	auto gone = after;
+	gone.nearestFriend.reset();
+	CHECK(Decide(gone, t) == Ask::kHave);
+	// A fight still takes it at once.
+	auto fought = after;
+	fought.fighting = true;
+	CHECK(Decide(fought, t) == Ask::kFight);
+	// Far, but no friend nearer by the margin: the wait still lets any game that has it ask.
+	const Facts farBoth{ .owner = Owner::kNobody, .unownedSince = t - 2s, .ours = 6500.0f, .nearestFriend = 5800.0f };
+	CHECK(Decide(farBoth, t) == Ask::kHave);
+}
+
+TEST("npc rules: a spawn is kept by its spawner's game while it has it, and asked for at once when nobody runs it")
+{
+	using namespace NpcRules;
+	const auto t = Steady::now();
+	// A conjurer's atronach: its player far, a friend near. It is no other game's to run, so it is never let go of.
+	const Facts ours{ .owner = Owner::kUs, .ours = 9000.0f, .nearestFriend = 100.0f, .spawn = true };
+	CHECK(Decide(ours, t) == Ask::kNone);
+	auto lost = ours;
+	lost.ours.reset();
+	CHECK(Decide(lost, t) == Ask::kNone);
+	const Facts nobody{ .owner = Owner::kNobody, .unownedSince = t, .ours = 9000.0f, .nearestFriend = 100.0f, .spawn = true };
+	CHECK(Decide(nobody, t) == Ask::kHave);
+	auto asked = nobody;
+	asked.lastClaim = t;
+	CHECK(Decide(asked, t + CLAIM_EVERY / 2) == Ask::kNone);
+	CHECK(Decide(asked, t + CLAIM_EVERY) == Ask::kHave);
+}
+
+TEST("npc rules: an actor made as the game ran is shared when our player or an NPC we run commands it")
+{
+	using namespace NpcRules;
+	CHECK(SharedAsSpawn(Commander::kOurPlayer));  // our conjured atronach, our thrall
+	CHECK(SharedAsSpawn(Commander::kOurNpc));     // a necromancer's raised corpse, a conjurer follower's familiar
+	CHECK(!SharedAsSpawn(Commander::kOther));     // another game's NPC's summon: that game shares it
+	CHECK(!SharedAsSpawn(Commander::kNobody));    // a quest's or an encounter's: each game makes its own
+}
+
 TEST("npc rules: states go 20 a second in a fight or near a player, else 10")
 {
 	using namespace NpcRules;
@@ -510,24 +578,110 @@ TEST("npc rules: a copy's events play when it is drawn at their time, in order, 
 	CHECK(queue.Size() == 0u);
 }
 
-TEST("npc rules: a copy equips what it carries of its runner's gear; only a spawn's copy is given what it lacks")
+namespace
+{
+	// Skyrim.esm's guard gear, for the gear tests: a cuirass (body), boots (feet), a helmet (head), a shield, a sword, a
+	// bow, a torch, arrows.
+	constexpr std::uint32_t CUIRASS = 0x00012E49, BOOTS = 0x00012E4B, HELMET = 0x00012E4D, SHIELD = 0x00012EB6;
+	constexpr std::uint32_t SWORD = 0x00012EB7, BOW = 0x0001397E, TORCH = 0x0001D4EC, ARROWS = 0x0001397D;
+	constexpr std::uint32_t BODY = 0x4, FEET = 0x80, HEAD = 0x1, SHIELD_SLOT = 0x200;
+
+	std::vector<NpcRules::GearItem> Items(std::initializer_list<NpcRules::GearItem> a_items) { return a_items; }
+}
+
+TEST("npc rules: a copy puts on what it carries of its runner's gear; only a spawn's copy is given what it lacks")
 {
 	using namespace NpcRules;
-	const Protocol::NpcGear gear{ .key = GUARD, .worn = { 0x00012E49, 0x00012E4B, 0xFF000900, 0x00012E49 }, .right = 0x00012EB7, .left = 0, .ammo = 0x0001397D };
+	const Protocol::NpcGear gear{ .key = GUARD, .worn = { { CUIRASS, BODY }, { BOOTS, FEET }, { 0xFF000900, HEAD }, { CUIRASS, BODY } }, .right = SWORD, .left = 0, .ammo = ARROWS };
 	// It wears the cuirass already and carries the boots and the sword; the arrows it lacks.
-	const std::vector<std::uint32_t> worn{ 0x00012E49 };
-	const std::vector<std::uint32_t> carried{ 0x00012E49, 0x00012E4B, 0x00012EB7 };
-	const auto                       real = PlanGear(gear, worn, carried, false);
-	CHECK(real.equip == std::vector<std::uint32_t>({ 0x00012E4B, 0x00012EB7 }));
+	const Wearing              now{ .armor = { { CUIRASS, CUIRASS, BODY } } };
+	const std::vector<Count>   carried{ { CUIRASS, 1 }, { BOOTS, 1 }, { SWORD, 1 } };
+	const auto                 real = PlanGear(gear, now, carried, false);
+	CHECK(real.equip == Items({ { BOOTS, Hand::kNone }, { SWORD, Hand::kRight } }));
 	CHECK(real.add.empty());
+	CHECK(real.unequip.empty());
 	CHECK(real.missing == 1u);
-	const auto spawn = PlanGear(gear, worn, carried, true);
-	CHECK(spawn.equip == std::vector<std::uint32_t>({ 0x00012E4B, 0x00012EB7, 0x0001397D }));
-	CHECK(spawn.add == std::vector<std::uint32_t>({ 0x0001397D }));
+	const auto spawn = PlanGear(gear, now, carried, true);
+	CHECK(spawn.equip == Items({ { BOOTS, Hand::kNone }, { SWORD, Hand::kRight }, { ARROWS, Hand::kNone } }));
+	CHECK(spawn.add == std::vector<Count>({ { ARROWS, 1 } }));
 	CHECK(spawn.missing == 0u);
-	// A weapon in both hands is equipped once.
-	const Protocol::NpcGear twin{ .key = GUARD, .right = 0x00012EB7, .left = 0x00012EB7 };
-	CHECK(PlanGear(twin, {}, carried, false).equip == std::vector<std::uint32_t>({ 0x00012EB7 }));
+	// All on already: nothing to do.
+	const Wearing dressed{ .armor = { { CUIRASS, CUIRASS, BODY }, { BOOTS, BOOTS, FEET } }, .right = SWORD, .ammo = ARROWS };
+	const auto    none = PlanGear(gear, dressed, carried, false);
+	CHECK(none.equip.empty());
+	CHECK(none.unequip.empty());
+	CHECK(none.missing == 0u);
+}
+
+TEST("npc rules: a copy takes off what its runner's NPC put away: a torch, a helmet, a shield, a bow swapped for a sword")
+{
+	using namespace NpcRules;
+	const std::vector<Count> carried{ { CUIRASS, 1 }, { HELMET, 1 }, { SHIELD, 1 }, { SWORD, 1 }, { BOW, 1 }, { TORCH, 1 }, { ARROWS, 20 } };
+	// Dusk: the guard lit a torch, and the copy holds it. Dawn: the runner's guard put it away (left 0).
+	const Wearing night{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = SWORD, .left = TORCH };
+	const auto    dawn = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = SWORD }, night, carried, false);
+	CHECK(dawn.unequip == Items({ { TORCH, Hand::kLeft } }));
+	CHECK(dawn.equip.empty());
+	// A helmet taken off, a shield put away: worn armor the runner's list no longer has.
+	const Wearing armed{ .armor = { { CUIRASS, CUIRASS, BODY }, { HELMET, HELMET, HEAD }, { SHIELD, SHIELD, SHIELD_SLOT } }, .right = SWORD, .left = SHIELD };
+	const auto    bare = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = SWORD }, armed, carried, false);
+	CHECK(bare.unequip == Items({ { HELMET, Hand::kNone }, { SHIELD, Hand::kNone } }));  // the shield once, as armor
+	CHECK(bare.equip.empty());
+	// A bow swapped for a sword: the bow comes off, the sword goes on; the arrows too.
+	const Wearing archer{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = BOW, .ammo = ARROWS };
+	const auto    melee = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = SWORD }, archer, carried, false);
+	CHECK(melee.unequip == Items({ { BOW, Hand::kRight }, { ARROWS, Hand::kNone } }));
+	CHECK(melee.equip == Items({ { SWORD, Hand::kRight } }));
+	// ... and with a sword the copy does not carry, the bow still comes off (the runner's NPC holds no bow).
+	const auto lacking = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = 0x00099999 }, archer, carried, false);
+	CHECK(lacking.unequip == Items({ { BOW, Hand::kRight }, { ARROWS, Hand::kNone } }));
+	CHECK(lacking.equip.empty());
+	CHECK(lacking.missing == 1u);
+	// The same for a spawn's copy (it is given the sword).
+	const auto spawn = PlanGear({ .key = GUARD, .right = 0x00099999 }, archer, carried, true);
+	CHECK(spawn.unequip == Items({ { CUIRASS, Hand::kNone }, { BOW, Hand::kRight }, { ARROWS, Hand::kNone } }));
+	CHECK(spawn.add == std::vector<Count>({ { 0x00099999, 1 } }));
+}
+
+TEST("npc rules: a copy keeps what its runner's game could not name to it, never left bare for a mod it lacks")
+{
+	using namespace NpcRules;
+	const std::vector<Count> carried{ { CUIRASS, 1 }, { HELMET, 1 }, { SWORD, 1 }, { BOW, 1 } };
+	const Wearing            now{ .armor = { { CUIRASS, CUIRASS, BODY }, { HELMET, HELMET, HEAD } }, .right = SWORD, .left = BOW };
+	// The runner's NPC wears a mod's cuirass and holds a weapon made as its game ran: the copy keeps its cuirass and sword.
+	const auto keep = PlanGear({ .key = GUARD, .worn = { { HELMET, HEAD } }, .right = 0, .left = 0, .unnamed = Protocol::kRightUnnamed, .unnamedSlots = BODY }, now, carried, false);
+	CHECK(keep.unequip == Items({ { BOW, Hand::kLeft } }));  // the left hand is empty there, not unnamed
+	CHECK(keep.equip.empty());
+	// A runtime armor of the copy's own counts as the plugin armor it was made from.
+	const Wearing enchanted{ .armor = { { 0xFF000A00, CUIRASS, BODY } } };
+	const auto    same = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } } }, enchanted, carried, false);
+	CHECK(same.unequip.empty());
+	CHECK(same.equip.empty());
+	// One with no plugin armor behind it is never compared, so never taken off.
+	const Wearing odd{ .armor = { { 0xFF000A01, 0, BODY } } };
+	CHECK(PlanGear({ .key = GUARD }, odd, carried, false).unequip.empty());
+}
+
+TEST("npc rules: a weapon in both hands is put in both, which takes two of it")
+{
+	using namespace NpcRules;
+	const Protocol::NpcGear twin{ .key = GUARD, .right = SWORD, .left = SWORD };
+	// Two carried: both hands.
+	CHECK(PlanGear(twin, {}, { { SWORD, 2 } }, false).equip == Items({ { SWORD, Hand::kRight }, { SWORD, Hand::kLeft } }));
+	// One carried: the right only; the left is missing.
+	const auto one = PlanGear(twin, {}, { { SWORD, 1 } }, false);
+	CHECK(one.equip == Items({ { SWORD, Hand::kRight } }));
+	CHECK(one.missing == 1u);
+	// Held in the right already: the left only.
+	CHECK(PlanGear(twin, { .right = SWORD }, { { SWORD, 2 } }, false).equip == Items({ { SWORD, Hand::kLeft } }));
+	// A spawn's copy is given the two it lacks, no more.
+	const auto spawn = PlanGear(twin, {}, {}, true);
+	CHECK(spawn.equip == Items({ { SWORD, Hand::kRight }, { SWORD, Hand::kLeft } }));
+	CHECK(spawn.add == std::vector<Count>({ { SWORD, 1 }, { SWORD, 1 } }));
+	// Moved from the right hand to the left: off the right first, then into the left.
+	const auto moved = PlanGear({ .key = GUARD, .left = SWORD }, { .right = SWORD }, { { SWORD, 1 } }, false);
+	CHECK(moved.unequip == Items({ { SWORD, Hand::kRight } }));
+	CHECK(moved.equip == Items({ { SWORD, Hand::kLeft } }));
 }
 
 TEST("npc rules: every kind of actor is told apart, the most telling first")
@@ -608,7 +762,7 @@ TEST("npc server: only an NPC's runner's states, events and gear are passed on, 
 	// Bo's word on the guard is nobody's.
 	f.fake->Deliver(2, Protocol::Encode(Protocol::NpcStates{ .npcs = { { GUARD, 0, StateAt(2, 7.0f) } } }));
 	f.fake->Deliver(2, Protocol::Encode(Protocol::NpcActions{ .actions = { { GUARD, 1, "attackStart" } } }));
-	f.fake->Deliver(2, Protocol::Encode(Protocol::NpcGear{ .key = GUARD, .worn = { 0x00012E49 } }));
+	f.fake->Deliver(2, Protocol::Encode(Protocol::NpcGear{ .key = GUARD, .worn = { { 0x00012E49, 0x4 } } }));
 	REQUIRE(f.fake->Settle());
 	CHECK(f.fake->Take(1).empty());
 	const auto heard = SentOf<Protocol::NpcStates>(f, 2, MT::kNpcStates, Protocol::DecodeNpcStates);
@@ -620,7 +774,7 @@ TEST("npc server: only an NPC's runner's states, events and gear are passed on, 
 
 	const Protocol::NpcActions actions{ .actions = { { GUARD, 40, "attackStart" }, { WOLF, 41, "attackStart" } } };
 	f.fake->Deliver(1, Protocol::Encode(actions));
-	const Protocol::NpcGear gear{ .key = GUARD, .worn = { 0x00012E49 }, .right = 0x00012EB7 };
+	const Protocol::NpcGear gear{ .key = GUARD, .worn = { { 0x00012E49, 0x4 } }, .right = 0x00012EB7 };
 	f.fake->Deliver(1, Protocol::Encode(gear));
 	REQUIRE(f.fake->Settle());
 	CHECK(f.fake->Take(1).empty());
@@ -646,7 +800,7 @@ TEST("npc server: one who joins later hears who runs each NPC and its gear; a pl
 	f.fake->Deliver(1, Protocol::Encode(Claims({ { GUARD, Why::kHave }, { ATRONACH_OF_1, Why::kHave } })));
 	f.fake->Deliver(2, Protocol::Encode(Claims({ { WOLF, Why::kHave } })));
 	REQUIRE(f.fake->Settle());
-	const Protocol::NpcGear gear{ .key = GUARD, .worn = { 0x00012E49 } };
+	const Protocol::NpcGear gear{ .key = GUARD, .worn = { { 0x00012E49, 0x4 } } };
 	f.fake->Deliver(1, Protocol::Encode(gear));
 	REQUIRE(f.fake->Settle());
 	(void)f.fake->Take(1);

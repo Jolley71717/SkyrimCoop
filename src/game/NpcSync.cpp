@@ -83,7 +83,8 @@ namespace NpcSync
 			bool                  hasDrawn = false;
 			std::uint64_t         drawn = 0;
 			std::uint64_t         played = 0;   // runner's events its graph took
-			std::uint64_t         refused = 0;  // events (walk's and runner's) its graph turned away
+			std::uint64_t         refused = 0;  // runner's events its graph turned away
+			std::uint64_t         walkRefused = 0;  // the walk's own events (Gait.h) its graph turned away
 			std::string           lastRefused;
 		};
 		std::mutex                                copyLock;
@@ -111,7 +112,7 @@ namespace NpcSync
 		struct Counts
 		{
 			std::uint64_t claims = 0, granted = 0, refused = 0, released = 0, hands = 0;
-			std::uint64_t statesSent = 0, statesIn = 0, actionsSent = 0, actionsIn = 0, gearSent = 0, gearIn = 0, gearMissing = 0, gearSkipped = 0;
+			std::uint64_t statesSent = 0, statesIn = 0, actionsSent = 0, actionsIn = 0, gearSent = 0, gearIn = 0, gearMissing = 0, gearSkipped = 0, gearTakenOff = 0;
 			std::uint64_t spawnsPlaced = 0, spawnsTaken = 0, unshared = 0, lookDiffers = 0;
 			std::uint64_t fallbackSilent = 0, fallbackElsewhere = 0, fallbackFar = 0;
 		};
@@ -316,41 +317,64 @@ namespace NpcSync
 			return a_player->GetMount(mount) && mount.get() == a_actor;
 		}
 
-		NpcRules::Kind KindOf(RE::Actor* a_actor, RE::PlayerCharacter* a_player)
+		NpcRules::Kind KindOf(RE::Actor* a_actor)
 		{
 			const auto race = a_actor->GetRace();
 			const auto editorId = race ? std::string_view{ race->GetFormEditorID() ? race->GetFormEditorID() : "" } : std::string_view{};
-			const bool commanded = a_actor->GetCommandingActor().get() == a_player;
+			const bool commanded = a_actor->GetCommandingActor() != nullptr;
 			const bool flies = race && race->data.flags.all(RE::RACE_DATA::Flag::kFlies);
 			const bool mount = a_actor->IsAMount() || a_actor->IsBeingRidden() || editorId.find("Horse") != std::string_view::npos;
 			const bool person = race && race->HasKeywordID(ACTOR_TYPE_NPC);
 			return NpcRules::KindOf(commanded, a_actor->IsPlayerTeammate(), flies, mount, person);
 		}
 
-		// What it wears and holds, as the others are told: a runtime armor as the plugin armor it was made from, or
-		// nothing (FormIds::Shareable); a runtime weapon or spell as nothing.
+		// A runtime armor's plugin armor (the one it was made from: an enchanted or tempered copy), for FormIds::Shareable.
+		std::uint32_t ArmorTemplateOf(std::uint32_t a_id)
+		{
+			const auto armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(a_id);
+			return armor && armor->templateArmor ? armor->templateArmor->GetFormID() : 0;
+		}
+
+		std::uint32_t SlotsOf(const RE::TESBoundObject* a_object)
+		{
+			const auto armor = a_object ? a_object->As<RE::TESObjectARMO>() : nullptr;
+			return armor ? armor->GetSlotMask().underlying() : 0;
+		}
+
+		// What it wears and holds, as the others are told: a runtime armor as the plugin armor it was made from
+		// (FormIds::Shareable), or left out with its body slots said; a runtime weapon or spell as an unnamed hand, never
+		// as an empty one (the others' copies keep their own there: NpcRules::PlanGear).
 		Protocol::NpcGear GearOf(RE::Actor* a_actor, const Key& a_key)
 		{
 			Protocol::NpcGear gear;
 			gear.key = a_key;
-			const auto templateOf = [](std::uint32_t a_id) -> std::uint32_t {
-				const auto armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(a_id);
-				return armor && armor->templateArmor ? armor->templateArmor->GetFormID() : 0;
-			};
 			for (const auto& [item, data] : a_actor->GetInventory([](RE::TESBoundObject& a_object) { return a_object.IsArmor(); })) {
 				const auto& [count, entry] = data;
-				if (count <= 0 || !entry || !entry->IsWorn() || gear.worn.size() >= Protocol::MAX_WORN) {
+				if (count <= 0 || !entry || !entry->IsWorn()) {
 					continue;
 				}
-				if (const auto shared = FormIds::Shareable(item->GetFormID(), templateOf); shared && std::ranges::find(gear.worn, *shared) == gear.worn.end()) {
-					gear.worn.push_back(*shared);
+				const auto slots = SlotsOf(item);
+				const auto shared = FormIds::Shareable(item->GetFormID(), ArmorTemplateOf);
+				if (!shared || gear.worn.size() >= Protocol::MAX_WORN) {
+					gear.unnamedSlots |= slots;
+				} else if (std::ranges::none_of(gear.worn, [&](const Protocol::WornItem& a_w) { return a_w.id == *shared; })) {
+					gear.worn.push_back({ *shared, slots });
 				}
 			}
 			std::ranges::sort(gear.worn);
-			const auto plugin = [](const RE::TESForm* a_form) -> std::uint32_t { return a_form && !FormIds::IsRuntime(a_form->GetFormID()) ? a_form->GetFormID() : 0; };
-			gear.right = plugin(a_actor->GetEquippedObject(false));
-			gear.left = plugin(a_actor->GetEquippedObject(true));
-			gear.ammo = plugin(a_actor->GetCurrentAmmo());
+			const auto held = [&](const RE::TESForm* a_form, std::uint8_t a_unnamedBit) -> std::uint32_t {
+				if (!a_form) {
+					return 0;
+				}
+				if (FormIds::IsRuntime(a_form->GetFormID())) {
+					gear.unnamed |= a_unnamedBit;
+					return 0;
+				}
+				return a_form->GetFormID();
+			};
+			gear.right = held(a_actor->GetEquippedObject(false), Protocol::kRightUnnamed);
+			gear.left = held(a_actor->GetEquippedObject(true), Protocol::kLeftUnnamed);
+			gear.ammo = held(a_actor->GetCurrentAmmo(), Protocol::kAmmoUnnamed);
 			return gear;
 		}
 
@@ -373,11 +397,11 @@ namespace NpcSync
 		{
 			std::uint64_t played = 0;
 			std::uint64_t refused = 0;
+			std::uint64_t walkRefused = 0;
 			std::string   lastRefused;
 			for (const auto event : a_walk) {
 				if (!a_actor->NotifyAnimationGraph(Name(event))) {
-					++refused;
-					lastRefused = event;
+					++walkRefused;
 				}
 			}
 			for (const auto& event : a_events) {
@@ -388,13 +412,14 @@ namespace NpcSync
 					lastRefused = event;
 				}
 			}
-			if (played == 0 && refused == 0) {
+			if (played == 0 && refused == 0 && walkRefused == 0) {
 				return;
 			}
 			std::scoped_lock l{ copyLock };
 			if (const auto it = copies.find(a_key); it != copies.end()) {
 				it->second.played += played;
 				it->second.refused += refused;
+				it->second.walkRefused += walkRefused;
 				if (!lastRefused.empty()) {
 					it->second.lastRefused = lastRefused;
 				}
@@ -447,6 +472,7 @@ namespace NpcSync
 		struct Dressed
 		{
 			std::size_t equipped = 0;
+			std::size_t unequipped = 0;
 			std::size_t missing = 0;
 			std::size_t skipped = 0;
 		};
@@ -458,36 +484,58 @@ namespace NpcSync
 			if (!manager) {
 				return out;
 			}
-			std::vector<std::uint32_t> worn;
-			std::vector<std::uint32_t> carried;
+			NpcRules::Wearing                now;
+			std::vector<NpcRules::Count>     carried;
 			for (const auto& [item, data] : a_actor->GetInventory()) {
 				const auto& [count, entry] = data;
 				if (count <= 0) {
 					continue;
 				}
-				carried.push_back(item->GetFormID());
-				if (entry && entry->IsWorn()) {
-					worn.push_back(item->GetFormID());
+				carried.push_back({ item->GetFormID(), count });
+				if (entry && entry->IsWorn() && item->IsArmor()) {
+					now.armor.push_back({ item->GetFormID(), FormIds::Shareable(item->GetFormID(), ArmorTemplateOf).value_or(0), SlotsOf(item) });
 				}
 			}
-			const auto plan = NpcRules::PlanGear(a_gear, worn, carried, a_mayAdd);
-			const auto leftSlot = RE::BGSDefaultObjectManager::GetSingleton() ?
-			                          RE::BGSDefaultObjectManager::GetSingleton()->GetObject<RE::BGSEquipSlot>(RE::DEFAULT_OBJECTS::kLeftHandEquip) :
-			                          nullptr;
-			for (const auto id : plan.equip) {
-				const auto form = RE::TESForm::LookupByID(id);
-				const auto object = form ? form->As<RE::TESBoundObject>() : nullptr;
-				// A spell in a hand is the runner's AI's to cast; what a copy shows of it is the runner's events (the
-				// cast's look on a copy comes with the magic work: docs/DESIGN.md).
-				if (!object || form->Is(RE::FormType::Spell)) {
+			const auto idOf = [](const RE::TESForm* a_form) { return a_form ? a_form->GetFormID() : 0u; };
+			now.right = idOf(a_actor->GetEquippedObject(false));
+			now.left = idOf(a_actor->GetEquippedObject(true));
+			now.ammo = idOf(a_actor->GetCurrentAmmo());
+			const auto plan = NpcRules::PlanGear(a_gear, now, carried, a_mayAdd);
+			const auto defaults = RE::BGSDefaultObjectManager::GetSingleton();
+			const auto slotOf = [&](NpcRules::Hand a_hand, const RE::TESForm* a_form) -> const RE::BGSEquipSlot* {
+				// A weapon goes in the hand named; a torch or a shield where the game puts it.
+				if (!defaults || a_hand == NpcRules::Hand::kNone || !a_form->Is(RE::FormType::Weapon)) {
+					return nullptr;
+				}
+				return defaults->GetObject<RE::BGSEquipSlot>(a_hand == NpcRules::Hand::kLeft ? RE::DEFAULT_OBJECTS::kLeftHandEquip : RE::DEFAULT_OBJECTS::kRightHandEquip);
+			};
+			// A spell in a hand is the runner's AI's to cast; what a copy shows of it is the runner's events (the cast's
+			// look on a copy comes with the magic work: docs/DESIGN.md). Neither taken off nor put on here.
+			const auto object = [&](std::uint32_t a_id) -> RE::TESBoundObject* {
+				const auto form = RE::TESForm::LookupByID(a_id);
+				return form && !form->Is(RE::FormType::Spell) ? form->As<RE::TESBoundObject>() : nullptr;
+			};
+			for (const auto& item : plan.unequip) {
+				const auto bound = object(item.id);
+				if (!bound) {
 					++out.skipped;
 					continue;
 				}
-				if (std::ranges::find(plan.add, id) != plan.add.end()) {
-					a_actor->AddObjectToContainer(object, nullptr, 1, nullptr);
+				manager->UnequipObject(a_actor, bound, nullptr, 1, slotOf(item.hand, bound), false, true, false, true);
+				++out.unequipped;
+			}
+			for (const auto& add : plan.add) {
+				if (const auto bound = object(add.id); bound && add.count > 0) {
+					a_actor->AddObjectToContainer(bound, nullptr, add.count, nullptr);
 				}
-				const bool left = id == a_gear.left && id != a_gear.right && form->Is(RE::FormType::Weapon);
-				manager->EquipObject(a_actor, object, nullptr, 1, left ? leftSlot : nullptr, false, true, false, true);
+			}
+			for (const auto& item : plan.equip) {
+				const auto bound = object(item.id);
+				if (!bound) {
+					++out.skipped;
+					continue;
+				}
+				manager->EquipObject(a_actor, bound, nullptr, 1, slotOf(item.hand, bound), false, true, false, true);
 				++out.equipped;
 			}
 			out.missing = plan.missing;
@@ -495,6 +543,24 @@ namespace NpcSync
 		}
 
 		// ---- the loaded NPCs (main thread) ----
+
+		// Who commands an actor: our player, an NPC this game runs (a load-order one by its own id, a runtime one as our
+		// spawn), or anyone else.
+		NpcRules::Commander CommanderOf(RE::Actor* a_actor, RE::PlayerCharacter* a_player)
+		{
+			const auto commander = a_actor->GetCommandingActor();
+			if (!commander) {
+				return NpcRules::Commander::kNobody;
+			}
+			if (commander.get() == a_player) {
+				return NpcRules::Commander::kOurPlayer;
+			}
+			const auto id = commander->GetFormID();
+			const Key  key{ id, FormIds::IsRuntime(id) ? ourId : 0 };
+			const auto owner = owners.find(key);
+			return owner != owners.end() && owner->second == ourId ? NpcRules::Commander::kOurNpc : NpcRules::Commander::kOther;
+		}
+
 		void Scan(Clock::time_point a_now)
 		{
 			const auto lists = RE::ProcessLists::GetSingleton();
@@ -524,9 +590,10 @@ namespace NpcSync
 					}
 					Key key{ id, 0 };
 					if (FormIds::IsRuntime(id)) {
-						// Made as this game ran. Our player's summon is shared as a spawn; any other (a quest's or an
-						// encounter's, which every game makes its own of) is not shared yet.
-						if (actor->GetCommandingActor().get() != player) {
+						// Made as this game ran: shared as our spawn when our player or an NPC we run commands it (every
+						// summon, raised corpse and thrall, whoever cast it); any other (a quest's or an encounter's,
+						// which every game makes its own of) is not shared yet.
+						if (!loaded.contains(Key{ id, ourId }) && !NpcRules::SharedAsSpawn(CommanderOf(actor.get(), player))) {
 							++counts.unshared;
 							continue;
 						}
@@ -537,7 +604,7 @@ namespace NpcSync
 					if (npc.id != id) {
 						npc = Loaded{ .handle = actor->GetHandle(), .id = id };
 					}
-					npc.kind = KindOf(actor.get(), player);
+					npc.kind = KindOf(actor.get());
 					npc.seen = a_now;
 				}
 			}
@@ -605,6 +672,7 @@ namespace NpcSync
 				}
 				facts.fighting = FoughtLately(npc.id, a_now);
 				facts.followsUs = player && FollowsUs(actor.get(), player);
+				facts.spawn = key.IsSpawn();
 				const auto ask = NpcRules::Decide(facts, a_now);
 				if (ask == NpcRules::Ask::kNone) {
 					continue;
@@ -797,6 +865,11 @@ namespace NpcSync
 							RemotePlayers::StopLegs(actor);
 						}
 					}
+					if (mirror && !copy.mirror) {
+						// Its own AI may have changed what it wears and holds meanwhile (a torch lit, a weapon drawn): its
+						// runner's gear is put on again.
+						copy.geared = false;
+					}
 					copy.mirror = mirror;
 					if (actor) {
 						if (copy.gear && !copy.geared) {
@@ -880,7 +953,8 @@ namespace NpcSync
 				}
 				counts.gearMissing += dressed.missing;
 				counts.gearSkipped += dressed.skipped;
-				logs::debug("NPCs: copy {:08X} of {:08X} put on {} of its runner's items ({} it lacks, {} left to its runner)", actor->GetFormID(), job.key.id, dressed.equipped,
+				counts.gearTakenOff += dressed.unequipped;
+				logs::debug("NPCs: copy {:08X} of {:08X} took off {} and put on {} of its runner's items ({} it lacks, {} left to its runner)", actor->GetFormID(), job.key.id, dressed.unequipped, dressed.equipped,
 					dressed.missing, dressed.skipped);
 			}
 		}
@@ -1185,21 +1259,23 @@ namespace NpcSync
 		std::size_t      spawnCopies = 0;
 		std::uint64_t    played = 0;
 		std::uint64_t    refused = 0;
+		std::uint64_t    walkRefused = 0;
 		for (const auto& [key, copy] : copies) {
 			mirrored += copy.mirror ? 1 : 0;
 			shown += copy.actorId != 0 ? 1 : 0;
 			spawnCopies += copy.spawned && copy.actorId != 0 ? 1 : 0;
 			played += copy.played;
 			refused += copy.refused;
+			walkRefused += copy.walkRefused;
 		}
 		if (words.empty()) {
 			return std::format(
 				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} statesSent={} statesIn={} "
-				"actionsSent={} actionsIn={} played={} refusedEvents={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} spawnsPlaced={} spawnsTaken={} unshared={} "
-				"lookDiffers={} fallbacks={}/{}/{} hooked={}",
+				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
+				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
-				counts.hands, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, eventsLost.load(), counts.gearSent, counts.gearIn,
-				counts.gearMissing, counts.gearSkipped, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
+				counts.hands, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
+				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0);
 		}
 		// One line per NPC: `npcs list`, or `npcs <form id>` for one. Its local form id, who runs it, its kind, where its
@@ -1259,9 +1335,11 @@ namespace NpcSync
 				}
 				float graphSpeed = 0.0f;
 				const bool hasSpeed = actor && actor->GetGraphVariableFloat(Name("Speed"), graphSpeed);
-				out += std::format(" runner={} mode={} target={} apart={} base={:08X} states={} drawn={} played={} refused={}{} geared={} graphSpeed={}", c.runner,
-					NpcRules::ModeName(c.mode), target, apart, c.base, c.buffer.snapshots.size(), c.drawn, c.played, c.refused, c.lastRefused.empty() ? "" : " last=" + c.lastRefused,
-					c.geared ? 1 : 0, hasSpeed ? std::format("{:.0f}", graphSpeed) : "none");
+				// played/refused: the runner's events; walkRefused: the walk's own (Gait.h); gear: its runner's gear came,
+				// geared: it is on.
+				out += std::format(" runner={} mode={} target={} apart={} base={:08X} states={} drawn={} played={} refused={} walkRefused={}{} gear={} geared={} graphSpeed={}",
+					c.runner, NpcRules::ModeName(c.mode), target, apart, c.base, c.buffer.snapshots.size(), c.drawn, c.played, c.refused, c.walkRefused,
+					c.lastRefused.empty() ? "" : " last=" + c.lastRefused, c.gear ? 1 : 0, c.geared ? 1 : 0, hasSpeed ? std::format("{:.0f}", graphSpeed) : "none");
 			}
 		}
 		return out;
