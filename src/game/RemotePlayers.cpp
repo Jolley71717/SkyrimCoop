@@ -82,6 +82,7 @@ namespace RemotePlayers
 			std::uint64_t swimRefused = 0;
 			std::uint64_t swimGivenUp = 0;
 			std::uint64_t refloats = 0;
+			float         drift = 0.0f;  // the engine's last update's move off its height while swimming (HoldDepth's a_drift)
 			Protocol::PlayerState lastDrawn;
 			bool          hasDrawn = false;
 
@@ -645,10 +646,15 @@ namespace RemotePlayers
 			}
 			a_this->UpdateNoAI(a_delta);
 			// In water, at its friend's depth: the water's pull to the surface does not lift it (Gait::Refloat).
-			if (sample && HoldDepth(a_this, sample->state)) {
-				std::scoped_lock l{ lock };
-				if (const auto player = players.find(playerId); player != players.end() && player->second.standInId == a_this->GetFormID()) {
-					++player->second.refloats;
+			if (sample) {
+				float      drift = 0.0f;
+				const bool held = HoldDepth(a_this, sample->state, &drift);
+				if ((sample->state.flags & Protocol::kSwimming) != 0) {
+					std::scoped_lock l{ lock };
+					if (const auto player = players.find(playerId); player != players.end() && player->second.standInId == a_this->GetFormID()) {
+						player->second.drift = drift;
+						player->second.refloats += held ? 1 : 0;
+					}
 				}
 			}
 			if (sample && eventsHere) {
@@ -1669,12 +1675,16 @@ namespace RemotePlayers
 		return !race || race->data.flags.any(RE::RACE_DATA::Flag::kWalks);
 	}
 
-	bool HoldDepth(RE::Actor* a_actor, const Protocol::PlayerState& a_state)
+	bool HoldDepth(RE::Actor* a_actor, const Protocol::PlayerState& a_state, float* a_drift)
 	{
 		if ((a_state.flags & Protocol::kSwimming) == 0 || !a_actor) {
 			return false;
 		}
-		if (!Gait::Refloat(a_state, a_state.z, a_actor->GetPositionZ())) {
+		const float after = a_actor->GetPositionZ();
+		if (a_drift) {
+			*a_drift = after - a_state.z;
+		}
+		if (!Gait::Refloat(a_state, a_state.z, after)) {
 			return false;
 		}
 		a_actor->SetPosition({ a_state.x, a_state.y, a_state.z }, true);
@@ -1864,6 +1874,7 @@ namespace RemotePlayers
 			int                  charState = -1;  // its character controller's state (hkpCharacterStateType; 5 is swimming)
 			float                z = 0.0f;
 			float                pitch = 0.0f;  // its angle x, up positive, in degrees
+			std::optional<float> body;          // its body's rise as drawn (Water::BodyRise)
 			std::optional<float> water;
 		};
 		std::unordered_map<std::uint32_t, Read> reads;
@@ -1884,6 +1895,7 @@ namespace RemotePlayers
 			const auto at = actor->GetPosition();
 			read.z = at.z;
 			read.pitch = -actor->GetAngleX() * 180.0f / std::numbers::pi_v<float>;
+			read.body = Water::BodyRise(actor);
 			read.water = Water::HeightAt(at, actor->GetParentCell());
 			reads[id] = read;
 		}
@@ -1894,13 +1906,14 @@ namespace RemotePlayers
 			const auto& friendState = remote.lastDrawn;
 			const bool  known = remote.hasDrawn && read.swimming >= 0;
 			out += std::format(" | player {} standin={:08X} friendSwims={} friendUnder={} shown={} swimming={} engineSwimming={} inWater={} charState={} z={} friendZ={} depthErr={}"
-							   " water={} pitch={} friendPitch={} swimTaken={} swimRefused={} swimGivenUp={} refloats={}",
+							   " water={} pitch={} friendPitch={} body={} swimTaken={} swimRefused={} swimGivenUp={} refloats={} drift={:.0f}",
 				id, remote.standInId, remote.hasDrawn ? ((friendState.flags & Protocol::kSwimming) != 0 ? 1 : 0) : -1,
 				remote.hasDrawn ? ((friendState.flags & Protocol::kUnderwater) != 0 ? 1 : 0) : -1, remote.shown.swimming ? "w" : "-", read.swimming,
 				read.engineSwimming, read.inWater, read.charState, known ? std::format("{:.0f}", read.z) : "none",
 				remote.hasDrawn ? std::format("{:.0f}", friendState.z) : "none", known ? std::format("{:.0f}", read.z - friendState.z) : "none",
 				read.water ? std::format("{:.0f}", *read.water) : "none", known ? std::format("{:.0f}", read.pitch) : "none",
-				remote.hasDrawn ? std::to_string(friendState.pitch) : "none", remote.swimTaken, remote.swimRefused, remote.swimGivenUp, remote.refloats);
+				remote.hasDrawn ? std::to_string(friendState.pitch) : "none", read.body ? std::format("{:.0f}", *read.body) : "none", remote.swimTaken, remote.swimRefused,
+				remote.swimGivenUp, remote.refloats, remote.drift);
 		}
 		return out;
 	}

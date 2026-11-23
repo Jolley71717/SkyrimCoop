@@ -92,8 +92,10 @@ namespace RemotePlayers
 	// Whether its graph goes into and out of swimming (its race walks; a fish's is always in water): Gait::Next's a_swimEvents.
 	[[nodiscard]] bool SwimsAsMode(const RE::Actor* a_actor);
 	// In water: placed again where it is shown after the engine's update when that moved it off its height
-	// (Gait::Refloat: the water's pull to the surface). True when it was.
-	bool HoldDepth(RE::Actor* a_actor, const Protocol::PlayerState& a_state);
+	// (Gait::Refloat: the water's pull to the surface). True when it was. a_drift: how far the engine's update moved it
+	// up (down negative) off the height it was shown at, put back or not, when it is shown swimming (for `swim`: what the
+	// engine did, not where the plugin put it after).
+	bool HoldDepth(RE::Actor* a_actor, const Protocol::PlayerState& a_state, float* a_drift = nullptr);
 	// An actor this game placed (a copy of a spawn) goes out of the world as a stand-in does: disabled, then deleted
 	// (Retire.h), its AI off meanwhile, taken out before a save and named in the co-save until it is gone.
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
@@ -117,8 +119,9 @@ namespace RemotePlayers
 	// Developer channel `swim` (the stand-ins' part, after ours: Water::Command): per player, whether its friend swims and
 	// is under water as the states say, what its graph was told (shown), what its actor state, the engine's flags and its
 	// character controller say, its height against its friend's (depthErr), the water's height there, its pitch against
-	// its friend's, the swim events its graph took and turned away and the changes given up, and how often the water
-	// moved it off the height it was shown at (refloats).
+	// its friend's, its body as drawn (Water::BodyRise), the swim events its graph took and turned away and the changes
+	// given up, how often the water moved it off the height it was shown at (refloats) and the engine's last move of it
+	// (drift).
 	[[nodiscard]] std::string Swim();
 
 	// The co-save record's type: "SKST" (stand-ins).

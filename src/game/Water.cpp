@@ -59,12 +59,13 @@ namespace Water
 					charController->flags.all(RE::CHARACTER_FLAGS::kSwimAtWaterSurface) ? 1 : 0, charController->flags.all(RE::CHARACTER_FLAGS::kShouldersUnderWater) ? 1 : 0,
 					charController->waterHeight);
 			}
-			return std::format("ours swimming={} engineSwimming={} inWater={} under={} engineUnder={} submerged={:.2f} charState={} z={:.0f} water={} depth={} pitch={:.0f}"
+			const auto body = BodyRise(player);
+			return std::format("ours swimming={} engineSwimming={} inWater={} under={} engineUnder={} submerged={:.2f} charState={} z={:.0f} water={} depth={} pitch={:.0f} body={}"
 							   " entered={} left={} dived={} surfaced={} heardIn={} heardOut={} heardDive={} heardSurface={}",
 				swimming ? 1 : 0, data.boolBits.all(RE::Actor::BOOL_BITS::kSwimming) ? 1 : 0, data.boolBits.all(RE::Actor::BOOL_BITS::kInWater) ? 1 : 0,
 				Under(player, swimming) ? 1 : 0, engineUnder ? 1 : 0, std::isfinite(submerged) ? submerged : -1.0f, controller, at.z,
 				water ? std::format("{:.0f}", *water) : "none", water ? std::format("{:.0f}", *water - at.z) : "none",
-				-player->GetAngleX() * 180.0f / std::numbers::pi_v<float>, watch.entered, watch.left, watch.dived, watch.surfaced, HeardAround(watch.enteredAt),
+				-player->GetAngleX() * 180.0f / std::numbers::pi_v<float>, body ? std::format("{:.0f}", *body) : "none", watch.entered, watch.left, watch.dived, watch.surfaced, HeardAround(watch.enteredAt),
 				HeardAround(watch.leftAt), HeardAround(watch.divedAt), HeardAround(watch.surfacedAt));
 		}
 
@@ -109,6 +110,24 @@ namespace Water
 			return std::format("spot=({:.0f},{:.0f}) depth={:.0f} dist={:.0f} radius={:.0f} looked={} from=({:.0f},{:.0f})", spot->x, spot->y, spot->depth,
 				spot->distance, radius, looked, at.x, at.y);
 		}
+	}
+
+	std::optional<float> BodyRise(RE::Actor* a_actor)
+	{
+		const auto root = a_actor ? a_actor->Get3D(false) : nullptr;
+		if (!root) {
+			return std::nullopt;
+		}
+		static const RE::BSFixedString pelvisName{ "NPC Pelvis [Pelv]" };
+		static const RE::BSFixedString headName{ "NPC Head [Head]" };
+		const auto pelvis = root->GetObjectByName(pelvisName);
+		const auto head = root->GetObjectByName(headName);
+		if (!pelvis || !head) {
+			return std::nullopt;
+		}
+		const auto& p = pelvis->world.translate;
+		const auto& h = head->world.translate;
+		return WaterRules::BodyRise(p.x, p.y, p.z, h.x, h.y, h.z);
 	}
 
 	std::optional<float> HeightAt(const RE::NiPoint3& a_at, RE::TESObjectCELL* a_cell)

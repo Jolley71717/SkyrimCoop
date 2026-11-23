@@ -201,6 +201,18 @@ namespace Gait
 		return -degrees * std::numbers::pi_v<float> / 180.0f;
 	}
 
+	// The pitch a copy of an NPC is turned to each frame, in the game's radians (down positive): a flyer's own (a dragon
+	// climbing or diving), a swimmer's under water (DivePitch), and level in every other case. Set every frame, so a
+	// copy that lands, or leaves the water from under it with no sample at the surface between (a script moves it out
+	// of a lake, its runner's states held and came again on the shore), never keeps the last pitch it had.
+	[[nodiscard]] inline float CopyPitch(const Protocol::PlayerState& a_state)
+	{
+		if ((a_state.flags & Protocol::kFlying) != 0) {
+			return -static_cast<float>(a_state.pitch) * std::numbers::pi_v<float> / 180.0f;
+		}
+		return DivePitch(a_state).value_or(0.0f);
+	}
+
 	// The water's own pull (a swimmer floats up to the surface) must not take an actor from the depth it is shown at:
 	// one whose height moved more than this in the engine's update is put back where it is shown (and counted).
 	inline constexpr float REFLOAT_DRIFT = 8.0f;

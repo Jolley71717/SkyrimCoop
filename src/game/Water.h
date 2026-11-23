@@ -18,6 +18,12 @@ namespace Water
 	// none where it has none or can't say (a cell not loaded).
 	[[nodiscard]] std::optional<float> HeightAt(const RE::NiPoint3& a_at, RE::TESObjectCELL* a_cell);
 
+	// How far an actor's body rises from its pelvis to its head as its 3D is drawn (WaterRules::BodyRise: about 90
+	// standing, near 0 swimming level, below 0 diving), from its third-person skeleton's pelvis and head nodes; none
+	// when its 3D or those nodes are not there (a creature's skeleton names them otherwise). What the engine drew, for
+	// the rig.
+	[[nodiscard]] std::optional<float> BodyRise(RE::Actor* a_actor);
+
 	// Each tick in a session: our player's swimming and being under water, for `swim` (when each last changed).
 	void Sample();
 

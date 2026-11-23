@@ -282,6 +282,29 @@ TEST("gait: a swimmer under water is pitched as it swims, held to 75 degrees; at
 	CHECK(!Gait::DivePitch(state));
 }
 
+TEST("gait: a copy is pitched as it flies or dives and level in every other state, so none keeps an old pitch")
+{
+	const auto radians = [](float a_degrees) { return a_degrees * std::numbers::pi_v<float> / 180.0f; };
+	auto       state = Moving(300.0f, Protocol::kFlying);
+	state.pitch = 20;  // a dragon climbing
+	CHECK(std::fabs(Gait::CopyPitch(state) - -radians(20.0f)) < 1e-5f);
+	state.flags = Protocol::kSwimming | Protocol::kUnderwater;
+	state.pitch = -40;  // diving
+	CHECK(std::fabs(Gait::CopyPitch(state) - radians(40.0f)) < 1e-5f);
+
+	// Every way out of those is level, whatever pitch the state still carries: the dragon landed, the swimmer came up,
+	// or the swimmer's runner moved it from under water straight onto the shore (no sample at the surface between).
+	state.pitch = -40;
+	for (const auto flags : { std::uint8_t{ Protocol::kNone }, std::uint8_t{ Protocol::kSwimming }, std::uint8_t{ Protocol::kUnderwater },
+			 std::uint8_t{ Protocol::kSneaking }, std::uint8_t{ Protocol::kJumping } }) {
+		state.flags = flags;
+		CHECK(Gait::CopyPitch(state) == 0.0f);
+	}
+	state.flags = Protocol::kFlying | Protocol::kSwimming | Protocol::kUnderwater;  // a flyer's own pitch comes first
+	state.pitch = 10;
+	CHECK(std::fabs(Gait::CopyPitch(state) - -radians(10.0f)) < 1e-5f);
+}
+
 TEST("gait: a swimmer the water's update moved off its height is put back; on land, or within 8 units, it is not")
 {
 	const auto swimming = Moving(100.0f, Protocol::kSwimming);

@@ -112,6 +112,7 @@ namespace NpcSync
 			std::uint64_t         swimRefused = 0;
 			std::uint64_t         swimGivenUp = 0;
 			std::uint64_t         refloats = 0;  // the water moved it off the height it is shown at (RemotePlayers::HoldDepth)
+			float                 drift = 0.0f;  // the engine's last update's move off its height while swimming
 			std::string           lastRefused;
 		};
 		std::mutex                                copyLock;
@@ -1741,26 +1742,26 @@ namespace NpcSync
 		// Its AI does not run: where its runner has it, turned its way (a flyer pitched too, and a swimmer under water),
 		// its legs its runner's.
 		a_actor->SetPosition({ sample->state.x, sample->state.y, sample->state.z }, true);
-		const auto dive = Gait::DivePitch(sample->state);
-		if ((sample->state.flags & Protocol::kFlying) != 0) {
-			const float pitch = -static_cast<float>(sample->state.pitch) * std::numbers::pi_v<float> / 180.0f;
+		// Its pitch is set every frame (Gait::CopyPitch: a flyer's, a diver's, else level), so a dragon that lands or a
+		// swimmer taken out of the water from under it is level at once.
+		const float pitch = Gait::CopyPitch(sample->state);
+		if (pitch != 0.0f) {
 			a_actor->SetAngle({ pitch, 0.0f, sample->state.heading });
-		} else if (dive) {
-			a_actor->SetAngle({ *dive, 0.0f, sample->state.heading });
 		} else {
 			a_actor->SetHeading(sample->state.heading);
-			if ((sample->state.flags & Protocol::kSwimming) != 0) {
-				a_actor->data.angle.x = 0.0f;  // level again at the surface, after a dive
-			}
+			a_actor->data.angle.x = 0.0f;
 		}
 		RemotePlayers::ShowMoves(a_actor, Gait::Bits(step, sample->state));
 		RemotePlayers::DriveLegs(a_actor, { step.speed, step.direction });
 		a_actor->UpdateNoAI(a_delta);
 		// In water, at its runner's depth: the water's pull to the surface does not lift it.
-		if (RemotePlayers::HoldDepth(a_actor, sample->state)) {
+		float      drift = 0.0f;
+		const bool held = RemotePlayers::HoldDepth(a_actor, sample->state, &drift);
+		if ((sample->state.flags & Protocol::kSwimming) != 0) {
 			std::scoped_lock l{ copyLock };
 			if (const auto it = copies.find(key); it != copies.end() && it->second.actorId == a_actor->GetFormID()) {
-				++it->second.refloats;
+				it->second.drift = drift;
+				it->second.refloats += held ? 1 : 0;
 			}
 		}
 		TellCopy(a_actor, key, step, events);
@@ -1965,18 +1966,39 @@ namespace NpcSync
 			refused += copy.swimRefused;
 			givenUp += copy.swimGivenUp;
 			refloats += copy.refloats;
-			if (!copy.hasDrawn || (copy.lastDrawn.flags & Protocol::kSwimming) == 0) {
+			if (!copy.hasDrawn) {
 				continue;
 			}
-			++swimming;
-			under += (copy.lastDrawn.flags & Protocol::kUnderwater) != 0 ? 1 : 0;
-			shown += copy.shown.swimming ? 1 : 0;
+			const auto actor = copy.handle.get();
+			const bool here = actor && actor->GetFormID() == copy.actorId;
+			const bool runnerSwims = (copy.lastDrawn.flags & Protocol::kSwimming) != 0;
+			const bool walks = !here || RemotePlayers::SwimsAsMode(actor.get());
+			// Listed: each copy whose runner has it swimming, and each copy of a race that does not walk (a fish, whose
+			// graph is never told to swim: the rig checks it was told nothing).
+			if (!runnerSwims && walks) {
+				continue;
+			}
+			if (runnerSwims) {
+				++swimming;
+				under += (copy.lastDrawn.flags & Protocol::kUnderwater) != 0 ? 1 : 0;
+				shown += copy.shown.swimming ? 1 : 0;
+			}
 			if (listed < MAX_SWIM_LISTED) {
-				const auto actor = copy.handle.get();
-				const bool here = actor && actor->GetFormID() == copy.actorId;
-				list += std::format(" | copy {:08X}{} shown={} under={} z={} runnerZ={:.0f} depthErr={}", key.id, key.IsSpawn() ? std::format(" spawner={}", key.spawner) : "",
-					copy.shown.swimming ? "w" : "-", (copy.lastDrawn.flags & Protocol::kUnderwater) != 0 ? 1 : 0,
-					here ? std::format("{:.0f}", actor->GetPositionZ()) : "none", copy.lastDrawn.z,
+				// What the engine says of it (its own flags and its character controller's state; 5 is swimming), not
+				// only what the plugin set and told its graph.
+				int engineSwimming = -1;
+				int charState = -1;
+				if (here) {
+					engineSwimming = actor->GetActorRuntimeData().boolBits.all(RE::Actor::BOOL_BITS::kSwimming) ? 1 : 0;
+					if (const auto controller = actor->GetCharController()) {
+						charState = static_cast<int>(std::to_underlying(controller->context.currentState));
+					}
+				}
+				list += std::format(" | copy {:08X}{} base={:08X} walks={} runnerSwims={} shown={} under={} engineSwimming={} charState={} swimTaken={} swimRefused={}"
+									" swimGivenUp={} refloats={} drift={:.0f} z={} runnerZ={:.0f} depthErr={}",
+					key.id, key.IsSpawn() ? std::format(" spawner={}", key.spawner) : "", copy.base, walks ? 1 : 0, runnerSwims ? 1 : 0,
+					copy.shown.swimming ? "w" : "-", (copy.lastDrawn.flags & Protocol::kUnderwater) != 0 ? 1 : 0, engineSwimming, charState, copy.swimTaken,
+					copy.swimRefused, copy.swimGivenUp, copy.refloats, copy.drift, here ? std::format("{:.0f}", actor->GetPositionZ()) : "none", copy.lastDrawn.z,
 					here ? std::format("{:.0f}", actor->GetPositionZ() - copy.lastDrawn.z) : "none");
 				++listed;
 			}

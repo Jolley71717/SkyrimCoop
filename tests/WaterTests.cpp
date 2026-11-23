@@ -42,10 +42,12 @@ TEST("water: the nearest point deep enough to swim in is found on the grid, and 
 	std::size_t looked = 0;
 	const auto  spot = WaterRules::FindSpot(0.0f, 0.0f, 2048.0f, Shore, &looked);
 	REQUIRE(spot.has_value());
-	CHECK(spot->x == 1280.0f);  // the first grid line past 1160 (10 x 128)
-	CHECK(spot->y == 0.0f);     // straight east: the nearest of that line
-	CHECK(spot->depth == 280.0f);
-	CHECK(spot->distance == 1280.0f);
+	// The first grid line with deep water SPOT_AROUND west of it too: past 1160 + 192 = 1352 (11 x 128). 1280, deep
+	// itself, is not: a walker stopping short of it, on the shore's side, would wade.
+	CHECK(spot->x == 1408.0f);
+	CHECK(spot->y == 0.0f);  // straight east: the nearest of that line
+	CHECK(spot->depth == 408.0f);
+	CHECK(spot->distance == 1408.0f);
 	CHECK(spot->looked == looked);
 	CHECK(looked > 0);
 
@@ -81,9 +83,30 @@ TEST("water: no water within the radius is none, and a search never looks past t
 	CHECK(!WaterRules::FindSpot(0.0f, 0.0f, std::numeric_limits<float>::quiet_NaN(), dry, &looked));
 	CHECK(looked == 1);
 
+	// A deep channel too narrow to be deep all round (deep only within 150 of x = 0): none. As wide as the ring: there.
+	const auto channel = [](float a_x, float) { return std::abs(a_x) <= 150.0f ? std::optional<float>{ 400.0f } : std::optional<float>{ 20.0f }; };
+	CHECK(!WaterRules::FindSpot(0.0f, 0.0f, 1024.0f, channel));
+	const auto wide = [](float a_x, float) { return std::abs(a_x) <= WaterRules::SPOT_AROUND ? std::optional<float>{ 400.0f } : std::nullopt; };
+	const auto inWide = WaterRules::FindSpot(0.0f, 0.0f, 1024.0f, wide);
+	REQUIRE(inWide.has_value());
+	CHECK(inWide->x == 0.0f);
+
 	// A depth read as no number is not water.
 	const auto broken = [](float, float) { return std::optional<float>{ std::numeric_limits<float>::infinity() }; };
 	CHECK(!WaterRules::FindSpot(0.0f, 0.0f, 256.0f, broken));
+}
+
+TEST("water: a body's rise from its pelvis to its head is about 90 standing, near 0 level, below 0 head down")
+{
+	using WaterRules::BodyRise;
+	const auto about = [](std::optional<float> a_got, float a_want) { return a_got && std::fabs(*a_got - a_want) < 0.01f; };
+	CHECK(about(BodyRise(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 60.0f), 90.0f));     // standing
+	CHECK(about(BodyRise(0.0f, 0.0f, 0.0f, 60.0f, 0.0f, 0.0f), 0.0f));      // lying level, facing any way
+	CHECK(about(BodyRise(0.0f, 0.0f, 0.0f, 0.0f, -60.0f, 0.0f), 0.0f));
+	CHECK(about(BodyRise(10.0f, 10.0f, 10.0f, 40.0f, 50.0f, -40.0f), -45.0f));  // head 50 below the hips, 50 ahead: diving at 45
+	CHECK(about(BodyRise(0.0f, 0.0f, 0.0f, 30.0f, 0.0f, 30.0f), 45.0f));
+	CHECK(!BodyRise(5.0f, 5.0f, 5.0f, 5.0f, 5.0f, 5.0f));  // one point: no line
+	CHECK(!BodyRise(0.0f, 0.0f, 0.0f, std::numeric_limits<float>::quiet_NaN(), 0.0f, 1.0f));
 }
 
 TEST("water: the events heard around a moment are said each once, in the order first heard, and only the last 64 kept")

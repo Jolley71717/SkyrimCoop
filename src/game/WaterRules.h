@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <vector>
@@ -31,6 +32,23 @@ namespace WaterRules
 		return a_swimming && (a_engineUnderwater || (std::isfinite(a_submerged) && a_submerged >= SUBMERGED_UNDER));
 	}
 
+	// ---- the body as drawn (the rig's reading of a dive) ----
+
+	// How far a body's line from its pelvis to its head rises, in degrees: about 90 standing, near 0 lying level (a
+	// swimmer at the surface), below 0 with its head lower than its hips (diving). Read from the actor's 3D, so it says
+	// what the engine drew, not what the plugin asked for. None when the two points are one or not numbers.
+	[[nodiscard]] inline std::optional<float> BodyRise(float a_pelvisX, float a_pelvisY, float a_pelvisZ, float a_headX, float a_headY, float a_headZ)
+	{
+		const float dx = a_headX - a_pelvisX;
+		const float dy = a_headY - a_pelvisY;
+		const float dz = a_headZ - a_pelvisZ;
+		const float level = std::hypot(dx, dy);
+		if (!std::isfinite(level) || !std::isfinite(dz) || (level < 1e-3f && std::abs(dz) < 1e-3f)) {
+			return std::nullopt;
+		}
+		return std::atan2(dz, level) * 180.0f / 3.14159265358979f;
+	}
+
 	// ---- water to swim in (the rig's `swim find`) ----
 
 	// Water this many units deeper than the land under it is deep enough to swim in (an actor is about 128 tall and
@@ -39,6 +57,10 @@ namespace WaterRules
 	// The grid the land is read on, and the farthest a search looks.
 	inline constexpr float GRID = 128.0f;
 	inline constexpr float MAX_RADIUS = 8192.0f;
+	// A spot is deep enough all round, not only where it is: the water is SWIM_DEPTH deep at eight points this far from
+	// it too. A walker that stops a little short of it, on the shore's side, still stops in water it swims in (a gentle
+	// shore's edge of deep water is only wading water a step nearer).
+	inline constexpr float SPOT_AROUND = 192.0f;
 
 	struct Spot
 	{
@@ -52,8 +74,9 @@ namespace WaterRules
 	// or no water).
 	using DepthAt = std::function<std::optional<float>(float a_x, float a_y)>;
 
-	// The nearest point within a_radius of (a_x, a_y), on a grid of GRID, where the water is at least SWIM_DEPTH deep;
-	// none when there is no such point. The answer carries how many points were read, found or not.
+	// The nearest point within a_radius of (a_x, a_y), on a grid of GRID, where the water is at least SWIM_DEPTH deep,
+	// there and at the eight points SPOT_AROUND round it; none when there is no such point. The answer carries how many
+	// grid points were tried, found or not (the points round one are not counted).
 	[[nodiscard]] inline std::optional<Spot> FindSpot(float a_x, float a_y, float a_radius, const DepthAt& a_depthAt, std::size_t* a_looked = nullptr)
 	{
 		const float radius = std::clamp(std::isfinite(a_radius) ? a_radius : 0.0f, 0.0f, MAX_RADIUS);
@@ -69,9 +92,26 @@ namespace WaterRules
 					continue;
 				}
 				++looked;
-				const auto depth = a_depthAt(a_x + dx, a_y + dy);
-				if (depth && std::isfinite(*depth) && *depth >= SWIM_DEPTH) {
-					best = Spot{ .x = a_x + dx, .y = a_y + dy, .depth = *depth, .distance = distance };
+				const auto deep = [&](float a_px, float a_py) {
+					const auto depth = a_depthAt(a_px, a_py);
+					return depth && std::isfinite(*depth) && *depth >= SWIM_DEPTH ? depth : std::nullopt;
+				};
+				const float x = a_x + dx;
+				const float y = a_y + dy;
+				const auto  depth = deep(x, y);
+				if (!depth) {
+					continue;
+				}
+				constexpr float SIDE = SPOT_AROUND;
+				constexpr float SLANT = SPOT_AROUND * 0.70710678f;
+				constexpr float AROUND_X[] = { SIDE, -SIDE, 0.0f, 0.0f, SLANT, SLANT, -SLANT, -SLANT };
+				constexpr float AROUND_Y[] = { 0.0f, 0.0f, SIDE, -SIDE, SLANT, -SLANT, SLANT, -SLANT };
+				bool all = true;
+				for (std::size_t k = 0; k < std::size(AROUND_X) && all; ++k) {
+					all = deep(x + AROUND_X[k], y + AROUND_Y[k]).has_value();
+				}
+				if (all) {
+					best = Spot{ .x = x, .y = y, .depth = *depth, .distance = distance };
 				}
 			}
 		}
