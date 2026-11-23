@@ -11,6 +11,7 @@
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
 #include "game/Retire.h"
+#include "game/Riding.h"
 #include "game/StandInRules.h"
 #include "game/StateBuffer.h"
 #include "game/VtableHook.h"
@@ -596,6 +597,9 @@ namespace RemotePlayers
 			std::vector<std::string>            actions;
 			float                               aim = 0.0f;
 			const bool                          eventsHere = !eventsFromTick.load(std::memory_order_relaxed);
+			// Seated on the copy of its friend's horse (Riding.h): the engine carries it in the saddle, so it is not placed,
+			// turned or told its walk (its actions still play: a mounted swing, a bow from the saddle).
+			const bool                          seated = Riding::Seated(a_this);
 			{
 				std::scoped_lock l{ lock };
 				if (const auto gone = retiring.find(a_this); gone != retiring.end() && gone->second == a_this->GetFormID()) {
@@ -608,7 +612,9 @@ namespace RemotePlayers
 						sample = remote.buffer.Sample(Clock::now());
 						if (sample) {
 							step = Gait::Next(remote.shown, sample->state, sample->held, SwimsAsMode(a_this));
-							if (eventsHere) {
+							if (seated) {
+								step.events.clear();
+							} else if (eventsHere) {
 								remote.shown = step.shown;  // else the tick tells the graph (TellGraph from Frame)
 							}
 							remote.lastDrawn = sample->state;
@@ -634,7 +640,9 @@ namespace RemotePlayers
 			}
 			// Its own AI never runs: no packages, no combat, no greetings. Where its friend is, the engine's no-AI update
 			// places its 3D.
-			if (sample) {
+			if (sample && seated) {
+				drive.Set(a_this, a_this->GetFormID(), { step.speed, step.direction }, Clock::now());
+			} else if (sample) {
 				a_this->SetPosition({ sample->state.x, sample->state.y, sample->state.z }, true);
 				a_this->SetHeading(sample->state.heading);
 				// Aimed where its friend aims while a weapon or a spell is out (the way its arrows and spells leave), pitched
@@ -711,6 +719,9 @@ namespace RemotePlayers
 			if (InGraveyard(id)) {
 				return;
 			}
+			// Off its mount first, or its rider off it (Riding.h): no actor leaves the world, or goes in a save, still
+			// in a ride with one that stays.
+			Riding::Release(a_actor);
 			// The co-save names the preset even for one standing on a copy of it: it has the preset back before any save
 			// (PutPresetBack), and a load looks for an actor of that base.
 			const auto base = a_actor->GetObjectReference();
@@ -1432,7 +1443,11 @@ namespace RemotePlayers
 				{
 					std::scoped_lock l{ lock };
 					step = Gait::Next(remote.shown, sample->state, sample->held, SwimsAsMode(actor.get()));
-					remote.shown = step.shown;
+					if (Riding::Seated(actor.get())) {
+						step.events.clear();  // in the saddle (Riding.h): its walk is told again once it is off
+					} else {
+						remote.shown = step.shown;
+					}
 					actions = remote.actions.Due(now - StateBuffer::Buffer::Delay());
 				}
 				TellGraph(actor.get(), id, step);

@@ -8,6 +8,7 @@
 #include "game/LocalPlayer.h"
 #include "game/NpcRules.h"
 #include "game/RemotePlayers.h"
+#include "game/Riding.h"
 #include "game/StateBuffer.h"
 #include "game/VtableHook.h"
 #include "game/Water.h"
@@ -637,6 +638,45 @@ namespace NpcSync
 			return owner != owners.end() && owner->second == ourId ? NpcRules::Commander::kOurNpc : NpcRules::Commander::kOther;
 		}
 
+		// Who rides a mount here (docs/DESIGN.md, "Riding"): our player or an NPC we run (kOurs), a friend's stand-in or a
+		// copy of an NPC another game runs (kTheirs), or nobody (an NPC nobody runs is nobody's word).
+		enum class RiddenBy
+		{
+			kNobody,
+			kOurs,
+			kTheirs,
+		};
+
+		RiddenBy RiddenByOf(RE::Actor* a_mount, RE::PlayerCharacter* a_player)
+		{
+			RE::NiPointer<RE::Actor> rider;
+			if (!a_mount->GetMountedBy(rider) || !rider) {
+				return RiddenBy::kNobody;
+			}
+			if (rider.get() == a_player) {
+				return RiddenBy::kOurs;
+			}
+			if (RemotePlayers::IsOurs(rider.get())) {
+				return RiddenBy::kTheirs;
+			}
+			const auto id = rider->GetFormID();
+			const auto owner = owners.find(Key{ id, FormIds::IsRuntime(id) ? ourId : 0 });
+			if (owner == owners.end()) {
+				return RiddenBy::kNobody;
+			}
+			return owner->second == ourId ? RiddenBy::kOurs : RiddenBy::kTheirs;
+		}
+
+		// A mount of ours to share as our spawn when it is a runtime reference: ridden by ours, or our player's last horse.
+		bool OurMount(RE::Actor* a_actor, RE::PlayerCharacter* a_player)
+		{
+			if (RiddenByOf(a_actor, a_player) == RiddenBy::kOurs) {
+				return true;
+			}
+			const auto last = a_player ? a_player->QLastRiddenMount().get() : RE::NiPointer<RE::Actor>{};
+			return last && last.get() == a_actor;
+		}
+
 		void Scan(Clock::time_point a_now)
 		{
 			const auto lists = RE::ProcessLists::GetSingleton();
@@ -668,8 +708,8 @@ namespace NpcSync
 					if (FormIds::IsRuntime(id)) {
 						// Made as this game ran: shared as our spawn when our player or an NPC we run commands it (every
 						// summon, raised corpse and thrall, whoever cast it); any other (a quest's or an encounter's,
-						// which every game makes its own of) is not shared yet.
-						if (!loaded.contains(Key{ id, ourId }) && !NpcRules::SharedAsSpawn(CommanderOf(actor.get(), player))) {
+						// which every game makes its own of) is not shared yet. A horse of ours is (NpcRules::SharedRuntime).
+						if (!loaded.contains(Key{ id, ourId }) && !NpcRules::SharedRuntime(CommanderOf(actor.get(), player), OurMount(actor.get(), player))) {
 							++counts.unshared;
 							continue;
 						}
@@ -779,7 +819,10 @@ namespace NpcSync
 					NoteFight(npc.id, a_now);
 				}
 				facts.fighting = sayDeath || FoughtLately(npc.id, a_now);
-				facts.followsUs = player && FollowsUs(actor.get(), player);
+				const auto ridden = RiddenByOf(actor.get(), player);
+				facts.ridden = ridden == RiddenBy::kOurs;
+				facts.riddenThere = ridden == RiddenBy::kTheirs;
+				facts.followsUs = facts.ridden || (player && FollowsUs(actor.get(), player));
 				facts.spawn = key.IsSpawn();
 				const auto ask = NpcRules::Decide(facts, a_now);
 				if (ask == NpcRules::Ask::kNone) {
@@ -1716,6 +1759,15 @@ namespace NpcSync
 		std::optional<StateBuffer::Sampled> sample;
 		Gait::Step                          step;
 		std::vector<std::string>            events;
+		// A copy our player sits on is ridden here: the engine moves it until its runner hands it over (a mount goes
+		// with its rider, NpcRules::Facts::ridden). A copy seated on its mount (Riding.h) is carried by the engine: not
+		// placed, and its walk not told.
+		if (const auto player = RE::PlayerCharacter::GetSingleton(); player && player->IsOnMount()) {
+			if (RE::NiPointer<RE::Actor> rider; a_actor->GetMountedBy(rider) && rider.get() == player) {
+				return false;
+			}
+		}
+		const bool seated = Riding::Seated(a_actor);
 		{
 			std::scoped_lock l{ copyLock };
 			const auto       byActor = copyByActor.find(a_actor);
@@ -1733,11 +1785,21 @@ namespace NpcSync
 				return false;
 			}
 			step = Gait::Next(copy.shown, sample->state, sample->held, RemotePlayers::SwimsAsMode(a_actor));
-			copy.shown = step.shown;
+			if (seated) {
+				step.events.clear();  // a rider's graph rides: its walk is told again once it is off
+			} else {
+				copy.shown = step.shown;
+			}
 			events = copy.actions.Due(now - StateBuffer::Buffer::Delay());
 			copy.lastDrawn = sample->state;
 			copy.hasDrawn = true;
 			++copy.drawn;
+		}
+		if (seated) {
+			RemotePlayers::DriveLegs(a_actor, { step.speed, step.direction });
+			a_actor->UpdateNoAI(a_delta);
+			TellCopy(a_actor, key, step, events);
+			return true;
 		}
 		// Its AI does not run: where its runner has it, turned its way (a flyer pitched too, and a swimmer under water),
 		// its legs its runner's.
@@ -1946,6 +2008,63 @@ namespace NpcSync
 				out += std::format(" runner={} mode={} target={} apart={} base={:08X} states={} drawn={} played={} refused={} walkRefused={}{} gear={} geared={}{} graphSpeed={}",
 					c.feed.runner, NpcRules::ModeName(c.mode), target, apart, c.base, c.buffer.snapshots.size(), c.drawn, c.played, c.refused, c.walkRefused,
 					c.lastRefused.empty() ? "" : " last=" + c.lastRefused, c.gear ? 1 : 0, c.geared ? 1 : 0, wears, hasSpeed ? std::format("{:.0f}", graphSpeed) : "none");
+			}
+		}
+		return out;
+	}
+
+	RE::NiPointer<RE::Actor> ActorOf(const Protocol::NpcKey& a_key)
+	{
+		{
+			std::scoped_lock l{ copyLock };
+			if (const auto it = copies.find(a_key); it != copies.end() && it->second.actorId != 0) {
+				if (auto actor = it->second.handle.get(); actor && actor->GetFormID() == it->second.actorId) {
+					return actor;
+				}
+			}
+		}
+		if (const auto it = loaded.find(a_key); it != loaded.end()) {
+			if (auto actor = it->second.handle.get(); actor && actor->GetFormID() == it->second.id) {
+				return actor;
+			}
+		}
+		return {};
+	}
+
+	std::optional<Protocol::NpcKey> KeyOf(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return std::nullopt;
+		}
+		{
+			std::scoped_lock l{ copyLock };
+			if (const auto it = copyByActor.find(a_actor); it != copyByActor.end()) {
+				return it->second;
+			}
+		}
+		const auto id = a_actor->GetFormID();
+		const Key  key{ id, FormIds::IsRuntime(id) ? ourId : 0 };
+		if (loaded.contains(key)) {
+			return key;
+		}
+		return std::nullopt;
+	}
+
+	std::uint32_t RunnerOf(const Protocol::NpcKey& a_key)
+	{
+		const auto it = owners.find(a_key);
+		return it != owners.end() ? it->second : 0;
+	}
+
+	std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> RunActors()
+	{
+		std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> out;
+		for (const auto& [key, npc] : loaded) {
+			if (!Runs(key)) {
+				continue;
+			}
+			if (auto actor = npc.handle.get(); actor && actor->GetFormID() == npc.id) {
+				out.emplace_back(key, std::move(actor));
 			}
 		}
 		return out;

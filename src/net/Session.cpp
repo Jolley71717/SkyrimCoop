@@ -13,6 +13,7 @@
 #include "game/NpcSync.h"
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
+#include "game/Riding.h"
 #include "game/Water.h"
 #include "net/FormsCommand.h"
 #include "net/Identity.h"
@@ -234,6 +235,7 @@ namespace Session
 					nextState = nextLooks = nextHands = nextFace = nextBeat = Clock::now();
 					PlayerActions::Recording(true);
 					NpcSync::Started(playerId, hostId);
+					Riding::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -252,6 +254,7 @@ namespace Session
 			case Protocol::MessageType::kPlayerLeft:
 				if (const auto msg = Protocol::DecodePlayerLeft(a_data)) {
 					RemotePlayers::Left(msg->playerId);
+					Riding::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -313,6 +316,11 @@ namespace Session
 			case Protocol::MessageType::kNpcDeaths:
 				if (const auto msg = Protocol::DecodeNpcDeaths(a_data); msg && msg->runner != playerId) {
 					NpcSync::Deaths(*msg);
+				}
+				break;
+			case Protocol::MessageType::kRides:
+				if (const auto msg = Protocol::DecodeRides(a_data); msg && msg->sender != playerId) {
+					Riding::Rides(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -482,6 +490,7 @@ namespace Session
 				Steam::Leave();
 			}
 		}
+		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
 		NpcSync::Clear();
 		RemotePlayers::Clear();
 		Reset();
@@ -522,6 +531,7 @@ namespace Session
 			Water::Sample();          // our player in and out of the water, for the rig (dev `swim`)
 			SendOurs(Clock::now());
 			NpcSync::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Riding::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 	}

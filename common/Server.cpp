@@ -6,6 +6,7 @@
 #include "NpcBook.h"
 #include "NpcFates.h"
 #include "Redact.h"
+#include "RideBook.h"
 #include "Text.h"
 #include "TokenBucket.h"
 
@@ -58,6 +59,9 @@ namespace
 		// the next one.
 		TokenBucket actionBudget{ 96.0, 48.0 };
 		bool        toldActionsDropped = false;
+		// Ride changes passed on (common/RideBook.h): a burst of 64, then 16 a second (a player gets on or off a horse now
+		// and then, the NPCs a game runs a few at a time). Past it a change is kept and owed, never dropped.
+		TokenBucket rideBudget{ 64.0, 16.0 };
 		bool        toldUnknown = false;
 	};
 
@@ -164,6 +168,8 @@ void Server::Run()
 	std::map<Protocol::NpcKey, Protocol::NpcGear> npcGear;
 	// The health of the NPCs run and those dead (common/NpcFates.h), for whoever joins after, and where each hit on a copy goes.
 	NpcFates::Book fates;
+	// Who rides what (common/RideBook.h), for whoever joins after.
+	RideBook::Book rides;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -195,6 +201,20 @@ void Server::Run()
 		send(a_key, Protocol::Encode(Protocol::Reject{ std::move(a_reason) }), true);
 		transports[a_key.first]->Disconnect(a_key.second);
 	};
+	// Rides passed on in messages of at most MAX_RIDES each: to one player (a_to), or to everyone but a_except. a_full: a
+	// joiner's list (its first message says so). a_sender: the game that said them (0: the server's own word).
+	const auto sendRides = [&](const PeerKey* a_to, const PeerKey* a_except, std::vector<Protocol::Ride> a_rides, bool a_full, std::uint32_t a_sender = 0) {
+		for (std::size_t first = 0; first < a_rides.size(); first += Protocol::MAX_RIDES) {
+			Protocol::Rides msg{ .sender = a_sender, .full = a_full && first == 0 };
+			const auto      end = (std::min)(a_rides.size(), first + Protocol::MAX_RIDES);
+			msg.rides.assign(a_rides.begin() + static_cast<std::ptrdiff_t>(first), a_rides.begin() + static_cast<std::ptrdiff_t>(end));
+			if (a_to) {
+				send(*a_to, Protocol::Encode(msg), true);
+			} else {
+				broadcast(Protocol::Encode(msg), true, a_except);
+			}
+		}
+	};
 	// A joined player is gone: the others hear it.
 	const auto left = [&](const PeerKey& a_key, const Peer& a_peer, std::string_view a_why) {
 		log(std::format("server: player {} left ({})", a_peer.playerId, a_why));
@@ -214,6 +234,10 @@ void Server::Run()
 			log(std::format("server: the {} NPC(s) player {} ran are nobody's now", released.size(), a_peer.playerId));
 		}
 		fates.Left(a_peer.playerId);
+		// Their ride, and those of the NPCs their game ran, end: the others get the riders off.
+		if (auto ended = rides.Leave(a_peer.playerId); !ended.empty()) {
+			sendRides(nullptr, &a_key, std::move(ended), false);
+		}
 	};
 
 	const auto onHello = [&](const PeerKey& a_key, Peer& a_peer, std::span<const std::uint8_t> a_data) {
@@ -269,6 +293,7 @@ void Server::Run()
 			sessionHash = hello->contentHash;
 			sessionTable.clear();  // the first player's load order numbers the new session
 			fates.Clear();         // and the deaths and wounds of the last one are not this one's
+			rides.Clear();         // nor its rides
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -332,6 +357,10 @@ void Server::Run()
 		}
 		if (auto dead = fates.Dead(); !dead.empty()) {
 			send(a_key, Protocol::Encode(Protocol::NpcDeaths{ .full = true, .deaths = std::move(dead) }), true);
+		}
+		// Who rides what (after the owners: an NPC rider's ride is read against its runner).
+		if (auto all = rides.All(); !all.empty()) {
+			sendRides(&a_key, nullptr, std::move(all), true);
 		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
@@ -570,6 +599,24 @@ void Server::Run()
 				}
 			}
 			break;
+		case MT::kRides:
+			// A player's own ride and the rides of the NPCs its game runs (RideBook.h), each change once, the sender named;
+			// past its budget a change is owed (the loop below passes it on).
+			if (const auto msg = Protocol::DecodeRides(a_data)) {
+				const auto                  now = Clock::now();
+				std::vector<Protocol::Ride> pass;
+				for (auto& ride : rides.Take(a_peer.playerId, msg->rides, [&](const Protocol::NpcKey& a_npc) { return npcs.Runs(a_peer.playerId, a_npc); })) {
+					if (!rides.Owes(a_peer.playerId) && a_peer.rideBudget.Take(now)) {
+						pass.push_back(ride);
+					} else {
+						rides.Owe(a_peer.playerId, ride);
+					}
+				}
+				if (!pass.empty()) {
+					sendRides(nullptr, &a_key, std::move(pass), false, a_peer.playerId);
+				}
+			}
+			break;
 		case MT::kHeartbeat:
 			if (const auto beat = Protocol::DecodeHeartbeat(a_data); beat && a_peer.heartbeats.Take(Clock::now())) {
 				// Unreliable, as the heartbeat itself is sent: a resend would measure the resend, not the connection.
@@ -629,6 +676,16 @@ void Server::Run()
 			if (peer.joined && peer.faceOwed && peer.face && peer.faceBudget.Take(now)) {
 				peer.faceOwed = false;
 				broadcast(Protocol::Encode(Protocol::RemoteFace{ peer.playerId, *peer.face }), true, &key);
+			}
+			if (peer.joined && rides.Owes(peer.playerId)) {
+				std::vector<Protocol::Ride> pass;
+				Protocol::Ride              ride;
+				while (pass.size() < Protocol::MAX_RIDES && rides.Owes(peer.playerId) && peer.rideBudget.Take(now) && rides.NextOwed(peer.playerId, ride)) {
+					pass.push_back(ride);
+				}
+				if (!pass.empty()) {
+					sendRides(nullptr, &key, std::move(pass), false, peer.playerId);
+				}
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {
 				log(std::format("server: dropped {}: no hello", transports[key.first]->Describe(key.second)));

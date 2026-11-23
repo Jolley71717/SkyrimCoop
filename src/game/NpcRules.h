@@ -73,6 +73,10 @@ namespace NpcRules
 		bool                             fighting = false;    // our player fought or talked to it within FIGHT_HOLD
 		bool                             followsUs = false;   // it follows our player (a follower, a summon, a mount)
 		bool                             spawn = false;       // made as this game ran (a summon): no other game has it to run
+		// A mount ridden here (docs/DESIGN.md, "Riding"): by our player or an NPC we run (ridden: it goes with its rider
+		// at once, not at the follower's pace), or by an NPC another game runs (riddenThere: that game runs it).
+		bool                             ridden = false;
+		bool                             riddenThere = false;
 		std::optional<Clock::time_point> lastClaim;     // our last claim of it, of any kind
 		// Our last kFollower claim of it, kept until we say kHave or kRelease of it: none, the book has not heard from us
 		// that it follows our player (or has heard that it stopped).
@@ -99,6 +103,10 @@ namespace NpcRules
 		}
 		switch (a_facts.owner) {
 		case Owner::kUs:
+			if (a_facts.riddenThere && !a_facts.ridden) {
+				// A mount an NPC of another game's rides goes with its rider: that game asks for it (as its follower).
+				return since(CLAIM_EVERY) ? Ask::kRelease : Ask::kNone;
+			}
 			if (a_facts.followsUs) {
 				// The book hears it follows our player, whether we got it as a follower or hired it after.
 				if (!a_facts.saidFollows || a_now - *a_facts.saidFollows >= FOLLOWER_EVERY) {
@@ -121,7 +129,8 @@ namespace NpcRules
 				return since(FIGHT_EVERY) ? Ask::kFight : Ask::kNone;
 			}
 			if (a_facts.followsUs) {
-				return since(FOLLOWER_EVERY) ? Ask::kFollower : Ask::kNone;
+				// A mount our rider sits on is asked for at the claim rate: rider and mount move in one game.
+				return since(a_facts.ridden ? CLAIM_EVERY : FOLLOWER_EVERY) ? Ask::kFollower : Ask::kNone;
 			}
 			return Ask::kNone;
 		case Owner::kNobody:
@@ -276,12 +285,27 @@ namespace NpcRules
 		return std::ranges::equal(a_a, a_b, [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
 	}
 
+	// A graph event of getting on or off a mount, or of riding one (a rider's "HorseEnter", "HorseExit", its mounted
+	// locomotion, a dragon rider's): each game's engine plays those itself as it seats a rider (docs/DESIGN.md, "Riding"),
+	// so a friend's or a runner's are never played again on a stand-in or a copy, which may not be on its mount yet. Names
+	// that start with "horse", or hold "mount" or "dragonrid", in any case.
+	[[nodiscard]] inline bool MountEvent(std::string_view a_event)
+	{
+		const auto lower = [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); };
+		std::string name(a_event.size(), '\0');
+		std::ranges::transform(a_event, name.begin(), lower);
+		return name.starts_with("horse") || name.find("mount") != std::string::npos || name.find("dragonrid") != std::string::npos;
+	}
+
 	[[nodiscard]] inline bool Replayed(std::string_view a_event)
 	{
 		if (a_event.empty() || a_event.size() > Protocol::MAX_EVENT_NAME) {
 			return false;
 		}
 		if (std::ranges::any_of(a_event, [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7F; })) {
+			return false;
+		}
+		if (MountEvent(a_event)) {
 			return false;
 		}
 		return std::ranges::none_of(LOCAL_EVENTS, [&](std::string_view a_local) { return SameName(a_local, a_event); });
@@ -581,6 +605,14 @@ namespace NpcRules
 	[[nodiscard]] constexpr bool SharedAsSpawn(Commander a_commander)
 	{
 		return a_commander == Commander::kOurPlayer || a_commander == Commander::kOurNpc;
+	}
+
+	// The same, and a mount of ours (docs/DESIGN.md, "Riding"): one our player or an NPC this game runs rides, or our
+	// player's last ridden horse (a horse bought or placed as the game ran is a runtime reference), so the others have a
+	// copy of it to seat that rider on.
+	[[nodiscard]] constexpr bool SharedRuntime(Commander a_commander, bool a_ourMount)
+	{
+		return SharedAsSpawn(a_commander) || a_ourMount;
 	}
 
 	// ---- what kind of NPC ----

@@ -3,6 +3,9 @@
 #include "Protocol.h"
 
 #include <functional>
+#include <optional>
+#include <utility>
+#include <vector>
 
 // The NPCs of the session (docs/DESIGN.md, "NPCs"): each NPC near a player is run by one game, its AI included, and the
 // others show a copy of it moved by that game's word.
@@ -76,4 +79,11 @@ namespace NpcSync
 	// walks, what it is shown doing, what the engine says (its swimming flag, its character controller's state), its own
 	// swim events and refloats, the engine's last move of it off its depth, and its height against its runner's.
 	[[nodiscard]] std::string Swim();
+	// For riding (src/game/Riding.h), main thread: the actor that shows an NPC here (its copy, or the NPC itself when this
+	// game has it loaded; none: neither), the NPC an actor shows (none: no NPC this game shares or copies), who runs an
+	// NPC as the server said (0: nobody), and the NPCs this game runs with their actors.
+	[[nodiscard]] RE::NiPointer<RE::Actor>                                         ActorOf(const Protocol::NpcKey& a_key);
+	[[nodiscard]] std::optional<Protocol::NpcKey>                                  KeyOf(RE::Actor* a_actor);
+	[[nodiscard]] std::uint32_t                                                    RunnerOf(const Protocol::NpcKey& a_key);
+	[[nodiscard]] std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> RunActors();
 }

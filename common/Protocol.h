@@ -45,7 +45,9 @@ namespace Protocol
 	//    layers (kPlayerFace, kRemoteFace: message types 41-42). (As with 9: whichever change lands later renumbers.)
 	// 11: a state says whether the one it is of swims with its head under water (StateFlags::kUnderwater), for the dive
 	//    its stand-in or copy shows. (As with 9: whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 11;
+	// 12: who rides what (kRides, message type 55): a player's horse, and the mounts of the NPCs a game runs, so the others
+	//    show the rider in its saddle. (As with 9: whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 12;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -109,6 +111,8 @@ namespace Protocol
 		kRemoteActions = 40,  // server -> the others, reliable: that player's, for their stand-in to play
 		kPlayerFace = 41,     // client -> server, reliable: our character's face (again whenever it changes and settles)
 		kRemoteFace = 42,     // server -> the others (and to a joiner, each one there): that player's face
+		// 43: free; 44-48: the shared loot's, 49-54: the dropped items' (each in its own change).
+		kRides = 55,  // both ways, reliable: who rides what (a player, the NPCs a game runs); the server names the sender
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -633,6 +637,36 @@ namespace Protocol
 		std::uint32_t             playerId = 0;
 		std::vector<PlayerAction> actions;
 		bool operator==(const RemoteActions&) const = default;
+	};
+
+	// ---- riding (docs/DESIGN.md, "Riding") ----
+	// Who rides what: a player on their horse, an NPC on its mount. A game says its own player's ride and the rides of the
+	// NPCs it runs, each time one changes; the server passes on only a player's own and an NPC's runner's
+	// (common/RideBook.h) and keeps them for whoever joins after.
+
+	// At most this many rides in one message (a joiner's full list is sent in as many as it takes).
+	inline constexpr std::size_t MAX_RIDES = 64;
+
+	// One rider and its mount. player != 0: that player rides (from a game: its own id, which the server checks); else
+	// rider is the NPC that rides. mount: what it rides (id 0 on a reader's side: a mount that game lacks, so it shows the
+	// rider on foot). on false: it got off.
+	struct Ride
+	{
+		std::uint32_t player = 0;
+		NpcKey        rider;
+		NpcKey        mount;
+		bool          on = false;
+		bool operator==(const Ride&) const = default;
+	};
+
+	// sender: 0 from a game; the server names the game that sent them (0 on a joiner's list). full: the first of a
+	// joiner's list: a game forgets every ride it knew before it.
+	struct Rides
+	{
+		std::uint32_t     sender = 0;
+		bool              full = false;
+		std::vector<Ride> rides;
+		bool operator==(const Rides&) const = default;
 	};
 
 	// ---- serialization -------------------------------------------------------------
@@ -1691,6 +1725,67 @@ namespace Protocol
 		}
 		return msg;
 	}
+
+	inline std::vector<std::uint8_t> Encode(const Rides& a_msg)
+	{
+		Writer     w{ MessageType::kRides };
+		const auto count = (std::min)(a_msg.rides.size(), MAX_RIDES);
+		w.U32(a_msg.sender);
+		w.U8(a_msg.full ? 1 : 0);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& ride = a_msg.rides[i];
+			w.U32(ride.player);
+			WriteKey(w, ride.player != 0 ? NpcKey{} : ride.rider);
+			WriteKey(w, ride.mount);
+			w.U8(ride.on ? 1 : 0);
+		}
+		return w.Data();
+	}
+
+	// Whether a ride names one rider and a mount that can be: a player (and no NPC) or an NPC of id != 0, and a mount of id
+	// 0 only with no spawner.
+	[[nodiscard]] inline bool RideHolds(const Ride& a_ride)
+	{
+		const bool rider = a_ride.player != 0 ? a_ride.rider == NpcKey{} : a_ride.rider.id != 0;
+		return rider && (a_ride.mount.id != 0 || a_ride.mount.spawner == 0);
+	}
+
+	// None for more than MAX_RIDES, a ride that does not hold (RideHolds), or an on that is not 0 or 1. A mount of id 0
+	// reads: none, or one the reader lacks.
+	inline std::optional<Rides> DecodeRides(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Rides msg;
+		msg.sender = r.U32();
+		const auto full = r.U8();
+		const auto count = r.U8();
+		if (!r.Ok() || full > 1 || count > MAX_RIDES) {
+			return std::nullopt;
+		}
+		msg.full = full == 1;
+		msg.rides.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			Ride ride;
+			ride.player = r.U32();
+			ride.rider = ReadKey(r);
+			ride.mount = ReadKey(r);
+			const auto on = r.U8();
+			ride.on = on == 1;
+			if (r.Ok() && (on > 1 || !RideHolds(ride))) {
+				return std::nullopt;
+			}
+			msg.rides.push_back(ride);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t MAX_RIDES_SIZE = 1 + 4 + 1 + 1 + MAX_RIDES * (4 + 8 + 8 + 1);
+	static_assert(MAX_RIDES <= 0xFF && MAX_RIDES_SIZE <= 2048, "a message of rides stays small");
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{
