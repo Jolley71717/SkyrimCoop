@@ -514,7 +514,7 @@ namespace Face
 			}
 			++out.parts;
 			out.partsFound += found(part) ? 1 : 0;
-			if (part->type.underlying() == std::to_underlying(RE::BGSHeadPart::HeadPartType::kHair) && !hair) {
+			if (part->type.get() == RE::BGSHeadPart::HeadPartType::kHair && !hair) {
 				hair = part;
 			}
 		}
@@ -554,7 +554,7 @@ namespace Face
 			if (const auto node = face->GetObjectByName(hair->formEditorID)) {
 				RE::BSVisit::TraverseScenegraphGeometries(node, [&](RE::BSGeometry* a_geometry) -> RE::BSVisit::BSVisitControl {
 					const auto property = a_geometry->GetGeometryRuntimeData().shaderProperty.get();
-					const auto lighting = property ? RE::netimmerse_cast<RE::BSLightingShaderProperty*>(property) : nullptr;
+					const auto lighting = property ? ::netimmerse_cast<RE::BSLightingShaderProperty*>(property) : nullptr;
 					const auto material = lighting ? lighting->material : nullptr;
 					if (!material || material->GetFeature() != RE::BSShaderMaterial::Feature::kHairTint) {
 						return RE::BSVisit::BSVisitControl::kContinue;
