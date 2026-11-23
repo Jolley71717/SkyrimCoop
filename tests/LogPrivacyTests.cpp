@@ -179,7 +179,7 @@ TEST("log privacy: a second joiner hears the first by name while the log keeps t
 	CHECK(NowhereInLog(f, "Bob"));
 }
 
-TEST("log privacy: a host whose plugin names carry a line break or a Steam id refuses joiners with one clean log line each, naming the plugin but no account")
+TEST("log privacy: plugin names carrying a line break or a Steam id never reach the server's log, whatever load orders join")
 {
 	Fixture f;
 
@@ -191,30 +191,26 @@ TEST("log privacy: a host whose plugin names carry a line break or a Steam id re
 	hostHello.contentHash = Protocol::LoadOrderHash(hostHello.plugins);
 	REQUIRE(f.Join(1, hostHello));
 
-	// A joiner with only the base game lacks the first; one with it too lacks the second.
+	// Joiners with other load orders are let in (their games translate form IDs by plugin name); one brings a plugin
+	// named after the account too, which the session's plugin table takes on.
 	auto bare = Fixture::MakeHello("Joiner");
 	bare.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm" }, {});
 	bare.contentHash = Protocol::LoadOrderHash(bare.plugins);
-	const auto bareReason = f.Refused(2, bare);
-	auto       closer = Fixture::MakeHello("Closer");
-	closer.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", forged }, {});
+	REQUIRE(f.Join(2, bare));
+	auto closer = Fixture::MakeHello("Closer");
+	closer.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", forged, "Mine" + ID + ".esp" }, {});
 	closer.contentHash = Protocol::LoadOrderHash(closer.plugins);
-	const auto closerReason = f.Refused(3, closer);
+	REQUIRE(f.Join(3, closer));
 	REQUIRE(f.fake->Settle());
 
-	// What each joiner is told names the plugin (it is the joiner's to fix), on one line: whatever the joiner's game
-	// writes of it, its log sink's Scrub leaves an alias where the account was.
-	CHECK(bareReason == "Your mods differ from the host's: you don't have Evil.espserver: player 1 left (disconnected).");
-	CHECK(closerReason == std::format("Your mods differ from the host's: you don't have {}.esp.", ID));
-	CHECK(Redact::Scrub(closerReason).find(ID) == std::string::npos);
-	CHECK(Redact::Scrub(closerReason).find(Redact::Alias(STEAM_ID) + ".esp") != std::string::npos);
-
-	// The host's log: one line for each, no forged line, no account, no joiner's name.
+	// The host's log: one line for each, counts and masked addresses only: no forged line, no account, no plugin's name,
+	// no joiner's name.
 	CHECK(AllOneLine(f));
-	CHECK(f.Logged("server: refused fake 2: another load order (you don't have Evil.espserver: player 1 left (disconnected))"));
-	CHECK(f.Logged(std::format("server: refused fake 3: another load order (you don't have {}.esp)", Redact::Alias(STEAM_ID))));
+	CHECK(f.Logged("server: fake 2 has another load order (0 plugins the session has not, 2 of the session's it lacks)"));
+	CHECK(f.Logged("server: fake 3 has another load order (1 plugins the session has not, 1 of the session's it lacks)"));
 	CHECK(std::ranges::none_of(f.LogLines(), [](const std::string& a_line) { return a_line.starts_with("server: player 1 left"); }));
 	CHECK(NowhereInLog(f, ID));
+	CHECK(NowhereInLog(f, "Evil"));
 	CHECK(NowhereInLog(f, "Joiner"));
 	CHECK(NowhereInLog(f, "Closer"));
 }

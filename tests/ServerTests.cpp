@@ -182,47 +182,132 @@ TEST("server: more players than the protocol allows are never let in, whatever t
 	CHECK(f.Refused(100, Fixture::MakeHello("Late")) == std::format("The game is full ({} players).", Protocol::MAX_PLAYERS));
 }
 
-TEST("server: another load order is refused, naming the plugin the joiner lacks")
+namespace
 {
-	Fixture f;
-	auto    host = Fixture::MakeHello("Host");
-	host.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "Dawnguard.esm", "BigMod.esp" }, { "Small.esl" });
-	host.contentHash = Protocol::LoadOrderHash(host.plugins);
-	REQUIRE(f.Join(1, host));
+	// The plugin tables the server sent a_peer so far (everything else it sent is forgotten).
+	std::vector<std::vector<std::string>> TablesSent(Fixture& a_f, PeerId a_peer)
+	{
+		std::vector<std::vector<std::string>> out;
+		for (const auto& packet : a_f.fake->Take(a_peer)) {
+			if (packet.empty() || packet[0] != Type(MT::kPluginTable)) {
+				continue;
+			}
+			if (const auto table = Protocol::DecodePluginTable(packet)) {
+				out.push_back(table->plugins);
+			}
+		}
+		return out;
+	}
 
-	auto joiner = Fixture::MakeHello("Joiner");
-	joiner.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "Dawnguard.esm" }, { "Small.esl" });
-	joiner.contentHash = Protocol::LoadOrderHash(joiner.plugins);
-	CHECK(f.Refused(2, joiner) == "Your mods differ from the host's: you don't have BigMod.esp.");
-	CHECK(f.fake->WaitDisconnected(2));
-	CHECK(f.LoggedSoon("server: refused fake 2: another load order (you don't have BigMod.esp)"));
+	Protocol::Hello HelloWith(std::string a_name, const std::vector<std::string>& a_full, const std::vector<std::string>& a_light = {})
+	{
+		auto hello = Fixture::MakeHello(std::move(a_name));
+		hello.plugins = Protocol::ComparedLoadOrder(a_full, a_light);
+		hello.contentHash = Protocol::LoadOrderHash(hello.plugins);
+		return hello;
+	}
+
+	std::vector<std::vector<std::string>> Tables(const std::vector<std::string>& a_table)
+	{
+		return { a_table };
+	}
+
+	bool LogHas(Fixture& a_f, std::string_view a_text)
+	{
+		return std::ranges::any_of(a_f.LogLines(), [&](const std::string& a_line) { return a_line.find(a_text) != std::string::npos; });
+	}
 }
 
-TEST("server: another load order is refused, naming the plugin the host lacks, or saying the order differs")
+TEST("server: the session's plugin table is the first player's load order, sent before the welcome")
 {
-	Fixture f;
-	auto    host = Fixture::MakeHello("Host");
-	host.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "A.esp", "B.esp" }, {});
-	host.contentHash = Protocol::LoadOrderHash(host.plugins);
+	Fixture    f;
+	const auto host = HelloWith("Host", { "Skyrim.esm", "Update.esm" }, { "Small.esl" });
+	f.fake->Connect(1);
+	f.fake->Deliver(1, Protocol::Encode(host));
+	const auto upToWelcome = f.fake->TakeThrough(1, Type(MT::kWelcome));
+	REQUIRE(upToWelcome.size() == 2u);
+	const auto table = Protocol::DecodePluginTable(upToWelcome[0]);
+	REQUIRE(table);
+	CHECK(table->plugins == host.plugins);
+	CHECK(f.LoggedSoon("server: the session's plugin table has 3 plugins (3 new)"));
+}
+
+TEST("server: another load order is let in, its other plugins added to the table, which everyone in hears first")
+{
+	Fixture    f;
+	const auto host = HelloWith("Host", { "Skyrim.esm", "Update.esm", "Dawnguard.esm", "BigMod.esp" }, { "Small.esl" });
+	REQUIRE(f.Join(1, host));
+	CHECK(TablesSent(f, 1).size() == 1u);
+
+	// The joiner lacks BigMod.esp and has two plugins the host lacks, in another order.
+	const auto joiner = HelloWith("Joiner", { "Skyrim.esm", "Mine.esp", "Update.esm", "Dawnguard.esm" }, { "MyLight.esl", "Small.esl" });
+	REQUIRE(f.Join(2, joiner));
+	const auto grown = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "Dawnguard.esm", "BigMod.esp", "Mine.esp" }, { "Small.esl", "MyLight.esl" });
+	// The joiner hears the grown table before its welcome; the host hears it ahead of the joiner's arrival.
+	CHECK(TablesSent(f, 2) == Tables(grown));
+	const auto hostHeard = f.fake->TakeThrough(1, Type(MT::kPlayerJoined));
+	REQUIRE(hostHeard.size() == 2u);
+	const auto hostTable = Protocol::DecodePluginTable(hostHeard[0]);
+	REQUIRE(hostTable);
+	CHECK(hostTable->plugins == grown);
+	CHECK(f.LoggedSoon("server: fake 2 has another load order (2 plugins the session has not, 1 of the session's it lacks); its form IDs are translated by plugin name"));
+	CHECK(f.LoggedSoon("server: the session's plugin table has 7 plugins (2 new)"));
+	// Never a plugin's name in the server's log: it is each player's own business.
+	CHECK(!LogHas(f, "Mine.esp"));
+	CHECK(!LogHas(f, "BigMod"));
+}
+
+TEST("server: the same plugins in another order are let in, and the table stays as it was")
+{
+	Fixture    f;
+	const auto host = HelloWith("Host", { "Skyrim.esm", "Update.esm", "A.esp", "B.esp" });
+	REQUIRE(f.Join(1, host));
+	const auto swapped = HelloWith("Swapped", { "Skyrim.esm", "Update.esm", "B.esp", "A.esp" });
+	REQUIRE(f.Join(2, swapped));
+	CHECK(TablesSent(f, 2) == Tables(host.plugins));
+	REQUIRE(f.fake->Settle());
+	CHECK(TablesSent(f, 1).size() == 1u);  // the one before its own welcome: nothing grew
+	CHECK(f.Logged("server: fake 2 has another load order (the same plugins, in another order)"));
+
+	// Names in another case are the same plugins in the same places: the same load order, let in quietly.
+	const auto shouted = HelloWith("Shouted", { "SKYRIM.ESM", "update.esm", "a.ESP", "b.esp" });
+	REQUIRE(f.Join(3, shouted));
+	REQUIRE(f.fake->Settle());
+	CHECK(!f.Logged("server: fake 3 has another load order"));
+	CHECK(TablesSent(f, 3) == Tables(host.plugins));
+}
+
+TEST("server: another load order without a list to translate by is refused")
+{
+	Fixture    f;
+	const auto host = HelloWith("Host", { "Skyrim.esm", "Update.esm" });
 	REQUIRE(f.Join(1, host));
 
-	auto extra = Fixture::MakeHello("Extra");
-	extra.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "A.esp", "B.esp", "Mine.esp" }, {});
-	extra.contentHash = Protocol::LoadOrderHash(extra.plugins);
-	CHECK(f.Refused(2, extra) == "Your mods differ from the host's: the host doesn't have Mine.esp.");
-
-	auto swapped = Fixture::MakeHello("Swapped");
-	swapped.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "B.esp", "A.esp" }, {});
-	swapped.contentHash = Protocol::LoadOrderHash(swapped.plugins);
-	CHECK(f.Refused(3, swapped) == "Your mods differ from the host's: the same plugins, in another order.");
-
-	// A hello that names no plugins (a bot) gets the short refusal.
+	// A hello that names no plugins (a bot, or a load order too long for a hello) and has another hash.
 	auto bare = Fixture::MakeHello("Bare");
 	bare.contentHash = 0x9999;
-	CHECK(f.Refused(4, bare) == "Your mods differ from the host's.");
+	CHECK(f.Refused(2, bare) == "Your mods differ from the host's.");
+	CHECK(f.fake->WaitDisconnected(2));
+	CHECK(f.LoggedSoon("server: refused fake 2: another load order, and no list of it to translate by"));
+	// With the session's hash it is the session's load order: let in, and handed the table.
+	auto same = Fixture::MakeHello("Same");
+	same.contentHash = host.contentHash;
+	REQUIRE(f.Join(3, same));
+	CHECK(TablesSent(f, 3) == Tables(host.plugins));
 }
 
-TEST("server: a whole Skyrim load order is let in, and one that differs from it at its end is refused by name")
+TEST("server: a session started without a list sends no table and lets in only its own load order")
+{
+	Fixture f;
+	auto    first = Fixture::MakeHello("First");
+	first.contentHash = 0x1111;
+	REQUIRE(f.Join(1, first));
+	CHECK(TablesSent(f, 1).empty());
+	const auto listed = HelloWith("Listed", { "Skyrim.esm" });
+	CHECK(f.Refused(2, listed) == "Your mods differ from the host's.");
+}
+
+TEST("server: a whole Skyrim load order is let in, and one that differs from it at its end too, with no place left for its plugin")
 {
 	std::vector<std::string> full;
 	for (int i = 0; i < 254; ++i) {
@@ -232,53 +317,51 @@ TEST("server: a whole Skyrim load order is let in, and one that differs from it 
 	for (int i = 0; i < 4096; ++i) {
 		light.push_back(std::format("Light{:04}.esl", i));
 	}
-	Fixture f;
-	auto    host = Fixture::MakeHello("Host");
-	host.plugins = Protocol::ComparedLoadOrder(full, light);
-	host.contentHash = Protocol::LoadOrderHash(host.plugins);
+	Fixture    f;
+	const auto host = HelloWith("Host", full, light);
 	REQUIRE(f.Join(1, host));
+	CHECK(TablesSent(f, 1) == Tables(host.plugins));
 
 	auto same = Fixture::MakeHello("Same");
 	same.plugins = host.plugins;
 	same.contentHash = host.contentHash;
 	CHECK(f.Join(2, same).has_value());
 
+	// Every light place is taken: Other.esl gets none, so its forms are skipped in the games (FormTranslate.h).
 	light.back() = "Other.esl";
-	auto other = Fixture::MakeHello("Other");
-	other.plugins = Protocol::ComparedLoadOrder(full, light);
-	other.contentHash = Protocol::LoadOrderHash(other.plugins);
-	CHECK(f.Refused(3, other) == "Your mods differ from the host's: you don't have Light4095.esl.");
+	const auto other = HelloWith("Other", full, light);
+	REQUIRE(f.Join(3, other));
+	CHECK(TablesSent(f, 3) == Tables(host.plugins));
+	CHECK(f.LoggedSoon("server: fake 3 has another load order (1 plugins the session has not, 1 of the session's it lacks)"));
 }
 
-TEST("server: the same load order with names in another case is let in")
+TEST("server: an empty session takes the next player's load order and plugin table")
 {
-	Fixture f;
-	auto    host = Fixture::MakeHello("Host");
-	host.plugins = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm" }, { "Small.esl" });
-	host.contentHash = Protocol::LoadOrderHash(host.plugins);
-	REQUIRE(f.Join(1, host));
-
-	auto joiner = Fixture::MakeHello("Joiner");
-	joiner.plugins = Protocol::ComparedLoadOrder({ "SKYRIM.ESM", "update.esm" }, { "small.ESL" });
-	joiner.contentHash = Protocol::LoadOrderHash(joiner.plugins);
-	CHECK(f.Join(2, joiner).has_value());
-}
-
-TEST("server: an empty session takes the next player's load order")
-{
-	Fixture f;
-	auto    first = Fixture::MakeHello("First");
-	first.contentHash = 0x1111;
+	Fixture    f;
+	const auto first = HelloWith("First", { "Skyrim.esm", "First.esp" });
 	REQUIRE(f.Join(1, first));
 	f.fake->Drop(1);
 	CHECK(f.LoggedSoon("server: player 1 left (disconnected)"));
 
-	auto second = Fixture::MakeHello("Second");
-	second.contentHash = 0x2222;
+	const auto second = HelloWith("Second", { "Skyrim.esm", "Second.esp" });
 	REQUIRE(f.Join(2, second));
+	CHECK(TablesSent(f, 2) == Tables(second.plugins));
 
-	// And holds everyone after to it.
-	CHECK(f.Refused(3, first) == "Your mods differ from the host's.");
+	// And numbers everyone after by it: the first's plugin comes after the second's.
+	REQUIRE(f.Join(3, first));
+	CHECK(TablesSent(f, 3) == Tables(Protocol::ComparedLoadOrder({ "Skyrim.esm", "Second.esp", "First.esp" }, {})));
+
+	// A session started without lists holds everyone after to its hash.
+	f.fake->Drop(2);
+	f.fake->Drop(3);
+	CHECK(f.LoggedSoon("server: player 3 left (disconnected)"));
+	CHECK(f.LoggedSoon("server: player 2 left (disconnected)"));
+	auto bare = Fixture::MakeHello("Bare");
+	bare.contentHash = 0x1111;
+	REQUIRE(f.Join(4, bare));
+	auto other = Fixture::MakeHello("Other");
+	other.contentHash = 0x2222;
+	CHECK(f.Refused(5, other) == "Your mods differ from the host's.");
 }
 
 TEST("server: a player who comes back with the same identity gets the same player id")

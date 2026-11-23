@@ -12,7 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
-// Form IDs across load orders (protocol 36). A form ID's top byte is its plugin's place among the full plugins of the
+// Form IDs across load orders (protocol 4). A form ID's top byte is its plugin's place among the full plugins of the
 // game that loaded it (FE and the next 12 bits: its place among the light ones; FF: made at runtime), so two games with
 // other mods, or the same mods in another order, give a mod's NPC or item another ID. The wire carries every form ID
 // in the session's numbering instead: the session's plugin table (Protocol::PluginTable), the host's load order with
@@ -131,6 +131,14 @@ namespace FormIds
 			return found != index.end() ? std::optional{ found->second } : std::nullopt;
 		}
 
+		// The form ID a plugin's form a_local has in this load order (a plugin's file name and the form's number within
+		// it name one form in every game that has the plugin); none when the table lacks the plugin or no ID can say it.
+		[[nodiscard]] std::optional<std::uint32_t> FormOf(std::string_view a_plugin, std::uint32_t a_local) const
+		{
+			const auto place = Find(a_plugin);
+			return place ? Compose(*place, a_local) : std::nullopt;
+		}
+
 		// The plugin at a place, or nothing.
 		[[nodiscard]] const std::string* At(Place a_place) const
 		{
@@ -152,7 +160,7 @@ namespace FormIds
 	};
 
 	// One game's form IDs and the session's, both ways. Without both tables (the session's not come yet, or a peer that
-	// sent no list) it is the identity, as before protocol 36; with the same plugins in the same places too, and then
+	// sent no list) it is the identity, as before protocol 4; with the same plugins in the same places too, and then
 	// nothing is translated at all.
 	class Mapper
 	{

@@ -525,3 +525,18 @@ TEST("protocol: looks with a body weight outside 0 to 100 are not read; the ends
 		CHECK(read->weight == value);
 	}
 }
+
+TEST("protocol: the session's plugin table comes back as it went, a whole Skyrim load order too, and nothing malformed is read")
+{
+	const Protocol::PluginTable table{ Protocol::ComparedLoadOrder({ "Skyrim.esm", "Update.esm", "Mine.esp" }, { "ccBGSSSE037-Curios.esl" }) };
+	const auto                  packet = Protocol::Encode(table);
+	CHECK(Protocol::PeekType(packet) == MT::kPluginTable);
+	CHECK(Protocol::DecodePluginTable(packet) == table);
+	CheckStrict(packet, Protocol::DecodePluginTable);
+
+	const Protocol::PluginTable whole{ WholeLoadOrder() };
+	const auto                  wholePacket = Protocol::Encode(whole);
+	CHECK(wholePacket.size() <= Protocol::MAX_MESSAGE_SIZE);
+	CHECK(Protocol::DecodePluginTable(wholePacket) == whole);
+	CHECK(Protocol::DecodePluginTable(Protocol::Encode(Protocol::PluginTable{})) == Protocol::PluginTable{});
+}

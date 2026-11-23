@@ -1,5 +1,7 @@
 #include "game/LoadOrder.h"
 
+#include "Protocol.h"
+
 namespace LoadOrder
 {
 	Plugins Read()
@@ -25,5 +27,21 @@ namespace LoadOrder
 			}
 		}
 		return out;
+	}
+
+	std::optional<std::uint32_t> FirstPlayableArmor(std::string_view a_plugin)
+	{
+		const auto data = RE::TESDataHandler::GetSingleton();
+		if (!data) {
+			return std::nullopt;
+		}
+		for (const auto armor : data->GetFormArray<RE::TESObjectARMO>()) {
+			// Defined there, not only changed there: the plugin that made it is the first file of its form.
+			const auto file = armor ? armor->GetFile(0) : nullptr;
+			if (file && armor->GetPlayable() && Protocol::SamePluginName(file->GetFilename(), a_plugin)) {
+				return armor->GetFormID();
+			}
+		}
+		return std::nullopt;
 	}
 }

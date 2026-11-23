@@ -71,7 +71,7 @@ TEST("form ids: the same plugins in the same places translate nothing")
 	const Mapper same(Order(BASE, { "L.esl" }), Order({ "skyrim.ESM", "Dawnguard.esm", "Dragonborn.esm" }, { "l.esl" }));
 	CHECK(same.Identity());
 	CHECK(Mapper().Identity());
-	// Without either list (a peer that sent none, the session's not come yet) as before protocol 36.
+	// Without either list (a peer that sent none, the session's not come yet) as before protocol 4.
 	CHECK(Mapper({}, Order(BASE)).Identity());
 	CHECK(Mapper(Order(BASE), {}).Identity());
 	CHECK(Mapper(Order(BASE), {}).ToSession(0x05000801) == 0x05000801u);

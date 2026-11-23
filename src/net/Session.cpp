@@ -1,12 +1,15 @@
 #include "net/Session.h"
 
 #include "Config.h"
+#include "FormIds.h"
+#include "FormTranslate.h"
 #include "Protocol.h"
 #include "Redact.h"
 #include "Server.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/RemotePlayers.h"
+#include "net/FormsCommand.h"
 #include "net/Identity.h"
 #include "net/LaunchArgs.h"
 #include "net/NameChoice.h"
@@ -56,6 +59,16 @@ namespace Session
 		std::uint64_t                     statesIn = 0;
 		std::uint64_t                     looksSent = 0;
 		std::string                       lastEnd = "none";
+		// This game's edge to the session's form IDs (common/FormTranslate.h): our load order as the hello sent it, and
+		// the session's plugin table once the server sends it (before the welcome, and again whenever it grows). Until
+		// then the mapper is the identity, and nothing that carries a form is sent or read before the welcome.
+		std::vector<std::string>          ourOrder;
+		FormIds::Mapper                   forms;
+		std::size_t                       tableSize = 0;
+		FormTranslate::SkipLog            skippedPlugins;
+		std::uint64_t                     formsTranslated = 0;  // packets that went or came with other IDs
+		std::uint64_t                     formsSkipped = 0;     // packets with a form left out, set to none or nowhere
+		std::uint64_t                     formsPlaceless = 0;   // states of a friend somewhere this game lacks
 		bool                              launchChecked = false;
 		bool                              autoHosted = false;
 
@@ -67,19 +80,79 @@ namespace Session
 			sentLooks.reset();
 			beats.clear();
 			rttMs = -1.0f;
+			forms = {};
+			tableSize = 0;
+			skippedPlugins.Clear();
+			formsTranslated = formsSkipped = formsPlaceless = 0;
 		}
 
+		// What a translation did, counted; each plugin whose forms it skipped is named in the log once a session.
+		void Note(const FormTranslate::Result& a_result, FormTranslate::Way a_way)
+		{
+			if (a_result.kind == FormTranslate::Result::Kind::kChanged) {
+				++formsTranslated;
+			}
+			if (!a_result.Skipped()) {
+				return;
+			}
+			++formsSkipped;
+			formsPlaceless += a_result.placeless ? 1 : 0;
+			const bool out = a_way == FormTranslate::Way::kToSession;
+			for (const auto& plugin : skippedPlugins.Fresh(forms, a_way, a_result)) {
+				logs::info("Session: forms of {} are skipped: {} (said once)", plugin.empty() ? "a plugin past the session's table" : FormsCommand::Shown(plugin),
+					out ? "the others' games don't all have it" : "this game doesn't have it");
+			}
+		}
+
+		// Every packet goes out in the session's numbering of forms.
 		void Send(std::vector<std::uint8_t> a_data, bool a_reliable)
 		{
-			if (client) {
-				client->Send(std::move(a_data), a_reliable);
+			if (!client) {
+				return;
 			}
+			auto result = FormTranslate::Translate(forms, FormTranslate::Way::kToSession, a_data);
+			Note(result, FormTranslate::Way::kToSession);
+			client->Send(result.kind == FormTranslate::Result::Kind::kChanged ? std::move(result.packet) : std::move(a_data), a_reliable);
+		}
+
+		// The plugins that differ from the session's, named in this game's log (a few of each; the counts say the rest).
+		void SayDifferences()
+		{
+			constexpr std::size_t SHOWN = 8;
+			const auto            list = [&](const FormIds::Table& a_from, const FormIds::Table& a_in) {
+				std::string out;
+				std::size_t count = 0;
+				for (const auto* kind : { &a_from.full, &a_from.light }) {
+					for (const auto& name : *kind) {
+						if (!a_in.Find(name) && count++ < SHOWN) {
+							out += (out.empty() ? "" : ", ") + FormsCommand::Shown(name);
+						}
+					}
+				}
+				return count > SHOWN ? std::format("{} and {} more", out, count - SHOWN) : out;
+			};
+			if (forms.OursOnly() != 0) {
+				logs::info("Session: plugins of ours the session's table lacks (their forms are not shared): {}", list(forms.Local(), forms.Session()));
+			}
+			if (forms.SessionsOnly() != 0) {
+				logs::info("Session: plugins of the session's this game lacks (their forms are skipped here): {}", list(forms.Session(), forms.Local()));
+			}
+		}
+
+		void OnPluginTable(const Protocol::PluginTable& a_table)
+		{
+			forms = FormIds::Mapper(ourOrder, a_table.plugins);
+			tableSize = forms.Session().Size();
+			logs::info("Session: the session's plugin table has {} plugins: {} ({} of ours it lacks, {} of its this game lacks)", tableSize,
+				forms.Identity() ? "the same as ours, nothing to translate" : "form ids are translated by plugin name", forms.OursOnly(), forms.SessionsOnly());
+			SayDifferences();
 		}
 
 		void SayHello()
 		{
 			const auto plugins = LoadOrder::Read();
 			auto       order = Protocol::ComparedLoadOrder(plugins.full, plugins.light);
+			ourOrder = order;  // what the session's plugin table is matched against, whether or not the list fits a hello
 			const auto steamName = Config::Get().steam && Steam::Available() ? Steam::PersonaName() : std::string{};
 			Protocol::Hello hello{
 				.contentHash = Protocol::LoadOrderHash(order),
@@ -112,11 +185,22 @@ namespace Session
 
 		void Handle(std::span<const std::uint8_t> a_data)
 		{
+			// Every packet is read in this game's numbering of forms.
+			auto translated = FormTranslate::Translate(forms, FormTranslate::Way::kToLocal, a_data);
+			Note(translated, FormTranslate::Way::kToLocal);
+			if (translated.kind == FormTranslate::Result::Kind::kChanged) {
+				a_data = translated.packet;
+			}
 			const auto type = Protocol::PeekType(a_data);
 			if (!type) {
 				return;
 			}
 			switch (*type) {
+			case Protocol::MessageType::kPluginTable:
+				if (const auto msg = Protocol::DecodePluginTable(a_data)) {
+					OnPluginTable(*msg);
+				}
+				break;
 			case Protocol::MessageType::kWelcome:
 				if (const auto msg = Protocol::DecodeWelcome(a_data)) {
 					welcomed = true;
@@ -331,6 +415,35 @@ namespace Session
 	bool Active()
 	{
 		return role != Role::kNone;
+	}
+
+	std::string Forms(std::string_view a_args)
+	{
+		const auto query = FormsCommand::Parse(a_args);
+		const auto ours = [] {
+			const auto plugins = LoadOrder::Read();
+			return FormIds::Table::Of(Protocol::ComparedLoadOrder(plugins.full, plugins.light));
+		};
+		switch (query.kind) {
+		case FormsCommand::Kind::kStatus:
+			return std::format("identity={} table={} ours={} oursOnly={} theirsOnly={} translated={} skipped={} placeless={} plugins={}", forms.Identity() ? 1 : 0,
+				tableSize, ourOrder.empty() ? 0 : FormIds::Table::Of(ourOrder).Size(), forms.OursOnly(), forms.SessionsOnly(), formsTranslated, formsSkipped,
+				formsPlaceless, skippedPlugins.Count());
+		case FormsCommand::Kind::kId:
+			return FormsCommand::DescribeId(forms, ours(), query.number);
+		case FormsCommand::Kind::kFind:
+			return FormsCommand::DescribeFind(ours(), query.plugin, query.number);
+		case FormsCommand::Kind::kPlace:
+			return FormsCommand::DescribePlace(ours(), query.plugin);
+		case FormsCommand::Kind::kArmor:
+			if (const auto id = LoadOrder::FirstPlayableArmor(query.plugin)) {
+				return std::format("{} armor=1", FormsCommand::DescribeId(forms, ours(), *id));
+			}
+			return std::format("armor=0 plugin={}", FormsCommand::Shown(query.plugin));
+		case FormsCommand::Kind::kBad:
+			break;
+		}
+		return std::string{ FormsCommand::USAGE };
 	}
 
 	std::string Describe()

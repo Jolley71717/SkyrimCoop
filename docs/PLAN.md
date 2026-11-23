@@ -56,7 +56,7 @@ Proof, on the rig, both as host:
 - Both logs show the session: the host lists the friend as `player 2`, the friend is welcomed, and each side names the other's game and protocol version.
 - Messages go both ways over Steam's relay for an hour: heartbeats answered, no disconnect, and the round trip time logged.
 - Leaving is clean both ways: the friend leaves and the host's log says so; the host stops and the friend's log says so; each can start again without restarting the game.
-- A wrong password, a full session, a different protocol version and a different load order are each refused with their own clear line in both logs.
+- A wrong password, a full session and a different protocol version are each refused with their own clear line in both logs; a friend whose plugins are in another order, or who has other plugins, is let in and sees the host's gear as the host's game names it (the rig's `forms` step).
 - The same session over direct UDP (`sTransport = enet`) on the local network.
 - If Steam cannot do this from inside Skyrim, the phase ends with that finding and a decision on the fallbacks, not with a workaround nobody chose.
 

@@ -67,7 +67,7 @@ If a game does not reach the plugin's tick in step 3, read `skse64.log` and `Sky
 `Documents\My Games\Skyrim Special Edition\SKSE\SkyrimCoop.log`. A good first log has, in this order:
 
 ```
-SkyrimCoop 0.0.1 (protocol 3)
+SkyrimCoop 0.0.1 (protocol 4)
 Game version 1.7.104.0 (the tested one)
 Address Library: versionlib-1-7-104-0.bin (2263132 bytes) resolved an address (...)
 Launch: ...

@@ -12,4 +12,8 @@ namespace LoadOrder
 
 	// Main thread, after the game's data is loaded (SKSE's kDataLoaded).
 	[[nodiscard]] Plugins Read();
+
+	// The form ID of the first armor a_plugin defines that a player can wear (the rig's `forms armor`, to dress a player
+	// in a form of a chosen plugin): none when the game has no such plugin or it has no such armor. Main thread.
+	[[nodiscard]] std::optional<std::uint32_t> FirstPlayableArmor(std::string_view a_plugin);
 }

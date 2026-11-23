@@ -26,9 +26,6 @@ namespace Text
 		{ "reject.password", "Wrong password." },
 		{ "reject.full", "The game is full ({n} players)." },
 		{ "reject.mods", "Your mods differ from the host's." },
-		{ "reject.mods_missing", "Your mods differ from the host's: you don't have {plugin}." },
-		{ "reject.mods_extra", "Your mods differ from the host's: the host doesn't have {plugin}." },
-		{ "reject.mods_order", "Your mods differ from the host's: the same plugins, in another order." },
 
 		// --- Steam: the status line friends see beside our name in their friends list (src/steam/Steam.cpp), in the
 		// language of the player who sets it ---

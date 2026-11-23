@@ -7,9 +7,6 @@ reject.version = 這個遊戲使用另一個版本的模組（通訊協定 {you}
 reject.password = 密碼錯誤。
 reject.full = 遊戲已滿（{n} 名玩家）。
 reject.mods = 你的模組與房主的不同。
-reject.mods_missing = 你的模組與房主的不同：你沒有 {plugin}。
-reject.mods_extra = 你的模組與房主的不同：房主沒有 {plugin}。
-reject.mods_order = 你的模組與房主的不同：外掛程式相同，但順序不同。
 
 steam.status_hosting = 正在主持 Skyrim 連線合作
 steam.status_playing = 正在玩 Skyrim 連線合作

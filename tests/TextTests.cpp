@@ -212,7 +212,7 @@ TEST("text: every English key is unique and plain")
 		CHECK(!entry.text.empty());
 		CHECK(std::ranges::all_of(entry.key, [](char a_c) { return (a_c >= 'a' && a_c <= 'z') || (a_c >= '0' && a_c <= '9') || a_c == '_' || a_c == '.'; }));
 	}
-	CHECK(keys.size() >= 11u);
+	CHECK(keys.size() >= 8u);
 }
 
 TEST("text: a server's refusals read in the player's language, and a changed server's own text is shown as it came")
@@ -223,15 +223,12 @@ TEST("text: a server's refusals read in the player's language, and a changed ser
 		Text::FormatEnglish("reject.full", { { "n", 4 } }),
 		Text::FormatEnglish("reject.version", { { "you", 2 }, { "host", 3 } }),
 		Text::GetEnglish("reject.mods"),
-		Text::FormatEnglish("reject.mods_missing", { { "plugin", "Mine.esp" } }),
-		Text::FormatEnglish("reject.mods_extra", { { "plugin", "Theirs.esp" } }),
-		Text::GetEnglish("reject.mods_order"),
 		"Some refusal a changed server made up",
 	};
 	// The wire's texts stay what they were before the keys (the tests of the server check them byte for byte).
 	CHECK(sent[0] == "Wrong password.");
 	CHECK(sent[2] == "This game runs another version of the mod (protocol 2, the host has 3). Both players need the same version.");
-	CHECK(sent[4] == "Your mods differ from the host's: you don't have Mine.esp.");
+	CHECK(sent[3] == "Your mods differ from the host's.");
 	// In English nothing changes.
 	for (const auto& reason : sent) {
 		CHECK(Text::Reject(reason) == reason);
@@ -239,13 +236,12 @@ TEST("text: a server's refusals read in the player's language, and a changed ser
 	Text::Use("de", Text::Parse(
 		"reject.password = Falsches Passwort.\n"
 		"reject.version = Andere Version: du {you}, der Host {host}.\n"
-		"reject.mods_missing = Dir fehlt {plugin}.\n"));
+		"reject.mods = Andere Mods.\n"));
 	CHECK(Text::Reject(sent[0]) == "Falsches Passwort.");
 	CHECK(Text::Reject(sent[1]) == sent[1]);  // no German text: the English
 	CHECK(Text::Reject(sent[2]) == "Andere Version: du 2, der Host 3.");
-	CHECK(Text::Reject(sent[4]) == "Dir fehlt Mine.esp.");
-	CHECK(Text::Reject(sent[3]) == sent[3]);  // the plain refusal is not the one that names a plugin
-	CHECK(Text::Reject(sent[7]) == sent[7]);
+	CHECK(Text::Reject(sent[3]) == "Andere Mods.");
+	CHECK(Text::Reject(sent[4]) == sent[4]);
 	CHECK(Text::Reject("") == "");
 }
 

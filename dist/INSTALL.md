@@ -37,7 +37,7 @@ Start the game through SKSE and get to the main menu, then open
 It should begin like this:
 
 ```
-SkyrimCoop 0.0.1 (protocol 3)
+SkyrimCoop 0.0.1 (protocol 4)
 Game version 1.7.104.0 (the tested one)
 ...
 Config: host no, transport auto, port 7780, up to 4 players, password none, address none, log level info

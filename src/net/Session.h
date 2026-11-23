@@ -13,7 +13,8 @@
 // them in the host's lobby and this connects to its owner.
 //
 // Once let in, the game sends where its player is 20 times a second and what they look like when it changes, and
-// hands what the others send to RemotePlayers. Main thread only.
+// hands what the others send to RemotePlayers. Every packet goes through FormTranslate on its way out and in, so the
+// forms it names are the session's on the wire (by plugin file name) and this game's everywhere else. Main thread only.
 namespace Session
 {
 	// Once a tick.
@@ -30,4 +31,8 @@ namespace Session
 
 	// For the developer channel's `session`: one line, key=value, never a name or a Steam id.
 	[[nodiscard]] std::string Describe();
+
+	// For the developer channel's `forms` (net/FormsCommand.h): this game's edge to the session's form IDs, and one form
+	// looked up by ID, or by its plugin's file name and its number within the plugin.
+	[[nodiscard]] std::string Forms(std::string_view a_args);
 }
