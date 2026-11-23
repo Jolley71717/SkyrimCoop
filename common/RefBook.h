@@ -65,6 +65,13 @@ public:
 		return out;
 	}
 
+	// The session's word on a reference, when it has one.
+	[[nodiscard]] const Protocol::RefState* Find(std::uint32_t a_refId) const
+	{
+		const auto it = known.find(a_refId);
+		return it == known.end() ? nullptr : &it->second;
+	}
+
 	[[nodiscard]] std::size_t Size() const { return known.size(); }
 
 	void Clear()

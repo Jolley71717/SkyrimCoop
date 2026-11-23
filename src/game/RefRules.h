@@ -18,8 +18,10 @@
 //
 // Three things are shared, each by what the engine itself keeps, never by a script's name, so a mod's door, gate or
 // lever is shared as the base game's are and the load order does not matter:
-// - the open state of a door that opens and stays open (a plain door: not a load door, which takes the player to
-//   another cell, nor an automatic one, which each game opens for whoever comes near);
+// - the open state of everything that opens and stays open: a plain door (not a load door, which takes the player to
+//   another cell, nor an automatic one, which each game opens for whoever comes near), and an activator that has open
+//   and closed states (BGSOpenCloseForm: a gate, a portcullis, a drawbridge built as an activator and raised by a
+//   lever's script with SetOpen), named or not;
 // - the lock of everything that has one: every door (load doors too: a locked house), every chest; its level as well,
 //   so a lock a script raises or a key-only lock is the same in each game;
 // - the use of a mechanism: an activator the player can use (it has a name the game shows: "Pull Lever", "Pull Chain",
@@ -71,7 +73,9 @@ namespace RefRules
 		case Base::kContainer:
 			return { .lock = true };
 		case Base::kActivator:
-			return { .use = a_facts.named };
+			// its open state where it has one (a reference that reads none says none: Shared), its use where a player
+			// can use it
+			return { .open = true, .use = a_facts.named };
 		case Base::kOther:
 			break;
 		}
@@ -140,6 +144,34 @@ namespace RefRules
 	{
 		constexpr std::int8_t bases[] = { 1, 25, 50, 75, 100, -1 };
 		return a_level <= RefState::LEVEL_MAX ? bases[a_level] : 1;
+	}
+
+	// What a change is about: an open/close event says the open state, a lock event the lock and its level. A report
+	// says only that part, never the rest of what the reference reads here: the rest is this game's own (a friend's
+	// door picked long ago in their save must not unlock the host's when the friend only opens it).
+	enum class Part : std::uint8_t
+	{
+		kOpen,
+		kLock,
+	};
+
+	// a_shares cut to what a change of that part may say.
+	constexpr Shares Within(Shares a_shares, Part a_part)
+	{
+		return { .open = a_shares.open && a_part == Part::kOpen, .lock = a_shares.lock && a_part == Part::kLock, .use = false };
+	}
+
+	// The parts a_parts says, read in a_read (a held or refused report read again: only what it was about goes).
+	constexpr RefState Only(RefState a_read, const RefState& a_parts)
+	{
+		if (a_parts.open == RefState::kUnknown) {
+			a_read.open = RefState::kUnknown;
+		}
+		if (a_parts.locked == RefState::kUnknown && a_parts.lockLevel == RefState::LEVEL_UNKNOWN) {
+			a_read.locked = RefState::kUnknown;
+			a_read.lockLevel = RefState::LEVEL_UNKNOWN;
+		}
+		return a_read;
 	}
 
 	// The part of a state read here that is shared (Shares): the rest is not said.
@@ -223,7 +255,10 @@ namespace RefRules
 	}
 
 	// What to change on a reference to bring it to the session's word: only what the word says and the reference
-	// reads otherwise (a part it reads none of, kUnknown, it lacks: a door with no lock is given none).
+	// reads otherwise (an open state it reads none of, kUnknown, it lacks). A reference that shares its lock always
+	// reads locked or not (one with no lock reads unlocked: a lock is added to lock it). The level is written wherever
+	// the reference is, or is being made, locked and does not read the word's level, also where it reads none (a lock
+	// added now, or a leveled one scaled to this player); and where it is unlocked and reads another level of its own.
 	struct Change
 	{
 		std::optional<bool>         open;
@@ -241,7 +276,9 @@ namespace RefRules
 		if (a_want.locked != RefState::kUnknown && a_read.locked != RefState::kUnknown && a_want.locked != a_read.locked) {
 			out.locked = a_want.locked == RefState::kYes;
 		}
-		if (a_want.lockLevel != RefState::LEVEL_UNKNOWN && a_read.lockLevel != RefState::LEVEL_UNKNOWN && a_want.lockLevel != a_read.lockLevel) {
+		const bool endsLocked = out.locked ? *out.locked : a_read.locked == RefState::kYes;
+		if (a_want.lockLevel != RefState::LEVEL_UNKNOWN && a_want.lockLevel != a_read.lockLevel && a_read.locked != RefState::kUnknown &&
+			(endsLocked || a_read.lockLevel != RefState::LEVEL_UNKNOWN)) {
 			out.level = a_want.lockLevel;
 		}
 		return out;
@@ -295,6 +332,23 @@ namespace RefRules
 			const auto& k = it->second;
 			return (a_read.open != RefState::kUnknown && a_read.open != k.open) || (a_read.locked != RefState::kUnknown && a_read.locked != k.locked) ||
 			       (a_read.lockLevel != RefState::LEVEL_UNKNOWN && a_read.lockLevel != k.lockLevel);
+		}
+
+		// The server did not take a report of ours (Protocol::RefRefusal): it is answered, so it is no longer out, and
+		// what the session says of the reference is a_session (nothing, when it says nothing), not what we reported. A
+		// state read here that differs from it is news again.
+		void Refused(std::uint32_t a_refId, const RefState& a_session)
+		{
+			if (const auto it = outstanding.find(a_refId); it != outstanding.end() && --it->second == 0) {
+				outstanding.erase(it);
+			}
+			if (a_session.Says()) {
+				auto word = a_session;
+				word.refId = a_refId;
+				known.insert_or_assign(a_refId, word);
+			} else {
+				known.erase(a_refId);
+			}
 		}
 
 		[[nodiscard]] std::optional<RefState> Known(std::uint32_t a_refId) const
@@ -438,6 +492,111 @@ namespace RefRules
 	private:
 		std::unordered_map<std::uint32_t, RefState> waiting;
 		std::uint64_t                               dropped = 0;
+	};
+
+	// A report the server answered busy (past this player's budget) goes again after AGAIN_AFTER, read again then: the
+	// parts it was about, as the reference reads them then, if the session still doesn't know them. The newest parts of
+	// each kept.
+	inline constexpr auto AGAIN_AFTER = std::chrono::seconds(1);
+
+	class Again
+	{
+	public:
+		void Add(const RefState& a_parts, Clock::time_point a_now)
+		{
+			auto [it, added] = waiting.try_emplace(a_parts.refId, Entry{ a_parts, a_now + AGAIN_AFTER });
+			if (!added) {
+				it->second.parts = Protocol::MergeRefState(it->second.parts, a_parts);
+				it->second.due = a_now + AGAIN_AFTER;
+			}
+		}
+
+		// The parts due now, each taken out.
+		std::vector<RefState> Due(Clock::time_point a_now)
+		{
+			std::vector<RefState> out;
+			for (auto it = waiting.begin(); it != waiting.end();) {
+				if (it->second.due <= a_now) {
+					out.push_back(it->second.parts);
+					it = waiting.erase(it);
+				} else {
+					++it;
+				}
+			}
+			return out;
+		}
+
+		[[nodiscard]] std::size_t Size() const { return waiting.size(); }
+		void                      Clear() { waiting.clear(); }
+
+	private:
+		struct Entry
+		{
+			RefState          parts;
+			Clock::time_point due;
+		};
+		std::unordered_map<std::uint32_t, Entry> waiting;
+	};
+
+	// While a friend's use of a mechanism is being made here, its script runs here as it ran in the user's game: the gate
+	// it raises is raised here by it. The session's word on that gate (the user's game reports the gate it raised) must
+	// not be applied before the script has run, or a script that flips its target (opens it when closed, closes it
+	// when open) would find it open already and close it, and every game would end on closed. So for SETTLE after a use
+	// made here: words on open states wait (Pending) and are applied after, where the reference then reads otherwise;
+	// and an open state that changes here without our player's hand is not reported (it is the replayed script's, and
+	// the user's game reports what it did). Locks are not held back.
+	inline constexpr auto SETTLE = std::chrono::seconds(3);
+
+	class Settle
+	{
+	public:
+		void               Used(Clock::time_point a_now) { until = a_now + SETTLE; }
+		[[nodiscard]] bool Active(Clock::time_point a_now) const { return a_now < until; }
+		void               Clear() { until = {}; }
+
+	private:
+		Clock::time_point until{};
+	};
+
+	// Open states that change with no event: the engine is not known to send TESOpenCloseEvent for every kind (an
+	// activator a script opens), so the open states of the references near our player are read every SCAN_EVERY and a
+	// change between two reads in a row is taken as an open/close event. Only a change: a reference first seen (it came
+	// near, or loaded) is this game's as it is, and says nothing (its state is not the session's business until it
+	// changes).
+	inline constexpr auto SCAN_EVERY = std::chrono::milliseconds(500);
+
+	class OpenWatch
+	{
+	public:
+		void BeginScan() { ++generation; }
+
+		// A reference's open state in this scan: true when it was read in the last scan too and reads otherwise now.
+		bool Seen(std::uint32_t a_refId, std::uint8_t a_open)
+		{
+			auto [it, added] = last.try_emplace(a_refId, Entry{ a_open, generation });
+			const bool changed = !added && it->second.generation + 1 == generation && a_open != RefState::kUnknown &&
+			                     it->second.open != RefState::kUnknown && it->second.open != a_open;
+			it->second = Entry{ a_open, generation };
+			return changed;
+		}
+
+		// References not read in this scan are forgotten (gone out of reach, unloaded).
+		void EndScan()
+		{
+			std::erase_if(last, [&](const auto& a_entry) { return a_entry.second.generation != generation; });
+		}
+
+		[[nodiscard]] std::size_t Size() const { return last.size(); }
+		void                      Clear() { last.clear(); }
+
+	private:
+		struct Entry
+		{
+			std::uint8_t  open = RefState::kUnknown;
+			std::uint64_t generation = 0;
+		};
+		std::unordered_map<std::uint32_t, Entry> last;
+		std::uint64_t                            generation = 0;
 	};
 
 	// Whether a reference can be shared at all: a placed one of a plugin (a runtime one, FF, no other game has).

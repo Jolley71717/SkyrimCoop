@@ -52,7 +52,7 @@ declare -A STEP_INFO=(
 	[gait]="sneak and jump, each way: the watcher's stand-in shows it"
 	[save_rejoin]="the VM saves mid-session (no stand-in in the save), leaves, rejoins, loads that save; the host ends the session and hosts again"
 	[forms]="(only when named) the VM's plugins in another order: it joins, and an armor each puts on is on the other's stand-in as that game's own form (steps/forms.sh)"
-	[doors]="a door, a load door and a container one game locks are locked in the other, and unlocked back; a door one opens is open in the other, and after the VM loads a save or joins again; a pillar one player uses is used by their stand-in (steps/doors.sh)"
+	[doors]="a door, a load door and a container one game locks are locked in the other, and unlocked back; a door one opens is open in the other, and after the VM loads a save or joins again; a pillar one player uses is used by their stand-in, and its script and the gates near it read the same in both (steps/doors.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
 STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors final"

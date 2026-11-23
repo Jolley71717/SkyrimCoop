@@ -74,6 +74,7 @@ namespace FormTranslate
 		case MT::kRemoteRefState:
 		case MT::kActivate:
 		case MT::kRemoteActivate:
+		case MT::kRefRefused:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -184,7 +185,7 @@ namespace FormTranslate
 		}
 
 		// A message about one reference, written back with its own type (kRefState or kRemoteRefState, kActivate or
-		// kRemoteActivate): the reference, or 0 when it has none on the other side.
+		// kRemoteActivate, kRefRefused): the reference, or 0 when it has none on the other side.
 		template <class T, class Decode>
 		void ApplyRef(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type, Decode a_decode)
 		{
@@ -238,6 +239,9 @@ namespace FormTranslate
 		case MT::kActivate:
 		case MT::kRemoteActivate:
 			detail::ApplyRef<Protocol::Activation>(a_packet, ctx, *type, Protocol::DecodeActivation);
+			break;
+		case MT::kRefRefused:
+			detail::ApplyRef<Protocol::RefRefusal>(a_packet, ctx, *type, Protocol::DecodeRefRefusal);
 			break;
 		default:
 			break;

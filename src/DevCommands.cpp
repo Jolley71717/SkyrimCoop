@@ -175,7 +175,7 @@ namespace DevCommands
 			return Console::Run(a_args) ? "ran" : "error: the game could not run it";
 		}
 
-		// refs [near [radius]] | ref <hex> | use <hex>: doors, locks and mechanisms (WorldObjects).
+		// refs [near [radius]] | ref <hex> | use <hex> | script <hex>: doors, locks and mechanisms (WorldObjects).
 		std::string Refs(std::string_view a_args)
 		{
 			return WorldObjects::Command(a_args);
@@ -189,6 +189,11 @@ namespace DevCommands
 		std::string UseCommand(std::string_view a_args)
 		{
 			return WorldObjects::Use(a_args);
+		}
+
+		std::string Script(std::string_view a_args)
+		{
+			return WorldObjects::Scripts(a_args);
 		}
 
 		struct Entry
@@ -212,6 +217,7 @@ namespace DevCommands
 			{ "refs", Refs },
 			{ "ref", Ref },
 			{ "use", UseCommand },
+			{ "script", Script },
 		};
 	}
 
@@ -227,7 +233,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex> | script <hex>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

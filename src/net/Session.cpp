@@ -249,6 +249,11 @@ namespace Session
 					WorldObjects::Heard(*msg);
 				}
 				break;
+			case Protocol::MessageType::kRefRefused:
+				if (const auto msg = Protocol::DecodeRefRefusal(a_data); msg && welcomed) {
+					WorldObjects::Refused(*msg);
+				}
+				break;
 			case Protocol::MessageType::kRemoteActivate:
 				if (const auto msg = Protocol::DecodeActivation(a_data); msg && welcomed && msg->playerId != playerId) {
 					WorldObjects::Used(*msg);

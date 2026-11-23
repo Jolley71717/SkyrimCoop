@@ -6,6 +6,8 @@
 #include "game/RefRules.h"
 
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 // Doors, locks and mechanisms (docs/DESIGN.md, "Doors, locks and mechanisms"): the messages (common/Protocol.h), their
@@ -14,6 +16,7 @@
 // tested in a game only: tools/rig/steps/doors.sh.
 
 using Protocol::Activation;
+using Protocol::RefRefusal;
 using Protocol::RefState;
 
 namespace
@@ -216,18 +219,24 @@ TEST("refs: what is shared of each kind, by what the engine keeps and never a sc
 	using RefRules::Facts;
 	using RefRules::Of;
 	using RefRules::Shares;
-	CHECK(Of(Facts{ .base = Base::kDoor }) == Shares{ .open = true, .lock = true });
-	CHECK(Of(Facts{ .base = Base::kDoor, .loadDoor = true }) == Shares{ .lock = true });   // a house door: its lock only
-	CHECK(Of(Facts{ .base = Base::kDoor, .automatic = true }) == Shares{ .lock = true });  // each game opens it for whoever comes near
-	CHECK(Of(Facts{ .base = Base::kContainer }) == Shares{ .lock = true });
-	CHECK(Of(Facts{ .base = Base::kActivator, .named = true }) == Shares{ .use = true });  // a lever, a chain, a pillar
-	CHECK(!Of(Facts{ .base = Base::kActivator }).Any());                                   // a trigger, an unnamed trap part
+	// (each comparison in parentheses: a braced list's comma would split the CHECK macro's argument)
+	CHECK((Of(Facts{ .base = Base::kDoor }) == Shares{ .open = true, .lock = true }));
+	CHECK((Of(Facts{ .base = Base::kDoor, .loadDoor = true }) == Shares{ .lock = true }));   // a house door: its lock only
+	CHECK((Of(Facts{ .base = Base::kDoor, .automatic = true }) == Shares{ .lock = true }));  // each game opens it for whoever comes near
+	CHECK((Of(Facts{ .base = Base::kContainer }) == Shares{ .lock = true }));
+	// An activator: its open state where it has one (a portcullis, a gate, a drawbridge built as an activator, named or
+	// not), and its use where a player can use it (a lever, a chain, a pillar).
+	CHECK((Of(Facts{ .base = Base::kActivator, .named = true }) == Shares{ .open = true, .use = true }));
+	CHECK((Of(Facts{ .base = Base::kActivator }) == Shares{ .open = true }));
+	// ... and one with no open state (a trigger, a pillar) says none: what it reads is cut to nothing.
+	CHECK(!RefRules::Shared(Door(1, RefState::kUnknown, RefState::kUnknown), Of(Facts{ .base = Base::kActivator })).Says());
 	CHECK(!Of(Facts{ .base = Base::kDoor, .marker = true }).Any());
 	CHECK(!Of(Facts{}).Any());
 	CHECK(std::string_view{ RefRules::KindName(Facts{ .base = Base::kDoor }) } == "door");
 	CHECK(std::string_view{ RefRules::KindName(Facts{ .base = Base::kDoor, .loadDoor = true }) } == "loaddoor");
 	CHECK(std::string_view{ RefRules::KindName(Facts{ .base = Base::kDoor, .automatic = true }) } == "autodoor");
 	CHECK(std::string_view{ RefRules::KindName(Facts{ .base = Base::kActivator, .named = true }) } == "mechanism");
+	CHECK(std::string_view{ RefRules::KindName(Facts{ .base = Base::kActivator }) } == "activator");
 	CHECK(std::string_view{ RefRules::KindName(Facts{ .base = Base::kContainer }) } == "container");
 }
 
@@ -301,6 +310,70 @@ TEST("refs: the session's word changes only what it says and the reference reads
 	CHECK(change.level == std::optional<std::uint8_t>{ 5 });
 }
 
+TEST("refs: a lock the session's word locks is at the word's level, also where this game reads no level")
+{
+	// No lock here (it reads unlocked, no level): a lock is added, at the word's level, not the game's very easy.
+	auto change = RefRules::Plan(Door(1, RefState::kUnknown, RefState::kYes, 2), Door(1, RefState::kUnknown, RefState::kNo));
+	CHECK(change.locked == std::optional{ true });
+	CHECK(change.level == std::optional<std::uint8_t>{ 2 });
+	// A leveled lock, unlocked here (its level depends on our player: none read): locked at the word's level.
+	change = RefRules::Plan(Door(1, RefState::kUnknown, RefState::kYes, 5), Door(1, RefState::kUnknown, RefState::kNo, RefState::LEVEL_UNKNOWN));
+	CHECK(change.level == std::optional<std::uint8_t>{ 5 });
+	// Locked here already, at a level the game scales (none read): the word's level is written.
+	change = RefRules::Plan(Door(1, RefState::kUnknown, RefState::kYes, 3), Door(1, RefState::kUnknown, RefState::kYes, RefState::LEVEL_UNKNOWN));
+	CHECK(!change.locked);
+	CHECK(change.level == std::optional<std::uint8_t>{ 3 });
+	// Unlocked by the word: its own number follows where it reads one, and nothing is added where it reads none.
+	change = RefRules::Plan(Door(1, RefState::kUnknown, RefState::kNo, 1), Door(1, RefState::kUnknown, RefState::kYes, 4));
+	CHECK(change.locked == std::optional{ false });
+	CHECK(change.level == std::optional<std::uint8_t>{ 1 });
+	change = RefRules::Plan(Door(1, RefState::kUnknown, RefState::kNo, 1), Door(1, RefState::kUnknown, RefState::kNo, RefState::LEVEL_UNKNOWN));
+	CHECK(!change.Any());
+	// A reference that shares no lock here (its lock reads none: Shared) is not given one.
+	change = RefRules::Plan(Door(1, RefState::kUnknown, RefState::kYes, 2), Door(1, RefState::kNo, RefState::kUnknown, RefState::LEVEL_UNKNOWN));
+	CHECK(!change.Any());
+	// The same level: nothing.
+	change = RefRules::Plan(Door(1, RefState::kUnknown, RefState::kYes, 2), Door(1, RefState::kUnknown, RefState::kYes, 2));
+	CHECK(!change.Any());
+}
+
+TEST("refs: a change reports only the part it is about, never the rest of what the reporting game reads")
+{
+	using RefRules::Part;
+	using RefRules::Shares;
+	using RefRules::Within;
+	const Shares door{ .open = true, .lock = true };
+	// The friend's door reads open and unlocked (picked long ago in their save); they only opened it: the lock is not said.
+	const auto read = Door(7, RefState::kYes, RefState::kNo, 2);
+	const auto opened = RefRules::Shared(read, Within(door, Part::kOpen));
+	CHECK(opened.open == RefState::kYes);
+	CHECK(opened.locked == RefState::kUnknown);
+	CHECK(opened.lockLevel == RefState::LEVEL_UNKNOWN);
+	// A lock event says the lock and its level, not the open state.
+	const auto locked = RefRules::Shared(read, Within(door, Part::kLock));
+	CHECK(locked.open == RefState::kUnknown);
+	CHECK(locked.locked == RefState::kNo);
+	CHECK(locked.lockLevel == 2);
+	// A chest opened shares nothing (its open state is not shared; its lock was not the change).
+	CHECK(!RefRules::Shared(read, Within(Shares{ .lock = true }, Part::kOpen)).Says());
+	CHECK(!Within(door, Part::kOpen).use);
+	// A reference the session knows nothing of is news only in the part the change says.
+	RefRules::Book book;
+	CHECK(book.News(opened));
+	book.Sent(opened);
+	CHECK(book.Known(7)->Says());
+	CHECK(book.Known(7)->locked == RefState::kUnknown);  // the book holds no lock it was never told
+	// A held or refused report read again says only what it was about.
+	const auto again = RefRules::Only(Door(7, RefState::kNo, RefState::kYes, 4), opened);
+	CHECK(again.open == RefState::kNo);
+	CHECK(again.locked == RefState::kUnknown);
+	CHECK(again.lockLevel == RefState::LEVEL_UNKNOWN);
+	const auto againLock = RefRules::Only(Door(7, RefState::kNo, RefState::kYes, 4), locked);
+	CHECK(againLock.open == RefState::kUnknown);
+	CHECK(againLock.locked == RefState::kYes);
+	CHECK(againLock.lockLevel == 4);
+}
+
 TEST("refs: our own word on a door is not sent back, and a friend's applied here reads as known")
 {
 	RefRules::Book book;
@@ -329,10 +402,10 @@ TEST("refs: two players at one door at once end on the same state, the one the s
 	b.Sent(Door(9, doorB));
 	const auto first = Door(9, RefState::kYes, RefState::kUnknown, RefState::LEVEL_UNKNOWN, 1);
 	const auto second = Door(9, RefState::kNo, RefState::kUnknown, RefState::LEVEL_UNKNOWN, 2);
-	const auto hear = [](RefRules::Book& a_book, std::uint8_t& a_door, const RefState& a_word, std::uint32_t a_us) {
+	const auto hear = [](RefRules::Book& a_book, auto& a_door, const RefState& a_word, std::uint32_t a_us) {
 		if (a_book.Heard(a_word, a_us)) {
 			if (const auto change = RefRules::Plan(*a_book.Known(9), Door(9, a_door)); change.open) {
-				a_door = *change.open ? RefState::kYes : RefState::kNo;
+				a_door = static_cast<std::remove_reference_t<decltype(a_door)>>(*change.open ? RefState::kYes : RefState::kNo);
 			}
 		}
 	};
@@ -393,6 +466,174 @@ TEST("refs: the session's words wait for their reference to load, the newest of 
 	CHECK(!pending.Add(Door(0x9999, RefState::kYes)));
 	CHECK(pending.Dropped() == 1);
 	CHECK(pending.Add(Door(2, RefState::kNo)));  // one waiting already still takes a newer word
+}
+
+TEST("refs: a report the server did not take is answered, no longer out, and news again")
+{
+	RefRules::Book book;
+	book.Sent(Door(8, RefState::kYes));
+	CHECK(book.Outstanding() == 1);
+	CHECK(!book.News(Door(8, RefState::kYes)));
+	// Refused (busy), the session having no word on it: not out any more, and the door's state is news again.
+	book.Refused(8, RefState{});
+	CHECK(book.Outstanding() == 0);
+	CHECK(!book.Known(8));
+	CHECK(book.News(Door(8, RefState::kYes)));
+	// Refused while the session holds another word: that word is what it says, and ours differs from it.
+	book.Sent(Door(8, RefState::kYes));
+	book.Refused(8, Door(8, RefState::kNo));
+	CHECK(book.Known(8)->open == RefState::kNo);
+	CHECK(book.News(Door(8, RefState::kYes)));
+	// Two out, the first refused: the echo of the second is ours and the newest, and is applied.
+	book.Sent(Door(8, RefState::kYes));
+	book.Sent(Door(8, RefState::kNo));
+	book.Refused(8, RefState{});
+	CHECK(book.Heard(Door(8, RefState::kNo, RefState::kUnknown, RefState::LEVEL_UNKNOWN, 1), 1));
+	CHECK(book.Outstanding() == 0);
+}
+
+TEST("refs: a report dropped at one door does not leave two players on different states")
+{
+	// The review's case: player 1 and player 2 at one door. The server hears 1's report past 1's budget and answers it
+	// busy; then 2's, which it takes and passes on. Each game applies what it hears and reports again what is news.
+	RefRules::Book a;
+	RefRules::Book b;
+	RefRules::Again again;
+	auto           doorA = RefState::kYes;  // 1 opened it
+	auto           doorB = RefState::kNo;   // 2 closed it
+	const auto     t0 = Clock::now();
+	a.Sent(Door(9, doorA));
+	b.Sent(Door(9, doorB));
+	// 1 hears its refusal (the session has no word yet): not out, sent again in a moment.
+	a.Refused(9, RefState{});
+	again.Add(Door(9, RefState::kYes), t0);
+	// 2's report is the session's word, to both.
+	const auto word = Door(9, RefState::kNo, RefState::kUnknown, RefState::LEVEL_UNKNOWN, 2);
+	REQUIRE(a.Heard(word, 1));
+	if (const auto change = RefRules::Plan(*a.Known(9), Door(9, doorA)); change.open) {
+		doorA = *change.open ? RefState::kYes : RefState::kNo;
+	}
+	REQUIRE(b.Heard(word, 2));
+	CHECK(b.Outstanding() == 0);
+	// 1's report goes again: it reads the session's word now, which is no news.
+	const auto due = again.Due(t0 + RefRules::AGAIN_AFTER);
+	REQUIRE(due.size() == 1);
+	CHECK(!a.News(RefRules::Only(Door(9, doorA), due[0])));
+	CHECK(doorA == RefState::kNo);
+	CHECK(doorB == RefState::kNo);
+	CHECK(a.Outstanding() == 0);  // no echo count left one too high
+}
+
+TEST("refs: a refused report goes again after a moment, its newest parts once")
+{
+	RefRules::Again again;
+	const auto      t0 = Clock::now();
+	again.Add(Door(3, RefState::kYes), t0);
+	again.Add(Door(3, RefState::kUnknown, RefState::kYes, 2), t0 + std::chrono::milliseconds(100));
+	CHECK(again.Due(t0 + std::chrono::milliseconds(900)).empty());
+	const auto due = again.Due(t0 + std::chrono::milliseconds(100) + RefRules::AGAIN_AFTER);
+	REQUIRE(due.size() == 1);
+	CHECK(due[0].open == RefState::kYes);
+	CHECK(due[0].locked == RefState::kYes);
+	CHECK(again.Size() == 0);
+}
+
+TEST("refs: a lever whose script flips its gate ends with the gate as the user's game has it, in every game")
+{
+	// The user's game (A) pulled the lever: its script opened the gate, and A reported the use and then the gate. In
+	// game B the use is made by A's stand-in (B's lever script will flip B's gate a moment later), and the gate's word
+	// arrives in the same frame. B's script flips what it finds.
+	const auto run = [](std::uint8_t a_gateB, bool a_settle) {
+		RefRules::Book    book;
+		RefRules::Pending pending;
+		RefRules::Settle  settle;
+		const auto        t0 = Clock::now();
+		auto              gate = a_gateB;
+		const auto        apply = [&](const RefState& a_want) {
+			if (const auto change = RefRules::Plan(a_want, Door(20, gate)); change.open) {
+				gate = *change.open ? RefState::kYes : RefState::kNo;
+			}
+		};
+		if (a_settle) {
+			settle.Used(t0);  // the stand-in's use is made
+		}
+		const auto word = Door(20, RefState::kYes, RefState::kUnknown, RefState::LEVEL_UNKNOWN, 1);
+		REQUIRE(book.Heard(word, 2));
+		if (settle.Active(t0)) {
+			pending.Add(*book.Known(20));
+		} else {
+			apply(*book.Known(20));
+		}
+		// The lever's script runs (Papyrus, a few frames later): it flips the gate.
+		gate = gate == RefState::kYes ? RefState::kNo : RefState::kYes;
+		// B's change is the replayed script's: not reported while settling (the book would call it news otherwise).
+		const bool reports = !(settle.Active(t0 + std::chrono::milliseconds(200))) && book.News(Door(20, gate));
+		// The words that waited are applied once the use has settled.
+		CHECK(!settle.Active(t0 + RefRules::SETTLE));
+		for (const auto& want : pending.All()) {
+			apply(want);
+		}
+		return std::pair{ gate, reports };
+	};
+	// Closed in B as in A before: the script opens it, the word finds it open.
+	CHECK((run(RefState::kNo, true) == std::pair{ std::uint8_t{ RefState::kYes }, false }));
+	// Already open in B (B's save): the script closes it, and the word opens it again after.
+	CHECK((run(RefState::kYes, true) == std::pair{ std::uint8_t{ RefState::kYes }, false }));
+	// Without settling, the word first and the flip after: the gate ends closed, and B would report it closed to all.
+	CHECK((run(RefState::kNo, false) == std::pair{ std::uint8_t{ RefState::kNo }, true }));
+}
+
+TEST("refs: an open state that changes with no event is found between two reads, and one first seen is no change")
+{
+	RefRules::OpenWatch watch;
+	watch.BeginScan();
+	CHECK(!watch.Seen(1, RefState::kNo));  // first seen: this game's as it is
+	CHECK(!watch.Seen(2, RefState::kYes));
+	watch.EndScan();
+	watch.BeginScan();
+	CHECK(watch.Seen(1, RefState::kYes));  // a portcullis a script raised
+	CHECK(!watch.Seen(2, RefState::kYes));
+	watch.EndScan();
+	watch.BeginScan();
+	CHECK(!watch.Seen(1, RefState::kYes));
+	watch.EndScan();  // 2 not read: out of reach, forgotten
+	CHECK(watch.Size() == 1);
+	watch.BeginScan();
+	CHECK(!watch.Seen(2, RefState::kNo));  // back in reach, closed: first seen again, no change
+	CHECK(!watch.Seen(1, RefState::kUnknown));
+	watch.EndScan();
+	watch.BeginScan();
+	CHECK(!watch.Seen(1, RefState::kYes));  // from none to open is no change either
+	watch.EndScan();
+}
+
+TEST("refs: a refusal goes as its reference, why and the session's word, and a bad one is not read")
+{
+	const auto session = Door(0x0001A2B3, RefState::kNo, RefState::kYes, 5);
+	const auto refusal = RefRefusal::Of(Door(0x0001A2B3, RefState::kYes), RefRefusal::kBusy, &session);
+	const auto packet = Protocol::Encode(refusal);
+	CHECK(Protocol::PeekType(packet) == MT::kRefRefused);
+	CHECK(packet.size() == 1 + 4 + 7);
+	const auto back = Protocol::DecodeRefRefusal(packet);
+	REQUIRE(back);
+	CHECK(*back == refusal);
+	CHECK(back->Said().open == RefState::kYes);
+	CHECK(back->Said().locked == RefState::kUnknown);
+	CHECK(back->Session().locked == RefState::kYes);
+	CHECK(back->Session().lockLevel == 5);
+	CHECK(back->Session().refId == 0x0001A2B3);
+	CHECK(!RefRefusal::Of(Door(1, RefState::kYes), RefRefusal::kFull, nullptr).Session().Says());
+	auto bad = packet;
+	bad[5] = 3;  // no such reason
+	CHECK(!Protocol::DecodeRefRefusal(bad));
+	bad = packet;
+	bad[6] = 3;  // open past kUnknown
+	CHECK(!Protocol::DecodeRefRefusal(bad));
+	bad = packet;
+	bad.pop_back();
+	CHECK(!Protocol::DecodeRefRefusal(bad));
+	CHECK(!Protocol::DecodeRefRefusal(Protocol::Encode(Door(1, RefState::kYes))));
+	CHECK(FormTranslate::CarriesForms(MT::kRefRefused));
 }
 
 // ---- the server ---------------------------------------------------------------------------------------------------
@@ -512,4 +753,78 @@ TEST("server: a new session forgets the last one's doors")
 	const auto states = RefStatesIn(f.fake->TakeThrough(2, Type(MT::kRemoteRefState)));
 	REQUIRE(states.size() == 1);
 	CHECK(states[0].refId == 0x71);
+}
+
+TEST("server: every report is answered: past the budget the reporter hears busy, with the session's word, and nothing goes to the others")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	// The session's word on 0x100 first, from player 2.
+	f.fake->Deliver(2, Protocol::Encode(Door(0x100, RefState::kYes)));
+	REQUIRE(f.fake->WaitFor(1, Type(MT::kRemoteRefState)));
+	REQUIRE(f.fake->Settle());
+	f.fake->Take(1);
+	f.fake->Take(2);
+	// A script near player 1 changes 40 references in one frame, 0x100 among them (its last).
+	constexpr int SENT = 40;
+	for (int i = 1; i < SENT; ++i) {
+		f.fake->Deliver(1, Protocol::Encode(Door(0x200 + i, RefState::kYes)));
+	}
+	f.fake->Deliver(1, Protocol::Encode(Door(0x100, RefState::kNo)));
+	REQUIRE(f.fake->Settle());
+	const auto toA = f.fake->Take(1);
+	const auto taken = RefStatesIn(toA);
+	std::vector<RefRefusal> refused;
+	for (const auto& packet : toA) {
+		if (const auto refusal = Protocol::DecodeRefRefusal(packet)) {
+			refused.push_back(*refusal);
+		}
+	}
+	CHECK(taken.size() + refused.size() == SENT);  // each one answered, once
+	REQUIRE(!refused.empty());                     // 32 at once, then 8 a second: some were past it
+	for (const auto& refusal : refused) {
+		CHECK(refusal.reason == RefRefusal::kBusy);
+		CHECK(refusal.saidOpen != RefState::kUnknown);
+	}
+	// The last, on 0x100, was past the budget: the answer carries the session's word (player 2's open), not 1's closed.
+	CHECK(refused.back().refId == 0x100);
+	CHECK(refused.back().Said().open == RefState::kNo);
+	CHECK(refused.back().Session().open == RefState::kYes);
+	// Player 2 heard only what was taken, and no refusal.
+	const auto toB = f.fake->Take(2);
+	CHECK(RefStatesIn(toB).size() == taken.size());
+	CHECK(CountOf(toB, MT::kRefRefused) == 0);
+}
+
+TEST("server: a report the session cannot take is answered so, and a full book's answer says it")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	f.fake->Deliver(1, Protocol::Encode(Door(0x300, RefState::kUnknown)));  // says nothing
+	const auto packet = f.fake->WaitFor(1, Type(MT::kRefRefused));
+	REQUIRE(packet);
+	const auto refusal = Protocol::DecodeRefRefusal(*packet);
+	REQUIRE(refusal);
+	CHECK(refusal->reason == RefRefusal::kRefused);
+	CHECK(refusal->refId == 0x300);
+	CHECK(!refusal->Session().Says());
+}
+
+TEST("server: an ask for every door past its budget is answered later, not dropped")
+{
+	Fixture f;
+	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
+	f.fake->Deliver(1, Protocol::Encode(Door(0x400, RefState::kYes)));
+	REQUIRE(f.fake->WaitFor(1, Type(MT::kRemoteRefState)));
+	// Three loads in a row: the budget holds two asks, then one each 5 s.
+	for (int i = 0; i < 3; ++i) {
+		f.fake->Deliver(1, Protocol::Writer{ MT::kAskRefStates }.Data());
+	}
+	REQUIRE(f.fake->Settle());
+	CHECK(RefStatesIn(f.fake->Take(1)).size() == 2);
+	// The third is owed, and answered from the server's loop once the budget has room (one in 5 s).
+	const auto owed = f.fake->WaitFor(1, Type(MT::kRemoteRefState), std::chrono::seconds(8));
+	REQUIRE(owed);
+	CHECK(Protocol::DecodeRefState(*owed)->refId == 0x400);
 }

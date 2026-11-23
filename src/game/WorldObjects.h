@@ -16,7 +16,8 @@
 // yet; the session's word on each reference is applied here where it reads otherwise, at once when the reference is
 // loaded and once it loads otherwise; a friend's use of a mechanism is made here by their stand-in.
 //
-// Main thread only, except the event sinks, which only queue.
+// From the tick only (GameThread), except the event sinks, which only queue. The tick is not yet the game's main thread
+// (GameThread.h): the game writes made here are counted when they are made off it (`refs`: offmain=).
 namespace WorldObjects
 {
 	using SendFn = std::function<void(std::vector<std::uint8_t>)>;
@@ -35,6 +36,9 @@ namespace WorldObjects
 	void Heard(const Protocol::RefState& a_state);
 	void Used(const Protocol::Activation& a_use);
 
+	// From the session: a report of ours it did not take (kRefRefused). It is no longer out; a busy one goes again.
+	void Refused(const Protocol::RefRefusal& a_refusal);
+
 	// A save was loaded or a new game started: its doors are as that world has them, so every word of the session is
 	// asked for again and applied in full.
 	void AfterLoad();
@@ -47,4 +51,6 @@ namespace WorldObjects
 	[[nodiscard]] std::string Command(std::string_view a_args);
 	[[nodiscard]] std::string One(std::string_view a_args);
 	[[nodiscard]] std::string Use(std::string_view a_args);
+	// `script <hex id>`: the Papyrus scripts bound to it, each one's state and whole-number and true/false variables.
+	[[nodiscard]] std::string Scripts(std::string_view a_args);
 }
