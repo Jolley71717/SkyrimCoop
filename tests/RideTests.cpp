@@ -208,6 +208,65 @@ TEST("ride book: a player who leaves takes their ride and their NPCs' with them;
 	CHECK(book.Count() == 0u);
 }
 
+TEST("ride book: an NPC handed to another game is that game's to say; its same ride from it is passed on, and the old runner's leave does not end it")
+{
+	RideBook::Book book;
+	CHECK(book.Take(1, { NpcOn(SOLDIER, HORSE) }, RunsSoldier()) == std::vector<Ride>({ NpcOn(SOLDIER, HORSE) }));
+	// The soldier goes to Bo, who says the same ride: a change (its sender), passed on.
+	CHECK(book.Take(2, { NpcOn(SOLDIER, HORSE) }, RunsSoldier()) == std::vector<Ride>({ NpcOn(SOLDIER, HORSE) }));
+	CHECK(book.Take(2, { NpcOn(SOLDIER, HORSE) }, RunsSoldier()).empty());  // and once only
+	// Ada leaves: the soldier rides on, Bo's word.
+	CHECK(book.Leave(1).empty());
+	CHECK(book.All() == std::vector<Ride>({ NpcOn(SOLDIER, HORSE) }));
+	// Bo leaves: it ends.
+	CHECK(book.Leave(2) == std::vector<Ride>({ NpcOff(SOLDIER) }));
+	// Handed over on foot: the new runner's end ends it.
+	(void)book.Take(1, { NpcOn(SOLDIER, HORSE) }, RunsSoldier());
+	CHECK(book.Take(2, { NpcOff(SOLDIER) }, RunsSoldier()) == std::vector<Ride>({ NpcOff(SOLDIER) }));
+	CHECK(book.Count() == 0u);
+}
+
+TEST("ride server: a handover's ride goes to every other game, the old runner's too, with the new runner named; the old runner's leave keeps it")
+{
+	Fixture f;
+	AllIn(f, 3);
+	const auto claim = [&](PeerId a_peer, Protocol::ClaimWhy a_why) {
+		f.fake->Deliver(a_peer, Protocol::Encode(Protocol::NpcClaims{ .claims = { { SOLDIER, a_why } } }));
+		REQUIRE(f.fake->Settle());
+		for (PeerId peer = 1; peer <= 3; ++peer) {
+			(void)f.fake->Take(peer);
+		}
+	};
+	claim(1, Protocol::ClaimWhy::kHave);
+	f.fake->Deliver(1, Protocol::Encode(Protocol::Rides{ .rides = { NpcOn(SOLDIER, HORSE) } }));
+	REQUIRE(f.fake->Settle());
+	for (PeerId peer = 1; peer <= 3; ++peer) {
+		(void)f.fake->Take(peer);
+	}
+	// Ada lets go of the soldier and Bo takes it; Bo's game says the ride it shows.
+	claim(1, Protocol::ClaimWhy::kRelease);
+	claim(2, Protocol::ClaimWhy::kHave);
+	f.fake->Deliver(2, Protocol::Encode(Protocol::Rides{ .rides = { NpcOn(SOLDIER, HORSE) } }));
+	REQUIRE(f.fake->Settle());
+	CHECK(f.fake->Take(2).empty());
+	for (const PeerId peer : { PeerId{ 1 }, PeerId{ 3 } }) {
+		const auto heard = SentOf<Protocol::Rides>(f, peer, MT::kRides, Protocol::DecodeRides);
+		REQUIRE(heard.size() == 1u);
+		CHECK(heard[0].sender == 2u);
+		CHECK(heard[0].rides == std::vector<Ride>({ NpcOn(SOLDIER, HORSE) }));
+	}
+	// Ada's late word of it (she runs it no more) is nobody's.
+	f.fake->Deliver(1, Protocol::Encode(Protocol::Rides{ .rides = { NpcOff(SOLDIER) } }));
+	REQUIRE(f.fake->Settle());
+	CHECK(SentOf<Protocol::Rides>(f, 3, MT::kRides, Protocol::DecodeRides).empty());
+	// Ada leaves: Cy is told no end of the soldier's ride.
+	f.fake->Drop(1);
+	REQUIRE(f.fake->Settle());
+	for (const auto& msg : SentOf<Protocol::Rides>(f, 3, MT::kRides, Protocol::DecodeRides)) {
+		CHECK(std::ranges::find(msg.rides, NpcOff(SOLDIER)) == msg.rides.end());
+	}
+}
+
 TEST("ride server: a ride goes to the others with its sender named, only from whoever may say it; a joiner hears them all; a leaver's end")
 {
 	Fixture f;
@@ -261,7 +320,7 @@ TEST("ride server: a ride goes to the others with its sender named, only from wh
 
 // ---- seating a rider ----
 
-TEST("ride seat: the mount activated, then the console, then the quick put-on, in rounds 5 s apart; given up after 3")
+TEST("ride seat: the mount activated, then the console, in rounds 5 s apart; given up after 3; the quick put-on is no try")
 {
 	RideRules::Seat      seat;
 	auto                 t = Steady::now();
@@ -276,7 +335,7 @@ TEST("ride seat: the mount activated, then the console, then the quick put-on, i
 		CHECK(seat.Step(facts, t + 1s) == Act::kNone);
 		CHECK(seat.Step(facts, t + RideRules::CONSOLE_AFTER) == Act::kConsole);
 		CHECK(seat.Step(facts, t + 3s) == Act::kNone);
-		CHECK(seat.Step(facts, t + RideRules::QUICK_AFTER) == Act::kQuick);
+		CHECK(seat.Step(facts, t + 4s) == Act::kNone);  // no third try: the quick put-on takes no mount
 		CHECK(seat.Step(facts, t + RideRules::ROUND_LENGTH) == Act::kNone);
 		CHECK(seat.Rounds() == round + 1);
 		CHECK(seat.Step(facts, t + RideRules::ROUND_LENGTH + 1s) == Act::kNone);  // the gap between rounds
@@ -325,18 +384,36 @@ TEST("ride seat: seated once the engine has it on its mount, by whichever try it
 	CHECK(already.SeatedBy() == Act::kNone);
 }
 
-TEST("ride saddle: a seated rider far from its mount for a second is put back on it; near, or not long, it is not")
+TEST("ride saddle: a seated rider far from its mount for a second is finished onto it, then put back each second; near, or not long, nothing")
 {
 	RideRules::SaddleWatch watch;
 	const auto             t = Steady::now();
-	CHECK(!watch.Step(20.0f, t));
-	CHECK(!watch.Step(RideRules::SADDLE_FAR + 1.0f, t));
-	CHECK(!watch.Step(RideRules::SADDLE_FAR + 1.0f, t + 500ms));
-	CHECK(watch.Step(RideRules::SADDLE_FAR + 1.0f, t + RideRules::SADDLE_HOLD_AFTER));
-	CHECK(!watch.Step(10.0f, t + 2s));
-	CHECK(!watch.Step(RideRules::SADDLE_FAR + 1.0f, t + 2s));  // far again: the second starts over
-	CHECK(watch.Holds() == 1u);
-	CHECK(!watch.Step(-1.0f, t + 5s));  // not seated
+	const float            far = RideRules::SADDLE_FAR + 1.0f;
+	CHECK(watch.Step(20.0f, t) == Act::kNone);
+	CHECK(watch.Step(far, t) == Act::kNone);
+	CHECK(watch.Step(far, t + 500ms) == Act::kNone);
+	CHECK(watch.Step(far, t + RideRules::SADDLE_HOLD_AFTER) == Act::kQuick);  // the engine's own finish first
+	CHECK(watch.Step(far, t + RideRules::SADDLE_HOLD_AFTER + 500ms) == Act::kNone);
+	CHECK(watch.Step(far, t + 2 * RideRules::SADDLE_HOLD_AFTER) == Act::kHold);  // still far: put back
+	CHECK(watch.Step(far, t + 3 * RideRules::SADDLE_HOLD_AFTER) == Act::kHold);
+	CHECK(watch.Step(10.0f, t + 4s) == Act::kNone);
+	CHECK(watch.Step(far, t + 4s) == Act::kNone);  // far again: a new stretch, the second starts over
+	CHECK(watch.Step(far, t + 5s) == Act::kQuick);
+	CHECK(watch.Quicks() == 2u);
+	CHECK(watch.Holds() == 2u);
+	CHECK(watch.Step(-1.0f, t + 8s) == Act::kNone);  // not seated
+}
+
+TEST("ride handover: an NPC's ride from a game that runs it no more is kept a moment for its new runner, then not believed")
+{
+	RideRules::Handover handover;
+	const auto          t = Steady::now();
+	CHECK(!handover.Holds(false, t));  // believed: nothing held
+	CHECK(handover.Holds(true, t));
+	CHECK(handover.Holds(true, t + RideRules::HANDOVER_WAIT - 1ms));
+	CHECK(!handover.Holds(true, t + RideRules::HANDOVER_WAIT));  // no new word in time: got off
+	CHECK(!handover.Holds(false, t + 10s));  // the new runner said it
+	CHECK(handover.Holds(true, t + 20s));  // a later handover waits afresh
 }
 
 // ---- what a game says of its own riders ----
@@ -355,6 +432,30 @@ TEST("ride said: each ride of ours that begins or changes mount is said once, an
 	CHECK(said.Changes({ { us, {} } }) == std::vector<Ride>({ NpcOff(SOLDIER), PlayerOff(1) }));
 	CHECK(said.Count() == 0u);
 	CHECK(said.Changes({}).empty());
+}
+
+TEST("ride said: an NPC handed to us that another game said rides is said from here, on its horse or on foot (its end)")
+{
+	using Rider = RideRules::Said::Rider;
+	const Rider soldier{ 0, SOLDIER };
+	const Rider other{ 0, Protocol::NpcKey{ 0x00012346, 0 } };
+	// On its horse here too: said as a new ride (the server passes it on with us as its sender).
+	RideRules::Said riding;
+	riding.HandedOver(soldier);
+	CHECK(riding.Changes({ { soldier, HORSE } }) == std::vector<Ride>({ NpcOn(SOLDIER, HORSE) }));
+	CHECK(riding.Changes({ { soldier, HORSE } }).empty());
+	// On foot here (not in the list, or on a mount shared with no game): its end, once.
+	RideRules::Said onFoot;
+	onFoot.HandedOver(soldier);
+	onFoot.HandedOver(other);
+	CHECK(onFoot.Changes({ { other, {} } }) == std::vector<Ride>({ NpcOff(SOLDIER), NpcOff(other.npc) }));
+	CHECK(onFoot.Changes({}).empty());
+	CHECK(onFoot.Count() == 0u);
+	// A new session forgets it.
+	RideRules::Said cleared;
+	cleared.HandedOver(soldier);
+	cleared.Clear();
+	CHECK(cleared.Changes({}).empty());
 }
 
 TEST("ride believed: a player's ride only from that player, an NPC's only from its runner; a joiner's list from the server")
@@ -422,7 +523,7 @@ TEST("ride share: a horse made as the game ran is shared as our spawn while ours
 
 TEST("ride acts: each try has a name for the developer channel")
 {
-	for (const auto act : { Act::kNone, Act::kActivate, Act::kConsole, Act::kQuick, Act::kDismount }) {
+	for (const auto act : { Act::kNone, Act::kActivate, Act::kConsole, Act::kQuick, Act::kDismount, Act::kHold }) {
 		CHECK(RideRules::ActName(act) != "?");
 	}
 }

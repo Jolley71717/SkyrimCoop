@@ -37,8 +37,11 @@ namespace Riding
 	// Developer channel `ride`: ours (on a mount or not, the mount's key and actor, the rides said), then each rider
 	// another game says rides: on or not, the mount's key and the actor that shows it here, the rider's actor, what the
 	// engine says (on that mount, on another, getting on or off), seated, the rounds tried and how, given up, its distance
-	// from its saddle and the times it was put back; and the counts. `ride find [radius]`: the nearest mount no one rides
-	// within radius (default 3000) of our player, its base, distance, and whether the crosshair is on it (aimed=), for the
-	// rig to mount. `ride base`: the base of a plain horse of the load order, for the console's placeatme.
+	// from its saddle, the times it was finished onto it (quicks=) and put back on it (holds=), whether it waits for a new
+	// runner (handover=), where its mount is here (mx= my=); the rides of the NPCs we run as said (said npc=); and the
+	// counts. `ride find [radius]`: the nearest mount no one rides within radius (default 3000) of our player, its base,
+	// distance, and whether the crosshair is on it (aimed=), for the rig to mount. `ride base`: the base of a plain horse
+	// of the load order, for the console's placeatme. `ride order`: a horse reference of Skyrim.esm no one rides, for the
+	// console's moveto. `ride off <id>`: an NPC this game runs gets off its mount (set-up).
 	[[nodiscard]] std::string Command(std::string_view a_args);
 }

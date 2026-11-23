@@ -5,6 +5,7 @@
 #include "game/NpcSync.h"
 #include "game/RemotePlayers.h"
 #include "game/RideRules.h"
+#include "net/FormsCommand.h"
 
 #include <cmath>
 #include <format>
@@ -39,6 +40,10 @@ namespace Riding
 			bool                             onOther = false;
 			bool                             busy = false;
 			float                            gap = -1.0f;  // the rider's distance from its mount while seated
+			float                            mountX = 0.0f;  // where the mount is here, last looked (the rig sees it go)
+			float                            mountY = 0.0f;
+			RideRules::Handover              handover;  // an NPC's ride while its runner changes
+			bool                             held = false;  // kept as it was for its new runner to say (`ride`: handover=1)
 			std::uint64_t                    heard = 0;
 		};
 		std::map<Rider, Wanted> wanted;
@@ -51,7 +56,7 @@ namespace Riding
 		struct Counts
 		{
 			std::uint64_t sent = 0, heard = 0, notBelieved = 0, lacked = 0;
-			std::uint64_t activates = 0, consoles = 0, quicks = 0, dismounts = 0, holds = 0, releases = 0;
+			std::uint64_t activates = 0, consoles = 0, quicks = 0, dismounts = 0, holds = 0, releases = 0, handedToUs = 0;
 		};
 		Counts counts;
 
@@ -163,15 +168,17 @@ namespace Riding
 			return runner != 0 && runner != ourId && (a_wanted.sender == 0 || a_wanted.sender == runner);
 		}
 
-		void Activate(RE::Actor* a_mount, RE::Actor* a_rider, const Key& a_mountKey)
+		// a_activate with the mount's activation open: a copy this game placed of another game's spawn is blocked from
+		// activation (NpcSync's PlaceActor), and both ways onto it (the rider's activate, the console's, which goes through
+		// the same activation) would be refused. Opened for this one, and blocked again.
+		template <class Fn>
+		void Unblocked(RE::Actor* a_mount, const Key& a_mountKey, Fn&& a_activate)
 		{
-			// A copy this game placed of another game's spawn is blocked from activation (NpcSync's PlaceActor): opened
-			// for this one, and blocked again.
 			const bool placed = a_mountKey.IsSpawn() && a_mountKey.spawner != ourId;
 			if (placed) {
 				a_mount->extraList.SetExtraFlags(RE::ExtraFlags::Flag::kBlockActivate, false);
 			}
-			a_mount->ActivateRef(a_rider, 0, nullptr, 1, false);
+			a_activate();
 			if (placed) {
 				a_mount->extraList.SetExtraFlags(RE::ExtraFlags::Flag::kBlockActivate, true);
 			}
@@ -181,6 +188,13 @@ namespace Riding
 		{
 			const auto rider = RiderActor(a_rider);
 			const auto believed = StillBelieved(a_rider, a_wanted);
+			// An NPC's ride said by a game that runs it no more: kept as it is a moment, for its new runner to say it (the
+			// same ride, then it stays seated; its end, then it gets off), not pulled off its horse at every handover.
+			a_wanted.held = a_rider.player == 0 && a_wanted.on && a_wanted.handover.Holds(!believed, a_now);
+			if (a_wanted.held) {
+				a_wanted.riderActor = rider ? rider->GetFormID() : 0;
+				return;
+			}
 			auto       mount = a_wanted.on && believed && a_wanted.mount.id != 0 ? NpcSync::ActorOf(a_wanted.mount) : RE::NiPointer<RE::Actor>{};
 			// A mount our player sits on is ours to ride: no friend is seated on it here.
 			if (mount) {
@@ -221,33 +235,45 @@ namespace Riding
 			case RideRules::Act::kActivate:
 				++counts.activates;
 				logs::info("Riding: {} is seated on {} ({:08X}): the mount activated by its rider", RiderText(a_rider), KeyText(a_wanted.mount), mount->GetFormID());
-				Activate(mount.get(), rider.get(), a_wanted.mount);
+				Unblocked(mount.get(), a_wanted.mount, [&] { mount->ActivateRef(rider.get(), 0, nullptr, 1, false); });
 				break;
 			case RideRules::Act::kConsole:
 				++counts.consoles;
-				Console::Run(std::format("{:08X}.activate {:08X}", mount->GetFormID(), rider->GetFormID()));
-				break;
-			case RideRules::Act::kQuick:
-				++counts.quicks;
-				rider->PutActorOnMountQuick();
+				logs::info("Riding: {} not on {} yet: the console's activate", RiderText(a_rider), KeyText(a_wanted.mount));
+				Unblocked(mount.get(), a_wanted.mount, [&] { Console::Run(std::format("{:08X}.activate {:08X}", mount->GetFormID(), rider->GetFormID())); });
 				break;
 			case RideRules::Act::kDismount:
 				++counts.dismounts;
 				logs::info("Riding: {} gets off its mount", RiderText(a_rider));
 				rider->StopInteractingQuick(true);
 				break;
-			case RideRules::Act::kNone:
+			default:
 				break;
 			}
 			const bool nowSeated = a_wanted.seat.Seated();
 			SetSeated(rider->GetFormID(), nowSeated);
 			a_wanted.gap = -1.0f;
+			if (mount) {
+				const auto mountAt = mount->GetPosition();
+				a_wanted.mountX = mountAt.x;
+				a_wanted.mountY = mountAt.y;
+			}
 			if (nowSeated && mount) {
 				const auto mountAt = mount->GetPosition();
 				a_wanted.gap = Distance(rider->GetPosition(), mountAt);
-				if (a_wanted.saddle.Step(a_wanted.gap, a_now)) {
+				switch (a_wanted.saddle.Step(a_wanted.gap, a_now)) {
+				case RideRules::Act::kQuick:
+					// The engine has it on that mount (its interaction names it) but not in the saddle: finished onto it.
+					++counts.quicks;
+					logs::info("Riding: {} is {:.0f} u from its mount: finished onto its saddle (quick put-on)", RiderText(a_rider), a_wanted.gap);
+					rider->PutActorOnMountQuick();
+					break;
+				case RideRules::Act::kHold:
 					++counts.holds;
 					rider->SetPosition(mountAt, true);
+					break;
+				default:
+					break;
 				}
 			}
 		}
@@ -319,6 +345,76 @@ namespace Riding
 			return best ? std::format("base={:08X}", best->GetFormID()) : "base none";
 		}
 
+		// `ride order`: a horse of the load order (a reference of Skyrim.esm's, never one made as the game ran), alive,
+		// enabled and ridden by no one, in our player's worldspace: the nearest of those with their 3D, else the nearest
+		// the game holds. For the rig to bring over with the console's moveto (set-up): its NPC rider leg needs a mount
+		// the session keys by its own reference.
+		std::string Order()
+		{
+			const auto player = RE::PlayerCharacter::GetSingleton();
+			const auto [map, mapLock] = RE::TESForm::GetAllForms();
+			if (!player || !map) {
+				return "horse none";
+			}
+			const auto   at = player->GetPosition();
+			const auto   world = player->GetWorldspace();
+			RE::Actor*   best = nullptr;
+			bool         bestLoaded = false;
+			float        bestDistance = 0.0f;
+			std::size_t  seen = 0;
+			RE::BSReadLockGuard guard{ mapLock };
+			for (const auto& [id, form] : *map) {
+				if (!form || (id >> 24) != 0 || form->GetFormType() != RE::FormType::ActorCharacter) {
+					continue;
+				}
+				const auto actor = form->As<RE::Actor>();
+				if (!actor || actor->IsDead() || actor->IsDisabled() || actor->IsDeleted() || !IsHorseRace(actor->GetRace()) || RemotePlayers::IsOurs(actor)) {
+					continue;
+				}
+				if (!world || actor->GetWorldspace() != world) {
+					continue;
+				}
+				if (RE::NiPointer<RE::Actor> rider; actor->GetMountedBy(rider) && rider) {
+					continue;
+				}
+				++seen;
+				const bool  loaded = actor->Is3DLoaded();
+				const float d = Distance(actor->GetPosition(), at);
+				if (!best || (loaded && !bestLoaded) || (loaded == bestLoaded && d < bestDistance)) {
+					best = actor;
+					bestLoaded = loaded;
+					bestDistance = d;
+				}
+			}
+			if (!best) {
+				return "horse none";
+			}
+			const auto base = best->GetActorBase();
+			return std::format("horse id={:08X} base={:08X} loaded={} dist={:.0f} seen={}", best->GetFormID(), base ? base->GetFormID() : 0, bestLoaded ? 1 : 0, bestDistance, seen);
+		}
+
+		// `ride off <id>`: an NPC this game runs gets off its mount (set-up for the rig's NPC rider leg: the console has no
+		// way to have an NPC get off). Refused for any other actor: a stand-in or a copy follows its own game's word.
+		std::string Off(std::string_view a_id)
+		{
+			const auto id = FormsCommand::ParseHex(a_id);
+			if (!id) {
+				return "usage: ride off <form id>";
+			}
+			for (const auto& [npc, actor] : NpcSync::RunActors()) {
+				if (actor->GetFormID() != *id) {
+					continue;
+				}
+				if (!MountOf(actor.get())) {
+					return std::format("off: {:08X} rides nothing", *id);
+				}
+				actor->StopInteractingQuick(true);
+				logs::info("Riding: the developer channel gets {} ({:08X}) off its mount", KeyText(npc), *id);
+				return std::format("off: {:08X}", *id);
+			}
+			return std::format("off: {:08X} is no NPC this game runs", *id);
+		}
+
 		std::string Ours()
 		{
 			const auto player = RE::PlayerCharacter::GetSingleton();
@@ -344,6 +440,23 @@ namespace Riding
 	{
 		if (!active) {
 			return;
+		}
+		// An NPC handed to this game that another game said rides is ours to say now: what it rides here goes out, even
+		// on foot (its end), and its copy's seat is let go of (our own AI rides it now).
+		for (auto it = wanted.begin(); it != wanted.end();) {
+			if (it->first.player == 0 && NpcSync::RunnerOf(it->first.npc) == ourId) {
+				if (it->second.on) {
+					said.HandedOver(it->first);
+				}
+				if (it->second.riderActor != 0) {
+					SetSeated(it->second.riderActor, false);
+				}
+				++counts.handedToUs;
+				logs::info("Riding: {} was handed to this game {}: said from here now", RiderText(it->first), it->second.on ? "riding" : "on foot");
+				it = wanted.erase(it);
+			} else {
+				++it;
+			}
 		}
 		SendOurs(a_send);
 		const auto now = Clock::now();
@@ -481,15 +594,27 @@ namespace Riding
 		if (!words.empty() && words[0] == "base") {
 			return Base();
 		}
+		if (!words.empty() && words[0] == "order") {
+			return Order();
+		}
+		if (!words.empty() && words[0] == "off") {
+			return words.size() == 2 ? Off(words[1]) : "usage: ride off <form id>";
+		}
 		std::string out = Ours();
+		// The rides of the NPCs we run, as said.
+		for (const auto& [rider, mount] : said.Mounts()) {
+			if (rider.player == 0) {
+				out += std::format(" | said npc={} mount={}", KeyText(rider.npc), KeyText(mount));
+			}
+		}
 		for (const auto& [rider, want] : wanted) {
-			out += std::format(" | rider {} on={} mount={} mountHere={:08X} riderHere={:08X} engineOn={} onOther={} busy={} seated={} rounds={} tried={} seatedBy={} givenUp={} gap={:.0f} holds={} dismounts={} sender={} heard={}",
+			out += std::format(" | rider {} on={} mount={} mountHere={:08X} riderHere={:08X} engineOn={} onOther={} busy={} seated={} rounds={} tried={} seatedBy={} givenUp={} gap={:.0f} quicks={} holds={} dismounts={} sender={} handover={} heard={} mx={:.0f} my={:.0f}",
 				RiderText(rider), want.on ? 1 : 0, KeyText(want.mount), want.mountActor, want.riderActor, want.engineOn ? 1 : 0, want.onOther ? 1 : 0, want.busy ? 1 : 0,
 				want.seat.Seated() ? 1 : 0, want.seat.Rounds(), RideRules::ActName(want.seat.LastTried()), RideRules::ActName(want.seat.SeatedBy()), want.seat.GivenUp() ? 1 : 0,
-				want.gap, want.saddle.Holds(), want.seat.Dismounts(), want.sender, want.heard);
+				want.gap, want.saddle.Quicks(), want.saddle.Holds(), want.seat.Dismounts(), want.sender, want.held ? 1 : 0, want.heard, want.mountX, want.mountY);
 		}
-		out += std::format(" | rides sent={} heard={} notBelieved={} lacked={} activates={} consoles={} quicks={} dismounts={} holds={} releases={}", counts.sent, counts.heard,
-			counts.notBelieved, counts.lacked, counts.activates, counts.consoles, counts.quicks, counts.dismounts, counts.holds, counts.releases);
+		out += std::format(" | rides sent={} heard={} notBelieved={} lacked={} activates={} consoles={} quicks={} dismounts={} holds={} releases={} handedToUs={}", counts.sent, counts.heard,
+			counts.notBelieved, counts.lacked, counts.activates, counts.consoles, counts.quicks, counts.dismounts, counts.holds, counts.releases, counts.handedToUs);
 		return out;
 	}
 }

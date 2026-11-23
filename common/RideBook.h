@@ -10,8 +10,8 @@
 
 // Who rides what, as the server keeps it (docs/DESIGN.md, "Riding"). Each game says its own player's ride and the rides
 // of the NPCs it runs (kRides) whenever one changes; the server passes on a player's only from that player's game and an
-// NPC's only from its runner's, each change once (the same ride again is not passed on), and gives a joiner every ride
-// the session has. A player who leaves takes every ride their game said with them: the others hear each one end.
+// NPC's only from its runner's, each change once (the same ride again from the same game is not passed on; from a new
+// runner it is, that runner named), and gives a joiner every ride the session has. A player who leaves takes every ride their game said with them: the others hear each one end.
 // Past a sender's budget a change is still kept and owed (Owe): the server's loop passes the newest of it on once the
 // budget has room, so an end of a ride is never lost. No game and no network here: tests/RideTests.cpp.
 namespace RideBook
@@ -53,7 +53,10 @@ namespace RideBook
 				const auto rider = RiderOf(ride);
 				const auto held = rides.find(rider);
 				if (ride.on) {
-					if (held != rides.end() && held->second.ride == ride) {
+					// The same ride from the same game is no change. From another game it is: the NPC was handed to that
+					// game (its runner now), so the book holds it as that game's (a leave of the old runner does not end
+					// it) and every other game, the old runner's too, hears it with its new sender.
+					if (held != rides.end() && held->second.ride == ride && held->second.sender == a_sender) {
 						continue;
 					}
 					rides[rider] = Held{ ride, a_sender };

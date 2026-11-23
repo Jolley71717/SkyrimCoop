@@ -659,8 +659,10 @@ namespace NpcSync
 			if (RemotePlayers::IsOurs(rider.get())) {
 				return RiddenBy::kTheirs;
 			}
-			const auto id = rider->GetFormID();
-			const auto owner = owners.find(Key{ id, FormIds::IsRuntime(id) ? ourId : 0 });
+			// The NPC the rider shows, as the session keys it: a copy of another game's spawn by that game's key (its id
+			// here is ours, its spawner theirs), an NPC of ours by its own.
+			const auto key = KeyOf(rider.get());
+			const auto owner = key ? owners.find(*key) : owners.end();
 			if (owner == owners.end()) {
 				return RiddenBy::kNobody;
 			}

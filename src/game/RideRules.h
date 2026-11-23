@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <string_view>
 #include <vector>
 
@@ -14,9 +15,15 @@
 // that rider (a friend's stand-in, a copy of the NPC) on the actor that shows the mount (its copy of the horse) through
 // the engine's own way onto a mount, so the engine carries the rider in the saddle and plays the getting on and off:
 // - Seat: a rider that should be on a mount and is not is put on in rounds: the mount activated by the rider (what the
-//   game does when a player presses the button on a horse), the console's activate a moment later if that did not take,
-//   then the engine's quick put-on; each round waits for the rider's and the mount's 3D, and 3 rounds 5 s apart are
-//   tried before it is given up (said in `ride`). One on another mount, or on one it should not be on, is got off.
+//   game does when a player presses the button on a horse), the console's activate a moment later if that did not take
+//   (both with the mount's activation unblocked); each round waits for the rider's and the mount's 3D, and 3 rounds 5 s
+//   apart are tried before it is given up (said in `ride`). One on another mount, or on one it should not be on, is got
+//   off.
+// - Saddle: a seated rider far from its saddle is first finished onto it by the engine's quick put-on (which takes no
+//   mount: it finishes the mount the rider's interaction names, so it is no way onto a mount for a rider that has none),
+//   then put back on it by the update hook if that did not take.
+// - Handover: an NPC's ride said by a game that no longer runs it is kept as it is for a moment, while its new runner
+//   says it again (the same ride, or its end), so a copy is not pulled off its horse at every handover.
 // - Ours: what our player and the NPCs we run ride, said again only when it changes.
 // No game here: tests/RideTests.cpp.
 namespace RideRules
@@ -26,19 +33,21 @@ namespace RideRules
 
 	// A round starts once rider and mount have had their 3D this long (a seat on a skeleton still loading does not hold).
 	inline constexpr auto READY_AFTER = 1s;
-	// In a round: the console's activate this long after the first try, the quick put-on this long after, and the round
-	// over this long after it began.
+	// In a round: the console's activate this long after the first try, and the round over this long after it began.
 	inline constexpr auto CONSOLE_AFTER = 2s;
-	inline constexpr auto QUICK_AFTER = 4s;
 	inline constexpr auto ROUND_LENGTH = 6s;
 	inline constexpr auto ROUND_GAP = 5s;
 	inline constexpr int  MAX_ROUNDS = 3;
 	// A rider is got off no more often than this (the engine's getting off takes a moment to show).
 	inline constexpr auto DISMOUNT_EVERY = 1s;
-	// A seated rider this far from its mount (units, the two positions apart) for SADDLE_HOLD_AFTER is put back on the
-	// saddle by the update hook: the engine carries a rider it seated, but not always one whose AI never runs.
+	// A seated rider this far from its mount (units, the two positions apart) for SADDLE_HOLD_AFTER is finished onto its
+	// saddle (the quick put-on), and if still far SADDLE_HOLD_AFTER later, put back on it by the update hook, each second
+	// it stays far: the engine carries a rider it seated, but not always one whose AI never runs. The rig's ride step
+	// fails a ride in which either was needed.
 	inline constexpr float SADDLE_FAR = 150.0f;
 	inline constexpr auto  SADDLE_HOLD_AFTER = 1s;
+	// An NPC's ride said by a game that no longer runs it is kept this long for its new runner to say it again.
+	inline constexpr auto HANDOVER_WAIT = 3s;
 
 	// What the engine says of one rider this game shows (a stand-in, a copy) and the mount it should be on.
 	struct SeatFacts
@@ -55,8 +64,9 @@ namespace RideRules
 		kNone,
 		kActivate,  // the mount activated by the rider (TESObjectREFR::ActivateRef)
 		kConsole,   // the console's `<mount>.activate <rider>`
-		kQuick,     // the engine's quick put-on (Actor::PutActorOnMountQuick)
+		kQuick,     // the engine's quick put-on (Actor::PutActorOnMountQuick): a seated rider finished onto its saddle
 		kDismount,  // off whatever it is on (Actor::StopInteractingQuick)
+		kHold,      // a seated rider put back on its saddle (placed where its mount is)
 	};
 
 	[[nodiscard]] constexpr std::string_view ActName(Act a_act)
@@ -72,6 +82,8 @@ namespace RideRules
 			return "quick";
 		case Act::kDismount:
 			return "dismount";
+		case Act::kHold:
+			return "hold";
 		}
 		return "?";
 	}
@@ -125,10 +137,6 @@ namespace RideRules
 				step = 2;
 				return Tried(Act::kConsole);
 			}
-			if (step == 2 && in >= QUICK_AFTER) {
-				step = 3;
-				return Tried(Act::kQuick);
-			}
 			if (in >= ROUND_LENGTH) {
 				roundStart.reset();
 				step = 0;
@@ -175,28 +183,60 @@ namespace RideRules
 		std::uint32_t                    dismounts = 0;
 	};
 
-	// A seated rider put back on its saddle: SADDLE_FAR from its mount for SADDLE_HOLD_AFTER.
+	// A seated rider far from its saddle: SADDLE_FAR from its mount for SADDLE_HOLD_AFTER, it is finished onto it by the
+	// engine (kQuick), once in each far stretch; still far SADDLE_HOLD_AFTER later, put back on it (kHold), and again
+	// each SADDLE_HOLD_AFTER it stays far. Near again: a new stretch.
 	class SaddleWatch
 	{
 	public:
-		bool Step(float a_gap, Clock::time_point a_now)
+		Act Step(float a_gap, Clock::time_point a_now)
 		{
 			if (!(a_gap > SADDLE_FAR)) {
 				farSince.reset();
-				return false;
+				finished = false;
+				return Act::kNone;
 			}
 			farSince = farSince.value_or(a_now);
 			if (a_now - *farSince < SADDLE_HOLD_AFTER) {
-				return false;
+				return Act::kNone;
+			}
+			farSince = a_now;  // the next try a second on
+			if (!finished) {
+				finished = true;
+				++quicks;
+				return Act::kQuick;
 			}
 			++holds;
-			return true;
+			return Act::kHold;
 		}
+		[[nodiscard]] std::uint64_t Quicks() const { return quicks; }
 		[[nodiscard]] std::uint64_t Holds() const { return holds; }
 
 	private:
 		std::optional<Clock::time_point> farSince;
+		bool                             finished = false;
+		std::uint64_t                    quicks = 0;
 		std::uint64_t                    holds = 0;
+	};
+
+	// An NPC's ride kept while its runner changes (HANDOVER_WAIT): a_stale, the ride was said by a game that does not run
+	// the NPC now (as this game was told). True while it is kept as it is (nothing tried on the rider); false once it is
+	// not stale, or stale for HANDOVER_WAIT (no longer believed: its rider is got off).
+	class Handover
+	{
+	public:
+		bool Holds(bool a_stale, Clock::time_point a_now)
+		{
+			if (!a_stale) {
+				staleSince.reset();
+				return false;
+			}
+			staleSince = staleSince.value_or(a_now);
+			return a_now - *staleSince < HANDOVER_WAIT;
+		}
+
+	private:
+		std::optional<Clock::time_point> staleSince;
 	};
 
 	// Who of ours rides, as this game said it last: each change is said once (an end too, of a ride it said began).
@@ -228,6 +268,13 @@ namespace RideRules
 				mounts[rider] = mount;
 				out.push_back(Protocol::Ride{ .player = rider.player, .rider = rider.npc, .mount = mount, .on = true });
 			}
+			// Handed to us on a horse another game said it rode, and on foot here: its end, said once.
+			for (const auto& rider : handed) {
+				if (!mounts.contains(rider)) {
+					out.push_back(Protocol::Ride{ .player = rider.player, .rider = rider.npc, .mount = {}, .on = false });
+				}
+			}
+			handed.clear();
 			for (auto it = mounts.begin(); it != mounts.end();) {
 				const auto now = a_now.find(it->first);
 				if (now == a_now.end() || now->second.id == 0) {
@@ -240,13 +287,23 @@ namespace RideRules
 			return out;
 		}
 
+		// An NPC handed to this game that another game said rides: the next Changes says what it rides here, even on
+		// foot (its end), so the session hears it from its new runner. On a mount here it is said as any new ride is.
+		void HandedOver(const Rider& a_rider) { handed.insert(a_rider); }
+
 		// A new session, or a world gone: nothing said yet (an NPC handed to another game is said by that game).
 		void Forget(const Rider& a_rider) { mounts.erase(a_rider); }
-		void Clear() { mounts.clear(); }
+		void Clear()
+		{
+			mounts.clear();
+			handed.clear();
+		}
 		[[nodiscard]] std::size_t Count() const { return mounts.size(); }
+		[[nodiscard]] const std::map<Rider, Protocol::NpcKey>& Mounts() const { return mounts; }
 
 	private:
 		std::map<Rider, Protocol::NpcKey> mounts;
+		std::set<Rider>                   handed;
 	};
 
 	// A ride a friend's game says, as this game takes it: a player's only from that player, an NPC's only from the game
