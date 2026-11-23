@@ -221,6 +221,7 @@ namespace
 			// Which save is loaded: the line a report of "an old save" is read by.
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
+			QuestSync::BeforeLoad();          // no quest alias record is left rewritten for a run into the load
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 			// data is not a pointer here: it is whether the load worked.

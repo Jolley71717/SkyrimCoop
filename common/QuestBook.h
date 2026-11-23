@@ -165,6 +165,18 @@ public:
 		entries = 0;
 	}
 
+	// Everything kept of one quest goes (a radiant job begun again or stopped: its stages were another run's).
+	void Forget(std::uint32_t a_questId)
+	{
+		const auto it = quests.find(a_questId);
+		if (it == quests.end()) {
+			return;
+		}
+		entries -= it->second.entries.size();
+		quests.erase(it);
+		std::erase(order, a_questId);
+	}
+
 private:
 	struct Quest
 	{

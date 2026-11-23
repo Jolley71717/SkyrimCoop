@@ -226,7 +226,7 @@ DropSync's state is under one lock, taken by the tick and by SKSE's callbacks on
 
 ## Quests
 
-Since protocol 7. Not tested in a game yet; the rig step `quests` is ready for it. The rules, free of the game, are `src/game/QuestRules.h`; the game side is `src/game/QuestSync`; the server's book is `common/QuestBook.h`; tests in `tests/QuestTests.cpp`.
+Since protocol 7 (runs and aliases since protocol 12). Not tested in a game yet; the rig steps `quests` and `jobs` are ready for it. The rules, free of the game, are `src/game/QuestRules.h`; the game side is `src/game/QuestSync`; the server's book is `common/QuestBook.h`; tests in `tests/QuestTests.cpp`.
 
 The aim is that every quest is shared: a stage done is done for everyone, whoever did the step, and the host's save keeps it. This version shares a quest's stages, its objectives and its end (completed or failed). Dialogue, scenes, quest items and rewards are each player's own for now (below).
 
@@ -236,7 +236,7 @@ The aim is that every quest is shared: a stage done is done for everyone, whoeve
 | --- | --- | --- |
 | Shared | a journal tab (main quest, College, Thieves Guild, Dark Brotherhood, Companions, Daedric, side, Civil War, Dawnguard, Dragonborn), an editor ID, and not a radiant job | yes: stages, objectives, end |
 | Own | a typed quest each player plays for themselves: the Helgen opening (`MQ101`), marriage, adoption (`QuestRules::OWN_QUESTS`) | no |
-| Radiant | started by the Story Manager for an event, and not "run once": each game picks its own job (its targets come from the event) | no, until the jobs' targets are shared |
+| Radiant | started by the Story Manager for an event, and not "run once": each game would pick its own job (its targets come from the event) | while the host's game runs it: the host's run, with the host's targets ("Runs and aliases"); a job a friend starts on its own is that friend's |
 | Misc | the misc tab (favours, small errands) | no, in this version: a scan of which play the same everywhere comes first |
 | Untyped | no journal tab: the game's machinery (dialogue, followers, trackers, encounters) | no |
 | No name | no editor ID: nothing to name it by when it is made here | no |
@@ -250,6 +250,13 @@ Every game judges again by its own record before it makes anything, so a quest o
 **The server's book** (`common/QuestBook.h`) keeps the session's word on each quest, up to 4096 quests and 512 entries each. It only grows: a stage once done stays done; an objective goes forward only (the first end said, completed or failed, stays; shown stays shown, at the latest stage of its quest it was read shown at); a quest ends once, the first way said. News goes to every game, the reporter's too, with who said it; the rest goes back to the reporter alone with why (it had it, past the player's budget, full, refused). Each player has a burst of 64 batches and 8 a second after that (past it, answered busy: the game reports it again two seconds later), and two asks for every word and one in 5 seconds after that (owed, never dropped).
 
 **The host's save is the world.** At its welcome and after each load the host's game says its world: `kQuestReset` (the server empties the book and tells the others), then a snapshot of its enabled shared quests: their stages done, objectives and ends. A friend's reset is ignored. A game that joins is sent the whole book after its welcome; a friend that loads a save asks for it again. A friend's own save holds its own quests as they were; the session's word is made where it is behind, never undone where it is ahead (forward only). Open question: quests the host finished and stopped before the session are not in its snapshot (it says only the enabled ones); a friend whose save is behind on them keeps its own.
+
+**Runs and aliases.** Since protocol 12; the rig step `jobs` is ready for it. The rules, free of the game, are `src/game/QuestRunRules.h`; the server's book is `common/QuestRuns.h`; tests in `tests/QuestRunTests.cpp`. A quest's aliases (the people, places and things it is about) are filled by each game when the quest starts, and two games pick differently: a radiant job's target, the bandit camp a bounty names, the courier's letter. So the quest is the session's only when its aliases hold the same references everywhere, and the host's game picks them:
+- The host's game says each shared quest and radiant job it starts (its event, `TESQuestStartStopEvent`) as a run: a number its game never gives twice in its session, said fresh for a radiant job (its earlier run's stages are not this run's: the server and every game forget that quest's word). It reads the references its reference aliases hold once a second while the quest runs and says them when first read and whenever they change. A radiant job's stop ends its run. At its welcome and after each load it says the runs of its world before its snapshot.
+- The server keeps the host's word only (a friend's runs are its own picks, never passed on): the live runs and their references, sent to a game that joins or asks again before the quests' stages, so a quest is started with the host's references before its stages are made. A stage of a radiant job's run that ended is refused, so a friend's late word cannot start it again. The host's reset and a new session clear it.
+- A friend's game holds the run's stages until the quest is started for it (`QuestRules::Verdict::kHold`). A quest not running there is started with the host's references: each reference alias's record is made a forced fill of the host's reference for the start (one the host left empty, a forced fill of none), the engine's own start runs (as the Story Manager starts a job), and the records are put back once the quest runs, after 10 seconds, or before a load (records are the game's data, never saved). A quest already running there is taken as the run (adopted), so a rejoin or a friend that started the same job is lined up. Either way, a reference the host's alias holds and this game's does not is forced into the alias every 2 seconds while it differs (a reference not loaded yet is tried again). A run whose references or start do not come within 10 seconds is given up: a shared quest's stages are then made as before (this game's own picks); a radiant job's are dropped. The host's stop of a radiant job stops it there (`stopquest`).
+- A radiant job is shared only while it runs as the host's run. One a friend's game starts on its own stays that friend's job: its stages are not reported and the host's game never runs it.
+- Not shared: an actor a quest creates for its alias (a reference the host's game made as it ran: each game's own until NPCs are paired), a reference of a plugin a game lacks (that game's own pick), and location aliases (the engine's layout of them is not known yet: each game's own pick, counted in `quests run`).
 
 **Making the session's word here.** Each thing the session says is judged against this game: it has it already, the quest is missing (a mod this game lacks) or not shared here, a stage is below the quest's current stage here (passed: this game went past it, done or a branch it did not take, so it is never set again and its fragment never runs twice, whatever the done bit reads), an objective or end is of a quest not started here (its stages bring it, or were not made), or it is to be made. It is made by the game's own console commands (`setstage`, `SetObjectiveDisplayed`, `SetObjectiveCompleted`, `CompleteQuest`), so the quest's own scripts run here as they ran where the step was done:
 - one thing every 250 ms, never a frame's worth;
@@ -266,8 +273,8 @@ Every game judges again by its own record before it makes anything, so a quest o
 **Not yet:**
 - Dialogue and scenes play for the player who started them; the others see the stage it set.
 - Quest items and rewards go to the player who got them.
-- An NPC a quest creates for its alias in each game is that game's own until NPCs are shared.
-- Radiant jobs and misc quests are each game's own.
+- Misc quests are each game's own, and so is a radiant job a friend's game starts on its own (only the host's jobs are the session's).
+- A quest's location aliases are each game's own pick, and an actor a quest creates for its alias is each game's own, until NPCs are paired.
 - A choice a quest keeps in a script variable rather than a stage (which side a player took in a dialogue) is not shared.
 - A quest a friend took further in its own save than the host has (apart) stays the friend's own until the host reaches that stage; the friend cannot hand it to the host.
 
@@ -297,6 +304,9 @@ Choices made to keep moving. Each is the obvious option, cheap to change now, an
 | The vetting workflow still knows how to build Flash menu sources, as in the sister project, though this project has none yet. | Trim it, and add it back with the first menu. |
 | The git hooks read `~/.skyrimcoop-private-patterns`, and fall back to the sister project's file. | A file of its own only. |
 | The ban list, load-order translation, the mod comparison shown to a refused player, and the log-privacy test over all sources are not carried yet ([PORTING.md](PORTING.md)). | Carry them now. |
+| Quest runs (protocol 12): a quest a friend's game runs already when the host's run of it comes (its own radiant job, or one it ran before a rejoin) is taken as the host's run, the host's references forced into its aliases, not stopped and started again. | Stop the friend's quest and start it again with the host's references (its start-up stage would run twice there). |
+| A radiant job a friend's game starts on its own stays that friend's: only the host's game says runs. | Let a friend's job reach the host's game as a run of the session's. |
+| Location aliases are each game's own pick for now (counted in `quests run`); reference aliases are the host's. | Share them through the game's scripts (`ForceLocationTo`) once that is tried in a game. |
 | Whether to ever build on another project's GPL code. | [PRIOR-ART.md](PRIOR-ART.md) sets out what that would and would not allow. Nothing has been taken. |
 | Proton and the Steam Deck are reported in the log and otherwise untested. | Test them from phase 1. |
 | The session's clock is the host's, else the player there longest, and a friend's own wait or sleep is undone (pulled back to the owner's hour within the day). | Let a friend's wait or sleep move everyone (any player may pass time), or let each game keep its own hour. |

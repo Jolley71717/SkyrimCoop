@@ -29,9 +29,10 @@
 // A quest is judged by what its record says, never by a name list alone, so a mod's quest is shared as the base game's
 // are and the load order does not matter: its type (the journal's tab: the main quest, the guilds, the Daedric quests,
 // side quests, the Civil War, Dawnguard and Dragonborn are shared; misc and untyped quests are each game's own in this
-// version), and whether the Story Manager starts it for an event again and again (a radiant job: each game's own until
-// the jobs' targets are shared). A short list names the typed quests that are each player's own anyway (the Helgen
-// opening). Every game judges again by its own record before it makes anything.
+// version), and whether the Story Manager starts it for an event again and again (a radiant job: shared while it runs as
+// the host's run, with the host's targets, QuestRunRules.h; a friend's own job stays its own). A short list names the typed
+// quests that are each player's own anyway (the Helgen opening). Every game judges again by its own record before it
+// makes anything.
 namespace QuestRules
 {
 	using Clock = std::chrono::steady_clock;
@@ -55,7 +56,7 @@ namespace QuestRules
 	{
 		kShared,   // its stages, objectives and end are the session's
 		kOwn,      // a typed quest each player plays for themselves (OWN_QUESTS)
-		kRadiant,  // the Story Manager starts it for an event, again and again: each game picks its own job
+		kRadiant,  // the Story Manager starts it for an event, again and again: a run of the host's is shared (QuestRunRules.h)
 		kMisc,     // the misc tab ("more quests": shared later, once a scan shows which play the same everywhere)
 		kUntyped,  // no journal tab: the game's machinery (dialogue, followers, radiant trackers, encounters)
 		kNoName,   // no editor ID: nothing to name it by when it is made here (QuestSync makes stages by the console)
@@ -310,6 +311,17 @@ namespace QuestRules
 			out.clear();
 		}
 
+		// Everything of one quest forgotten (a radiant job begun again or stopped: its earlier run's word is not this
+		// run's): the session's word on it, this game's base and own, and its reports out (their answers, when they come,
+		// answer nothing).
+		void Forget(std::uint32_t a_questId)
+		{
+			session.Forget(a_questId);
+			base.Forget(a_questId);
+			own.Forget(a_questId);
+			std::erase_if(out, [&](const Entry& a_out) { return a_out.questId == a_questId; });
+		}
+
 	private:
 		[[nodiscard]] bool IsOut(const Entry& a_entry) const
 		{
@@ -395,6 +407,8 @@ namespace QuestRules
 		[[nodiscard]] std::uint64_t Quests() const { return quests; }  // quests found apart (each once a base)
 		[[nodiscard]] std::uint32_t LastQuest() const { return lastQuest; }
 		void Clear() { at.clear(); }
+		// A radiant job begun again or stopped: where this game was in its earlier run says nothing of this one.
+		void Forget(std::uint32_t a_questId) { at.erase(a_questId); }
 
 	private:
 		struct Quest
@@ -437,6 +451,9 @@ namespace QuestRules
 		std::uint16_t               current = 0;      // its current stage here (the last one set)
 		std::optional<StageVerdict> rule;             // a stage's row in STAGE_RULES
 		bool                        reporterNear = false;  // the player who did it is near ours
+		// The quest's run is heard and this game has not started the quest for it yet (QuestRunRules::Follower::Hold):
+		// everything of it waits, so its stages are made in the quest started with the host's references.
+		bool                        hold = false;
 	};
 
 	// What of an objective's word this game is to make: show it, and end it (1 completed, 2 failed; 0 nothing). Its end
@@ -472,6 +489,7 @@ namespace QuestRules
 		kPassed,      // a stage below the current one of a quest started here: this game went past it (done, or a
 		              // branch it did not take), so it is never set again (its fragment would run twice): dropped
 		kNotStarted,  // an objective or end of a quest not started here (its stages bring it, or were not made): dropped
+		kHold,        // the quest's run is heard and not started here yet (its fills, its start): held, its later wants too
 	};
 
 	[[nodiscard]] constexpr std::string_view VerdictName(Verdict a_verdict)
@@ -495,6 +513,8 @@ namespace QuestRules
 			return "passed";
 		case Verdict::kNotStarted:
 			return "notstarted";
+		case Verdict::kHold:
+			return "hold";
 		}
 		return "?";
 	}
@@ -504,6 +524,9 @@ namespace QuestRules
 	{
 		if (!a_here.exists) {
 			return Verdict::kMissing;
+		}
+		if (a_here.hold) {
+			return Verdict::kHold;  // judged again once the quest is started here for its run (or the run is given up)
 		}
 		if (a_here.cls != Class::kShared) {
 			return Verdict::kNotHere;
@@ -612,7 +635,7 @@ namespace QuestRules
 				}
 				const auto here = a_look(e, it->reporter);
 				const auto verdict = Judge(e, it->reporter, here);
-				if (verdict == Verdict::kFar) {
+				if (verdict == Verdict::kFar || verdict == Verdict::kHold) {
 					blocked.insert(e.questId);  // its later stages wait behind it
 					continue;
 				}
@@ -659,6 +682,26 @@ namespace QuestRules
 			wants.clear();
 			flight.clear();
 			lastStage.clear();
+		}
+
+		// What waits of one quest is no longer the session's word (a radiant job begun again or stopped).
+		void Forget(std::uint32_t a_questId)
+		{
+			std::erase_if(wants, [&](const Want& a_w) { return a_w.entry.questId == a_questId; });
+			flight.erase(a_questId);
+			lastStage.erase(a_questId);
+		}
+
+		// The wants held for their quest's run (kHold), for the dev command.
+		[[nodiscard]] std::size_t HeldForRun(const Look& a_look) const
+		{
+			std::size_t n = 0;
+			for (const auto& w : wants) {
+				if (Judge(w.entry, w.reporter, a_look(w.entry, w.reporter)) == Verdict::kHold) {
+					++n;
+				}
+			}
+			return n;
 		}
 
 	private:
