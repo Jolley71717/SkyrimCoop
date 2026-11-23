@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-23T17:19:58+00:00",
+ "updated": "2026-11-23T18:58:47+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -93,8 +93,9 @@
    "title": "A friend swimming shows as swimming",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
-   "note": ""
+   "stage": 2,
+   "note": "",
+   "pr": 25
   },
   {
    "id": "a-friend-who-joins-late-sees-what-changed-before",
@@ -424,7 +425,7 @@
    "title": "Friends look like their own character: face, hair, body and skin",
    "kind": "feature",
    "priority": 1,
-   "stage": 2,
+   "stage": 3,
    "note": "",
    "pr": 24
   },
@@ -490,7 +491,7 @@
    "title": "Items lying about, and dropped items",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
+   "stage": 3,
    "note": ""
   },
   {
