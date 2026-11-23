@@ -168,12 +168,12 @@ clock_scale_leg() {
 	clock_expect_scale "vm: brought back to the host's timescale" vm "$CLOCK_SCALE"
 	expect_eq "host: its timescale stays its own" "$(awk -v v="$(clock_key host scale)" 'BEGIN{printf "%.0f\n", v}')" "$CLOCK_SCALE"
 
-	backs0=$(clock_count vm scaleBacks); saved0=$(clock_said vm 'Clock: timescale .* our own, for the save')
+	backs0=$(clock_count vm scaleBacks); saved0=$(clock_said vm 'Clock: timescale .*(our own, for the save)')
 	clock_console "vm: saves mid-session (its own timescale into the save)" vm "save $SAVE_NAME" || return
 	sleep 8
 	[ "$(dc vm ping)" = pong ] || { fail "vm: the game lives through its save" "its dev channel went silent"; return; }
 	expect_ge "vm: put its own timescale back for the save (scaleBacks)" "$(clock_count vm scaleBacks)" $((backs0 + 1))
-	expect_ge "vm: its log says its own timescale went into the save" "$(clock_said vm 'Clock: timescale .* our own, for the save')" $((saved0 + 1))
+	expect_ge "vm: its log says its own timescale went into the save" "$(clock_said vm 'Clock: timescale .*(our own, for the save)')" $((saved0 + 1))
 	clock_expect_scale "vm: the host's timescale again after its save" vm "$CLOCK_SCALE"
 
 	r=$(dc vm 'session leave'); [[ $r == left* ]] || { fail "vm: leaves" "$r"; return; }
