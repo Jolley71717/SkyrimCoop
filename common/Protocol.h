@@ -397,6 +397,9 @@ namespace Protocol
 		std::uint8_t  kind = kStage;
 		std::uint16_t index = 0;
 		std::uint8_t  value = 0;
+		// An objective: the quest's current stage in the game that read it, the stage its shown part holds at (a later
+		// stage's own script may withdraw it, so a game at another stage does not show it from this word). 0 otherwise.
+		std::uint16_t stage = 0;
 
 		[[nodiscard]] bool SameThing(const QuestEntry& a_other) const { return questId == a_other.questId && kind == a_other.kind && index == a_other.index; }
 		bool operator==(const QuestEntry&) const = default;
@@ -1049,7 +1052,7 @@ namespace Protocol
 	}
 
 	// kQuests, kRemoteQuests, kQuestAnswer: playerId (kRemoteQuests only), a count (1 to MAX_QUEST_BATCH), then each
-	// entry: questId, kind, index, value. None for an empty batch, a kind not known, an objective state past
+	// entry: questId, kind, index, value, stage. None for an empty batch, a kind not known, an objective state past
 	// OBJECTIVE_STATE_MAX, or an answer past ANSWER_MAX. Encode writes at most MAX_QUEST_BATCH entries (Batches splits).
 	inline std::vector<std::uint8_t> Encode(const QuestBatch& a_msg, MessageType a_type)
 	{
@@ -1065,6 +1068,7 @@ namespace Protocol
 			w.U8(e.kind);
 			w.U16(e.index);
 			w.U8(e.value);
+			w.U16(e.stage);
 		}
 		return w.Data();
 	}
@@ -1106,6 +1110,7 @@ namespace Protocol
 			e.kind = r.U8();
 			e.index = r.U16();
 			e.value = r.U8();
+			e.stage = r.U16();
 			if (e.kind > QuestEntry::KIND_MAX) {
 				return std::nullopt;
 			}

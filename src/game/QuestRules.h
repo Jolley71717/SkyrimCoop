@@ -19,6 +19,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 // Shared quests (docs/DESIGN.md, "Quests"): which quests a session shares, what a game reports, and how the session's
@@ -200,23 +201,27 @@ namespace QuestRules
 		return out;
 	}
 
+
 	// ---- what a game reports ---------------------------------------------------------------------------------------
 
-	// What this game knows of the session's quests: the session's word as heard (a QuestBook, unlimited), and the
-	// reports of ours still out (sent, not answered), so a change is reported once, not again with every poll.
+	// What this game knows of the session's quests: the session's word as heard (a QuestBook, unlimited); the reports of
+	// ours still out (sent, not answered), so a change is reported once, not again with every poll; what this game held
+	// when the session's word was last new to it (its base: a welcome, the host's reset, a load), which is this game's
+	// own past and never reported; and what the session would not take of ours (refused, or its book full), which stays
+	// this game's own.
 	class View
 	{
 	public:
 		// Our game reads a_read (a stage done, an objective's state, an end): whether to report it. It is reported when
-		// the session does not know it yet (an objective: when ours is ahead of the session's) and no report of the same
-		// thing is out; it then counts as out until answered.
+		// it is ahead of the session's word, of this game's base and of what the session would not take, and no report
+		// of the same is out; it then counts as out until answered.
 		bool Offer(const Entry& a_read)
 		{
 			if (a_read.kind == Entry::kObjective && a_read.value == 0) {
 				return false;  // dormant says nothing
 			}
-			if (const auto known = session.Find(a_read)) {
-				if (a_read.kind != Entry::kObjective || !QuestBook::Ahead(a_read.value, known->value)) {
+			for (const auto* book : { &session, &base, &own }) {
+				if (const auto known = book->Find(a_read); known && !QuestBook::Ahead(a_read, *known)) {
 					return false;
 				}
 			}
@@ -227,43 +232,182 @@ namespace QuestRules
 			return true;
 		}
 
-		// The session's word (kRemoteQuests): true when it is new to this game's view. A report of ours is answered.
-		bool Heard(const Entry& a_entry)
+		// The session's word (kRemoteQuests): true when it is new to this game's view. a_ours: it is our own report,
+		// which it answers.
+		bool Heard(const Entry& a_entry, bool a_ours)
 		{
-			Answered(a_entry);
+			if (a_ours) {
+				TakeOut(a_entry);
+			}
 			Entry merged;
 			return session.Report(a_entry, merged) == QuestBook::Take::kNews;
 		}
 
-		// A report of ours answered (kRemoteQuests or kQuestAnswer): no longer out.
-		void Answered(const Entry& a_entry)
+		// The server's answer to the oldest report of ours out on that thing (kQuestAnswer; its value says why it was
+		// not news): the session has it (learnt as the session's), it is refused or the book is full (kept as this game's
+		// own: not offered again unless it moves on), or busy (the caller sends it again). The report it answers, if one
+		// was out.
+		std::optional<Entry> Answered(const Entry& a_answer)
 		{
-			std::erase_if(out, [&](const Entry& a_out) { return a_out.SameThing(a_entry); });
+			auto mine = TakeOut(a_answer);
+			if (!mine) {
+				return std::nullopt;
+			}
+			Entry merged;
+			switch (a_answer.value) {
+			case Entry::kSame:
+				session.Report(*mine, merged);
+				break;
+			case Entry::kRefused:
+			case Entry::kFull:
+				own.Report(*mine, merged);
+				break;
+			default:
+				break;
+			}
+			return mine;
+		}
+
+		// A report sent again that was never offered (one of the host's snapshot answered busy): out until answered.
+		void MarkOut(const Entry& a_entry)
+		{
+			if (!IsOut(a_entry)) {
+				out.push_back(a_entry);
+			}
+		}
+
+		// What this game holds now, taken as its base (a welcome, the host's reset, a load): none of it is reported, only
+		// what moves on from it. The session's word on it is still made here where this game is behind.
+		void Rebase(std::span<const Entry> a_held)
+		{
+			base.Clear();
+			Entry merged;
+			for (const auto& e : a_held) {
+				base.Report(e, merged);
+			}
 		}
 
 		[[nodiscard]] const Entry* Known(const Entry& a_what) const { return session.Find(a_what); }
+		[[nodiscard]] bool         Reached(std::uint32_t a_questId, std::uint16_t a_stage) const { return session.Reached(a_questId, a_stage); }
 		[[nodiscard]] std::size_t  Quests() const { return session.Quests(); }
 		[[nodiscard]] std::size_t  Entries() const { return session.Entries(); }
 		[[nodiscard]] std::size_t  Outstanding() const { return out.size(); }
+		[[nodiscard]] std::size_t  Based() const { return base.Entries(); }
+		[[nodiscard]] std::size_t  Kept() const { return own.Entries(); }
 		[[nodiscard]] std::vector<Entry> All() const { return session.All(); }
 
-		// The session's word forgotten (a welcome, a load, the host's world new); reports out stay out until answered.
-		void Clear() { session.Clear(); }
-		void ClearAll()
+		// The session's word forgotten (a welcome, a load, the host's world new), and with it what it would not take;
+		// reports out stay out until answered.
+		void Clear()
 		{
 			session.Clear();
+			own.Clear();
+		}
+		void ClearAll()
+		{
+			Clear();
+			base.Clear();
 			out.clear();
 		}
 
 	private:
 		[[nodiscard]] bool IsOut(const Entry& a_entry) const
 		{
-			return std::ranges::any_of(out, [&](const Entry& a_out) { return a_out.SameThing(a_entry) && (a_entry.kind != Entry::kObjective || !QuestBook::Ahead(a_entry.value, a_out.value)); });
+			return std::ranges::any_of(out, [&](const Entry& a_out) { return a_out.SameThing(a_entry) && !QuestBook::Ahead(a_entry, a_out); });
+		}
+
+		// The oldest report of ours out on that thing, taken out (answers come in the order the reports went).
+		std::optional<Entry> TakeOut(const Entry& a_entry)
+		{
+			const auto it = std::ranges::find_if(out, [&](const Entry& a_out) { return a_out.SameThing(a_entry); });
+			if (it == out.end()) {
+				return std::nullopt;
+			}
+			auto mine = *it;
+			out.erase(it);
+			return mine;
 		}
 
 		QuestBook          session{ SIZE_MAX, SIZE_MAX };
+		QuestBook          base{ SIZE_MAX, SIZE_MAX };
+		QuestBook          own{ SIZE_MAX, SIZE_MAX };
 		std::vector<Entry> out;
 	};
+
+	// A quest further on in this game than in the session when the session's word was last new to it (a friend that
+	// joins with a save ahead of the host's, or whose host loaded an older save): its stages and objectives here are
+	// this game's own until the session reaches the stage this game was at, so a friend's world apart from the host's
+	// never runs on in the host's. Judged a while after the base is taken (APART_WAIT: the session's word comes right
+	// behind the welcome or the reset); the host's game is never apart, its world is the session's.
+	inline constexpr auto APART_WAIT = std::chrono::seconds{ 5 };
+
+	class Apart
+	{
+	public:
+		// The base taken at a_now: each quest started here and the stage it is at.
+		void Rebase(std::span<const std::pair<std::uint32_t, std::uint16_t>> a_at, Clock::time_point a_now)
+		{
+			at.clear();
+			for (const auto& [quest, stage] : a_at) {
+				if (stage != 0) {
+					at[quest] = Quest{ stage, false };
+				}
+			}
+			since = a_now;
+		}
+
+		enum class Say : std::uint8_t
+		{
+			kReport,  // the quest is with the session: report what moves on here
+			kWait,    // the session's word on it may still be coming: hold the report
+			kOwn,     // this game is further on than the session: what moves on here is its own
+		};
+
+		// What moves on here in a_questId: whether to report it.
+		Say Judge(std::uint32_t a_questId, const View& a_view, Clock::time_point a_now)
+		{
+			const auto it = at.find(a_questId);
+			if (it == at.end()) {
+				return Say::kReport;
+			}
+			if (a_view.Reached(a_questId, it->second.stage)) {
+				at.erase(it);  // the session came this far: with it from now on
+				return Say::kReport;
+			}
+			if (a_now - since < APART_WAIT) {
+				return Say::kWait;
+			}
+			if (!it->second.said) {
+				it->second.said = true;
+				++quests;
+				lastQuest = a_questId;
+			}
+			return Say::kOwn;
+		}
+
+		// The stage this game was at in a quest still apart (0 when it is not).
+		[[nodiscard]] std::uint16_t StageOf(std::uint32_t a_questId) const
+		{
+			const auto it = at.find(a_questId);
+			return it == at.end() ? 0 : it->second.stage;
+		}
+
+		[[nodiscard]] std::uint64_t Quests() const { return quests; }  // quests found apart (each once a base)
+		[[nodiscard]] std::uint32_t LastQuest() const { return lastQuest; }
+		void Clear() { at.clear(); }
+
+	private:
+		struct Quest
+		{
+			std::uint16_t stage = 0;
+			bool          said = false;
+		};
+		std::unordered_map<std::uint32_t, Quest> at;
+		Clock::time_point                        since{};
+		std::uint64_t                            quests = 0;
+		std::uint32_t                            lastQuest = 0;
+	};
+
 
 	// Reports the server answered busy, to send again after AGAIN_AFTER.
 	inline constexpr auto AGAIN_AFTER = std::chrono::seconds{ 2 };
@@ -289,19 +433,45 @@ namespace QuestRules
 		bool                        exists = false;   // the quest is in this game
 		Class                       cls = Class::kUntyped;
 		bool                        has = false;      // the stage is done here, the objective as far on, the end so
+		bool                        started = false;  // the quest runs here, or has ended here
+		std::uint16_t               current = 0;      // its current stage here (the last one set)
 		std::optional<StageVerdict> rule;             // a stage's row in STAGE_RULES
 		bool                        reporterNear = false;  // the player who did it is near ours
 	};
 
+	// What of an objective's word this game is to make: show it, and end it (1 completed, 2 failed; 0 nothing). Its end
+	// is made whatever stage the quest is at here (an end stays). Its shown part only while the quest here is at the
+	// stage the word was read at: a later stage's own script may have withdrawn it (SetObjectiveDisplayed(n, false)),
+	// and the game at that stage did so here too, so it is not shown again from an older word.
+	struct ObjectiveMake
+	{
+		bool         show = false;
+		std::uint8_t end = 0;
+		[[nodiscard]] bool Any() const { return show || end != 0; }
+	};
+
+	[[nodiscard]] inline ObjectiveMake ObjectiveToMake(const Entry& a_said, std::uint8_t a_ours, std::uint16_t a_current)
+	{
+		ObjectiveMake make;
+		make.show = QuestBook::Shown(a_said.value) && !QuestBook::Shown(a_ours) && a_said.stage == a_current;
+		if (QuestBook::End(a_ours) == 0) {
+			make.end = QuestBook::End(a_said.value);
+		}
+		return make;
+	}
+
 	enum class Verdict : std::uint8_t
 	{
-		kMake,     // make it here now
-		kHas,      // this game has it already: done
-		kMissing,  // no such quest here (a mod this game lacks, or a form of another kind): dropped
-		kNotHere,  // the quest is not shared by this game's own record: dropped
-		kOwn,      // a stage the rules keep each game's own: dropped
-		kFar,      // a stage that moves the player, said by a friend who is not near: held until they are
-		kFarPast,  // ... said as the session's word (a join, a load: no friend did it now): dropped, not made
+		kMake,        // make it here now
+		kHas,         // this game has it already: done
+		kMissing,     // no such quest here (a mod this game lacks, or a form of another kind): dropped
+		kNotHere,     // the quest is not shared by this game's own record: dropped
+		kOwn,         // a stage the rules keep each game's own: dropped
+		kFar,         // a stage that moves the player, said by a friend who is not near: held until they are
+		kFarPast,     // ... said as the session's word (a join, a load: no friend did it now): dropped, not made
+		kPassed,      // a stage below the current one of a quest started here: this game went past it (done, or a
+		              // branch it did not take), so it is never set again (its fragment would run twice): dropped
+		kNotStarted,  // an objective or end of a quest not started here (its stages bring it, or were not made): dropped
 	};
 
 	[[nodiscard]] constexpr std::string_view VerdictName(Verdict a_verdict)
@@ -321,6 +491,10 @@ namespace QuestRules
 			return "far";
 		case Verdict::kFarPast:
 			return "farpast";
+		case Verdict::kPassed:
+			return "passed";
+		case Verdict::kNotStarted:
+			return "notstarted";
 		}
 		return "?";
 	}
@@ -337,7 +511,13 @@ namespace QuestRules
 		if (a_here.has) {
 			return Verdict::kHas;
 		}
-		if (a_entry.kind == Entry::kStage && a_here.rule) {
+		if (a_entry.kind != Entry::kStage) {
+			return a_here.started ? Verdict::kMake : Verdict::kNotStarted;
+		}
+		if (a_here.started && a_entry.index < a_here.current) {
+			return Verdict::kPassed;
+		}
+		if (a_here.rule) {
 			if (*a_here.rule == StageVerdict::kOwn) {
 				return Verdict::kOwn;
 			}
@@ -381,7 +561,7 @@ namespace QuestRules
 			// a newer word on the same objective replaces the older one waiting
 			for (auto& w : wants) {
 				if (w.entry.SameThing(a_entry)) {
-					w.entry.value = a_entry.kind == Entry::kObjective ? QuestBook::MergeObjective(w.entry.value, a_entry.value) : a_entry.value;
+					w.entry = a_entry.kind == Entry::kObjective ? QuestBook::Merge(w.entry, a_entry) : a_entry;
 					w.reporter = a_reporter;
 					return true;
 				}
@@ -569,11 +749,31 @@ namespace QuestRules
 	struct QuestRead
 	{
 		std::uint32_t                                         questId = 0;
+		std::uint16_t                                         current = 0;  // its current stage (objectives are read at it)
 		std::vector<std::uint16_t>                            done;        // stages done
 		std::vector<std::pair<std::uint16_t, std::uint8_t>>   objectives;  // index, state
 		bool                                                  completed = false;
 		bool                                                  failed = false;
 	};
+
+	// A quest's objectives that are not dormant (by index, each with the stage it is at), then its end: what a game
+	// polls, takes as its base and says in a snapshot.
+	[[nodiscard]] inline std::vector<Entry> ObjectivesAndEnd(QuestRead a_quest)
+	{
+		std::vector<Entry> out;
+		std::ranges::sort(a_quest.objectives);
+		for (const auto& [index, state] : a_quest.objectives) {
+			if (state != 0 && state <= Entry::OBJECTIVE_STATE_MAX) {
+				out.push_back({ a_quest.questId, Entry::kObjective, index, state, a_quest.current });
+			}
+		}
+		if (a_quest.completed) {
+			out.push_back({ a_quest.questId, Entry::kCompleted, 0, 0 });
+		} else if (a_quest.failed) {
+			out.push_back({ a_quest.questId, Entry::kFailed, 0, 0 });
+		}
+		return out;
+	}
 
 	// The entries of a snapshot, in the order a game behind makes them: quest by quest (by form ID), each one's stages
 	// in ascending order (the order a quest's own scripts set them, nearly always), then its objectives that are not
@@ -592,17 +792,8 @@ namespace QuestRules
 			for (const auto stage : q.done) {
 				out.push_back({ q.questId, Entry::kStage, stage, 0 });
 			}
-			std::ranges::sort(q.objectives);
-			for (const auto& [index, state] : q.objectives) {
-				if (state != 0 && state <= Entry::OBJECTIVE_STATE_MAX) {
-					out.push_back({ q.questId, Entry::kObjective, index, state });
-				}
-			}
-			if (q.completed) {
-				out.push_back({ q.questId, Entry::kCompleted, 0, 0 });
-			} else if (q.failed) {
-				out.push_back({ q.questId, Entry::kFailed, 0, 0 });
-			}
+			const auto rest = ObjectivesAndEnd(std::move(q));
+			out.insert(out.end(), rest.begin(), rest.end());
 		}
 		return out;
 	}
