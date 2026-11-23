@@ -257,15 +257,15 @@ void Server::Run()
 		}
 	};
 
-	// The moves from a game's ledger on (its world holds the ones before), as a catch-up, then the log's id and next
-	// number: the game makes the catch-up's moves, its own among them (a load took them from its world), and takes the
-	// moves passed on after it as they come.
+	// The moves from a game's ledger on (its world holds the ones before), as a catch-up named by its ask, then the log's
+	// id and next number: the game makes the catch-up's moves its world lacks (a load took them from its world, its own
+	// among them), and takes the moves passed on after it as they come.
 	const auto sendLoot = [&](const PeerKey& a_to, const Protocol::LootAsk& a_ask) {
 		const auto start = loot.StartFor(a_ask.logId, a_ask.from);
-		for (const auto& packet : Protocol::LootBatches(loot.From(start), MT::kRemoteLoot, true)) {
+		for (const auto& packet : Protocol::LootBatches(loot.From(start), MT::kRemoteLoot, a_ask.ask)) {
 			send(a_to, packet, true);
 		}
-		send(a_to, Protocol::Encode(Protocol::LootCaughtUp{ .logId = loot.Id(), .from = start, .next = loot.Next() }), true);
+		send(a_to, Protocol::Encode(Protocol::LootCaughtUp{ .ask = a_ask.ask, .logId = loot.Id(), .from = start, .next = loot.Next() }), true);
 	};
 
 	const auto onHello = [&](const PeerKey& a_key, Peer& a_peer, std::span<const std::uint8_t> a_data) {
@@ -634,7 +634,10 @@ void Server::Run()
 					a_peer.lootAskOwed.reset();
 					sendLoot(a_key, *ask);
 				} else {
-					a_peer.lootAskOwed = *ask;  // answered from the loop once the budget has room: never dropped
+					// Answered from the loop once the budget has room. A newer ask replaces one owed: the game asked again for
+					// a world since replaced, and goes by the answer to its newest ask alone (LootAsk::ask).
+					a_peer.lootAskOwed = *ask;
+
 				}
 			}
 			break;

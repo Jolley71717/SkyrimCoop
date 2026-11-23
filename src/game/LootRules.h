@@ -226,8 +226,16 @@ namespace LootRules
 
 	// What this game's world holds of the session's numbered moves: the log's id and the first number it does not hold
 	// yet. Kept in the co-save, so a save loaded later asks for the moves from there (its own among them: the load took
-	// them from its world). Its own moves still out (sent, no echo or answer yet) are kept here too, matched by what
-	// they say: the server answers each move once, a numbered echo or a kLootAnswer.
+	// them from its world). Its own moves still out (sent, no echo or answer yet) are kept here too, each by the tag it
+	// was sent with: the server answers each move once, with a numbered echo or a kLootAnswer, and carries the tag back as
+	// it was (the forms may come back as 0).
+	//
+	// The world is replaced at a welcome and at a load (Begin): from that moment, not from when the ask goes out, every
+	// move passed on is held until the catch-up of this world's newest ask is done. So a move heard on the loading screen,
+	// before the ask can go out, never moves the ledger past moves this world lacks: the catch-up brings it with them. Each
+	// ask has its own number, carried by its catch-up and its end: the answers to an older ask (asked for a world replaced
+	// since) are void, and an older ask the server never answered (it owes a game one at most, the newest) leaves nothing
+	// waiting for it.
 	class Ledger
 	{
 	public:
@@ -242,83 +250,115 @@ namespace LootRules
 		enum class Heard : std::uint8_t
 		{
 			kMake,  // make it here
-			kOwn,   // ours, made here as we made it: nothing to make (its number is the ledger's now)
-			kHeld,  // heard while a catch-up is coming: not made now (the catch-up holds it, if this world lacks it)
+			kOwn,   // ours, made in this world as we made it: nothing to make (its number is the ledger's now)
+			kHeld,  // heard while this world's catch-up is coming: not made now (the catch-up brings it, if this world lacks it)
 			kHad,   // numbered before what this world holds already
-			kVoid,  // the catch-up of an ask made for a world since replaced (a load): the later ask's answers it
+			kVoid,  // the catch-up of an ask older than this world's newest (a load or a welcome since): not this world's
+		};
+
+		// Whose a move echoed or answered was.
+		enum class Mine : std::uint8_t
+		{
+			kNone,    // no move of ours out by that tag (another player's, a stray, or one given up on)
+			kNow,     // ours, made in this world
+			kBefore,  // ours, made in a world a load has replaced since: this world never made it
 		};
 
 		[[nodiscard]] Mark Saved() const { return mark; }
 
-		// A load (from its co-save; {0, 1} when it held none) or a new game: the world is that one now. A catch-up
-		// still coming was asked for the world before: it is void.
+		// A load (from its co-save; {0, 1} when it held none) or a new game: the world is that one now. A catch-up still
+		// coming was asked for the world before: void. Our moves still out were made in the world before: this world
+		// lacks them, so their echoes are made here as anyone's are.
 		void Loaded(Mark a_mark)
 		{
 			mark = a_mark.next == 0 ? Mark{ a_mark.logId, 1 } : a_mark;
-			voidAsks = asks;
+			asking = false;
+			askDue = false;
+			for (auto& o : out) {
+				o.before = true;
+			}
 		}
 
-		// An ask for the moves this world lacks (kAskLoot): from now until its kLootCaughtUp, moves passed on are held.
-		[[nodiscard]] Protocol::LootAsk Ask()
+		// This world asks the session for the moves it lacks (a welcome, or a load in a session). From now until the
+		// catch-up of this ask is done, moves passed on are held, whenever the ask itself can go out (AskDue: not from a
+		// loading screen). Any older ask's catch-up is void from now.
+		void Begin()
 		{
-			++asks;
-			return Protocol::LootAsk{ .logId = mark.logId, .from = mark.next };
+			asking = true;
+			askDue = true;
+			if (++ask == 0) {
+				ask = 1;
+			}
 		}
 
-		// A move the session passed on (kRemoteLoot): what to do with it. Our own live echo also ends its wait as out.
-		Heard Take(const LootEntry& a_move, bool a_catchUp, std::uint32_t a_ourId)
+		// The ask to send now: once after each Begin, none otherwise. From the ledger as it is then: a move heard since
+		// Begin was held, so the ledger never moved past one this world lacks.
+		[[nodiscard]] std::optional<Protocol::LootAsk> AskDue()
 		{
-			if (a_catchUp) {
-				if (voidAsks > 0 || asks == 0) {
+			if (!std::exchange(askDue, false)) {
+				return std::nullopt;
+			}
+			return Protocol::LootAsk{ .ask = ask, .logId = mark.logId, .from = mark.next };
+		}
+
+		// A move the session passed on (kRemoteLoot): what to do with it. a_ask is the ask its batch answers as a catch-up
+		// (0: a move passed on as it came). Our own, matched by its tag, is no longer out: made in this world, it is
+		// kOwn; made in a world a load replaced since, this world lacks it and it is made (kMake), in a live echo and in a
+		// catch-up alike. A move held is not matched: the catch-up brings it again, and matches it then.
+		Heard Take(const LootEntry& a_move, std::uint32_t a_ask, std::uint32_t a_ourId)
+		{
+			if (a_ask != 0) {
+				if (!asking || askDue || a_ask != ask) {
 					return Heard::kVoid;
 				}
-				if (a_move.number < mark.next) {
-					return Heard::kHad;
-				}
-				mark.next = a_move.number + 1;
-				return Heard::kMake;
-			}
-			const bool ours = a_move.playerId == a_ourId && a_ourId != 0 && Echo(a_move);
-			if (asks > 0) {
+			} else if (asking) {
 				return Heard::kHeld;
 			}
+			const auto mine = a_ourId != 0 && a_move.playerId == a_ourId ? Match(a_move.tag, nullptr) : Mine::kNone;
 			if (a_move.number < mark.next) {
 				return Heard::kHad;
 			}
 			mark.next = a_move.number + 1;
-			return ours ? Heard::kOwn : Heard::kMake;
+			return mine == Mine::kNow ? Heard::kOwn : Heard::kMake;
 		}
 
-		// The catch-up of the oldest ask is done. True when it was this world's (the ledger is the log's from now).
+		// The end of a catch-up. True when it ends this world's newest ask (the ledger is the log's from now); an older
+		// ask's, or one nobody asked for, is false and changes nothing.
 		bool CaughtUp(const Protocol::LootCaughtUp& a_msg)
 		{
-			if (asks == 0) {
-				return false;  // nothing asked: a stray
-			}
-			--asks;
-			if (voidAsks > 0) {
-				--voidAsks;
+			if (!asking || askDue || a_msg.ask != ask) {
 				return false;
 			}
+			asking = false;
 			mark.logId = a_msg.logId;
 			mark.next = a_msg.next;
 			return true;
 		}
 
-		[[nodiscard]] bool Asking() const { return asks > 0; }
+		[[nodiscard]] bool Asking() const { return asking; }
 
-		// Our move sent: out until its echo or answer.
-		void Sent(const LootEntry& a_move, Clock::time_point a_now)
+		// Our move goes out: tagged, and out until its echo or answer. The move as it is sent (with its tag).
+		LootEntry Sent(LootEntry a_move, Clock::time_point a_now)
 		{
 			if (out.size() >= MAX_OUT) {
 				out.pop_front();
 				++lost;
 			}
-			out.push_back({ a_move, a_now });
+			a_move.tag = nextTag++;
+			if (nextTag == 0) {
+				nextTag = 1;
+			}
+			out.push_back({ a_move, a_now, false });
+			return a_move;
 		}
 
-		// Our move answered (kLootAnswer) or echoed: no longer out. False when it wasn't (a stray, or one given up on).
-		bool Answered(const LootEntry& a_move) { return Echo(a_move); }
+		// The first tag Sent gives (a random one per run of the game, so a catch-up that holds an earlier run's moves of
+		// ours never meets a tag still out in this one).
+		void FirstTag(std::uint32_t a_tag) { nextTag = a_tag != 0 ? a_tag : 1; }
+
+		// Our move answered (kLootAnswer): no longer out. Whose it was (kNone: a stray, or one given up on), and a_sent
+		// the move as we sent it (its forms ours, whatever the answer's came back as), to send again when it was busy.
+		Mine Answered(const LootEntry& a_move, LootEntry& a_sent) { return Match(a_move.tag, &a_sent); }
 
 		// Moves out longer than OUT_LOST are given up on (a connection that dropped them): counted as lost.
 		void Expire(Clock::time_point a_now)
@@ -329,12 +369,12 @@ namespace LootRules
 			}
 		}
 
-		// How many of a_item our player put into a_holder that the session has not numbered yet.
+		// How many of a_item our player put into a_holder in this world that the session has not numbered yet.
 		[[nodiscard]] std::uint32_t PutsOut(std::uint32_t a_holder, std::uint32_t a_item) const
 		{
 			std::uint64_t n = 0;
 			for (const auto& o : out) {
-				if (o.move.kind == LootEntry::kPut && o.move.holderId == a_holder && o.move.itemId == a_item) {
+				if (!o.before && o.move.kind == LootEntry::kPut && o.move.holderId == a_holder && o.move.itemId == a_item) {
 					n += o.move.count;
 				}
 			}
@@ -344,38 +384,49 @@ namespace LootRules
 		[[nodiscard]] std::size_t   Out() const { return out.size(); }
 		[[nodiscard]] std::uint64_t Lost() const { return lost; }
 
-		// A session's end or a welcome: what was out is no longer answered by anyone; the mark stays (the world's).
+		// A session's end, or a welcome before its Begin: no catch-up is coming. The mark stays (the world's), and so do
+		// our moves out: a rejoin's catch-up may hold their echoes (ours, made here), and the rest are lost in OUT_LOST.
 		void Disconnected()
 		{
-			out.clear();
-			asks = 0;
-			voidAsks = 0;
+			asking = false;
+			askDue = false;
 		}
 
 		static constexpr std::size_t MAX_OUT = 4096;
 		static constexpr auto        OUT_LOST = std::chrono::seconds(60);
 
 	private:
-		bool Echo(const LootEntry& a_move)
+		Mine Match(std::uint32_t a_tag, LootEntry* a_sent)
 		{
-			const auto it = std::ranges::find_if(out, [&](const OutMove& a_out) { return a_out.move.SameMove(a_move); });
+			if (a_tag == 0) {
+				return Mine::kNone;
+			}
+			const auto it = std::ranges::find_if(out, [&](const OutMove& a_out) { return a_out.move.tag == a_tag; });
 			if (it == out.end()) {
-				return false;
+				return Mine::kNone;
+			}
+			const auto mine = it->before ? Mine::kBefore : Mine::kNow;
+			if (a_sent) {
+				*a_sent = it->move;
 			}
 			out.erase(it);
-			return true;
+
+			return mine;
 		}
 
 		struct OutMove
 		{
 			LootEntry         move;
 			Clock::time_point at;
+			bool              before = false;  // made in a world a load has replaced since
 		};
-		Mark              mark;
-		std::deque<OutMove>  out;
-		std::uint32_t     asks = 0;      // asks sent, their kLootCaughtUp not heard yet
-		std::uint32_t     voidAsks = 0;  // ... of them, the oldest, asked for a world since replaced
-		std::uint64_t     lost = 0;
+		Mark                mark;
+		std::deque<OutMove> out;
+		std::uint32_t       ask = 0;         // this world's newest ask (0: none yet)
+		bool                asking = false;  // ... its catch-up not done: moves passed on are held
+		bool                askDue = false;  // ... and not sent yet
+		std::uint32_t       nextTag = 1;
+		std::uint64_t       lost = 0;
 	};
 
 	// ---- moves that wait ----------------------------------------------------------------------------------------------

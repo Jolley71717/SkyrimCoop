@@ -21,16 +21,21 @@ namespace SKSE
 // is dead here too), and keeps a ledger of the numbers its world holds, in its co-save, so a game that loads a save or
 // joins again asks for the moves from there (kAskLoot) and makes the ones its world lacks.
 //
-// From the tick only (GameThread), and from SKSE's messages and co-save callbacks on the main thread; the event sink
-// only queues. The game writes made from the tick are counted when they are made off the main thread (`loot`: offmain=).
+// From the tick (GameThread: on the task pool's job threads once in the world), and from SKSE's messages and co-save
+// callbacks on the main thread: every entry point takes one lock over LootSync's state. The event sinks never take it:
+// the container event's only queues, and the container menu's (on the UI's thread) only says which holder the menu
+// shows, where no move is made until it shuts. The game writes made from the tick are counted when they are made off
+// the main thread (`loot`: offmain=).
 namespace LootSync
 {
 	using SendFn = std::function<void(std::vector<std::uint8_t>)>;
 
-	// At kDataLoaded: the event sink and the merchants' chests. False when the game's event source is not there.
+	// At kDataLoaded: the event sinks (our player's moves, the container menu's open and close) and the merchants'
+	// chests. False when the game's event source is not there.
 	bool Install();
 
-	// The session let us in as a_playerId: what this world lacks of the session's moves is asked for.
+	// The session let us in as a_playerId: what this world lacks of the session's moves is asked for (moves passed on
+	// are held from now until that catch-up is done).
 	void Welcomed(std::uint32_t a_playerId);
 
 	// Once a tick while in a session and let in: reports our player's moves, sends a catch-up's ask, and makes the moves
@@ -44,7 +49,9 @@ namespace LootSync
 	void Answered(const Protocol::LootBatch& a_batch);
 
 	// A save was loaded (its co-save read first) or a new game started: the world's ledger is the save's (none for a new
-	// game), and the moves it lacks are asked for again.
+	// game), and the moves it lacks are asked for again; in a session, moves passed on are held from now (the loading
+	// screen still up), not from when the ask can go out.
+
 	void AfterLoad();
 
 	// The session ended. The ledger and the moves still waiting stay (they are this world's).

@@ -48,7 +48,7 @@ namespace
 		return a_move;
 	}
 
-	std::vector<std::uint8_t> Report(std::vector<LootEntry> a_entries) { return Protocol::Encode(LootBatch{ false, std::move(a_entries) }, MT::kLoot); }
+	std::vector<std::uint8_t> Report(std::vector<LootEntry> a_entries) { return Protocol::Encode(LootBatch{ 0, std::move(a_entries) }, MT::kLoot); }
 
 	// The moves of every batch of a_type in a_packets, in order.
 	std::vector<LootEntry> MovesIn(const std::vector<std::vector<std::uint8_t>>& a_packets, MT a_type = MT::kRemoteLoot)
@@ -75,14 +75,15 @@ namespace
 		return out;
 	}
 
-	bool AllCatchUp(const std::vector<std::vector<std::uint8_t>>& a_packets, bool a_catchUp)
+	// Whether every kRemoteLoot batch in a_packets answers the ask a_ask (0: moves passed on as they came).
+	bool AllAsk(const std::vector<std::vector<std::uint8_t>>& a_packets, std::uint32_t a_ask)
 	{
 		return std::ranges::all_of(a_packets, [&](const auto& a_packet) {
 			if (Protocol::PeekType(a_packet) != MT::kRemoteLoot) {
 				return true;
 			}
 			const auto batch = Protocol::DecodeLootBatch(a_packet);
-			return batch && batch->catchUp == a_catchUp;
+			return batch && batch->ask == a_ask;
 		});
 	}
 
@@ -97,32 +98,35 @@ namespace
 
 // ---- the messages -------------------------------------------------------------------------------------------------
 
-TEST("loot: a batch goes to the server, back numbered with its player, and an answer carries why")
+TEST("loot: a batch goes to the server, back numbered with its player, and an answer carries why; each move keeps its tag")
 {
-	const std::vector<LootEntry> moves{ Take(0x0001A332, 0x0000000F, 25), Put(0x0001A332, 0x00012EB7, 1), Emptied(0x0001A332, 7) };
-	const auto                   report = Report(moves);
+	std::vector<LootEntry> moves{ Take(0x0001A332, 0x0000000F, 25), Put(0x0001A332, 0x00012EB7, 1), Emptied(0x0001A332, 7) };
+	moves[0].tag = 1;
+	moves[1].tag = 0xFFFFFFFF;
+	moves[2].tag = 0x12345678;
+	const auto report = Report(moves);
 	CHECK(Protocol::PeekType(report) == MT::kLoot);
 	auto back = Protocol::DecodeLootBatch(report);
 	REQUIRE(back);
 	CHECK(back->entries == moves);
-	CHECK(!back->catchUp);
+	CHECK(back->ask == 0);
 
 	std::vector<LootEntry> numbered;
 	for (std::uint32_t i = 0; i < moves.size(); ++i) {
 		numbered.push_back(Numbered(moves[i], 40 + i, 3));
 	}
-	for (const bool catchUp : { false, true }) {
-		back = Protocol::DecodeLootBatch(Protocol::Encode(LootBatch{ catchUp, numbered }, MT::kRemoteLoot));
+	for (const std::uint32_t ask : { 0u, 1u, 0xFFFFFFFFu }) {
+		back = Protocol::DecodeLootBatch(Protocol::Encode(LootBatch{ ask, numbered }, MT::kRemoteLoot));
 		REQUIRE(back);
 		CHECK(back->entries == numbered);
-		CHECK(back->catchUp == catchUp);
+		CHECK(back->ask == ask);
 	}
 
 	auto answered = moves;
 	answered[0].answer = LootEntry::kBusy;
 	answered[1].answer = LootEntry::kFull;
 	answered[2].answer = LootEntry::kRefused;
-	back = Protocol::DecodeLootBatch(Protocol::Encode(LootBatch{ false, answered }, MT::kLootAnswer));
+	back = Protocol::DecodeLootBatch(Protocol::Encode(LootBatch{ 0, answered }, MT::kLootAnswer));
 	REQUIRE(back);
 	CHECK(back->entries == answered);
 	// A game's move does not carry a number, a player or an answer: they are the server's to give.
@@ -151,25 +155,24 @@ TEST("loot: a batch that can't be read is none: empty, a kind or an answer not k
 	CHECK(none(Report({ marker })));
 	auto answer = Take(0x1A332, 0xF, 1);
 	answer.answer = LootEntry::ANSWER_MAX + 1;
-	CHECK(none(Protocol::Encode(LootBatch{ false, { answer } }, MT::kLootAnswer)));
+	CHECK(none(Protocol::Encode(LootBatch{ 0, { answer } }, MT::kLootAnswer)));
 
 	// The session's move needs its number and an item; a game's own and an answer are read with an item no form named
 	// (FormTranslate made it 0), so the server answers it.
-	CHECK(none(Protocol::Encode(LootBatch{ false, { Take(0x1A332, 0xF, 1) } }, MT::kRemoteLoot)));
-	CHECK(none(Protocol::Encode(LootBatch{ false, { Numbered(Take(0x1A332, 0, 1), 1, 1) } }, MT::kRemoteLoot)));
-	CHECK(!none(Protocol::Encode(LootBatch{ false, { Numbered(Emptied(0x1A332, 1), 1, 1) } }, MT::kRemoteLoot)));
+	CHECK(none(Protocol::Encode(LootBatch{ 0, { Take(0x1A332, 0xF, 1) } }, MT::kRemoteLoot)));
+	CHECK(none(Protocol::Encode(LootBatch{ 0, { Numbered(Take(0x1A332, 0, 1), 1, 1) } }, MT::kRemoteLoot)));
+	CHECK(!none(Protocol::Encode(LootBatch{ 0, { Numbered(Emptied(0x1A332, 1), 1, 1) } }, MT::kRemoteLoot)));
 	CHECK(!none(Report({ Take(0x1A332, 0, 1) })));
-	CHECK(!none(Protocol::Encode(LootBatch{ false, { Take(0x1A332, 0, 1) } }, MT::kLootAnswer)));
+	CHECK(!none(Protocol::Encode(LootBatch{ 0, { Take(0x1A332, 0, 1) } }, MT::kLootAnswer)));
 
-	// Short, long, a flags byte not known.
+	// Short, long.
 	auto packet = Report({ Take(0x1A332, 0xF, 1) });
 	CHECK(none(std::vector<std::uint8_t>(packet.begin(), packet.end() - 1)));
 	packet.push_back(0);
 	CHECK(none(packet));
-	auto remote = Protocol::Encode(LootBatch{ true, { Numbered(Take(0x1A332, 0xF, 1), 1, 1) } }, MT::kRemoteLoot);
+	auto remote = Protocol::Encode(LootBatch{ 3, { Numbered(Take(0x1A332, 0xF, 1), 1, 1) } }, MT::kRemoteLoot);
 	CHECK(!none(remote));
-	remote[1] = 2;
-	CHECK(none(remote));
+	CHECK(none(std::vector<std::uint8_t>(remote.begin(), remote.end() - 1)));
 	CHECK(!Protocol::DecodeLootBatch(Protocol::Encode(LootAsk{})));
 }
 
@@ -180,27 +183,30 @@ TEST("loot: a long list goes in batches of MAX_LOOT_BATCH, in order, and nothing
 	for (std::uint32_t i = 0; i < 2 * Protocol::MAX_LOOT_BATCH + 2; ++i) {
 		moves.push_back(Numbered(Take(0x1A332, 0x100 + i, 1), i + 1, 2));
 	}
-	const auto packets = Protocol::LootBatches(moves, MT::kRemoteLoot, true);
+	const auto packets = Protocol::LootBatches(moves, MT::kRemoteLoot, 5);
 	REQUIRE(packets.size() == 3);
-	CHECK(AllCatchUp(packets, true));
+	CHECK(AllAsk(packets, 5));
 	CHECK(MovesIn(packets) == moves);
 	CHECK(Protocol::DecodeLootBatch(packets[2])->entries.size() == 2);
 	// Encode alone writes no more than a batch holds.
-	CHECK(Protocol::DecodeLootBatch(Protocol::Encode(LootBatch{ false, moves }, MT::kRemoteLoot))->entries.size() == Protocol::MAX_LOOT_BATCH);
+	CHECK(Protocol::DecodeLootBatch(Protocol::Encode(LootBatch{ 0, moves }, MT::kRemoteLoot))->entries.size() == Protocol::MAX_LOOT_BATCH);
 }
 
-TEST("loot: an ask and the end of its catch-up go there and back; numbers start at 1")
+TEST("loot: an ask and the end of its catch-up go there and back, named by the ask's number; numbers start at 1")
 {
-	const LootAsk ask{ .logId = 0x1234'5678'9ABC'DEF0ull, .from = 41 };
+	const LootAsk ask{ .ask = 0xFFFFFFFF, .logId = 0x1234'5678'9ABC'DEF0ull, .from = 41 };
 	CHECK(Protocol::DecodeLootAsk(Protocol::Encode(ask)) == ask);
 	CHECK(Protocol::DecodeLootAsk(Protocol::Encode(LootAsk{})) == LootAsk{});
 	CHECK(!Protocol::DecodeLootAsk(Protocol::Encode(LootAsk{ .logId = 5, .from = 0 })));
+	CHECK(!Protocol::DecodeLootAsk(Protocol::Encode(LootAsk{ .ask = 0, .logId = 5, .from = 1 })));
 	auto packet = Protocol::Encode(ask);
 	packet.push_back(0);
 	CHECK(!Protocol::DecodeLootAsk(packet));
 
-	const LootCaughtUp done{ .logId = 7, .from = 3, .next = 9 };
+	const LootCaughtUp done{ .ask = 9, .logId = 7, .from = 3, .next = 9 };
 	CHECK(Protocol::DecodeLootCaughtUp(Protocol::Encode(done)) == done);
+	CHECK(!Protocol::DecodeLootCaughtUp(Protocol::Encode(LootCaughtUp{ .ask = 0, .logId = 7, .from = 3, .next = 9 })));
+
 	CHECK(Protocol::DecodeLootCaughtUp(Protocol::Encode(LootCaughtUp{ .logId = 7, .from = 1, .next = 1 })));
 	CHECK(!Protocol::DecodeLootCaughtUp(Protocol::Encode(LootCaughtUp{ .logId = 7, .from = 0, .next = 9 })));
 	CHECK(!Protocol::DecodeLootCaughtUp(Protocol::Encode(LootCaughtUp{ .logId = 7, .from = 10, .next = 9 })));
@@ -246,26 +252,32 @@ TEST("loot: holders and items are named by their plugin on the wire; a move anot
 	for (std::uint32_t i = 0; i < 3; ++i) {
 		numbered.push_back(Numbered(batch->entries[i], i + 1, 2));
 	}
-	const auto in = FormTranslate::Translate(hostEdge, Way::kToLocal, Protocol::Encode(LootBatch{ false, numbered }, MT::kRemoteLoot));
+	numbered[1].tag = 41;  // the reporter's tag and the ask a catch-up answers go through as they were
+	const auto in = FormTranslate::Translate(hostEdge, Way::kToLocal, Protocol::Encode(LootBatch{ 6, numbered }, MT::kRemoteLoot));
 	REQUIRE(in.kind == Result::Kind::kChanged);
 	CHECK(in.entries == 1);
 	batch = Protocol::DecodeLootBatch(in.packet);
 	REQUIRE(batch);
+	CHECK(batch->ask == 6);
+	CHECK(batch->entries[0].tag == 41);
+	batch->entries[0].tag = 0;  // the checks below are of the forms
 	REQUIRE(batch->entries.size() == 2);
 	CHECK(batch->entries[0] == Numbered(Take(0x03000D62, 0x0000000F, 30), 2, 2));
 	CHECK(batch->entries[1] == Numbered(Emptied(0x03000D62, 4), 3, 2));
 
 	// A batch of only a move the host can't name is not read at all; an answer keeps every move, one not named made 0.
-	CHECK(FormTranslate::Translate(hostEdge, Way::kToLocal, Protocol::Encode(LootBatch{ false, { numbered[0] } }, MT::kRemoteLoot)).kind == Result::Kind::kDrop);
+	CHECK(FormTranslate::Translate(hostEdge, Way::kToLocal, Protocol::Encode(LootBatch{ 0, { numbered[0] } }, MT::kRemoteLoot)).kind == Result::Kind::kDrop);
 	auto answer = Take(0x03000D62, 0x04000800, 1);
 	answer.answer = LootEntry::kRefused;
-	const auto told = FormTranslate::Translate(hostEdge, Way::kToLocal, Protocol::Encode(LootBatch{ false, { answer } }, MT::kLootAnswer));
+	answer.tag = 77;
+	const auto told = FormTranslate::Translate(hostEdge, Way::kToLocal, Protocol::Encode(LootBatch{ 0, { answer } }, MT::kLootAnswer));
 	REQUIRE(told.kind == Result::Kind::kChanged);
 	batch = Protocol::DecodeLootBatch(told.packet);
 	REQUIRE(batch);
 	REQUIRE(batch->entries.size() == 1);
 	CHECK(batch->entries[0].itemId == 0);
 	CHECK(batch->entries[0].answer == LootEntry::kRefused);
+	CHECK(batch->entries[0].tag == 77);  // the reporter knows its move by it, the item gone to 0
 	CHECK(FormTranslate::Translate(FormIds::Mapper(), Way::kToSession, Report({ Take(0x0001A332, 0xF, 1) })).kind == Result::Kind::kSame);
 	CHECK(FormTranslate::Translate(FormIds::Mapper(), Way::kToSession, Protocol::Encode(LootAsk{ .logId = 3, .from = 2 })).kind == Result::Kind::kSame);
 }
@@ -338,14 +350,21 @@ TEST("server: a move of loot goes to every game numbered, its reporter's too; on
 	Fixture f;
 	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
 	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
-	f.fake->Deliver(2, Report({ Take(0x1A332, 0xF, 25), Put(0x1A332, 0x12EB7, 1) }));
+	auto take = Take(0x1A332, 0xF, 25);
+	auto put = Put(0x1A332, 0x12EB7, 1);
+	take.tag = 900;
+	put.tag = 901;
+	f.fake->Deliver(2, Report({ take, put }));
 	for (const PeerId peer : { PeerId{ 1 }, PeerId{ 2 } }) {
 		const auto packets = f.fake->TakeThrough(peer, Type(MT::kRemoteLoot));
-		CHECK(AllCatchUp(packets, false));
+		CHECK(AllAsk(packets, 0));
 		const auto heard = MovesIn(packets);
 		REQUIRE(heard.size() == 2);
-		CHECK(heard[0] == Numbered(Take(0x1A332, 0xF, 25), 1, 2));
-		CHECK(heard[1] == Numbered(Put(0x1A332, 0x12EB7, 1), 2, 2));
+		CHECK(heard[0].tag == 900);  // the reporter's tags, carried to every game
+		CHECK(heard[1].tag == 901);
+		CHECK(heard[0] == Numbered(take, 1, 2));
+		CHECK(heard[1] == Numbered(put, 2, 2));
+
 	}
 	f.fake->Deliver(1, Report({ Take(0, 0xF, 1), Emptied(0x1A332, 3), Take(0xFF000800, 0xF, 1) }));
 	REQUIRE(f.fake->Settle());
@@ -400,7 +419,7 @@ TEST("server: an ask hears the moves from its ledger as a catch-up, then the log
 	// Bo's world never was in a session.
 	f.fake->Deliver(2, Protocol::Encode(LootAsk{}));
 	auto packets = f.fake->TakeThrough(2, Type(MT::kLootCaughtUp));
-	CHECK(AllCatchUp(packets, true));
+	CHECK(AllAsk(packets, 1));
 	auto heard = MovesIn(packets);
 	REQUIRE(heard.size() == 3);
 	CHECK(heard[0] == Numbered(Take(0x1A332, 0xF, 1), 1, 1));
@@ -431,27 +450,66 @@ TEST("server: an ask hears the moves from its ledger as a catch-up, then the log
 	CHECK(MovesIn(f.fake->Take(1)).empty());  // Ada heard nothing of Bo's asks
 }
 
-TEST("server: an ask past its budget is owed and answered once there is room, never dropped")
+TEST("server: an ask past its budget is owed and answered once there is room, never dropped; a game that asked them all is left asking none")
 {
 	Fixture f;
 	REQUIRE(f.Join(1, Fixture::MakeHello("Ada")));
-	constexpr std::uint32_t ASKS = 7;  // the budget holds 4 at once, then one in 2 s
+	REQUIRE(f.Join(2, Fixture::MakeHello("Bo")));
+	f.fake->Deliver(2, Report({ Take(0x1A332, 0xF, 1), Put(0x1A332, 0x12EB7, 1) }));
+	REQUIRE(f.fake->WaitFor(1, Type(MT::kRemoteLoot)));
+	REQUIRE(f.fake->Settle());
+	(void)f.fake->Take(1);
+
+	// Ada's game quickloads faster than the ask budget (4 at once, then one in 2 s): seven loads, seven asks.
+	Ledger ledger;
+	constexpr std::uint32_t ASKS = 7;
+	std::uint32_t           newest = 0;
 	for (std::uint32_t i = 1; i <= ASKS; ++i) {
-		f.fake->Deliver(1, Protocol::Encode(LootAsk{ .logId = 0, .from = i }));
+		ledger.Loaded({ .logId = 0, .next = 1 });
+		ledger.Begin();
+		const auto ask = ledger.AskDue();
+		REQUIRE(ask);
+		newest = ask->ask;
+		f.fake->Deliver(1, Protocol::Encode(*ask));
 	}
 	REQUIRE(f.fake->Settle());
-	auto done = CaughtUpsIn(f.fake->Take(1));
+	auto packets = f.fake->Take(1);
+	auto done = CaughtUpsIn(packets);
 	CHECK(done.size() >= 4);
-	// The newest one owed is answered once the budget has room (the older ones it replaced asked for the same world).
-	if (done.size() < 5) {
-		const auto later = CaughtUpsIn(f.fake->TakeThrough(1, Type(MT::kLootCaughtUp)));
-		done.insert(done.end(), later.begin(), later.end());
+	// The newest one owed is answered once the budget has room; the ones it replaced never are.
+	if (done.empty() || done.back().ask != newest) {
+		auto later = f.fake->TakeThrough(1, Type(MT::kLootCaughtUp));
+		packets.insert(packets.end(), later.begin(), later.end());
+		done = CaughtUpsIn(packets);
 	}
 	CHECK(done.size() == 5);
+	REQUIRE(!done.empty());
+	CHECK(done.back().ask == newest);
 	for (const auto& end : done) {
 		CHECK(end.from == 1);  // a ledger of no log: from the first move
-		CHECK(end.next == 1);
+		CHECK(end.next == 3);
 	}
+
+	// The game hears it all in order: the older asks' catch-ups are void, the newest one's made, and it asks no more.
+	std::uint32_t made = 0;
+	std::uint32_t voided = 0;
+	for (const auto& packet : packets) {
+		if (Protocol::PeekType(packet) == MT::kRemoteLoot) {
+			const auto batch = Protocol::DecodeLootBatch(packet);
+			REQUIRE(batch);
+			for (const auto& move : batch->entries) {
+				const auto heard = ledger.Take(move, batch->ask, 1);
+				made += heard == Ledger::Heard::kMake ? 1 : 0;
+				voided += heard == Ledger::Heard::kVoid ? 1 : 0;
+			}
+		} else if (const auto end = Protocol::DecodeLootCaughtUp(packet)) {
+			(void)ledger.CaughtUp(*end);
+		}
+	}
+	CHECK(made == 2);
+	CHECK(voided == 2 * (done.size() - 1));  // every answer but the newest is to an ask replaced since
+	CHECK(!ledger.Asking());
+	CHECK(ledger.Saved().next == 3);
 }
 
 TEST("server: a new session starts the log again under a new id")
@@ -537,84 +595,173 @@ TEST("loot judge: made when loaded and shared here; a holder not loaded waits, a
 	CHECK(Judge(true, Holder{ .kind = HolderKind::kContainer, .storage = true }, GOLD, false).verdict == Verdict::kMake);
 }
 
-// ---- the ledger ---------------------------------------------------------------------------------------------------
+/// ---- the ledger ---------------------------------------------------------------------------------------------------
 
 TEST("loot ledger: a world in no session asks from 1; moves heard while it asks are held, the catch-up makes them, then live moves go on")
 {
 	Ledger ledger;
 	CHECK(ledger.Saved() == Ledger::Mark{});
-	const auto ask = ledger.Ask();
-	CHECK((ask == LootAsk{ .logId = 0, .from = 1 }));
+	CHECK(!ledger.AskDue());  // nothing asked before a welcome or a load in a session
+	ledger.Begin();
+	const auto ask = ledger.AskDue();
+	REQUIRE(ask);
+	CHECK((*ask == LootAsk{ .ask = 1, .logId = 0, .from = 1 }));
+	CHECK(!ledger.AskDue());  // once
 	CHECK(ledger.Asking());
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 3, 2), false, 1) == Ledger::Heard::kHeld);
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 1, 2), true, 1) == Ledger::Heard::kMake);
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 2, 1), true, 1) == Ledger::Heard::kMake);  // our own too: the world lacks it
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 3, 2), true, 1) == Ledger::Heard::kMake);
-	CHECK(ledger.CaughtUp(LootCaughtUp{ .logId = 77, .from = 1, .next = 4 }));
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 3, 2), 0, 1) == Ledger::Heard::kHeld);
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 1, 2), 1, 1) == Ledger::Heard::kMake);
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 2, 1), 1, 1) == Ledger::Heard::kMake);  // our own too: not out, the world lacks it
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 3, 2), 1, 1) == Ledger::Heard::kMake);
+	CHECK(ledger.CaughtUp(LootCaughtUp{ .ask = 1, .logId = 77, .from = 1, .next = 4 }));
 	CHECK(!ledger.Asking());
 	CHECK((ledger.Saved() == Ledger::Mark{ .logId = 77, .next = 4 }));
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 4, 2), false, 1) == Ledger::Heard::kMake);
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 3, 2), false, 1) == Ledger::Heard::kHad);
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 4, 2), 0, 1) == Ledger::Heard::kMake);
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 3, 2), 0, 1) == Ledger::Heard::kHad);
 	CHECK(ledger.Saved().next == 5);
 	// A catch-up nobody asked for, and its end, are strays.
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 9, 2), true, 1) == Ledger::Heard::kVoid);
-	CHECK(!ledger.CaughtUp(LootCaughtUp{ .logId = 77, .from = 9, .next = 10 }));
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 9, 2), 1, 1) == Ledger::Heard::kVoid);
+	CHECK(!ledger.CaughtUp(LootCaughtUp{ .ask = 1, .logId = 77, .from = 9, .next = 10 }));
 	CHECK(ledger.Saved().next == 5);
 }
 
-TEST("loot ledger: our own move comes back as ours, matched by what it says whatever the order; the same move by another is theirs")
+TEST("loot ledger: a move heard between a load and its ask (the loading screen) is held, never moving the ledger past moves this world lacks")
 {
+	// The friend's save is at 100, the session's log at 150; the host does a Take All (151) while the friend loads.
 	Ledger ledger;
-	ledger.Loaded({ .logId = 5, .next = 1 });
-	const auto a = Take(0x1A332, 0xF, 10);
-	const auto b = Put(0x1A332, 0x12EB7, 1);
-	ledger.Sent(a, T0);
-	ledger.Sent(b, T0);
-	CHECK(ledger.Out() == 2);
-	auto answered = b;
-	answered.answer = LootEntry::kBusy;
-	CHECK(ledger.Answered(answered));  // b's answer before a's echo
-	CHECK(ledger.Take(Numbered(a, 1, 4), false, 3) == Ledger::Heard::kMake);  // another player's take of the same
-	CHECK(ledger.Out() == 1);
-	CHECK(ledger.Take(Numbered(a, 2, 3), false, 3) == Ledger::Heard::kOwn);
-	CHECK(ledger.Out() == 0);
-	CHECK(!ledger.Answered(answered));  // given once
-	CHECK(ledger.Saved().next == 3);
+	ledger.Loaded({ .logId = 5, .next = 160 });  // the world before the load had them all
+	ledger.Loaded({ .logId = 5, .next = 100 });  // the save's
+	ledger.Begin();                              // at the load: the ask can't go out yet (not in the world)
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 50), 151, 2), 0, 1) == Ledger::Heard::kHeld);
+	CHECK(ledger.Saved().next == 100);
+	const auto ask = ledger.AskDue();  // in the world: from the save's ledger, not from 152
+	REQUIRE(ask);
+	CHECK(ask->from == 100);
+	CHECK(ask->logId == 5);
+	for (std::uint32_t n = 100; n <= 151; ++n) {
+		CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), n, 2), ask->ask, 1) == Ledger::Heard::kMake);
+	}
+	CHECK(ledger.CaughtUp(LootCaughtUp{ .ask = ask->ask, .logId = 5, .from = 100, .next = 152 }));
+	CHECK((ledger.Saved() == Ledger::Mark{ .logId = 5, .next = 152 }));
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 152, 2), 0, 1) == Ledger::Heard::kMake);
+
+	// Out of a session a load asks nothing, and holds nothing (no session passes moves on).
+	Ledger alone;
+	alone.Loaded({ .logId = 5, .next = 7 });
+	CHECK(!alone.Asking());
+	CHECK(!alone.AskDue());
 }
 
-TEST("loot ledger: an ask made for a world a load replaced is void; the later ask's catch-up is the one made")
+TEST("loot ledger: our own move comes back as ours by its tag, in any order, whatever its forms came back as; the same move by another is theirs")
+{
+	Ledger ledger;
+	ledger.FirstTag(0xFFFF'FFFF);
+	ledger.Loaded({ .logId = 5, .next = 1 });
+	const auto a = ledger.Sent(Take(0x1A332, 0xF, 10), T0);
+	const auto b = ledger.Sent(Put(0x1A332, 0x12EB7, 1), T0);
+	CHECK(a.tag == 0xFFFF'FFFF);
+	CHECK(b.tag == 1);  // past the last, from 1 again (0 is no tag)
+	CHECK(a.holderId == 0x1A332);
+	CHECK(ledger.Out() == 2);
+	// b answered busy before a's echo, with its holder made 0 on the way (a form the session can't name): still ours.
+	auto answered = b;
+	answered.holderId = 0;
+	answered.answer = LootEntry::kBusy;
+	LootEntry sent;
+	CHECK(ledger.Answered(answered, sent) == Ledger::Mine::kNow);
+	CHECK(sent == b);  // as we sent it, to send again
+	CHECK(ledger.PutsOut(0x1A332, 0x12EB7) == 0);
+	auto theirs = Numbered(a, 1, 4);  // another player's take of the same, even with our tag on it
+	CHECK(ledger.Take(theirs, 0, 3) == Ledger::Heard::kMake);
+	CHECK(ledger.Out() == 1);
+	CHECK(ledger.Take(Numbered(a, 2, 3), 0, 3) == Ledger::Heard::kOwn);
+	CHECK(ledger.Out() == 0);
+	CHECK(ledger.Answered(answered, sent) == Ledger::Mine::kNone);  // given once
+	CHECK(ledger.Saved().next == 3);
+	auto untagged = Take(0x1A332, 0xF, 10);
+	CHECK(ledger.Answered(untagged, sent) == Ledger::Mine::kNone);
+}
+
+TEST("loot ledger: each ask has its number; an older ask's catch-up is void, and one the server replaced and never answered leaves nothing asking")
 {
 	Ledger ledger;
 	ledger.Loaded({ .logId = 5, .next = 3 });
-	CHECK((ledger.Ask() == LootAsk{ .logId = 5, .from = 3 }));
-	ledger.Loaded({ .logId = 5, .next = 8 });  // a later save loaded before the answer came
-	CHECK((ledger.Ask() == LootAsk{ .logId = 5, .from = 8 }));
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 3, 2), true, 1) == Ledger::Heard::kVoid);
-	CHECK(!ledger.CaughtUp(LootCaughtUp{ .logId = 5, .from = 3, .next = 9 }));
+	ledger.Begin();
+	const auto first = ledger.AskDue();
+	REQUIRE(first);
+	CHECK((*first == LootAsk{ .ask = 1, .logId = 5, .from = 3 }));
+	// Quickloads faster than the server's ask budget: three more asks; the server answers the first at once, owes the
+	// newest and never answers the two it replaced.
+	std::uint32_t newest = 0;
+	for (std::uint32_t next : { 8u, 9u, 10u }) {
+		ledger.Loaded({ .logId = 5, .next = next });
+		ledger.Begin();
+		const auto ask = ledger.AskDue();
+		REQUIRE(ask);
+		CHECK(ask->from == next);
+		CHECK(ask->ask > first->ask);
+		newest = ask->ask;
+	}
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 3, 2), first->ask, 1) == Ledger::Heard::kVoid);
+	CHECK(!ledger.CaughtUp(LootCaughtUp{ .ask = first->ask, .logId = 5, .from = 3, .next = 12 }));
 	CHECK(ledger.Asking());
-	CHECK(ledger.Saved().next == 8);
-	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 8, 2), true, 1) == Ledger::Heard::kMake);
-	CHECK(ledger.CaughtUp(LootCaughtUp{ .logId = 5, .from = 8, .next = 9 }));
-	CHECK((ledger.Saved() == Ledger::Mark{ .logId = 5, .next = 9 }));
+	CHECK(ledger.Saved().next == 10);
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 11, 2), 0, 1) == Ledger::Heard::kHeld);
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 10, 2), newest, 1) == Ledger::Heard::kMake);
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 11, 2), newest, 1) == Ledger::Heard::kMake);
+	CHECK(ledger.CaughtUp(LootCaughtUp{ .ask = newest, .logId = 5, .from = 10, .next = 12 }));
+	CHECK(!ledger.Asking());  // live moves are made again
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 12, 2), 0, 1) == Ledger::Heard::kMake);
+	CHECK((ledger.Saved() == Ledger::Mark{ .logId = 5, .next = 13 }));
 
-	// A save of no number reads as 1; the session's end leaves the mark (the world's) and forgets what was out.
-	ledger.Sent(Take(0x1A332, 0xF, 1), T0);
-	(void)ledger.Ask();
+	// A save of no number reads as 1; the session's end leaves the mark (the world's) and what was out (a rejoin's
+	// catch-up may echo it), and stops asking.
+	(void)ledger.Sent(Take(0x1A332, 0xF, 1), T0);
+	ledger.Begin();
 	ledger.Disconnected();
-	CHECK(ledger.Out() == 0);
+	CHECK(ledger.Out() == 1);
 	CHECK(!ledger.Asking());
-	CHECK(ledger.Saved().next == 9);
+	CHECK(!ledger.AskDue());
+	CHECK(ledger.Saved().next == 13);
 	ledger.Loaded({ .logId = 6, .next = 0 });
 	CHECK((ledger.Saved() == Ledger::Mark{ .logId = 6, .next = 1 }));
+}
+
+TEST("loot ledger: our move made after a load while its ask is owed is matched in the catch-up, never made twice; one of a world the load replaced is made")
+{
+	Ledger ledger;
+	const auto before = ledger.Sent(Put(0x1A332, 0xF, 4), T0);  // made in the world the load replaces, still out
+	ledger.Loaded({ .logId = 5, .next = 10 });
+	ledger.Begin();
+	const auto ask = ledger.AskDue();
+	REQUIRE(ask);
+	CHECK(ledger.PutsOut(0x1A332, 0xF) == 0);  // not in this world
+	const auto now = ledger.Sent(Take(0x1A332, 0xF, 3), T0);  // taken in this world while the ask is owed
+	CHECK(ledger.Out() == 2);
+	// Its live echo comes before the catch-up (the server numbered it first): held, and still out.
+	CHECK(ledger.Take(Numbered(now, 12, 1), 0, 1) == Ledger::Heard::kHeld);
+	CHECK(ledger.Out() == 2);
+	CHECK(ledger.Take(Numbered(Take(0x1A332, 0xF, 1), 10, 2), ask->ask, 1) == Ledger::Heard::kMake);
+	CHECK(ledger.Take(Numbered(before, 11, 1), ask->ask, 1) == Ledger::Heard::kMake);  // this world lacks it
+	CHECK(ledger.Take(Numbered(now, 12, 1), ask->ask, 1) == Ledger::Heard::kOwn);      // made here already
+	CHECK(ledger.Out() == 0);
+	CHECK(ledger.CaughtUp(LootCaughtUp{ .ask = ask->ask, .logId = 5, .from = 10, .next = 13 }));
+
+	// A move of the world before answered busy is that world's: not sent again from this one.
+	const auto old = ledger.Sent(Take(0x1A332, 0xF, 1), T0);
+	ledger.Loaded({ .logId = 5, .next = 13 });
+	auto busy = old;
+	busy.answer = LootEntry::kBusy;
+	LootEntry sent;
+	CHECK(ledger.Answered(busy, sent) == Ledger::Mine::kBefore);
 }
 
 TEST("loot ledger: a move out too long is lost; our puts out count for the marker, by holder and item")
 {
 	Ledger ledger;
-	ledger.Sent(Put(0x1A332, 0xF, 10), T0);
-	ledger.Sent(Put(0x1A332, 0xF, 5), T0 + 30s);
-	ledger.Sent(Put(0x1A333, 0xF, 7), T0 + 30s);
-	ledger.Sent(Take(0x1A332, 0xF, 3), T0 + 30s);
+	(void)ledger.Sent(Put(0x1A332, 0xF, 10), T0);
+	(void)ledger.Sent(Put(0x1A332, 0xF, 5), T0 + 30s);
+	(void)ledger.Sent(Put(0x1A333, 0xF, 7), T0 + 30s);
+	(void)ledger.Sent(Take(0x1A332, 0xF, 3), T0 + 30s);
 	CHECK(ledger.PutsOut(0x1A332, 0xF) == 15);
 	CHECK(ledger.PutsOut(0x1A332, 0x10) == 0);
 	ledger.Expire(T0 + 61s);
@@ -623,7 +770,7 @@ TEST("loot ledger: a move out too long is lost; our puts out count for the marke
 	CHECK(ledger.PutsOut(0x1A332, 0xF) == 5);
 }
 
-// ---- moves that wait ----------------------------------------------------------------------------------------------
+/ ---- moves that wait ----------------------------------------------------------------------------------------------
 
 TEST("loot waiting: each holder's moves in order, a waiting one holding back its later ones, other holders not")
 {

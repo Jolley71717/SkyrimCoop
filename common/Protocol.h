@@ -488,41 +488,43 @@ namespace Protocol
 
 		std::uint32_t number = 0;    // kRemoteLoot: the session's number for it (1 up); 0 otherwise
 		std::uint32_t playerId = 0;  // kRemoteLoot: who made it; 0 otherwise
+		std::uint32_t tag = 0;       // the reporting game's own name for the move, carried back as it was in its echo and
+		                             // its answer: the reporter knows its moves by it (a form may come back as 0)
 		std::uint32_t holderId = 0;
 		std::uint32_t itemId = 0;
 		std::uint32_t count = 0;
 		std::uint8_t  kind = kTake;
 		std::uint8_t  answer = kBusy;  // kLootAnswer only
 
-		// The same move, whoever made it and whatever its number.
-		[[nodiscard]] bool SameMove(const LootEntry& a_other) const
-		{
-			return holderId == a_other.holderId && itemId == a_other.itemId && count == a_other.count && kind == a_other.kind;
-		}
 		bool operator==(const LootEntry&) const = default;
 	};
 
-	// A batch of loot moves: kLoot (a game's own, in the order made), kRemoteLoot (the session's, numbered; catchUp when it
-	// answers a kAskLoot rather than passing a move on), kLootAnswer (to the reporter alone, each with its answer).
+	// A batch of loot moves: kLoot (a game's own, in the order made), kRemoteLoot (the session's, numbered; `ask` is the
+	// kAskLoot it answers as a catch-up, 0 for a move passed on as it came), kLootAnswer (to the reporter alone, each with
+	// its answer).
 	struct LootBatch
 	{
-		bool                   catchUp = false;
+		std::uint32_t          ask = 0;
 		std::vector<LootEntry> entries;
 		bool operator==(const LootBatch&) const = default;
 	};
 
 	// kAskLoot: the moves of the log `logId` from `from` on (a game's ledger: what its world holds already). A log id that
-	// is not the server's (0: none; another session's) is answered from the first move.
+	// is not the server's (0: none; another session's) is answered from the first move. `ask` names it (never 0): its
+	// catch-up and its end carry it, so a game tells the answer to its newest ask from the answers to the asks it made
+	// before (the server owes a game one ask at most, the newest: an older one it replaced is never answered).
 	struct LootAsk
 	{
+		std::uint32_t ask = 1;
 		std::uint64_t logId = 0;
 		std::uint32_t from = 1;
 		bool operator==(const LootAsk&) const = default;
 	};
 
-	// kLootCaughtUp: every move from `from` on has been sent; the log is `logId` and its next number `next`.
+	// kLootCaughtUp: every move from `from` on has been sent for the ask `ask`; the log is `logId`, its next number `next`.
 	struct LootCaughtUp
 	{
+		std::uint32_t ask = 1;
 		std::uint64_t logId = 0;
 		std::uint32_t from = 1;
 		std::uint32_t next = 1;
@@ -1304,16 +1306,16 @@ namespace Protocol
 		return msg;
 	}
 
-	// kLoot: a count (1 to MAX_LOOT_BATCH), then each move: holderId, itemId, count, kind. kRemoteLoot: a flags byte (1:
-	// a catch-up), the count, then each: number, playerId, holderId, itemId, count, kind. kLootAnswer: the count, then each
-	// move as kLoot has it and its answer. None for an empty batch, a kind not known, an answer past ANSWER_MAX, a take or
+	// kLoot: a count (1 to MAX_LOOT_BATCH), then each move: tag, holderId, itemId, count, kind. kRemoteLoot: the ask it
+	// answers (0: none, moves passed on as they came), the count, then each: number, playerId, tag, holderId, itemId,
+	// count, kind. kLootAnswer: the count, then each move as kLoot has it and its answer. None for an empty batch, a kind not known, an answer past ANSWER_MAX, a take or
 	// put of a count out of 1 to MAX_LOOT_COUNT (or of no item, in kRemoteLoot), an emptied marker that names an item,
 	// or a kRemoteLoot move with no number. Encode writes at most MAX_LOOT_BATCH moves (LootBatches splits).
 	inline std::vector<std::uint8_t> Encode(const LootBatch& a_msg, MessageType a_type)
 	{
 		Writer w{ a_type };
 		if (a_type == MessageType::kRemoteLoot) {
-			w.U8(a_msg.catchUp ? 1 : 0);
+			w.U32(a_msg.ask);
 		}
 		const auto count = (std::min)(a_msg.entries.size(), MAX_LOOT_BATCH);
 		w.U8(static_cast<std::uint8_t>(count));
@@ -1323,6 +1325,7 @@ namespace Protocol
 				w.U32(e.number);
 				w.U32(e.playerId);
 			}
+			w.U32(e.tag);
 			w.U32(e.holderId);
 			w.U32(e.itemId);
 			w.U32(e.count);
@@ -1335,12 +1338,13 @@ namespace Protocol
 	}
 	inline std::vector<std::uint8_t> Encode(const LootBatch& a_msg) { return Encode(a_msg, MessageType::kLoot); }
 
-	// a_entries in batches of MAX_LOOT_BATCH, in order, each encoded as a_type (none for no entries).
-	inline std::vector<std::vector<std::uint8_t>> LootBatches(const std::vector<LootEntry>& a_entries, MessageType a_type, bool a_catchUp = false)
+	// a_entries in batches of MAX_LOOT_BATCH, in order, each encoded as a_type (none for no entries); a_ask: the ask a
+	// kRemoteLoot catch-up answers (0: moves passed on as they came).
+	inline std::vector<std::vector<std::uint8_t>> LootBatches(const std::vector<LootEntry>& a_entries, MessageType a_type, std::uint32_t a_ask = 0)
 	{
 		std::vector<std::vector<std::uint8_t>> out;
 		for (std::size_t at = 0; at < a_entries.size(); at += MAX_LOOT_BATCH) {
-			LootBatch  batch{ a_catchUp, {} };
+			LootBatch  batch{ a_ask, {} };
 			const auto end = (std::min)(a_entries.size(), at + MAX_LOOT_BATCH);
 			batch.entries.assign(a_entries.begin() + static_cast<std::ptrdiff_t>(at), a_entries.begin() + static_cast<std::ptrdiff_t>(end));
 			out.push_back(Encode(batch, a_type));
@@ -1371,11 +1375,7 @@ namespace Protocol
 		r.U8();
 		LootBatch msg;
 		if (type == MessageType::kRemoteLoot) {
-			const auto flags = r.U8();
-			if (flags > 1) {
-				return std::nullopt;
-			}
-			msg.catchUp = flags == 1;
+			msg.ask = r.U32();
 		}
 		const auto count = r.U8();
 		if (count == 0 || count > MAX_LOOT_BATCH) {
@@ -1388,6 +1388,7 @@ namespace Protocol
 				e.number = r.U32();
 				e.playerId = r.U32();
 			}
+			e.tag = r.U32();
 			e.holderId = r.U32();
 			e.itemId = r.U32();
 			e.count = r.U32();
@@ -1418,12 +1419,13 @@ namespace Protocol
 	inline std::vector<std::uint8_t> Encode(const LootAsk& a_msg)
 	{
 		Writer w{ MessageType::kAskLoot };
+		w.U32(a_msg.ask);
 		w.U64(a_msg.logId);
 		w.U32(a_msg.from);
 		return w.Data();
 	}
 
-	// None for a from of 0 (the log's numbers start at 1).
+	// None for an ask of 0 or a from of 0 (the log's numbers start at 1).
 	inline std::optional<LootAsk> DecodeLootAsk(std::span<const std::uint8_t> a_data)
 	{
 		if (PeekType(a_data) != MessageType::kAskLoot) {
@@ -1432,9 +1434,10 @@ namespace Protocol
 		Reader r{ a_data };
 		r.U8();
 		LootAsk msg;
+		msg.ask = r.U32();
 		msg.logId = r.U64();
 		msg.from = r.U32();
-		if (!r.AtEnd() || msg.from == 0) {
+		if (!r.AtEnd() || msg.ask == 0 || msg.from == 0) {
 			return std::nullopt;
 		}
 		return msg;
@@ -1443,13 +1446,14 @@ namespace Protocol
 	inline std::vector<std::uint8_t> Encode(const LootCaughtUp& a_msg)
 	{
 		Writer w{ MessageType::kLootCaughtUp };
+		w.U32(a_msg.ask);
 		w.U64(a_msg.logId);
 		w.U32(a_msg.from);
 		w.U32(a_msg.next);
 		return w.Data();
 	}
 
-	// None for a number of 0 (the log's numbers start at 1) or a from past next.
+	// None for an ask of 0, a number of 0 (the log's numbers start at 1) or a from past next.
 	inline std::optional<LootCaughtUp> DecodeLootCaughtUp(std::span<const std::uint8_t> a_data)
 	{
 		if (PeekType(a_data) != MessageType::kLootCaughtUp) {
@@ -1458,10 +1462,12 @@ namespace Protocol
 		Reader r{ a_data };
 		r.U8();
 		LootCaughtUp msg;
+		msg.ask = r.U32();
 		msg.logId = r.U64();
 		msg.from = r.U32();
 		msg.next = r.U32();
-		if (!r.AtEnd() || msg.next == 0 || msg.from == 0 || msg.from > msg.next) {
+		if (!r.AtEnd() || msg.ask == 0 || msg.next == 0 || msg.from == 0 || msg.from > msg.next) {
+
 			return std::nullopt;
 		}
 		return msg;

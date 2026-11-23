@@ -33,7 +33,18 @@ namespace LootSync
 		constexpr RE::FormID PLAYER_REF = 0x14;
 		constexpr RE::FormID PLAYER_BASE = 0x7;
 		constexpr RE::FormID PLAYER_FACTION = 0xDB1;
-		constexpr auto       RETRY_EVERY = std::chrono::seconds(2);
+		constexpr auto       RETRY_EVERY = std::chrono::seconds(1);
+
+		// The holder the container menu shows, from the menu's own open and close events (on the UI's thread, which is
+		// the thread the menu reads its list on); 0: none. menuShut: it shut since the tick last looked.
+		std::atomic<RE::FormID> menuHolder{ 0 };
+		std::atomic<bool>       menuShut{ false };
+
+		// Everything below, between the tick (which runs on the task pool's job threads, not the main thread) and SKSE's
+		// callbacks on the main thread (a load, the co-save, a new game). Taken by every entry point of LootSync, never
+		// while sending (a send may end the session, which calls Clear). The event sinks never take it (the sink queues
+		// under queueLock; the menu's sink writes atomics only), so a game write made under it never waits on itself.
+		std::mutex stateLock;
 
 		std::uint32_t                  ourId = 0;
 		LootRules::Ledger              ledger;
@@ -42,11 +53,9 @@ namespace LootSync
 		LootRules::EmptyWatch          empty;
 		LootRules::Again               again;
 		std::unordered_set<RE::FormID> vendorChests;  // every faction's merchant container
-		bool                           askAgain = false;
 		bool                           installed = false;
 		Clock::time_point              lastBarter{};
 		Clock::time_point              nextRetry{};
-		RE::FormID                     lastOpened = 0;  // the holder our player's container menu showed last frame
 		// Read from the co-save at a load, taken by AfterLoad.
 		std::optional<LootRules::Ledger::Mark> loadedMark;
 		std::vector<LootEntry>                 loadedWaiting;
@@ -76,8 +85,9 @@ namespace LootSync
 			std::uint64_t busy = 0;           // our moves answered busy
 			std::uint64_t full = 0;           // ... the log full
 			std::uint64_t refused = 0;        // ... refused
-			std::uint64_t stray = 0;          // answers or echoes matching no move of ours out
-			std::uint64_t opened = 0;         // waiting moves made as our player opened their holder
+			std::uint64_t stray = 0;          // answers matching no move of ours out
+			std::uint64_t replaced = 0;       // our moves answered busy that a load had taken out of the world: not sent again
+			std::uint64_t openHeld = 0;       // moves held while their holder was open in our container menu
 			std::uint64_t offMain = 0;        // game writes made off the game's main thread
 			std::array<std::uint64_t, LootRules::SCOPE_COUNT> kept{};  // our moves by scope (kShared: reported)
 		};
@@ -219,6 +229,18 @@ namespace LootSync
 			return a_owner && (a_owner->GetFormID() == PLAYER_BASE || a_owner->GetFormID() == PLAYER_FACTION);
 		}
 
+		// Whether our player taking from a_ref through the menu is a theft: it is owned by someone else, or it has no owner
+		// of its own and its cell does (an inn's barrels, a house's chests). For the rig (`loot near`: owned=).
+		bool OwnedByOther(RE::TESObjectREFR* a_ref)
+		{
+			if (const auto owner = a_ref->GetOwner()) {
+				return !OwnedByPlayer(owner);
+			}
+			const auto cell = a_ref->GetParentCell();
+			const auto cellOwner = cell ? cell->GetOwner() : nullptr;
+			return cellOwner && !OwnedByPlayer(cellOwner);
+		}
+
 		LootRules::Holder HolderOf(RE::TESObjectREFR* a_ref)
 		{
 			LootRules::Holder holder;
@@ -288,7 +310,7 @@ namespace LootSync
 			return false;
 		}
 
-		// The holder our player's container menu shows now (0: none open).
+		// The holder our player's container menu shows now (0: none open), as the UI says it when asked.
 		RE::FormID OpenHolder()
 		{
 			const auto ui = RE::UI::GetSingleton();
@@ -299,25 +321,24 @@ namespace LootSync
 			return ref ? ref->GetFormID() : 0;
 		}
 
+		// Whether our container menu shows a_holder: by its open event (set on the UI's thread as it opens), or by the UI
+		// asked now. The menu's list holds that holder's inventory entries, read on the UI's thread as the player takes
+		// or stores, so no move is made there while it shows (Make): removing a stack would free an entry the list still
+		// names (a crash, or a take of an item that is gone).
+		bool ShownInMenu(RE::FormID a_holder)
+		{
+			return a_holder != 0 && (menuHolder.load() == a_holder || OpenHolder() == a_holder);
+		}
+
 		// Whether this game can make a move at a_ref now: its cell is in the game's loaded area (an ash pile's or a
-		// disabled body's too), or our player has it open.
+		// disabled body's too).
 		bool Loaded(RE::TESObjectREFR* a_ref)
 		{
 			if (!a_ref || a_ref->IsDeleted()) {
 				return false;
 			}
 			const auto cell = a_ref->GetParentCell();
-			return (cell && cell->IsAttached()) || OpenHolder() == a_ref->GetFormID();
-		}
-
-		// The container menu shows the new contents of a holder our player has open.
-		void Refresh(RE::FormID a_holder)
-		{
-			if (OpenHolder() == a_holder) {
-				if (const auto queue_ = RE::UIMessageQueue::GetSingleton()) {
-					queue_->AddMessage(RE::ContainerMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kUpdate, nullptr);
-				}
-			}
+			return cell && cell->IsAttached();
 		}
 
 		// Makes a move of the session's here, or says why not now.
@@ -337,6 +358,14 @@ namespace LootSync
 			}
 			if (judged.verdict != LootRules::Verdict::kMake) {
 				return judged.verdict;
+			}
+			if (ShownInMenu(a_move.holderId)) {
+				// Held until the menu shuts (its close event makes the tick retry at once); the moves after it at this holder
+				// wait behind it, in order. Our player sees the copy as it was when the menu opened until then.
+				if (counts.openHeld++ == 0) {
+					logs::info("Loot: a move at {:08X} waits while our container menu shows it (made once the menu shuts)", a_move.holderId);
+				}
+				return LootRules::Verdict::kWait;
 			}
 			NoteThread("a container's inventory changed");
 			// Its inventory as this game makes it when the place loads (its leveled roll), before the move goes in.
@@ -378,7 +407,6 @@ namespace LootSync
 				return LootRules::Verdict::kSkip;
 			}
 			++counts.made;
-			Refresh(a_move.holderId);
 			return LootRules::Verdict::kMake;
 		}
 
@@ -449,16 +477,21 @@ namespace LootSync
 			}
 		}
 
-		void Flush(const SendFn& a_send, Clock::time_point a_now)
+		using Packets = std::vector<std::vector<std::uint8_t>>;
+
+		// The frame's moves, each tagged as it goes out, onto a_packets (sent once the state lock is let go).
+		void Flush(Packets& a_packets, Clock::time_point a_now)
 		{
 			if (outbox.empty()) {
 				return;
 			}
+			std::vector<LootEntry> tagged;
+			tagged.reserve(outbox.size());
 			for (const auto& move : outbox) {
-				ledger.Sent(move, a_now);
+				tagged.push_back(ledger.Sent(move, a_now));
 			}
-			for (auto& packet : Protocol::LootBatches(outbox, Protocol::MessageType::kLoot)) {
-				a_send(std::move(packet));
+			for (auto& packet : Protocol::LootBatches(tagged, Protocol::MessageType::kLoot)) {
+				a_packets.push_back(std::move(packet));
 			}
 			counts.sent += outbox.size();
 			outbox.clear();
@@ -501,6 +534,28 @@ namespace LootSync
 		};
 		Sink sink;
 
+		// The container menu's open and close, on the UI's thread: which holder it shows (no move is made there while it
+		// does), and that it shut (the moves held for it are made at once). Atomics only: no lock taken on the UI's thread.
+		class MenuSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override
+			{
+				if (!a_event || a_event->menuName != RE::ContainerMenu::MENU_NAME) {
+					return RE::BSEventNotifyControl::kContinue;
+				}
+				if (a_event->opening) {
+					const auto ref = RE::TESObjectREFR::LookupByHandle(RE::ContainerMenu::GetTargetRefHandle());
+					menuHolder = ref ? ref->GetFormID() : 0;
+				} else {
+					menuHolder = 0;
+					menuShut = true;
+				}
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
+		MenuSink menuSink;
+
 		std::uint32_t Counted(std::uint64_t a_n)
 		{
 			return static_cast<std::uint32_t>((std::min<std::uint64_t>)(a_n, 0xFFFFFFFF));
@@ -518,6 +573,7 @@ namespace LootSync
 
 	bool Install()
 	{
+		std::lock_guard guard{ stateLock };
 		if (installed) {
 			return true;
 		}
@@ -527,6 +583,11 @@ namespace LootSync
 			return false;
 		}
 		events->AddEventSink<RE::TESContainerChangedEvent>(&sink);
+		if (const auto ui = RE::UI::GetSingleton()) {
+			ui->AddEventSink<RE::MenuOpenCloseEvent>(&menuSink);
+		} else {
+			logs::warn("Loot: the UI is not there yet; a container menu is known only by asking it each move");
+		}
 		if (const auto data = RE::TESDataHandler::GetSingleton()) {
 			for (const auto faction : data->GetFormArray<RE::TESFaction>()) {
 				if (faction && faction->vendorData.merchantContainer) {
@@ -534,6 +595,8 @@ namespace LootSync
 				}
 			}
 		}
+		std::random_device random;
+		ledger.FirstTag(random());
 		installed = true;
 		logs::info("Loot: watching our player's takes and puts ({} merchants' chests known)", vendorChests.size());
 		return true;
@@ -541,69 +604,73 @@ namespace LootSync
 
 	void Welcomed(std::uint32_t a_playerId)
 	{
+		std::lock_guard guard{ stateLock };
 		ourId = a_playerId;
 		ledger.Disconnected();
 		Forget();
-		askAgain = true;
+		ledger.Begin();  // from now, moves passed on are held until the catch-up: the ask goes out from the world
 	}
 
 	void Frame(const SendFn& a_send)
 	{
-		const auto now = Clock::now();
-		if (!LocalPlayer::InWorld()) {
-			return;  // a loading screen, the main menu: the events wait in the queue
-		}
-		if (std::exchange(askAgain, false)) {
-			const auto ask = ledger.Ask();
-			a_send(Protocol::Encode(ask));
-			++counts.asks;
-			logs::info("Loot: asked the session for its moves from {} ({})", ask.from, ask.logId == 0 ? "this world was in no session" : "this world's ledger");
-		}
-		if (const auto ui = RE::UI::GetSingleton(); ui && ui->IsMenuOpen(RE::BarterMenu::MENU_NAME)) {
-			lastBarter = now;
-		}
-		std::vector<RE::FormID> takenFrom;
-		for (const auto& event : TakeQueue()) {
-			++counts.events;
-			Look(event, now, takenFrom);
-		}
-		for (const auto holder : takenFrom) {
-			AfterTakes(holder);
-		}
-		for (const auto& move : again.Due(now)) {
-			++counts.again;
-			Queue(move);
-		}
-		Flush(a_send, now);
-		ledger.Expire(now);
-
-		// The moves that wait: every RETRY_EVERY, and at once for a holder our player opens (opening it makes its
-		// inventory: what waits for it goes in before the player takes anything).
-		const auto opened = OpenHolder();
-		const bool justOpened = opened != 0 && opened != lastOpened && waiting.Has(opened);
-		lastOpened = opened;
-		if (waiting.Size() != 0 && (now >= nextRetry || justOpened)) {
-			nextRetry = now + RETRY_EVERY;
-			const auto before = counts.made;
-			waiting.Retry(now, [](const LootEntry& a_move) { return Make(a_move); });
-			if (justOpened && counts.made != before) {
-				++counts.opened;
+		Packets packets;
+		{
+			std::lock_guard guard{ stateLock };
+			const auto      now = Clock::now();
+			if (!LocalPlayer::InWorld()) {
+				return;  // a loading screen, the main menu: the events wait in the queue, the ask waits, moves heard are held
 			}
+			if (const auto ask = ledger.AskDue()) {
+				packets.push_back(Protocol::Encode(*ask));
+				++counts.asks;
+				logs::info("Loot: asked the session for its moves from {} ({}; ask {})", ask->from, ask->logId == 0 ? "this world was in no session" : "this world's ledger",
+					ask->ask);
+			}
+			if (const auto ui = RE::UI::GetSingleton(); ui && ui->IsMenuOpen(RE::BarterMenu::MENU_NAME)) {
+				lastBarter = now;
+			}
+			std::vector<RE::FormID> takenFrom;
+			for (const auto& event : TakeQueue()) {
+				++counts.events;
+				Look(event, now, takenFrom);
+			}
+			for (const auto holder : takenFrom) {
+				AfterTakes(holder);
+			}
+			for (const auto& move : again.Due(now)) {
+				++counts.again;
+				Queue(move);
+			}
+			Flush(packets, now);
+			ledger.Expire(now);
+
+			// The moves that wait: every RETRY_EVERY, and at once when our container menu shuts (the moves held while it
+			// showed their holder go in then).
+			const bool shut = menuShut.exchange(false);
+			if (waiting.Size() != 0 && (now >= nextRetry || shut)) {
+				nextRetry = now + RETRY_EVERY;
+				waiting.Retry(now, [](const LootEntry& a_move) { return Make(a_move); });
+			}
+		}
+		for (auto& packet : packets) {
+			a_send(std::move(packet));
 		}
 	}
 
 	void Heard(const Protocol::LootBatch& a_batch)
 	{
-		const auto now = Clock::now();
-		std::uint32_t made = 0;
-		std::uint32_t own = 0;
-		std::uint32_t player = 0;
+		std::lock_guard guard{ stateLock };
+		const auto      now = Clock::now();
+		const bool      catchUp = a_batch.ask != 0;
+		std::uint32_t   made = 0;
+		std::uint32_t   own = 0;
+		std::uint32_t   player = 0;
 		for (const auto& move : a_batch.entries) {
 			if (move.holderId == 0) {
 				continue;  // a holder this game lacks
 			}
 			++counts.heard;
-			switch (ledger.Take(move, a_batch.catchUp, ourId)) {
+			switch (ledger.Take(move, a_batch.ask, ourId)) {
 			case LootRules::Ledger::Heard::kMake:
 				{
 					const auto before = counts.made;
@@ -612,7 +679,7 @@ namespace LootSync
 						++made;
 						player = move.playerId;
 					}
-					if (a_batch.catchUp) {
+					if (catchUp) {
 						++counts.caughtUpMade;
 					}
 					break;
@@ -636,32 +703,40 @@ namespace LootSync
 				break;
 			}
 		}
-		if (made != 0 && !a_batch.catchUp) {
+		if (made != 0 && !catchUp) {
 			logs::info("Loot: made {} move(s) of player {}'s here (now at {})", made, player, ledger.Saved().next);
 		}
 	}
 
 	void CaughtUp(const Protocol::LootCaughtUp& a_msg)
 	{
+		std::lock_guard guard{ stateLock };
 		if (!ledger.CaughtUp(a_msg)) {
 			return;
 		}
 		++counts.caughtUp;
-		logs::info("Loot: caught up with the session's moves from {} to {} ({} made here, {} waiting for their holder)", a_msg.from, a_msg.next,
+		logs::info("Loot: caught up with the session's moves from {} to {} (ask {}; {} made here, {} waiting for their holder)", a_msg.from, a_msg.next, a_msg.ask,
 			counts.caughtUpMade, waiting.Size());
 	}
 
 	void Answered(const Protocol::LootBatch& a_batch)
 	{
-		const auto now = Clock::now();
+		std::lock_guard guard{ stateLock };
+		const auto      now = Clock::now();
 		for (const auto& move : a_batch.entries) {
-			if (!ledger.Answered(move)) {
+			LootEntry  sent;
+			const auto mine = ledger.Answered(move, sent);
+			if (mine == LootRules::Ledger::Mine::kNone) {
 				++counts.stray;
 			}
 			switch (move.answer) {
 			case LootEntry::kBusy:
 				++counts.busy;
-				again.Add(move, now);
+				if (mine == LootRules::Ledger::Mine::kNow) {
+					again.Add(sent, now);  // as we sent it: our forms, whatever the answer's came back as
+				} else if (mine == LootRules::Ledger::Mine::kBefore) {
+					++counts.replaced;  // made in a world a load took it out of: not this world's to report
+				}
 				break;
 			case LootEntry::kFull:
 				if (counts.full++ == 0) {
@@ -670,7 +745,8 @@ namespace LootSync
 				break;
 			default:
 				if (counts.refused++ == 0) {
-					logs::info("Loot: the session refused our move at {:08X} (item {:08X}); it stays this game's own", move.holderId, move.itemId);
+					logs::info("Loot: the session refused our move at {:08X} (item {:08X}); it stays this game's own", mine != LootRules::Ledger::Mine::kNone ? sent.holderId : move.holderId,
+						mine != LootRules::Ledger::Mine::kNone ? sent.itemId : move.itemId);
 				}
 				break;
 			}
@@ -679,6 +755,7 @@ namespace LootSync
 
 	void AfterLoad()
 	{
+		std::lock_guard guard{ stateLock };
 		Forget();
 		ledger.Loaded(loadedMark.value_or(LootRules::Ledger::Mark{}));
 		waiting.Clear();
@@ -691,17 +768,20 @@ namespace LootSync
 			ledger.Saved().next, loadedWaiting.size());
 		loadedMark.reset();
 		loadedWaiting.clear();
-		askAgain = ourId != 0;
+		if (ourId != 0) {
+			// The world is the save's from now: moves passed on are held from this moment (the loading screen still up, the
+			// ask not sent yet), so the catch-up asked from the save's ledger brings them with the ones before.
+			ledger.Begin();
+		}
 	}
 
 	void Clear()
 	{
+		std::lock_guard guard{ stateLock };
 		ourId = 0;
 		ledger.Disconnected();
 		Forget();
-		askAgain = false;
 	}
-
 	namespace
 	{
 		template <class T>
@@ -718,7 +798,8 @@ namespace LootSync
 
 	void WriteCoSave(SKSE::SerializationInterface* a_intf)
 	{
-		const auto mark = ledger.Saved();
+		std::lock_guard guard{ stateLock };  // the tick may be making (and erasing) the moves that wait right now
+		const auto      mark = ledger.Saved();
 		if (mark.logId == 0 && waiting.Size() == 0) {
 			return;  // a world that never was in a session
 		}
@@ -744,6 +825,7 @@ namespace LootSync
 
 	void ReadCoSave(SKSE::SerializationInterface* a_intf, std::uint32_t a_version, std::uint32_t a_length)
 	{
+		std::lock_guard guard{ stateLock };
 		loadedMark.reset();
 		loadedWaiting.clear();
 		LootRules::Ledger::Mark mark;
@@ -781,6 +863,7 @@ namespace LootSync
 
 	void RevertCoSave()
 	{
+		std::lock_guard guard{ stateLock };
 		loadedMark.reset();
 		loadedWaiting.clear();
 	}
@@ -813,9 +896,11 @@ namespace LootSync
 				essential = actor->IsEssential() || actor->IsProtected();
 			}
 			const auto at = a_ref->GetPosition();
-			return std::format("ref={:08X} kind={} loaded={} items={} shared={} vendor={} storage={} runtime={} creature={} essential={} dist={:.0f} at=({:.0f},{:.0f},{:.0f})",
+			// owned=1: our player taking from it through the menu is a theft (its owner's or its cell's: an inn's barrels).
+			return std::format(
+				"ref={:08X} kind={} loaded={} items={} shared={} vendor={} storage={} runtime={} owned={} creature={} essential={} dist={:.0f} at=({:.0f},{:.0f},{:.0f})",
 				a_ref->GetFormID(), kind, Loaded(a_ref) ? 1 : 0, items, shared, holder.vendor ? 1 : 0, holder.storage ? 1 : 0, holder.runtime ? 1 : 0,
-				creature ? 1 : 0, essential ? 1 : 0, a_dist, at.x, at.y, at.z);
+				OwnedByOther(a_ref) ? 1 : 0, creature ? 1 : 0, essential ? 1 : 0, a_dist, at.x, at.y, at.z);
 		}
 
 		float Distance(const RE::TESObjectREFR* a_a, const RE::TESObjectREFR* a_b)
@@ -948,11 +1033,13 @@ namespace LootSync
 
 	std::string Command(std::string_view a_args)
 	{
-		const auto words = DevLine::Words(a_args);
+		std::lock_guard guard{ stateLock };
+		const auto      words = DevLine::Words(a_args);
 		if (words.empty()) {
 			std::uint64_t dropped = 0;
 			{
-				std::lock_guard guard{ queueLock };
+				std::lock_guard queueGuard{ queueLock };
+
 				dropped = queueDropped;
 			}
 			std::string kept;
@@ -964,13 +1051,14 @@ namespace LootSync
 			const auto mark = ledger.Saved();
 			return std::format("installed={} log={:08X} next={} asking={} out={} waiting={} again={} events={} sent={} resent={} emptiedSent={} heard={} made={} "
 							   "takes={} puts={} emptied={} removed={} short={} own={} had={} held={} voided={} waited={} skipped={} asks={} caughtUp={} "
-							   "busy={} full={} refused={} stray={} lost={} opened={} dropped={} expired={} eventsDropped={} kept={} offmain={}",
+							   "busy={} full={} refused={} stray={} replaced={} lost={} openHeld={} menu={:08X} dropped={} expired={} eventsDropped={} kept={} offmain={}",
 				installed ? 1 : 0, static_cast<std::uint32_t>(mark.logId), mark.next, ledger.Asking() ? 1 : 0, ledger.Out(), waiting.Size(), again.Size(),
 				Counted(counts.events), Counted(counts.sent), Counted(counts.again), Counted(counts.emptiedSent), Counted(counts.heard), Counted(counts.made),
 				Counted(counts.takes), Counted(counts.puts), Counted(counts.emptied), Counted(counts.removed), Counted(counts.shortTakes), Counted(counts.own),
 				Counted(counts.had), Counted(counts.held), Counted(counts.voided), Counted(counts.waited), Counted(counts.skipped), Counted(counts.asks),
-				Counted(counts.caughtUp), Counted(counts.busy), Counted(counts.full), Counted(counts.refused), Counted(counts.stray), Counted(ledger.Lost()),
-				Counted(counts.opened), Counted(waiting.Dropped()), Counted(waiting.Expired()), Counted(dropped), kept.empty() ? "-" : kept, Counted(counts.offMain));
+				Counted(counts.caughtUp), Counted(counts.busy), Counted(counts.full), Counted(counts.refused), Counted(counts.stray), Counted(counts.replaced),
+				Counted(ledger.Lost()), Counted(counts.openHeld), menuHolder.load(), Counted(waiting.Dropped()), Counted(waiting.Expired()), Counted(dropped),
+				kept.empty() ? "-" : kept, Counted(counts.offMain));
 		}
 		if (words[0] == "near") {
 			return Near(words);
