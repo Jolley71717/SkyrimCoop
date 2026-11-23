@@ -25,6 +25,7 @@
 //   shows no one there rather than someone in the wrong cell;
 // - an entry of a list is left out: a worn item;
 // - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has).
+// - an NPC the other side lacks is left out of the NPC messages' lists, and so is an NPC's state in a place it lacks.
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -68,6 +69,11 @@ namespace FormTranslate
 		case MT::kRemoteState:
 		case MT::kPlayerLooks:
 		case MT::kRemoteLooks:
+		case MT::kNpcClaims:
+		case MT::kNpcOwners:
+		case MT::kNpcStates:
+		case MT::kNpcActions:
+		case MT::kNpcGear:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -159,6 +165,43 @@ namespace FormTranslate
 				out.placeless = true;
 				changed = true;
 			}
+
+			// An NPC (Protocol::NpcKey): a load-order reference goes by its plugin, false when it has no ID on the other
+			// side; a spawn's id is its spawner's game's own runtime reference, never translated (no other game has it).
+			bool Npc(Protocol::NpcKey& a_key)
+			{
+				return a_key.IsSpawn() || (a_key.id != 0 && Key(a_key.id));
+			}
+
+			// A place that must be had whole (an NPC's): false when either half has no ID on the other side.
+			bool WholePlace(std::uint32_t& a_cell, std::uint32_t& a_worldspace)
+			{
+				auto cell = a_cell;
+				auto worldspace = a_worldspace;
+				if (!Key(cell) || !Key(worldspace)) {
+					return false;
+				}
+				a_cell = cell;
+				a_worldspace = worldspace;
+				return true;
+			}
+
+			// The entries of a list a_keep says have IDs on the other side (mapping them as it goes); the rest are left out.
+			template <class T, class Keep>
+			void Entries(std::vector<T>& a_list, Keep a_keep)
+			{
+				std::vector<T> kept;
+				kept.reserve(a_list.size());
+				for (auto& entry : a_list) {
+					if (a_keep(entry)) {
+						kept.push_back(std::move(entry));
+					}
+				}
+				const auto left = a_list.size() - kept.size();
+				a_list = std::move(kept);
+				out.entries += static_cast<std::uint32_t>(left);
+				changed = changed || left != 0;
+			}
 		};
 
 		template <class T, class Decode, class MapFn>
@@ -207,6 +250,48 @@ namespace FormTranslate
 			break;
 		case MT::kRemoteLooks:
 			detail::Apply<Protocol::RemoteLooks>(a_packet, ctx, Protocol::DecodeRemoteLooks, [&](Protocol::RemoteLooks& a_msg) { detail::MapLooks(ctx, a_msg.looks); });
+			break;
+		// NPCs: one the other side lacks (a mod's) is left out of every list; a state somewhere the other side lacks is
+		// left out too (no copy can stand there); a base it lacks reads 0 (a spawn of it can't be placed); gear of an NPC it
+		// lacks names no NPC (id 0, which the reader skips), and worn items or held objects it lacks are left out or 0.
+		case MT::kNpcClaims:
+			detail::Apply<Protocol::NpcClaims>(a_packet, ctx, Protocol::DecodeNpcClaims, [&](Protocol::NpcClaims& a_msg) {
+				ctx.Entries(a_msg.claims, [&](Protocol::NpcClaim& a_claim) { return ctx.Npc(a_claim.key); });
+			});
+			break;
+		case MT::kNpcOwners:
+			detail::Apply<Protocol::NpcOwners>(a_packet, ctx, Protocol::DecodeNpcOwners, [&](Protocol::NpcOwners& a_msg) {
+				ctx.Entries(a_msg.owners, [&](Protocol::NpcOwner& a_owner) { return ctx.Npc(a_owner.key); });
+			});
+			break;
+		case MT::kNpcStates:
+			detail::Apply<Protocol::NpcStates>(a_packet, ctx, Protocol::DecodeNpcStates, [&](Protocol::NpcStates& a_msg) {
+				ctx.Entries(a_msg.npcs, [&](Protocol::NpcState& a_npc) {
+					if (!ctx.Npc(a_npc.key) || !ctx.WholePlace(a_npc.state.cell, a_npc.state.worldspace)) {
+						return false;
+					}
+					ctx.Detail(a_npc.base);
+					return true;
+				});
+			});
+			break;
+		case MT::kNpcActions:
+			detail::Apply<Protocol::NpcActions>(a_packet, ctx, Protocol::DecodeNpcActions, [&](Protocol::NpcActions& a_msg) {
+				ctx.Entries(a_msg.actions, [&](Protocol::NpcAction& a_action) { return ctx.Npc(a_action.key); });
+			});
+			break;
+		case MT::kNpcGear:
+			detail::Apply<Protocol::NpcGear>(a_packet, ctx, Protocol::DecodeNpcGear, [&](Protocol::NpcGear& a_msg) {
+				if (!ctx.Npc(a_msg.key)) {
+					a_msg.key = {};
+					++ctx.out.fields;
+					ctx.changed = true;
+				}
+				ctx.Ids(a_msg.worn);
+				ctx.Detail(a_msg.right);
+				ctx.Detail(a_msg.left);
+				ctx.Detail(a_msg.ammo);
+			});
 			break;
 		default:
 			break;

@@ -3,6 +3,7 @@
 #include "EnetTransport.h"
 #include "FormIds.h"
 #include "Name.h"
+#include "NpcBook.h"
 #include "Redact.h"
 #include "Text.h"
 #include "TokenBucket.h"
@@ -142,6 +143,10 @@ void Server::Run()
 	// translate theirs, so they must have the session's load order.
 	std::optional<std::uint32_t> sessionHash;
 	std::vector<std::string>     sessionTable;
+	// Who runs each NPC (common/NpcBook.h), and the last gear each runner reported of its NPCs, for whoever joins after.
+	// Only an NPC's runner's states, events and gear are passed on.
+	NpcBook::Book                                  npcs;
+	std::map<Protocol::NpcKey, Protocol::NpcGear> npcGear;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -170,6 +175,16 @@ void Server::Run()
 		broadcast(Protocol::Encode(Protocol::PlayerLeft{ a_peer.playerId }), true, &a_key);
 		if (a_peer.playerId == hostId) {
 			hostId = 0;
+		}
+		// The NPCs their game ran are nobody's now: the games that have them loaded claim them again. Their spawns go.
+		if (const auto released = npcs.Leave(a_peer.playerId); !released.empty()) {
+			Protocol::NpcOwners told;
+			for (const auto& key : released) {
+				told.owners.push_back({ key, 0 });
+				npcGear.erase(key);
+			}
+			broadcast(Protocol::Encode(told), true, &a_key);
+			log(std::format("server: the {} NPC(s) player {} ran are nobody's now", released.size(), a_peer.playerId));
 		}
 	};
 
@@ -270,6 +285,11 @@ void Server::Run()
 				}
 			}
 		}
+		// Who runs each NPC (a full list: a player back on a new connection forgets what they knew), and their gear.
+		send(a_key, Protocol::Encode(Protocol::NpcOwners{ .full = true, .owners = npcs.All() }), true);
+		for (const auto& [npc, gear] : npcGear) {
+			send(a_key, Protocol::Encode(gear), true);
+		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
 		log(std::format("server: player {} joined from {}{} ({} in the session)", a_peer.playerId, transports[a_key.first]->Describe(a_key.second),
@@ -315,6 +335,66 @@ void Server::Run()
 				} else {
 					a_peer.looksOwed = true;  // the newest goes once the budget allows
 				}
+			}
+			break;
+		case MT::kNpcClaims:
+			// Each claim as NpcBook rules: everyone hears who runs an NPC that changed hands (the claimant too: its
+			// answer), and a refused claimant hears who runs it instead.
+			if (const auto msg = Protocol::DecodeNpcClaims(a_data)) {
+				const auto          now = Clock::now();
+				Protocol::NpcOwners changes;
+				Protocol::NpcOwners refused;
+				for (const auto& claim : msg->claims) {
+					switch (npcs.Claim(a_peer.playerId, claim, now)) {
+					case NpcBook::Outcome::kGranted:
+						changes.owners.push_back({ claim.key, a_peer.playerId });
+						npcGear.erase(claim.key);  // the new runner reports its own
+						break;
+					case NpcBook::Outcome::kReleased:
+						changes.owners.push_back({ claim.key, 0 });
+						npcGear.erase(claim.key);
+						break;
+					case NpcBook::Outcome::kRefused:
+						refused.owners.push_back({ claim.key, npcs.Owner(claim.key) });
+						break;
+					case NpcBook::Outcome::kKept:
+					case NpcBook::Outcome::kIgnored:
+						break;
+					}
+				}
+				if (!changes.owners.empty()) {
+					broadcast(Protocol::Encode(changes), true, nullptr);
+				}
+				if (!refused.owners.empty()) {
+					send(a_key, Protocol::Encode(refused), true);
+				}
+			}
+			break;
+		case MT::kNpcStates:
+			// Only the states of NPCs the sender runs, the sender named as their runner.
+			if (auto msg = Protocol::DecodeNpcStates(a_data)) {
+				std::erase_if(msg->npcs, [&](const Protocol::NpcState& a_npc) { return !npcs.Runs(a_peer.playerId, a_npc.key); });
+				if (!msg->npcs.empty()) {
+					msg->runner = a_peer.playerId;
+					broadcast(Protocol::Encode(*msg), false, &a_key);
+				}
+			}
+			break;
+		case MT::kNpcActions:
+			if (auto msg = Protocol::DecodeNpcActions(a_data)) {
+				std::erase_if(msg->actions, [&](const Protocol::NpcAction& a_action) { return !npcs.Runs(a_peer.playerId, a_action.key); });
+				if (!msg->actions.empty()) {
+					msg->runner = a_peer.playerId;
+					broadcast(Protocol::Encode(*msg), true, &a_key);
+				}
+			}
+			break;
+		case MT::kNpcGear:
+			// Kept for whoever joins later while it has this runner.
+			if (auto msg = Protocol::DecodeNpcGear(a_data); msg && npcs.Runs(a_peer.playerId, msg->key)) {
+				msg->runner = a_peer.playerId;
+				npcGear[msg->key] = *msg;
+				broadcast(Protocol::Encode(*msg), true, &a_key);
 			}
 			break;
 		case MT::kHeartbeat:

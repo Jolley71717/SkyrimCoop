@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 
 // Pure helpers behind stand-in motion, kept free of the game so they can be tested. Carried as is from F4Multiplayer's
 // src/game/Prediction.h (commit a7bddd24b); StateBuffer.h uses SenderClock and ArrivalClock.
@@ -136,6 +137,17 @@ namespace Prediction
 		Clock::time_point                    arrival{};     // when the last state came
 		Clock::time_point                    stamp{};
 		Clock::duration                      steppedBack{};  // how much earlier the stamps given before this one now are
+
+		// Where something the sender timed at a_sentMs on its clock (an NPC's graph event) falls among the stamps, with
+		// the clock left as it is. None before the first state.
+		[[nodiscard]] std::optional<Clock::time_point> At(std::uint32_t a_sentMs) const
+		{
+			if (!started) {
+				return std::nullopt;
+			}
+			const auto delta = static_cast<std::int32_t>(a_sentMs - lastSent);
+			return first + sent + shift + std::chrono::milliseconds(delta);
+		}
 
 		Clock::time_point Next(Clock::time_point a_arrival, std::uint32_t a_sentMs)
 		{

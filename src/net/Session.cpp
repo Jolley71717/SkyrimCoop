@@ -8,6 +8,7 @@
 #include "Server.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
+#include "game/NpcSync.h"
 #include "game/RemotePlayers.h"
 #include "net/FormsCommand.h"
 #include "net/Identity.h"
@@ -211,6 +212,7 @@ namespace Session
 					hostId = msg->hostId;
 					sentLooks.reset();
 					nextState = nextLooks = nextBeat = Clock::now();
+					NpcSync::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -240,6 +242,26 @@ namespace Session
 			case Protocol::MessageType::kRemoteLooks:
 				if (const auto msg = Protocol::DecodeRemoteLooks(a_data); msg && msg->playerId != playerId) {
 					RemotePlayers::Looked(msg->playerId, msg->looks);
+				}
+				break;
+			case Protocol::MessageType::kNpcOwners:
+				if (const auto msg = Protocol::DecodeNpcOwners(a_data)) {
+					NpcSync::Owners(*msg);
+				}
+				break;
+			case Protocol::MessageType::kNpcStates:
+				if (const auto msg = Protocol::DecodeNpcStates(a_data); msg && msg->runner != playerId) {
+					NpcSync::States(*msg);
+				}
+				break;
+			case Protocol::MessageType::kNpcActions:
+				if (const auto msg = Protocol::DecodeNpcActions(a_data); msg && msg->runner != playerId) {
+					NpcSync::Actions(*msg);
+				}
+				break;
+			case Protocol::MessageType::kNpcGear:
+				if (const auto msg = Protocol::DecodeNpcGear(a_data); msg && msg->runner != playerId) {
+					NpcSync::Gear(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -375,6 +397,7 @@ namespace Session
 				Steam::Leave();
 			}
 		}
+		NpcSync::Clear();
 		RemotePlayers::Clear();
 		Reset();
 		role = Role::kNone;
@@ -411,6 +434,7 @@ namespace Session
 		}
 		if (welcomed) {
 			SendOurs(Clock::now());
+			NpcSync::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 	}
