@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Protocol.h"
+#include "game/Gait.h"
 #include "game/GaitDrive.h"
 
 namespace SKSE
@@ -85,6 +86,14 @@ namespace RemotePlayers
 	// What a copy's graph is given for Speed and Direction from now on (GaitDrive.h), and no more.
 	void DriveLegs(RE::Actor* a_actor, GaitDrive::Values a_values);
 	void StopLegs(RE::Actor* a_actor);
+	// The actor state's movement bits of an actor this game moves for another (a stand-in or a copy), as Gait::Bits
+	// worked them out: one place sets them for both.
+	void ShowMoves(RE::Actor* a_actor, const Gait::MoveBits& a_bits);
+	// Whether its graph goes into and out of swimming (its race walks; a fish's is always in water): Gait::Next's a_swimEvents.
+	[[nodiscard]] bool SwimsAsMode(const RE::Actor* a_actor);
+	// In water: placed again where it is shown after the engine's update when that moved it off its height
+	// (Gait::Refloat: the water's pull to the surface). True when it was.
+	bool HoldDepth(RE::Actor* a_actor, const Protocol::PlayerState& a_state);
 	// An actor this game placed (a copy of a spawn) goes out of the world as a stand-in does: disabled, then deleted
 	// (Retire.h), its AI off meanwhile, taken out before a save and named in the co-save until it is gone.
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
@@ -105,6 +114,12 @@ namespace RemotePlayers
 	// back while still loading.
 	[[nodiscard]] std::string Faces(const std::function<std::uint32_t(const Protocol::PlayerFace&)>& a_sessionHash);
 	[[nodiscard]] std::string Graph(std::string_view a_args);
+	// Developer channel `swim` (the stand-ins' part, after ours: Water::Command): per player, whether its friend swims and
+	// is under water as the states say, what its graph was told (shown), what its actor state, the engine's flags and its
+	// character controller say, its height against its friend's (depthErr), the water's height there, its pitch against
+	// its friend's, the swim events its graph took and turned away and the changes given up, and how often the water
+	// moved it off the height it was shown at (refloats).
+	[[nodiscard]] std::string Swim();
 
 	// The co-save record's type: "SKST" (stand-ins).
 	inline constexpr std::uint32_t COSAVE_STANDINS = 0x54534B53;

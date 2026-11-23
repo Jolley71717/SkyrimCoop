@@ -254,7 +254,7 @@ namespace NpcRules
 	// The runner's graph events its copies play: all but the walk's own (Gait.h works those out on each copy from the
 	// states, as it does for a stand-in, so they would come twice) and names no graph takes. A graph's event names are
 	// compared without case, as the game's string cache keeps them.
-	inline constexpr std::array<std::string_view, 12> LOCAL_EVENTS{
+	inline constexpr std::array<std::string_view, 14> LOCAL_EVENTS{
 		"moveStart",
 		"moveStop",
 		"SneakStart",
@@ -264,6 +264,8 @@ namespace NpcRules
 		"JumpStandingStart",
 		"JumpDirectionalStart",
 		"JumpLand",
+		"SwimStart",
+		"SwimStop",
 		"turnStart",
 		"turnStop",
 		"IdleStop",

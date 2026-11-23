@@ -14,6 +14,7 @@
 #include "game/StandInRules.h"
 #include "game/StateBuffer.h"
 #include "game/VtableHook.h"
+#include "game/Water.h"
 
 #include <Windows.h>
 
@@ -75,6 +76,12 @@ namespace RemotePlayers
 			std::uint64_t takenEvents = 0;
 			std::uint64_t refusedEvents = 0;
 			std::string   lastRefused;
+			// In water (under lock): the swim events its graph took and turned away, the changes it gave up on
+			// (Gait::SWIM_TRIES), and how often the water moved it off the height it is shown at (HoldDepth).
+			std::uint64_t swimTaken = 0;
+			std::uint64_t swimRefused = 0;
+			std::uint64_t swimGivenUp = 0;
+			std::uint64_t refloats = 0;
 			Protocol::PlayerState lastDrawn;
 			bool          hasDrawn = false;
 
@@ -242,18 +249,10 @@ namespace RemotePlayers
 			return it->second;
 		}
 
-		void SetMoveFlags(RE::Actor* a_actor, const Gait::Step& a_step, const Protocol::PlayerState& a_state)
+		// The water's events, counted apart (dev `swim`).
+		bool IsSwimEvent(std::string_view a_event)
 		{
-			const auto state = a_actor->AsActorState();
-			if (!state) {
-				return;
-			}
-			auto& flags = state->actorState1;
-			flags.sneaking = a_step.shown.sneaking ? 1 : 0;
-			flags.sprinting = a_step.shown.sprinting ? 1 : 0;
-			flags.running = a_step.shown.moving && !a_step.shown.sprinting && a_state.speed > 200.0f ? 1 : 0;
-			flags.walking = a_step.shown.moving && a_state.speed <= 200.0f ? 1 : 0;
-			flags.movingForward = a_step.shown.moving ? 1 : 0;
+			return a_event == Gait::SWIM_START || a_event == Gait::SWIM_STOP;
 		}
 
 		// Where the graph's events are sent from: the stand-in's own update (the hook, by default) or the tick (dev
@@ -325,22 +324,35 @@ namespace RemotePlayers
 			return VtableHook::Slot(a_vtable, a_index, a_hook, a_original, "Players", a_what);
 		}
 
-		// Sends a step's events to a stand-in's graph and keeps the count of those taken and turned away. One turned away
-		// is sent again next time (what the graph shows stays what it was).
-		void TellGraph(RE::Actor* a_actor, std::uint32_t a_player, const Gait::Step& a_step, const Gait::Shown& a_was)
+		// Sends a step's events to a stand-in's graph and keeps the count of those taken and turned away. The part of what
+		// it shows that an event turned away was to change stays as it was, so that event alone is sent again next time
+		// (Gait::Settle; a swim event only SWIM_TRIES times for one change).
+		void TellGraph(RE::Actor* a_actor, std::uint32_t a_player, const Gait::Step& a_step)
 		{
 			if (a_step.events.empty()) {
 				return;
 			}
+			std::vector<std::pair<std::string_view, bool>> results;
+			results.reserve(a_step.events.size());
 			std::string   refused;
 			std::uint64_t taken = 0;
+			std::uint64_t refusals = 0;
+			std::uint64_t swimTaken = 0;
+			std::uint64_t swimRefused = 0;
 			for (const auto event : a_step.events) {
-				if (a_actor->NotifyAnimationGraph(Name(event))) {
+				const bool ok = a_actor->NotifyAnimationGraph(Name(event));
+				results.emplace_back(event, ok);
+				if (ok) {
 					++taken;
 				} else {
 					refused = event;
+					++refusals;
+				}
+				if (IsSwimEvent(event)) {
+					++(ok ? swimTaken : swimRefused);
 				}
 			}
+			const auto       settled = Gait::Settle(a_step.shown, results);
 			std::scoped_lock l{ lock };
 			const auto       player = players.find(a_player);
 			if (player == players.end() || player->second.standInId != a_actor->GetFormID()) {
@@ -352,16 +364,24 @@ namespace RemotePlayers
 					a_step.events.size(), refused.empty() ? "" : "; turned away " + refused);
 			}
 			remote.takenEvents += taken;
+			remote.swimTaken += swimTaken;
+			remote.swimRefused += swimRefused;
+			if (swimTaken > 0 && remote.swimTaken == swimTaken) {
+				logs::info("Players: player {}'s stand-in {:08X}: its graph took its first swim event", a_player, remote.standInId);
+			}
+			if (settled.swimGivenUp) {
+				++remote.swimGivenUp;
+				logs::info("Players: player {}'s stand-in {:08X}: its graph turned {} away {} times in a row; left as it is until its friend next goes in or out of the water ({} so far)",
+					a_player, remote.standInId, settled.swimming ? Gait::SWIM_START : Gait::SWIM_STOP, Gait::SWIM_TRIES, remote.swimGivenUp);
+			}
+			remote.shown = settled;
 			if (!refused.empty()) {
-				remote.shown = a_was;
-				++remote.refusedEvents;
-				if (remote.lastRefused != refused || remote.refusedEvents == 1) {
+				remote.refusedEvents += refusals;
+				if (remote.lastRefused != refused || remote.refusedEvents == refusals) {
 					logs::info("Players: player {}'s stand-in {:08X}: its graph turned {} away ({} times so far; sent from the {})", a_player, remote.standInId,
 						refused, remote.refusedEvents, eventsFromTick ? "tick" : "update");
 				}
 				remote.lastRefused = refused;
-			} else {
-				remote.shown = a_step.shown;
 			}
 		}
 
@@ -570,7 +590,6 @@ namespace RemotePlayers
 			}
 			std::optional<StateBuffer::Sampled> sample;
 			Gait::Step                          step;
-			Gait::Shown                         was;
 			bool                                ours = false;
 			std::uint32_t                       playerId = 0;
 			std::vector<std::string>            actions;
@@ -587,8 +606,7 @@ namespace RemotePlayers
 						auto& remote = player->second;
 						sample = remote.buffer.Sample(Clock::now());
 						if (sample) {
-							was = remote.shown;
-							step = Gait::Next(remote.shown, sample->state, sample->held);
+							step = Gait::Next(remote.shown, sample->state, sample->held, SwimsAsMode(a_this));
 							if (eventsHere) {
 								remote.shown = step.shown;  // else the tick tells the graph (TellGraph from Frame)
 							}
@@ -618,16 +636,23 @@ namespace RemotePlayers
 			if (sample) {
 				a_this->SetPosition({ sample->state.x, sample->state.y, sample->state.z }, true);
 				a_this->SetHeading(sample->state.heading);
-				// Aimed where its friend aims while a weapon or a spell is out (the way its arrows and spells leave), level
-				// otherwise.
+				// Aimed where its friend aims while a weapon or a spell is out (the way its arrows and spells leave), pitched
+				// as its friend swims under water, level otherwise.
 				a_this->data.angle.x = aim;
-				SetMoveFlags(a_this, step, sample->state);
+				ShowMoves(a_this, Gait::Bits(step, sample->state));
 				// What its graph's Speed and Direction channels give it from now on (SpeedPoll, DirectionPoll).
 				drive.Set(a_this, a_this->GetFormID(), { step.speed, step.direction }, Clock::now());
 			}
 			a_this->UpdateNoAI(a_delta);
+			// In water, at its friend's depth: the water's pull to the surface does not lift it (Gait::Refloat).
+			if (sample && HoldDepth(a_this, sample->state)) {
+				std::scoped_lock l{ lock };
+				if (const auto player = players.find(playerId); player != players.end() && player->second.standInId == a_this->GetFormID()) {
+					++player->second.refloats;
+				}
+			}
 			if (sample && eventsHere) {
-				TellGraph(a_this, playerId, step, was);
+				TellGraph(a_this, playerId, step);
 			}
 			if (sample && eventsHere) {
 				PlayActions(a_this, playerId, actions);
@@ -1397,16 +1422,14 @@ namespace RemotePlayers
 			FixDraw(id, remote, actor.get(), sample->state, now);
 			if (eventsFromTick && actor->Is3DLoaded()) {
 				Gait::Step  step;
-				Gait::Shown was;
 				std::vector<std::string> actions;
 				{
 					std::scoped_lock l{ lock };
-					was = remote.shown;
-					step = Gait::Next(was, sample->state, sample->held);
+					step = Gait::Next(remote.shown, sample->state, sample->held, SwimsAsMode(actor.get()));
 					remote.shown = step.shown;
 					actions = remote.actions.Due(now - StateBuffer::Buffer::Delay());
 				}
-				TellGraph(actor.get(), id, step, was);
+				TellGraph(actor.get(), id, step);
 				PlayActions(actor.get(), id, actions);  // its friend's actions from the tick too, as its legs' events
 			}
 		}
@@ -1625,6 +1648,39 @@ namespace RemotePlayers
 		drive.Erase(a_actor);
 	}
 
+	void ShowMoves(RE::Actor* a_actor, const Gait::MoveBits& a_bits)
+	{
+		const auto state = a_actor ? a_actor->AsActorState() : nullptr;
+		if (!state) {
+			return;
+		}
+		auto& flags = state->actorState1;
+		flags.sneaking = a_bits.sneaking ? 1 : 0;
+		flags.sprinting = a_bits.sprinting ? 1 : 0;
+		flags.running = a_bits.running ? 1 : 0;
+		flags.walking = a_bits.walking ? 1 : 0;
+		flags.movingForward = a_bits.forward ? 1 : 0;
+		flags.swimming = a_bits.swimming ? 1 : 0;
+	}
+
+	bool SwimsAsMode(const RE::Actor* a_actor)
+	{
+		const auto race = a_actor ? a_actor->GetRace() : nullptr;
+		return !race || race->data.flags.any(RE::RACE_DATA::Flag::kWalks);
+	}
+
+	bool HoldDepth(RE::Actor* a_actor, const Protocol::PlayerState& a_state)
+	{
+		if ((a_state.flags & Protocol::kSwimming) == 0 || !a_actor) {
+			return false;
+		}
+		if (!Gait::Refloat(a_state, a_state.z, a_actor->GetPositionZ())) {
+			return false;
+		}
+		a_actor->SetPosition({ a_state.x, a_state.y, a_state.z }, true);
+		return true;
+	}
+
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt)
 	{
 		drive.Erase(a_actor);
@@ -1677,12 +1733,12 @@ namespace RemotePlayers
 				return actor && actor->GetGraphVariableFloat(Name(a_name), v) ? std::vformat(a_format, std::make_format_args(v)) : std::string{ "none" };
 			};
 			const auto& newest = remote.buffer.snapshots.empty() ? std::optional<Protocol::PlayerState>{} : std::optional{ remote.buffer.snapshots.back().state };
-			out += std::format(" | player {} standin={:08X} placed={} dressed={} at={} target={} graphSpeed={} graphDir={} graphSampled={} shown={}{}{}{} drawn={} refused={}{} taken={} states={} newest={} dist={}",
+			out += std::format(" | player {} standin={:08X} placed={} dressed={} at={} target={} graphSpeed={} graphDir={} graphSampled={} shown={}{}{}{}{} drawn={} refused={}{} taken={} states={} newest={} dist={}",
 				id, remote.standInId, remote.placed, remote.dressed ? 1 : 0, at,
 				remote.hasDrawn ? std::format("({:.0f},{:.0f},{:.0f}) speed={:.0f} dir={:.3f} flags={:#04x}", remote.lastDrawn.x, remote.lastDrawn.y, remote.lastDrawn.z, remote.lastDrawn.speed,
 					Protocol::UnpackDirection(remote.lastDrawn.direction), remote.lastDrawn.flags) : "none",
 				graphFloat("Speed", "{:.0f}"), graphFloat("Direction", "{:.3f}"), graphFloat("SpeedSampled", "{:.0f}"), remote.shown.moving ? "m" : "-", remote.shown.sneaking ? "s" : "-", remote.shown.sprinting ? "r" : "-",
-				remote.shown.inAir ? "j" : "-", remote.drawn, remote.refusedEvents, remote.lastRefused.empty() ? "" : " last=" + remote.lastRefused, remote.takenEvents,
+				remote.shown.inAir ? "j" : "-", remote.shown.swimming ? "w" : "-", remote.drawn, remote.refusedEvents, remote.lastRefused.empty() ? "" : " last=" + remote.lastRefused, remote.takenEvents,
 				remote.buffer.snapshots.size(),
 				newest ? std::format("({:.0f},{:.0f},{:.0f}) in {:08X}", newest->x, newest->y, newest->z, newest->cell ? newest->cell : newest->worldspace) : "none",
 				here && newest ? std::format("{:.0f}", SameSpace(*here, *newest) ? Distance(*here, *newest) : -1.0f) : "?");
@@ -1795,6 +1851,58 @@ namespace RemotePlayers
 			ours += remote.standInId != 0 ? 1 : 0;
 		}
 		return std::format("strays={} standins={} presetActors={}{}", live - (std::min)(live, ours), ours, live, list);
+	}
+
+	std::string Swim()
+	{
+		// What each stand-in's game objects say, read before the lock (the game's own locks).
+		struct Read
+		{
+			int                  swimming = -1;  // its actor state's bit (-1: no stand-in)
+			int                  engineSwimming = -1;
+			int                  inWater = -1;
+			int                  charState = -1;  // its character controller's state (hkpCharacterStateType; 5 is swimming)
+			float                z = 0.0f;
+			float                pitch = 0.0f;  // its angle x, up positive, in degrees
+			std::optional<float> water;
+		};
+		std::unordered_map<std::uint32_t, Read> reads;
+		for (const auto& [id, remote] : players) {
+			const auto actor = remote.standIn.get();
+			if (!actor || actor->GetFormID() != remote.standInId) {
+				continue;
+			}
+			Read read;
+			const auto state = actor->AsActorState();
+			read.swimming = state && state->IsSwimming() ? 1 : 0;
+			const auto& data = actor->GetActorRuntimeData();
+			read.engineSwimming = data.boolBits.all(RE::Actor::BOOL_BITS::kSwimming) ? 1 : 0;
+			read.inWater = data.boolBits.all(RE::Actor::BOOL_BITS::kInWater) ? 1 : 0;
+			if (const auto controller = actor->GetCharController()) {
+				read.charState = static_cast<int>(std::to_underlying(controller->context.currentState));
+			}
+			const auto at = actor->GetPosition();
+			read.z = at.z;
+			read.pitch = -actor->GetAngleX() * 180.0f / std::numbers::pi_v<float>;
+			read.water = Water::HeightAt(at, actor->GetParentCell());
+			reads[id] = read;
+		}
+		std::string      out;
+		std::scoped_lock l{ lock };
+		for (const auto& [id, remote] : players) {
+			const auto  read = reads.contains(id) ? reads[id] : Read{};
+			const auto& friendState = remote.lastDrawn;
+			const bool  known = remote.hasDrawn && read.swimming >= 0;
+			out += std::format(" | player {} standin={:08X} friendSwims={} friendUnder={} shown={} swimming={} engineSwimming={} inWater={} charState={} z={} friendZ={} depthErr={}"
+							   " water={} pitch={} friendPitch={} swimTaken={} swimRefused={} swimGivenUp={} refloats={}",
+				id, remote.standInId, remote.hasDrawn ? ((friendState.flags & Protocol::kSwimming) != 0 ? 1 : 0) : -1,
+				remote.hasDrawn ? ((friendState.flags & Protocol::kUnderwater) != 0 ? 1 : 0) : -1, remote.shown.swimming ? "w" : "-", read.swimming,
+				read.engineSwimming, read.inWater, read.charState, known ? std::format("{:.0f}", read.z) : "none",
+				remote.hasDrawn ? std::format("{:.0f}", friendState.z) : "none", known ? std::format("{:.0f}", read.z - friendState.z) : "none",
+				read.water ? std::format("{:.0f}", *read.water) : "none", known ? std::format("{:.0f}", read.pitch) : "none",
+				remote.hasDrawn ? std::to_string(friendState.pitch) : "none", remote.swimTaken, remote.swimRefused, remote.swimGivenUp, remote.refloats);
+		}
+		return out;
 	}
 
 	std::string Graph(std::string_view a_args)
