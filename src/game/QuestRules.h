@@ -684,6 +684,13 @@ namespace QuestRules
 			lastStage.clear();
 		}
 
+		// Whether anything of a_questId waits here: a want to judge, or a stage made and not read done yet (a radiant job's
+		// stop waits for it, QuestRunRules::Follower::Due).
+		[[nodiscard]] bool Has(std::uint32_t a_questId) const
+		{
+			return flight.contains(a_questId) || std::ranges::any_of(wants, [&](const Want& a_w) { return a_w.entry.questId == a_questId; });
+		}
+
 		// What waits of one quest is no longer the session's word (a radiant job begun again or stopped).
 		void Forget(std::uint32_t a_questId)
 		{

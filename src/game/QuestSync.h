@@ -8,6 +8,11 @@
 #include <string_view>
 #include <vector>
 
+namespace SKSE
+{
+	class SerializationInterface;
+}
+
 // Shared quests in a session (docs/DESIGN.md, "Quests"; the rules, free of the game, are src/game/QuestRules.h and, for
 // runs and aliases, src/game/QuestRunRules.h).
 // What our game does is read from the game itself: a stage done (TESQuestStageEvent), a quest started or stopped
@@ -52,6 +57,15 @@ namespace QuestSync
 	// A save was loaded or a new game started: the host's game says its world again; a friend's asks for the session's
 	// word again and makes what its save is behind on.
 	void AfterLoad();
+
+	// The co-save: the radiant jobs this game runs for the session's runs as it saves, so that a load of that save stops
+	// each one no run of the session claims (a job left running for a run that is over). Read before AfterLoad; a revert
+	// (a new game, a save without it) leaves none.
+	inline constexpr std::uint32_t COSAVE_RUNS = 0x52514B53;  // "SKQR"
+	inline constexpr std::uint32_t COSAVE_RUNS_VERSION = 1;
+	void WriteCoSave(SKSE::SerializationInterface* a_intf);
+	void ReadCoSave(SKSE::SerializationInterface* a_intf, std::uint32_t a_version, std::uint32_t a_length);
+	void RevertCoSave();
 
 	// The session ended.
 	void Clear();

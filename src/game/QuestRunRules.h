@@ -16,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -52,6 +53,19 @@ namespace QuestRunRules
 	// The host's game says a run's fills again this often unchanged (the server takes the same word as nothing new and
 	// passes nothing on): a word its budget dropped, or one lost with a start, is said again.
 	inline constexpr auto RESAY_EVERY = std::chrono::seconds{ 30 };
+	// How long the host's game holds a radiant job's stop after its event before it says it: the job's last stages, and a
+	// stage the engine reports after the stop, are said first, and its end (completed, failed, its objectives) is read
+	// and said then; the stop goes after them, so the server never takes the stop before the stages of the run it ends.
+	inline constexpr auto STOP_LINGER = std::chrono::seconds{ 1 };
+	// How long a friend's game makes what the session said of a run before it makes the host's stop of it: the last
+	// stages heard and the end are made first (one thing per QuestRules::MAKE_EVERY, the objectives and end SETTLE after
+	// the last stage), then the job is stopped here, if its own scripts did not stop it already. One left after this
+	// (held for a far friend, stuck) does not keep the job running.
+	inline constexpr auto STOP_WAIT = std::chrono::seconds{ 20 };
+	// A friend's game starts at most one quest for a run in this time, the oldest heard first: a game that joins a long
+	// game hears every run that is on at once, and each start runs the quest's alias fills, its start-up stage and
+	// scripts (the pace the maker keeps for stages, QuestRules::MAKE_EVERY).
+	inline constexpr auto START_PACE = std::chrono::milliseconds{ 250 };
 
 	// ---- the host's game: its runs ---------------------------------------------------------------------------------
 
@@ -84,7 +98,7 @@ namespace QuestRunRules
 		std::optional<Run> Read(std::uint32_t a_questId, std::vector<Fill> a_fills, Clock::time_point a_now)
 		{
 			const auto it = quests.find(a_questId);
-			if (it == quests.end() || !it->second.live) {
+			if (it == quests.end() || !it->second.live || it->second.stopping) {
 				return std::nullopt;
 			}
 			auto& q = it->second;
@@ -103,36 +117,74 @@ namespace QuestRunRules
 			return run;
 		}
 
-		// a_questId stopped in our game (its event): the word to send for a radiant job (its run is over); none for a
-		// shared quest (each game's own scripts stop it once it is done).
-		std::optional<Run> Stopped(std::uint32_t a_questId)
+		// a_questId stopped in our game (its event). A shared quest's run ends here (each game's own scripts stop it once it
+		// is done: nothing is said). A radiant job's stop is held STOP_LINGER (true): its stages are still the run's
+		// meanwhile (Live), and StopsDue says the stop after them.
+		bool Stopped(std::uint32_t a_questId, Clock::time_point a_now)
 		{
 			const auto it = quests.find(a_questId);
-			if (it == quests.end() || !it->second.live) {
-				return std::nullopt;
+			if (it == quests.end() || !it->second.live || it->second.stopping) {
+				return false;
 			}
-			it->second.live = false;
-			if (!it->second.repeats) {
-				return std::nullopt;
+			auto& q = it->second;
+			if (!q.repeats) {
+				q.live = false;
+				return false;
 			}
-			Run run;
-			run.questId = a_questId;
-			run.run = it->second.run;
-			run.flags = Run::kStopped;
-			return run;
+			q.stopping = true;
+			q.stopAt = a_now + STOP_LINGER;
+			return true;
 		}
 
+		// The radiant jobs whose stop is due now (STOP_LINGER after their event), oldest first: the caller says the frame's
+		// stages and each one's end first, then these words. Their runs are over.
+		std::vector<Run> StopsDue(Clock::time_point a_now)
+		{
+			std::vector<std::pair<Clock::time_point, std::uint32_t>> due;
+			for (const auto& [id, q] : quests) {
+				if (q.live && q.stopping && a_now >= q.stopAt) {
+					due.emplace_back(q.stopAt, id);
+				}
+			}
+			std::ranges::sort(due);
+			std::vector<Run> out;
+			for (const auto& [at, id] : due) {
+				out.push_back(End(quests.at(id), id));
+			}
+			return out;
+		}
+
+		// A radiant job whose stop is held, started again before the stop was said (its new start's event): the stop to
+		// say now, before the new run's start (the caller says the frame's stages first).
+		std::optional<Run> StopNow(std::uint32_t a_questId)
+		{
+			const auto it = quests.find(a_questId);
+			if (it == quests.end() || !it->second.live || !it->second.stopping) {
+				return std::nullopt;
+			}
+			return End(it->second, a_questId);
+		}
+
+		// Whether a_questId's stop is held (its stages still the run's, its fills not read).
+		[[nodiscard]] bool Stopping(std::uint32_t a_questId) const
+		{
+			const auto it = quests.find(a_questId);
+			return it != quests.end() && it->second.live && it->second.stopping;
+		}
+
+		// Whether a_questId runs as the session's here (its stages reported), a stop held included.
 		[[nodiscard]] bool Live(std::uint32_t a_questId) const
 		{
 			const auto it = quests.find(a_questId);
 			return it != quests.end() && it->second.live;
 		}
 
+		// The runs whose fills are read (not one whose stop is held).
 		[[nodiscard]] std::vector<std::uint32_t> LiveQuests() const
 		{
 			std::vector<std::uint32_t> out;
 			for (const auto& [id, q] : quests) {
-				if (q.live) {
+				if (q.live && !q.stopping) {
 					out.push_back(id);
 				}
 			}
@@ -153,7 +205,8 @@ namespace QuestRunRules
 		}
 
 		// A new world (a welcome, a load): its quests that run are started again as runs (the snapshot); the numbers go
-		// on, so no run is numbered twice in the game's session.
+		// on, so no run is numbered twice in the game's session. A stop held is not said: the session's runs go with the
+		// world (kQuestReset).
 		void Clear() { quests.clear(); }
 
 	private:
@@ -164,9 +217,22 @@ namespace QuestRunRules
 			bool              repeats = false;
 			bool              fresh = false;
 			bool              filled = false;
+			bool              stopping = false;  // a radiant job's stop, held until stopAt
+			Clock::time_point stopAt{};
 			Clock::time_point saidAt{};
 			std::vector<Fill> fills;
 		};
+
+		static Run End(Quest& a_q, std::uint32_t a_questId)
+		{
+			a_q.live = false;
+			a_q.stopping = false;
+			Run run;
+			run.questId = a_questId;
+			run.run = a_q.run;
+			run.flags = Run::kStopped;
+			return run;
+		}
 		std::unordered_map<std::uint32_t, Quest> quests;
 		std::uint32_t                            counter = 0;
 	};
@@ -193,7 +259,8 @@ namespace QuestRunRules
 		kGaveUp,      // its fills or its start did not come within START_WAIT, or the game would not start it (tried again)
 		kEnded,       // the quest is ended here already: nothing to start
 		kNotHere,     // the quest is missing here, or not shared by this game's record
-		kRestarting,  // a radiant job that ran here with another location: stopped, to be started again for the run
+		kRestarting,  // a radiant job that ran here with another location (or an earlier run's): stopped, to be started again for the run
+		kStopping,    // a radiant job the host's run of is over: what the session said of it is made first, then it is stopped here
 	};
 
 	[[nodiscard]] constexpr std::string_view PhaseName(Phase a_phase)
@@ -213,6 +280,8 @@ namespace QuestRunRules
 			return "nothere";
 		case Phase::kRestarting:
 			return "restarting";
+		case Phase::kStopping:
+			return "stopping";
 		}
 		return "?";
 	}
@@ -225,7 +294,11 @@ namespace QuestRunRules
 		kStarted,  // the quest started here runs: put the aliases' records back, and force what did not hold
 		kAdopt,    // the quest ran here already: it is the session's run now; force the run's references into it
 		kGiveUp,   // the run's fills or its start did not come: put any records back; its stages go on as Phase says
-		kStop,     // a radiant job the session's run of stopped: stop it here too
+		kStop,     // a radiant job the session's run of stopped, what the session said of it made: stop it here too, and
+		           // forget the session's word on it
+		kEnd,      // ... and it stopped here already (its own scripts, at its last stage): forget the session's word on it
+		kStopOld,  // a new run of a radiant job whose earlier run is still stopping here: stop the earlier one now (the new
+		           // run is started once it has stopped; its word is the new run's and stays)
 	};
 
 	// One reference (or location) to force into an alias here.
@@ -264,36 +337,48 @@ namespace QuestRunRules
 	{
 	public:
 		// The server's word on a run (kRemoteQuestRun). True when what this game knows of the quest's stages,
-		// objectives and end is to be forgotten: a radiant job begun again (fresh) or stopped, whose earlier run's word
-		// is not this one's. a_here is this game's quest now; a stop of the run this game runs as the session's is made
-		// by the next Due (kStop).
+		// objectives and end is to be forgotten now: a radiant job begun again (fresh), or the stop of one this game does
+		// not run for the run (its earlier run's word is not this one's). The stop of a radiant job this game runs as the
+		// session's is not forgotten yet: what the session said of the run is made first (Due: kStop or kEnd, and the
+		// caller forgets it then).
 		bool Hear(const Run& a_run, const Here& a_here, Clock::time_point a_now)
 		{
 			if ((a_run.flags & Run::kStopped) != 0) {
 				const auto it = quests.find(a_run.questId);
-				if (it == quests.end() || it->second.run != a_run.run || !it->second.live) {
-					return false;  // not the run this game knows of (the server passes on a stop of the run on only)
+				if (it == quests.end() || it->second.run != a_run.run || !it->second.live || it->second.phase == Phase::kStopping) {
+					return false;  // not the run this game knows of (the server passes on a stop of the run on only), or again
 				}
-				auto&      q = it->second;
-				// a quest this game started or took for the run, even one given up before it ran (it may run yet)
-				const bool ours = q.phase == Phase::kRunning || q.phase == Phase::kStarting || q.phase == Phase::kRestarting ||
-				                  (q.phase == Phase::kGaveUp && q.counts.startedHere);
+				auto& q = it->second;
+				if (a_here.radiant && OursPhase(q)) {
+					q.phase = Phase::kStopping;
+					q.since = a_now;
+					return false;
+				}
+				const auto seq = q.seq;
 				q = Quest{};
 				q.run = a_run.run;
-				q.stop = ours && a_here.radiant;
+				q.seq = seq;
 				return a_here.radiant;
 			}
 			auto& q = quests[a_run.questId];
 			bool  forget = false;
 			if (q.run != a_run.run || !q.live) {
 				forget = (a_run.flags & Run::kFresh) != 0;
-				const bool wasOurs = q.live && (q.phase == Phase::kRunning || q.phase == Phase::kStarting);
+				const bool wasOurs = q.live && (q.phase == Phase::kRunning || q.phase == Phase::kStarting || q.phase == Phase::kStopping);
+				// the earlier run's job still stopping here (its last word being made): stopped now, the new run started after
+				const bool stopFirst = q.live && q.phase == Phase::kStopping;
 				q = Quest{};
 				q.run = a_run.run;
 				q.live = true;
 				q.since = a_now;
+				q.seq = ++heardSeq;
 				// the quest runs here as an earlier run of the session's: this run is adopted by the next Due
-				q.wasOurs = wasOurs;
+				q.wasOurs = wasOurs && !stopFirst;
+				if (stopFirst) {
+					q.phase = Phase::kRestarting;
+					q.stopFirst = true;
+				}
+				candidates.erase(a_run.questId);  // a run claims it: not left over from another world
 			}
 			if ((a_run.flags & Run::kFilled) != 0) {
 				q.filled = true;
@@ -307,26 +392,41 @@ namespace QuestRunRules
 		}
 
 		// What to do now about a_questId, its quest here being a_here; called every frame for each quest this game has
-		// heard a run of (Quests), before the session's stages are made (Hold reads the phase this sets).
-		Act Due(std::uint32_t a_questId, const Here& a_here, Clock::time_point a_now)
+		// heard a run of (Quests, the oldest heard first), before the session's stages are made (Hold reads the phase this
+		// sets). a_pending: what the session said of the quest still waits to be made here (QuestRules::Maker::Has). At
+		// most one start is made per START_PACE, whatever the quest.
+		Act Due(std::uint32_t a_questId, const Here& a_here, Clock::time_point a_now, bool a_pending = false)
 		{
 			const auto it = quests.find(a_questId);
-			if (it == quests.end()) {
+			if (it == quests.end() || !it->second.live) {
 				return Act::kNothing;
 			}
 			auto& q = it->second;
-			if (q.stop) {
-				q.stop = false;
-				return a_here.running || a_here.starting ? Act::kStop : Act::kNothing;
+			if (q.phase == Phase::kStopping) {
+				if (!a_here.running && !a_here.starting) {
+					End(q);
+					return Act::kEnd;  // it stopped here already (its own last stage)
+				}
+				if (a_pending && a_now - q.since < STOP_WAIT) {
+					return Act::kNothing;  // its last word is made first
+				}
+				End(q);
+				return Act::kStop;
 			}
-			if (!q.live) {
-				return Act::kNothing;
+			if (q.stopFirst) {
+				q.stopFirst = false;
+				q.since = a_now;
+				if (a_here.running || a_here.starting) {
+					return Act::kStopOld;
+				}
 			}
 			if (!a_here.exists || (!a_here.shared && !a_here.radiant)) {
 				q.phase = Phase::kNotHere;
 				return Act::kNothing;
 			}
 			switch (q.phase) {
+			case Phase::kStopping:
+				return Act::kNothing;  // made above
 			case Phase::kRestarting:
 				if (a_here.running || a_here.starting) {
 					if (a_now - q.since >= START_WAIT) {
@@ -349,7 +449,12 @@ namespace QuestRunRules
 					return Act::kAdopt;
 				}
 				if (a_here.starting) {
-					return Act::kNothing;  // its own start is under way: adopted once it runs
+					// its own start is under way: adopted once it runs; one that never runs does not hold the run's stages
+					if (a_now - q.since >= START_WAIT) {
+						q.retryAt = a_now + RETRY_EVERY;
+						return GiveUp(q, a_now);
+					}
+					return Act::kNothing;
 				}
 				if (!q.filled) {
 					if (a_now - q.since >= START_WAIT) {
@@ -358,6 +463,10 @@ namespace QuestRunRules
 					}
 					return Act::kNothing;
 				}
+				if (a_now < nextStart) {
+					return Act::kNothing;  // another start was made within START_PACE: its turn comes
+				}
+				nextStart = a_now + START_PACE;
 				q.phase = Phase::kStarting;
 				q.since = a_now;
 				++started;
@@ -390,9 +499,10 @@ namespace QuestRunRules
 					q.phase = Phase::kEnded;
 					return Act::kNothing;
 				}
-				if (a_here.starting || !q.filled || a_now < q.retryAt) {
+				if (a_here.starting || !q.filled || a_now < q.retryAt || a_now < nextStart) {
 					return Act::kNothing;
 				}
+				nextStart = a_now + START_PACE;
 				q.phase = Phase::kStarting;
 				q.since = a_now;
 				++q.counts.retries;
@@ -526,20 +636,32 @@ namespace QuestRunRules
 			       (it->second.phase == Phase::kWaiting || it->second.phase == Phase::kStarting || it->second.phase == Phase::kRestarting);
 		}
 
-		// Whether a_questId runs here as the session's run: a radiant job shared only then (its stages reported and made).
+		// Whether a_questId runs here as the session's run: a radiant job shared only then (its stages reported and made),
+		// its last word included while the host's stop of it waits for that (kStopping).
 		[[nodiscard]] bool Ours(std::uint32_t a_questId) const
 		{
 			const auto it = quests.find(a_questId);
-			return it != quests.end() && it->second.live && it->second.phase == Phase::kRunning;
+			return it != quests.end() && it->second.live && (it->second.phase == Phase::kRunning || it->second.phase == Phase::kStopping);
 		}
 
 		// Our game stopped a_questId itself (its event): a run it ran here is not run here any more. A stop made for a
-		// restart is the restart's.
+		// restart is the restart's. Nothing is left over of it to stop after a load or the host's reset.
 		void StoppedHere(std::uint32_t a_questId)
 		{
 			const auto it = quests.find(a_questId);
 			if (it != quests.end() && it->second.phase == Phase::kRunning) {
 				it->second.phase = Phase::kEnded;
+			}
+			candidates.erase(a_questId);
+		}
+
+		// Our game started a_questId by itself, for no run of the session's (its event): it is this game's own job now,
+		// not one left over from another world.
+		void StartedHere(std::uint32_t a_questId)
+		{
+			const auto it = quests.find(a_questId);
+			if (it == quests.end() || !it->second.live) {
+				candidates.erase(a_questId);
 			}
 		}
 
@@ -572,17 +694,23 @@ namespace QuestRunRules
 			return it != quests.end() ? it->second.counts : RunCounts{};
 		}
 
-		// The quests heard of, for the caller's frame (each one's Due).
+		// The quests heard of whose run is on, for the caller's frame (each one's Due), the oldest heard first (the starts'
+		// order under START_PACE).
 		[[nodiscard]] std::vector<std::uint32_t> Quests() const
 		{
-			std::vector<std::uint32_t> out;
-			out.reserve(quests.size());
+			std::vector<std::pair<std::uint64_t, std::uint32_t>> order;
+			order.reserve(quests.size());
 			for (const auto& [id, q] : quests) {
-				if (q.live || q.stop) {
-					out.push_back(id);
+				if (q.live) {
+					order.emplace_back(q.seq, id);
 				}
 			}
-			std::ranges::sort(out);
+			std::ranges::sort(order);
+			std::vector<std::uint32_t> out;
+			out.reserve(order.size());
+			for (const auto& [seq, id] : order) {
+				out.push_back(id);
+			}
 			return out;
 		}
 		[[nodiscard]] std::size_t Live() const
@@ -597,16 +725,94 @@ namespace QuestRunRules
 		[[nodiscard]] std::uint64_t NotLoadedCount() const { return notLoaded; }  // distinct, over every run
 		[[nodiscard]] std::uint64_t LocApartCount() const { return locApart; }    // distinct, over every run
 
-		// The session's runs are no longer this game's word (a welcome, the host's world new, a load, the session's end).
-		void Clear() { quests.clear(); }
+		// ---- what this game ran for runs, after the runs are gone -----------------------------------------------------
+		//
+		// A radiant job this game started or took for a run of the session's goes on running when the session's runs are
+		// no longer this game's word: the host's world new (it loaded a save from before the job, or came in again), this
+		// game's own load of a save it made while the job ran for a run (its co-save names it), the session's end. Those
+		// quests are kept (candidates); once this game is a friend in a session and START_WAIT has passed since the
+		// session's runs were asked for again (Arm), each that no run has claimed is one to stop here (Orphans): it ran for
+		// a run that the host's world does not have. A shared quest is never stopped (the caller's: forward only).
+
+		// The session's runs are no longer this game's word (a welcome, the host's world new, a load, the session's end):
+		// what this game ran for them is kept as candidates, and nothing is judged until Arm.
+		void Clear()
+		{
+			for (const auto& [id, q] : quests) {
+				if (q.live && OursPhase(q)) {
+					candidates.insert(id);
+				}
+			}
+			quests.clear();
+			armedAt.reset();
+		}
+
+		// This game loaded a save (or began a new game): its quests are that world's, and the ones it ran for the
+		// session's runs when it was saved are a_saved (its co-save; none for a new game). What ran in the world before
+		// is gone with it.
+		void Loaded(const std::vector<std::uint32_t>& a_saved)
+		{
+			quests.clear();
+			candidates = std::unordered_set<std::uint32_t>(a_saved.begin(), a_saved.end());
+			armedAt.reset();
+		}
+
+		// This game is a friend in a session and asked for the session's runs (welcomed, the host's world new, its own
+		// load): the candidates that no run claims within START_WAIT are judged then.
+		void Arm(Clock::time_point a_now) { armedAt = a_now; }
+
+		// This game is the host (its world is the session's): the jobs in it are its own, none is left over.
+		void Forsake()
+		{
+			candidates.clear();
+			armedAt.reset();
+		}
+
+		// The quests to stop here now: candidates no run claimed in START_WAIT since Arm (once each; the caller stops each
+		// that is a radiant job and runs here).
+		std::vector<std::uint32_t> Orphans(Clock::time_point a_now)
+		{
+			if (!armedAt || a_now - *armedAt < START_WAIT) {
+				return {};
+			}
+			armedAt.reset();
+			std::vector<std::uint32_t> out;
+			for (const auto id : candidates) {
+				const auto it = quests.find(id);
+				if (it == quests.end() || !it->second.live) {
+					out.push_back(id);
+				}
+			}
+			candidates.clear();
+			std::ranges::sort(out);
+			orphans += out.size();
+			return out;
+		}
+
+		// What this game runs, or ran, for the session's runs (the co-save's list: the caller keeps the radiant jobs that
+		// run): the quests that run for a run now and the candidates not judged yet.
+		[[nodiscard]] std::vector<std::uint32_t> Ran() const
+		{
+			std::vector<std::uint32_t> out(candidates.begin(), candidates.end());
+			for (const auto& [id, q] : quests) {
+				if (q.live && OursPhase(q) && !candidates.contains(id)) {
+					out.push_back(id);
+				}
+			}
+			std::ranges::sort(out);
+			return out;
+		}
+		[[nodiscard]] std::size_t Candidates() const { return candidates.size(); }
+		[[nodiscard]] std::uint64_t OrphansFound() const { return orphans; }
 
 	private:
 		struct Quest
 		{
 			std::uint32_t      run = 0;
+			std::uint64_t      seq = 0;            // the order runs were heard in (the oldest started first)
 			bool               live = false;
 			bool               filled = false;
-			bool               stop = false;     // a stop of the run this game ran: made by the next Due
+			bool               stopFirst = false;  // an earlier run's job, still stopping here, to stop before this run starts
 			bool               wasOurs = false;  // an earlier run of the quest ran here as the session's
 			bool               late = false;     // runs here after it was given up: its dropped stages to be made again
 			Phase              phase = Phase::kWaiting;
@@ -630,7 +836,29 @@ namespace QuestRunRules
 			return Act::kGiveUp;
 		}
 
+		// A quest this game started or took for the run, even one given up before it ran (it may run yet).
+		[[nodiscard]] static bool OursPhase(const Quest& a_q)
+		{
+			return a_q.phase == Phase::kRunning || a_q.phase == Phase::kStarting || a_q.phase == Phase::kRestarting ||
+			       a_q.phase == Phase::kStopping || (a_q.phase == Phase::kGaveUp && a_q.counts.startedHere);
+		}
+
+		// The run is over here: no longer heard of.
+		static void End(Quest& a_q)
+		{
+			const auto run = a_q.run;
+			const auto seq = a_q.seq;
+			a_q = Quest{};
+			a_q.run = run;
+			a_q.seq = seq;
+		}
+
 		std::unordered_map<std::uint32_t, Quest> quests;
+		std::unordered_set<std::uint32_t>        candidates;  // ran here for runs that are no longer this game's word
+		std::optional<Clock::time_point>         armedAt;
+		Clock::time_point                        nextStart{};  // no start for a run before this (START_PACE)
+		std::uint64_t                            heardSeq = 0;
+		std::uint64_t                            orphans = 0;
 		std::uint64_t                            started = 0;
 		std::uint64_t                            adopted = 0;
 		std::uint64_t                            gaveUp = 0;

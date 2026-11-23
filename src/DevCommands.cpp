@@ -179,6 +179,27 @@ namespace DevCommands
 			return Console::Run(a_args) ? "ran" : "error: the game could not run it";
 		}
 
+		// mainmenu: back to the main menu, as the pause menu's Quit to Main Menu (the engine's reset flag, RE::Main::resetGame,
+		// which SKSE's Game.QuitToMainMenu sets): the world goes; nothing here leaves the session. The rig's way to a host
+		// world that is new without loading a save on the host (a coc from the main menu after it). Not tried in a game yet:
+		// the rig reads `where` for the main menu, and the session, after it.
+		std::string MainMenu(std::string_view a_args)
+		{
+			if (!a_args.empty()) {
+				return "error: usage: mainmenu";
+			}
+			const auto main = RE::Main::GetSingleton();
+			if (!main) {
+				return "error: the game's main object is not there";
+			}
+			if (!LocalPlayer::InWorld()) {
+				return "error: not in the world";
+			}
+			logs::info("Dev: back to the main menu (the developer channel's mainmenu)");
+			main->resetGame = true;
+			return "ok";
+		}
+
 		// refs [near [radius]] | ref <hex> | use <hex> | script <hex>: doors, locks and mechanisms (WorldObjects).
 		std::string Refs(std::string_view a_args)
 		{
@@ -247,6 +268,7 @@ namespace DevCommands
 			{ "pad", Pad },
 			{ "walkto", WalkTo },
 			{ "console", ConsoleCommand },
+			{ "mainmenu", MainMenu },
 			{ "refs", Refs },
 			{ "ref", Ref },
 			{ "use", UseCommand },
@@ -271,7 +293,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex> | script <hex> | quests [pick [n] | runpick <radiant|shared> [n] [plain|loc|event] | run <id> | start <id> [here | at <location>]] | quest <editor id or hex> | clock [pick <clear|cloudy|rain|snow> [n] | weather <hex> | release] | loot [near [radius] | inv <hex> | take <holder> <item> <n> | put <holder> <item> <n> | find <book|key|weapon|misc>] | drops [list | drop <item hex> <n> | take <drop id> | count <item hex> | ref <ref hex>]";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | mainmenu | refs [near [radius]] | ref <hex> | use <hex> | script <hex> | quests [pick [n] | runpick <radiant|shared> [n] [plain|loc|event] | run <id> | start <id> [here | at <location>]] | quest <editor id or hex> | clock [pick <clear|cloudy|rain|snow> [n] | weather <hex> | release] | loot [near [radius] | inv <hex> | take <holder> <item> <n> | put <holder> <item> <n> | find <book|key|weapon|misc>] | drops [list | drop <item hex> <n> | take <drop id> | count <item hex> | ref <ref hex>]";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

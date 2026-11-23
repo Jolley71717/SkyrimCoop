@@ -20,7 +20,8 @@
 #      starts a job: the input, said). A pick the engine would not start there is stopped and passed over for the next,
 #      JOBS_PICKS of them (RIG after). Within JOBS_WAIT the host says the run with its aliases' references (live=1,
 #      fills= not -), and the VM runs the job as the host's run (phase=running, running=1) with every reference the host's
-#      aliases hold held by its own (refSame=1: the references; its locations are the location legs' and may stay its own\n#      pick where a game cannot read them), its plugin log saying "Quests: started <quest> here for the host's run ...:
+#      aliases hold held by its own (refSame=1: the references; its locations are the location legs' and may stay its own
+#      pick where a game cannot read them), its plugin log saying "Quests: started <quest> here for the host's run ...:
 #      starting". The start itself took them, not the forcing every 2 s after (the start checks): the VM's start gave
 #      every reference the host said (atStart= equal to the host's refs=; a WARN when the rest were not loaded in the VM),
 #      its log says so with N > 0 ("with N of its aliases given the host's references"), and no reference its start gave
@@ -50,7 +51,24 @@
 #  11. The counts: a start for a run the VM's game would not make (startFailed=), one it could not try (cannotStart=: an
 #      alias only the event fills had nothing to take), a run given up (runsGaveUp=), a reference not loaded when forced
 #      (notLoaded=, distinct references), a location apart while it ran (locApart=) and a location map value that is no
-#      location (locUnread=) are WARNs, named.
+#      location (locUnread=) are WARNs, named. The report line has the stop and orphan counts, offmain= (console
+#      commands run off the game's main thread), startsOffMain= and lastStartThread= (which thread the starts ran on).
+#  12. (after 6, while the job runs in both) The job's end: the host sets its last stage (console setstage: the input),
+#      which completes and stops it there, the stage and the stop in one frame. The VM makes that stage from the
+#      session's word before the job stops there (its log: "made <quest> stage <s>", then its stop), reads it completed
+#      when the host does, and the host held its stop until its stages and end were said (stopsHeld= up). A last stage
+#      that does not stop the job in the host is a WARN, and the console stops it.
+#  13. (after 12) A friend's load: a new radiant job the host starts runs in the VM (the start checks); the VM saves with
+#      it running ($SAVE_NAME), the host stops it (it stops in the VM), the VM loads that save: the job comes back from the
+#      save, and within JOBS_WAIT + 10 s the VM stops it there (orphansStopped= up, its log "stopped <quest> here: it ran
+#      for a run of the host's").
+#
+#   step_jobsreset                             the step `jobsreset` (in the default run, last before final)
+# The host's world new mid-job: the host starts a radiant job, the VM runs it as the host's run (the start checks); the
+# host's game goes to the main menu (`mainmenu`: the input) and back into a new world with coc (console placement; no save
+# is loaded, so no_host_load still holds), as when the host loads a save from before the job. Both stay in the session,
+# the VM hears the host's world is new, and within JOBS_WAIT + 10 s it stops the job (orphansStopped=, its log). Last
+# before final: the host's world after it is a new one. Not run in a game yet.
 
 JOBS_WAIT=${JOBS_WAIT:-20}    # s: a run to reach the VM and its quest to run there with the host's references (START_WAIT is 10 s)
 JOBS_QUIET=${JOBS_QUIET:-8}   # s: how long a game's own job is watched for not reaching the other game
@@ -284,6 +302,115 @@ jobs_loc_leg() {
 	wait_until "$JOBS_WAIT" jobs_still vm "$job" || fail "vm: $job stops there when the host's stops" "$(jobs_line vm "$job")"
 }
 
+# jobs_order <who> <first pattern> <then pattern>: 0 when that game's log has a line of the first pattern since the run's
+# mark, and the last one of them comes before the last line of the second (the stage made, then the job stopped)
+jobs_order() {
+	local a b
+	a=$(log_since_mark "$1" "$2|$3" | grep -nE -- "$2" | tail -1 | cut -d: -f1)
+	b=$(log_since_mark "$1" "$2|$3" | grep -nE -- "$3" | tail -1 | cut -d: -f1)
+	is_num "$a" && is_num "$b" && [ "$a" -lt "$b" ]
+}
+jobs_stop_pat() { echo "Quests: (stopped $1 here|$1 stopped here on its own)"; }
+
+# jobs_end_leg <job>: the host sets the job's last stage, which ends it there (its fragment completes and stops it: a
+# stage and the stop in one frame); the VM makes that stage from the session's word before the job stops there, and
+# reads it completed when the host does. The host's stop goes out after its stages and end (the stop held, stopsHeld=).
+# A last stage that does not stop the job in the host is a WARN, and the console stops it (the stop leg's input).
+jobs_end_leg() {
+	local job=$1 r top cur made0 held0 ended0 self=1 hc vc mpat
+	r=$(dc host "quest $job"); top=$(quests_sorted "$(field stages "$r")" | tr ' ' '\n' | grep -E '^[0-9]+$' | tail -1); cur=$(field current "$r")
+	if ! is_num "$top" || ! is_num "$cur" || [ "$top" -le "$cur" ]; then
+		warn "host: $job has a last stage past its current one to end it" "stages=$(field stages "$r") current=$cur: the end leg is not run"; return 0
+	fi
+	mpat="Quests: made $job stage $top here"
+	made0=$(quests_said vm "$mpat"); held0=$(jobs_count host stopsHeld); ended0=$(jobs_count vm endedHere)
+	quests_run "host: sets $job's last stage $top (console setstage: the input)" host "console setstage $job $top" ran || return 1
+	if wait_until 10 jobs_still host "$job"; then pass "host: $job stops itself at its last stage $top" "$(jobs_line host "$job" | cut -c1-120)"
+	else
+		self=0
+		warn "host: $job stops itself at its last stage $top" "it runs on (its last stage does not stop it): stopped by the console after it (the stop leg's input)"
+		dc host "console stopquest $job" >/dev/null
+		wait_until 10 jobs_still host "$job" || { rig_fault input "host: stops $job (console stopquest: the input)" "it still runs: $(jobs_line host "$job")"; return 1; }
+	fi
+	if wait_until $((JOBS_WAIT + 20)) jobs_still vm "$job"; then pass "vm: $job stops there when it ends in the host" "$(jobs_line vm "$job" | cut -c1-120)"
+	else fail "vm: $job stops there when it ends in the host" "$(jobs_line vm "$job")"; return 1; fi
+	if [ "$(quests_said vm "$mpat")" -gt "${made0:-0}" ] && jobs_order vm "$mpat" "$(jobs_stop_pat "$job")"; then
+		pass "vm: made $job's last stage $top from the session's word before it stopped there" "its log: 'made $job stage $top', then its stop"
+	else
+		fail "vm: made $job's last stage $top from the session's word before it stopped there" "made lines ${made0:-?}->$(quests_said vm "$mpat"); its log: $(log_since_mark vm "Quests: (made $job stage|stopped $job here|$job stopped here)" | tail -3 | cut -c1-160 | tr '\n' '|')"
+	fi
+	hc=$(field completed "$(dc host "quest $job")"); vc=$(field completed "$(dc vm "quest $job")")
+	if [ "$hc" = 1 ]; then expect_eq "vm: $job is completed there as in the host (its end, said before the stop)" "$vc" 1
+	else echo "     host: $job is not completed at its last stage (completed=${hc:-?}); the VM reads completed=${vc:-?}"; fi
+	if [ "$self" = 1 ] && is_num "$held0"; then expect_ge "host: held its stop until its stages and end were said (stopsHeld=)" "$(jobs_count host stopsHeld)" $((held0 + 1)); fi
+	echo "     vm: endedHere=${ended0:-?}->$(jobs_count vm endedHere) stopsMade=$(jobs_count vm stopsMade); host: endsSaid=$(jobs_count host endsSaid)"
+}
+
+# jobs_orphan_check <job> <orphans before> <lines before> <why>: within JOBS_WAIT + 10 s (the session's runs had 10 s to
+# claim it) the VM stops the job it ran for a run the host's world has no more: it stops there, orphansStopped= is up,
+# and its log says so
+jobs_orphan_check() {
+	local job=$1 o0=$2 l0=$3 why=$4 pat
+	pat="Quests: stopped $job here: it ran for a run of the host.s"
+	if wait_until $((JOBS_WAIT + 10)) jobs_still vm "$job"; then pass "vm: $job stops there after $why (no run of the host's claims it)" "$(jobs_line vm "$job" | cut -c1-120)"
+	else fail "vm: $job stops there after $why (no run of the host's claims it)" "it runs on: $(jobs_line vm "$job" | cut -c1-160); candidates=$(jobs_count vm candidates)"; return 1; fi
+	if is_num "$o0"; then expect_ge "vm: stopped it as a job no run claims (orphansStopped=)" "$(jobs_count vm orphansStopped)" $((o0 + 1))
+	else fail "vm: stopped it as a job no run claims (orphansStopped=)" "no orphansStopped= before: $(dc vm quests | cut -c1-120)"; fi
+	expect_ge "vm: its log says it stopped $job as no run's" "$(quests_said vm "$pat")" $((${l0:-0} + 1))
+}
+
+# jobs_load_leg: a radiant job the host starts runs in the VM; the VM saves with it running, the host stops the job (it
+# stops in the VM), and the VM loads that save: the job comes back running from the save, and the VM stops it there.
+jobs_load_leg() {
+	local job o0 l0 r
+	jobs_begin radiant host || return 1
+	job=$JOB
+	jobs_start_leg "$job" 0 || { dc host "console stopquest $job" >/dev/null; return 1; }
+	quests_run "vm: saves with $job running for the host's run" vm "console save $SAVE_NAME" ran || { dc host "console stopquest $job" >/dev/null; return 1; }
+	sleep 8
+	[ "$(dc vm ping)" = pong ] || { fail "vm: the game lives through its save" "its dev channel went silent after the save"; return 1; }
+	dc host "console stopquest $job" >/dev/null
+	wait_until 10 jobs_still host "$job" || { rig_fault input "host: stops $job (console stopquest: the input)" "it still runs: $(jobs_line host "$job")"; return 1; }
+	if wait_until "$JOBS_WAIT" jobs_still vm "$job"; then pass "vm: $job stops there when the host's stops" "$(jobs_line vm "$job" | cut -c1-120)"
+	else fail "vm: $job stops there when the host's stops" "$(jobs_line vm "$job")"; return 1; fi
+	o0=$(jobs_count vm orphansStopped); l0=$(quests_said vm "Quests: stopped $job here: it ran for a run of the host.s")
+	r=$(dc vm "console load $SAVE_NAME"); [ "$r" = ran ] || { rig_broken input "vm: loads its save ($job running in it)" "'console load' replied '$r'"; return 1; }
+	sleep 5
+	if wait_until 90 in_world vm; then pass "vm: back in the world after its load" "$(dc vm where | cut -c1-80)"; else fail "vm: back in the world after its load" "$(dc vm where | cut -c1-160)"; return 1; fi
+	wait_until 30 welcomed vm || { fail "vm: still in the session after its load" "$(dc vm 'session status' | cut -c1-160)"; return 1; }
+	echo "     vm: its log after the load: $(log_since_mark vm 'Quests: the loaded save ran' | tail -1 | cut -c1-200)"
+	jobs_orphan_check "$job" "$o0" "$l0" "its load (the save ran it for a run that is over)"
+}
+
+# step_jobsreset: the host's world new while a job runs (the host's game to the main menu, then coc: its world started
+# anew, as when it loads a save from before the job; the host never loads a save on the rig): the VM stops the job it ran
+# for the host's run, which that world does not have. Last before final: the host's world after it is a new one.
+step_jobsreset() {
+	local job o0 l0 w0 r
+	section "jobsreset: the host's world new mid-job: the VM stops the job it ran for the host's run"
+	for r in host vm; do jobs_status $r || return; done
+	JOBS_SKIP=""
+	jobs_begin radiant host || return
+	job=$JOB
+	jobs_start_leg "$job" 0 || { dc host "console stopquest $job" >/dev/null; return; }
+	o0=$(jobs_count vm orphansStopped); l0=$(quests_said vm "Quests: stopped $job here: it ran for a run of the host.s")
+	w0=$(quests_said vm "Quests: the host.s world is new")
+	r=$(dc host mainmenu); [ "$r" = ok ] || { rig_broken input "host: to the main menu (mainmenu: the input)" "replied '$r'"; dc host "console stopquest $job" >/dev/null; return; }
+	wait_until 60 _jobs_out host || { rig_fault input "host: to the main menu (mainmenu: the input)" "still in the world: $(dc host where | cut -c1-120)"; return; }
+	pass "host: at the main menu (mainmenu: the input)" "$(dc host where | cut -c1-80)"
+	place host "host: in the world again, a new one (coc from the main menu: console placement)" || return
+	no_host_load "jobsreset: "
+	if wait_until 60 joined_both; then pass "both: still in one session after the host's world is new" "$(dc host 'session status' | cut -c1-80)"
+	else rig_fault state "both: still in one session after the host's world is new" "host: $(dc host 'session status' | cut -c1-100); vm: $(dc vm 'session status' | cut -c1-100)"; return; fi
+	if wait_until "$JOBS_WAIT" _jobs_newer vm "Quests: the host.s world is new" "$w0"; then pass "vm: heard the host's world is new" "its log: 'the host's world is new'"
+	else fail "vm: heard the host's world is new" "log lines ${w0:-?}->$(quests_said vm "Quests: the host.s world is new")"; fi
+	jobs_orphan_check "$job" "$o0" "$l0" "the host's world is new (the host's run is in no world now)"
+	jobs_still host "$job" || dc host "console stopquest $job" >/dev/null
+	place vm "jobsreset: the VM's player near the host's again (coc: console placement)" || true
+}
+_jobs_out() { ! in_world "$1"; }
+_jobs_newer() { [ "$(quests_said "$1" "$2")" -gt "${3:-0}" ]; }
+
 jobs_counts() {
 	local s f; s=$(dc "$1" quests)
 	if [ "$(field startFailed "$s")" = 0 ]; then pass "$1: every start for a run took" "startFailed=0"
@@ -302,7 +429,7 @@ jobs_counts() {
 			esac
 		fi
 	done
-	echo "     $1: $(tr ' ' '\n' <<<"$s" | grep -E '^(runs|runsSent|runsHeard|runsStarted|runsAdopted|runsGaveUp|runsRetried|forced|forcedAtStart|locsAtStart|ownAtStart|startFailed|cannotStart|stopsMade|restarts|rewanted|notLoaded|locApart|rewritten|locSlot|locMap|locChecked|locUnread|lastRun)=' | tr '\n' ' ')"
+	echo "     $1: $(tr ' ' '\n' <<<"$s" | grep -E '^(runs|runsSent|runsHeard|runsStarted|runsAdopted|runsGaveUp|runsRetried|forced|forcedAtStart|locsAtStart|ownAtStart|startFailed|cannotStart|stopsMade|restarts|rewanted|notLoaded|locApart|rewritten|locSlot|locMap|locChecked|locUnread|stopsHeld|endsSaid|endedHere|stopsOld|orphansStopped|candidates|lastOrphan|offmain|startsOffMain|lastStartThread|lastRun)=' | tr '\n' ' ')"
 }
 
 step_jobs() {
@@ -327,8 +454,15 @@ step_jobs() {
 				fi
 			fi
 		fi
-		dc host "console stopquest $job" >/dev/null  # runs in neither game for the rest of the run
+		if jobs_running host "$job" && jobs_ours "$job"; then
+			section "jobs: the job ends in the host at its last stage: the VM makes that stage before the job stops there"
+			jobs_end_leg "$job"
+		fi
+		jobs_still host "$job" || dc host "console stopquest $job" >/dev/null  # runs in neither game for the rest of the run
 	fi
+
+	section "jobs: the VM loads a save it made while a job ran for the host's run, over now: it stops the job there"
+	jobs_load_leg
 
 	section "jobs: a radiant job the VM's game starts stays its own"
 	jobs_own_leg
@@ -379,9 +513,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	JOBS=" BQ01 BQ02 BQ03 LQ01 EQ01 EQ02 "
 	fake() {  # fake <share> [quest the host's engine never starts] [leak] [locs] [loc apart] [the VM's locs] [plain jobs' locs]
 		FK=$d/fake; rm -rf "$FK"; mkdir -p "$FK"; SHARE=$1; NOSTART=${2:-}; LEAK=${3:-0}; LOCS=${4:-1}; LOCAPART=${5:-0}; JOBS_SKIP=""
-		LOCSVM=${6:-$LOCS}; PLAINLOCS=${7:-0}
+		LOCSVM=${6:-$LOCS}; PLAINLOCS=${7:-0}; ENDBUG=0; ORPHANBUG=0; STOPSELF=1
 		for w in host vm; do echo 0 > "$FK/$w.made"; : > "$FK/$w.log"; done
-		echo 0 > "$FK/away"; echo 0 > "$FK/runs"; echo 0 > "$FK/stops"; echo 0 > "$FK/adopted"
+		echo 0 > "$FK/away"; echo 0 > "$FK/runs"; echo 0 > "$FK/stops"; echo 0 > "$FK/adopted"; for c in orphans held ended menu; do echo 0 > "$FK/$c"; done; : > "$FK/saved"
 	}
 	fget() { cat "$FK/$1.$2.$3" 2>/dev/null || echo "$4"; }   # fget <who> <quest> <what> <default>
 	fput() { echo "$4" > "$FK/$1.$2.$3"; }
@@ -399,7 +533,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		local w=$1 q=$2 n locs=0
 		[ "$w" = host ] && [ "$q" = "$NOSTART" ] && return 0
 		case "$q" in EQ*) [ "$w" = host ] && [ "${3:-}" != here ] && return 0 ;; esac  # its event's location: only with a place
-		fput "$w" "$q" running 1; fput "$w" "$q" done -; fput "$w" "$q" current 0
+		fput "$w" "$q" running 1; fput "$w" "$q" done -; fput "$w" "$q" current 0; fput "$w" "$q" completed 0
 		if [ "$w" = vm ]; then
 			[ "$LEAK" = 1 ] && fput host "$q" running 1
 			return 0
@@ -409,7 +543,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		haslocs "$q" && locs=1
 		case $SHARE in
 			1)
-				fput vm "$q" running 1; fput vm "$q" done -; fput vm "$q" current 0; fput vm "$q" phase running; fput vm "$q" run "$n"; fput vm "$q" started 1
+				fput vm "$q" running 1; fput vm "$q" done -; fput vm "$q" current 0; fput vm "$q" phase running; fput vm "$q" run "$n"; fput vm "$q" started 1; fput vm "$q" completed 0
 				fput vm "$q" atStart 1; fput vm "$q" missed 0; fput vm "$q" refsame 1
 				if [ $locs = 1 ] && [ "$LOCSVM" != 1 ]; then fput vm "$q" locAt 0; fput vm "$q" locSame 0; fput vm "$q" same 0  # unread: its own pick
 				elif [ "$LOCAPART" = 1 ] && [ $locs = 1 ]; then fput vm "$q" locAt 0; fput vm "$q" locSame 0; fput vm "$q" same 0
@@ -435,9 +569,30 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	fstage() {  # fstage <who> <quest> <stage>
 		local w=$1 q=$2 s=$3 o; o=$(other "$w")
 		fapp "$w" "$q" done "$s"; fput "$w" "$q" current "$s"
+		# a job's last stage (40) in the host completes and stops it there in the same frame (STOPSELF=1). ENDBUG=1: the
+		# stop overtakes the stage (sent at once, the stage at the frame's end; the VM forgets the stage it had not made)
+		if [ "$w" = host ] && isjob "$q" && [ "$s" = 40 ] && [ "$STOPSELF" = 1 ]; then
+			fput host "$q" completed 1
+			if [ "$ENDBUG" = 1 ]; then fstop host "$q"; return 0; fi
+			if shares "$q"; then
+				fapp vm "$q" done "$s"; fput vm "$q" current "$s"; fapp vm "$q" session "$s"; fbump vm.made
+				flog vm "Quests: made $q stage $s here (the session's word)"; fput vm "$q" completed 1
+				fput vm "$q" running 0; fput vm "$q" phase none; fput vm "$q" session -; fbump ended
+				flog vm "Quests: $q stopped here on its own at its end (the host's run $(fget host "$q" run 0) of the radiant job is over too)"
+			fi
+			fput host "$q" running 0; fput host "$q" live 0; fbump held
+			return 0
+		fi
 		shares "$q" || return 0
 		fapp "$o" "$q" done "$s"; fput "$o" "$q" current "$s"; fapp vm "$q" session "$s"
 		echo $(($(cat "$FK/$o.made") + 1)) > "$FK/$o.made"; flog "$o" "Quests: made $q stage $s here (the session's word)"
+	}
+	# frun_over <quest>: the VM's game runs the job for a run that is over (its load, the host's world new): stopped there
+	# as no run's, unless ORPHANBUG=1 (today's: it runs on forever)
+	frun_over() {
+		[ "$SHARE" = 1 ] && [ "$ORPHANBUG" != 1 ] && [ "$(fget host "$1" live 0)" != 1 ] || return 0
+		fput vm "$1" running 0; fput vm "$1" phase none; fbump orphans
+		flog vm "Quests: stopped $1 here: it ran for a run of the host's that the host's world does not have now (a load, or the host's world new)"
 	}
 	fpick() {  # fpick <class> <n> <mode>
 		local list cls=$1 n=$2 i=0 q
@@ -457,7 +612,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 			ping) echo pong ;;
 			quests)
 				local slot=+0x28 map=verified ls=$LOCS; [ "$w" = vm ] && ls=$LOCSVM; [ "$ls" = 1 ] || { slot=none; map=unread; }
-				echo "installed=1 host=$([ "$w" = host ] && echo 1 || echo 0) made=$(cat "$FK/$w.made") moved=0 stuck=0 unmade=0 runs=1 runsSent=4 runsHeard=4 runsStarted=1 runsAdopted=$(cat "$FK/adopted") runsGaveUp=0 runsRetried=0 forced=2 forcedAtStart=2 locsAtStart=1 ownAtStart=0 startFailed=0 cannotStart=0 stopsMade=$(cat "$FK/stops") restarts=0 rewanted=0 notLoaded=0 locApart=0 rewritten=0 locSlot=$slot locMap=$map locChecked=5/5 locUnread=0 lastRun=none" ;;
+				echo "installed=1 host=$([ "$w" = host ] && echo 1 || echo 0) made=$(cat "$FK/$w.made") moved=0 stuck=0 unmade=0 runs=1 runsSent=4 runsHeard=4 runsStarted=1 runsAdopted=$(cat "$FK/adopted") runsGaveUp=0 runsRetried=0 forced=2 forcedAtStart=2 locsAtStart=1 ownAtStart=0 startFailed=0 cannotStart=0 offmain=0 stopsMade=$(cat "$FK/stops") restarts=0 rewanted=0 notLoaded=0 locApart=0 rewritten=0 locSlot=$slot locMap=$map locChecked=5/5 locUnread=0 stopsHeld=$(cat "$FK/held") endsSaid=0 endedHere=$(cat "$FK/ended") stopsOld=0 orphansStopped=$(cat "$FK/orphans") candidates=0 lastOrphan=none startsOffMain=0 lastStartThread=main lastRun=none" ;;
 			"quests runpick "*)
 				read -r _ _ cls n mode <<<"$c"
 				fpick "$cls" "$n" "${mode:-plain}" ;;
@@ -473,17 +628,34 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 				fi ;;
 			"quest "*)
 				q=${c#quest }
-				echo "quest=$q id=00012001 type=0 class=shared enabled=$(fget "$w" "$q" running 0) completed=0 failed=0 current=$(fget "$w" "$q" current 0) stages=0,10,20,30,40 done=$(fget "$w" "$q" done -) seen=- objectives=- session=$(fget "$w" "$q" session -) sessionObjectives=- sessionEnd=- apart=0" ;;
+				echo "quest=$q id=00012001 type=0 class=shared enabled=$(fget "$w" "$q" running 0) completed=$(fget "$w" "$q" completed 0) failed=0 current=$(fget "$w" "$q" current 0) stages=0,10,20,30,40 done=$(fget "$w" "$q" done -) seen=- objectives=- session=$(fget "$w" "$q" session -) sessionObjectives=- sessionEnd=- apart=0" ;;
 			"console setstage "*) read -r _ _ q s <<<"$c"; fstage "$w" "$q" "$s"; echo ran ;;
 			"console stopquest "*) read -r _ _ q <<<"$c"; fstop "$w" "$q"; echo ran ;;
 			"session leave") echo 1 > "$FK/away"; for q in $JOBS DA05 DA06; do [ "$(fget vm "$q" phase none)" = running ] && fput vm "$q" phase none; done; echo left ;;
 			standins) echo "standin=00000000" ;;
 			"session status") echo "role=x connection=up welcomed=1 players=1" ;;
+			"console save "*)  # the VM's save: the jobs its game runs now
+				: > "$FK/saved"; for q in $JOBS; do [ "$(fget vm "$q" running 0)" = 1 ] && echo "$q" >> "$FK/saved"; done; echo ran ;;
+			"console load "*)  # the VM's load: the save's jobs run again, the session's word on them gone; one no run claims stops
+				n=$(wc -l < "$FK/saved" | tr -d ' ')
+				flog vm "Quests: the loaded save ran $n radiant job(s) for the session's runs when it was saved: each stops here unless a run of the host's claims it"
+				for q in $(cat "$FK/saved"); do fput vm "$q" running 1; fput vm "$q" phase none; fput vm "$q" session -; frun_over "$q"; done
+				echo ran ;;
+			mainmenu)  # the host's game to the main menu: its world and its runs go
+				for q in $JOBS; do fput host "$q" running 0; fput host "$q" live 0; done; echo 1 > "$FK/menu"; echo ok ;;
+			"console coc "*)
+				if [ "$w" = host ] && [ "$(cat "$FK/menu")" = 1 ]; then  # a new world: the VM hears it, its jobs for runs are no run's
+					echo 0 > "$FK/menu"
+					flog vm "Quests: the host's world is new (player 1 loaded a save or came in): its quests follow"
+					for q in $JOBS; do [ "$(fget vm "$q" phase none)" = running ] && { fput vm "$q" phase none; frun_over "$q"; }; done
+				fi
+				echo ran ;;
+			where) if [ "$w" = host ] && [ "$(cat "$FK/menu")" = 1 ]; then echo "error: not in the world"; else echo "cell=0000003C x=0 y=0 z=0 modal=0"; fi ;;
 			*) echo "error: the fake has no '$c'" ;;
 		esac
 	}
 	log_since_mark() { grep -aE -- "$2" "$FK/$1.log"; }
-	joined_both() { :; }; gone_from() { :; }
+	joined_both() { :; }; gone_from() { :; }; no_host_load() { pass "${1}the host's game loaded no save since it started" "the fake"; }
 	vm_join() {  # the VM back in: with the mod at work it takes the host's live runs its game runs
 		local q
 		echo 0 > "$FK/away"
@@ -516,15 +688,30 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	# the whole step: all passes with the mod at work, and fails with each part of it missing
 	fake 1; o=$(run 2 step_jobs)
 	t "step: all well, no FAIL, RIG or WARN" "$(count "$o" '^(FAIL|RIG|RIGFAULT|WARN) ')" 0
-	t "step: ... the VM runs each run as the host's, with its references (job, again, rejoin, loc job, event job, shared quest)" "$(count "$o" '^PASS vm: runs .* as the host.s run, its aliases holding')" 6
-	t "step: ... each by the host's run (its log), never its own start" "$(count "$o" '^PASS vm: .* runs there by the host.s run')" 6
-	t "step: ... each start gave the host's references itself (job, again, loc, event, shared)" "$(count "$o" '^PASS vm: its start gave every reference'),$(count "$o" '^PASS vm: its log says its start gave'),$(count "$o" '^PASS vm: no reference its start gave had to be forced')" 5,5,5
+	t "step: ... the VM runs each run as the host's, with its references (job, again, rejoin, load job, loc job, event job, shared quest)" "$(count "$o" '^PASS vm: runs .* as the host.s run, its aliases holding')" 7
+	t "step: ... each by the host's run (its log), never its own start" "$(count "$o" '^PASS vm: .* runs there by the host.s run')" 7
+	t "step: ... each start gave the host's references itself (job, again, load job, loc, event, shared)" "$(count "$o" '^PASS vm: its start gave every reference'),$(count "$o" '^PASS vm: its log says its start gave'),$(count "$o" '^PASS vm: no reference its start gave had to be forced')" 6,6,6
 	t "step: ... the location jobs started at the host's locations" "$(count "$o" '^PASS host: says .*.s locations'),$(count "$o" '^PASS vm: its start gave every location'),$(count "$o" '^PASS vm: .*.s location aliases hold the host.s locations')" 2,2,2
 	t "step: ... stages both ways, on the job and the shared quest, made by the session's word" "$(count "$o" '^PASS .*was made here by the session.s word')" 4
 	t "step: ... the host's stop stopped it in the VM" "$(count "$o" '^PASS vm: BQ01 stops there when the host.s stops')" 1
 	t "step: ... begun again, a new run" "$(count "$o" '^PASS host: BQ01 begun again is a new run')" 1
 	t "step: ... the rejoin took the job (runsAdopted=)" "$(count "$o" '^PASS vm: took the job its game ran as the host.s run')" 1
-	t "step: ... the VM's own job stayed its own" "$(count "$o" '^PASS host: the VM.s own job BQ02 does not run here'),$(count "$o" '^PASS vm: its own job is no run of the session.s')" 1,1
+	t "step: ... the VM's own job stayed its own" "$(count "$o" '^PASS host: the VM.s own job BQ03 does not run here'),$(count "$o" '^PASS vm: its own job is no run of the session.s')" 1,1
+	t "step: ... the job's last stage ended it in the host, and the VM made that stage, completed, before it stopped there" "$(count "$o" '^PASS host: BQ01 stops itself at its last stage 40'),$(count "$o" '^PASS vm: BQ01 stops there when it ends in the host'),$(count "$o" '^PASS vm: made BQ01.s last stage 40 from the session.s word before it stopped there'),$(count "$o" '^PASS vm: BQ01 is completed there as in the host'),$(count "$o" '^PASS host: held its stop until its stages and end were said')" 1,1,1,1,1
+	t "step: ... the VM's load of a save that ran a job for a run now over stopped it there" "$(count "$o" '^PASS vm: BQ02 stops there after its load'),$(count "$o" '^PASS vm: stopped it as a job no run claims \(orphansStopped=\)'),$(count "$o" '^PASS vm: its log says it stopped BQ02 as no run.s')" 1,1,1
+	# today's behaviour (before this change) fails each new leg: the stop overtakes the job's last stage and the VM forgets
+	# it; a job the VM's load brings back runs on forever; a job the host's world no longer has runs on forever
+	fake 1; ENDBUG=1; o=$(run 2e step_jobs)
+	t "step: a stop that overtakes the job's last stage (the VM stops it without making it) fails the end leg" "$(count "$o" '^FAIL vm: made BQ01.s last stage 40 from the session.s word before it stopped there'),$(count "$o" '^FAIL vm: BQ01 is completed there as in the host')" 1,1
+	fake 1; ORPHANBUG=1; o=$(run 2o step_jobs)
+	t "step: a job the VM's load brings back running on fails the load leg" "$(count "$o" '^FAIL vm: BQ02 stops there after its load')" 1
+	fake 1; STOPSELF=0; o=$(run 2s step_jobs)
+	t "step: a last stage that does not stop the job: a WARN, the console stops it, the VM made the stage first" "$(count "$o" '^WARN host: BQ01 stops itself at its last stage 40'),$(count "$o" '^WARN '),$(count "$o" '^(FAIL|RIG|RIGFAULT) '),$(count "$o" '^PASS vm: made BQ01.s last stage 40 from the session.s word before it stopped there')" 1,1,0,1
+	fake 1; o=$(run 6 step_jobsreset)
+	t "reset: all well, no FAIL, RIG or WARN" "$(count "$o" '^(FAIL|RIG|RIGFAULT|WARN) ')" 0
+	t "reset: the VM stopped the job the host's new world does not have" "$(count "$o" '^PASS vm: heard the host.s world is new'),$(count "$o" '^PASS vm: BQ01 stops there after the host.s world is new'),$(count "$o" '^PASS vm: stopped it as a job no run claims'),$(count "$o" '^PASS host: at the main menu')" 1,1,1,1
+	fake 1; ORPHANBUG=1; o=$(run 6o step_jobsreset)
+	t "reset: a job the host's new world does not have running on in the VM fails" "$(count "$o" '^FAIL vm: BQ01 stops there after the host.s world is new')" 1
 	fake 2; o=$(run 3 step_jobs)
 	t "step: the VM's own start of the same quest never passes for the host's run" "$(count "$o" '^PASS vm: runs .* as the host.s run'),$( [ "$(count "$o" '^FAIL vm: runs BQ01 as the host.s run')" -ge 1 ] && echo failed)" 0,failed
 	fake 3; o=$(run 3b step_jobs)
@@ -534,7 +721,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	fake 1 "" 0 1 1; o=$(run 4b step_jobs)
 	t "step: a VM start that keeps its own location fails the location legs (its locations differ), not the reference checks" "$(count "$o" '^FAIL vm: (LQ01|EQ01).s location aliases hold the host.s locations'),$(count "$o" '^FAIL vm: its start gave every location'),$(count "$o" '^FAIL vm: runs .* as the host.s run')" 2,2,0
 	fake 1 "" 0 1 0 0 1; o=$(run 4d step_jobs)
-	t "step: a host that shares locations with a VM that cannot: a WARN, the plain legs (jobs with a location alias) pass, no location legs" "$(count "$o" '^WARN vm: reads and writes quests. locations'),$(count "$o" '^WARN '),$(count "$o" '^(FAIL|RIG|RIGFAULT) '),$(count "$o" '^PASS vm: runs .* as the host.s run, its aliases holding'),$(count "$o" '^(PASS|FAIL) host: says .*.s locations')" 1,1,0,4,0
+	t "step: a host that shares locations with a VM that cannot: a WARN, the plain legs (jobs with a location alias) pass, no location legs" "$(count "$o" '^WARN vm: reads and writes quests. locations'),$(count "$o" '^WARN '),$(count "$o" '^(FAIL|RIG|RIGFAULT) '),$(count "$o" '^PASS vm: runs .* as the host.s run, its aliases holding'),$(count "$o" '^(PASS|FAIL) host: says .*.s locations')" 1,1,0,5,0
 	fake 1 "" 0 0; o=$(run 4c step_jobs)
 	t "step: a game that cannot share locations is a WARN, and the location legs are not run" "$(count "$o" '^WARN .*reads and writes quests. locations'),$(count "$o" '^(PASS|FAIL) host: says .*.s locations'),$(count "$o" '^(FAIL|RIG)')" 2,0,0
 	fake 1 "" 1; o=$(run 5 jobs_own_leg)
@@ -555,6 +742,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "jobs runs by default" "$(case " $OPTIN_STEPS " in *" jobs "*) echo no;; *) echo yes;; esac)" yes
 	t "jobs has its line" "$([ -n "${STEP_INFO[jobs]:-}" ] && echo yes)" yes
 	t "jobs is not run twice (it starts quests for good)" "$(grep -qE 'RERUN_STEPS=.*jobs' "$(dirname "${BASH_SOURCE[0]}")/../smoke.sh" && echo yes || echo no)" no
+	t "jobsreset is the last step before final (the host's world after it is a new one)" "$(case " $STEPS " in *" jobsreset final ") echo yes;; esac)" yes
+	t "jobsreset needs a session, runs by default and has its line" "$(case " $SESSION_STEPS " in *" jobsreset "*) echo s;; esac)$(case " $OPTIN_STEPS " in *" jobsreset "*) ;; *) echo d;; esac)$([ -n "${STEP_INFO[jobsreset]:-}" ] && echo l)" sdl
 	[ $bad -eq 0 ] && echo "jobs.sh selftest: all ok" || echo "jobs.sh selftest: FAILED"
 	rm -rf "$d"; exit $bad
 fi

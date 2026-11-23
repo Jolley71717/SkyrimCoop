@@ -122,11 +122,26 @@ namespace QuestSync
 			std::uint64_t restartsMade = 0;  // radiant jobs stopped here to start again with the host's location
 			std::uint64_t rewanted = 0;      // the session's word on a quest made again when its run came to run late
 			std::uint64_t locUnread = 0;     // a quest's location map held a value that is no location (not used)
+			std::uint64_t stopsHeld = 0;     // the host's game: radiant jobs' stops held STOP_LINGER, said after their stages
+			std::uint64_t endsSaid = 0;      // ... their ends (objectives, completed, failed) said with the stop
+			std::uint64_t endedHere = 0;     // a friend's game: radiant jobs the host's run of ended that stopped here on their own
+			std::uint64_t stopsOld = 0;      // ... an earlier run's job stopped here for a new run of it
+			std::uint64_t orphansStopped = 0;  // ... radiant jobs started for a run that no run claimed after a reset or load
+			std::uint64_t startsOffMain = 0;   // starts for a run made off the game's main thread
 		};
 		Counts      counts;
 		QuestRunRules::Keeper   keeper;    // the host's game: the runs it says
 		QuestRunRules::Follower follower;  // a friend's game: the host's runs, made here
 		std::string lastRun = "none";
+		std::string lastStartThread = "none";  // where the last start for a run ran: main or off (the tick's thread)
+		std::string lastOrphan = "none";
+
+		// The co-save (WriteCoSave, ReadCoSave): the radiant jobs this game runs, or ran, for the session's runs, so that a
+		// load of a save made while one ran for a run stops it when no run claims it. Kept by the tick (savedRuns, every
+		// poll) and read by the save on the main thread; the load's list is taken by AfterLoad.
+		std::mutex              coSaveLock;
+		std::vector<RE::FormID> savedRuns;   // under coSaveLock
+		std::vector<RE::FormID> loadedRuns;  // under coSaveLock
 
 		// Location aliases (QuestRunRules::LocProbe, LocCheck): the slot of a location alias's record that holds its forced
 		// location (found at the catalog, or none), every location of the load order (a value read from the engine is used
@@ -698,11 +713,16 @@ namespace QuestSync
 			bool       result = false;
 			const bool started = a_quest->EnsureQuestStarted(result, true);
 			NoteThread();
+			// the engine writes of a start (the records, the start, the forcing after) run from the tick: which thread that
+			// was is said with each start, for the rig to read (the frame hook moves them to the main thread)
+			const bool onMain = GameThread::IsLoadThread();
+			lastStartThread = onMain ? "main" : "off";
+			counts.startsOffMain += onMain ? 0 : 1;
 			const bool took = started || result;
 			logs::info("Quests: started {} here for the host's run {} with {} of its aliases given the host's references, {} of its location aliases the host's "
-					   "locations and {} made empty as the host's ({} this game's own pick, {} of them not loaded here): {}",
+					   "locations and {} made empty as the host's ({} this game's own pick, {} of them not loaded here), on {} thread: {}",
 				QuestName(id), follower.RunOf(id), plan.note.refs, plan.note.locs, plan.note.nones, plan.note.own, plan.note.notLoaded,
-				took ? "starting" : "the game would not start it (tried again later)");
+				onMain ? "the game's main" : "a thread other than the game's main", took ? "starting" : "the game would not start it (tried again later)");
 			if (!took) {
 				++counts.startFailed;
 				Restore(done);
@@ -1110,7 +1130,8 @@ namespace QuestSync
 					seen.erase(event.quest);
 				}
 			}
-			// The runs: the host's game says its world's again (its snapshot), a friend's hears the session's again.
+			// The runs: the host's game says its world's again (its snapshot), a friend's hears the session's again (what
+			// it ran for the runs kept, to stop what no run claims once it is armed again).
 			keeper.Clear();
 			follower.Clear();
 			RestoreRecords();
@@ -1122,12 +1143,92 @@ namespace QuestSync
 			++counts.runsSent;
 		}
 
+		// What this game has to report so far, said now (before a run word that must come after it).
+		void Flush(const SendFn& a_send, std::vector<Entry>& a_news)
+		{
+			if (a_news.empty()) {
+				return;
+			}
+			counts.sent += a_news.size();
+			for (auto& packet : Protocol::Batches(a_news, Protocol::MessageType::kQuests)) {
+				a_send(std::move(packet));
+			}
+			a_news.clear();
+		}
+
+		// The host's game: a radiant job's run is over (its stop held STOP_LINGER, or it began again). Its end as the quest
+		// holds it now (its objectives, completed or failed: the poll reads only quests that run) is offered, the stages and
+		// end so far are said, then the stop: the server and every friend hear the run's last word before its end.
+		void EndRun(const SendFn& a_send, const Protocol::QuestRun& a_stop, Clock::time_point a_now, std::vector<Entry>& a_news)
+		{
+			const auto id = a_stop.questId;
+			std::size_t ends = 0;
+			if (const auto quest = QuestOf(id)) {
+				for (const auto& entry : QuestRules::ObjectivesAndEnd(ReadOf(quest))) {
+					if (ApartSay(entry.questId, a_now) == QuestRules::Apart::Say::kReport && view.Offer(entry)) {
+						a_news.push_back(entry);
+						++ends;
+					}
+				}
+			}
+			counts.endsSaid += ends;
+			Flush(a_send, a_news);
+			SendRun(a_send, a_stop);
+			ForgetQuest(id);
+			logs::info("Quests: the radiant job {} stopped here: its run {} is over in every game (said after its stages and {} of its end)", QuestName(id),
+				a_stop.run, ends);
+		}
+
+		// A friend's game: the radiant jobs it started or took for runs that the session's runs no longer claim (the host's
+		// world new, this game's load), stopped here. A shared quest is never stopped (forward only).
+		void StopOrphans(Clock::time_point a_now)
+		{
+			for (const auto id : follower.Orphans(a_now)) {
+				const auto quest = QuestOf(id);
+				if (!quest || ClassOf(quest) != Class::kRadiant || !quest->IsEnabled()) {
+					continue;
+				}
+				if (Run(std::format("stopquest {}", EditorId(quest)))) {
+					++counts.orphansStopped;
+					lastOrphan = QuestName(id);
+					logs::info("Quests: stopped {} here: it ran for a run of the host's that the host's world does not have now (a load, or the host's world new)",
+						QuestName(id));
+				}
+			}
+		}
+
+		// The radiant jobs this game runs, or ran, for the session's runs and that run now: what the next save's co-save
+		// names (read on the main thread as the game saves).
+		void NoteRan()
+		{
+			std::vector<RE::FormID> ran;
+			if (!host) {
+				for (const auto id : follower.Ran()) {
+					const auto quest = QuestOf(id);
+					if (quest && ClassOf(quest) == Class::kRadiant && quest->IsEnabled()) {
+						ran.push_back(id);
+					}
+				}
+			}
+			std::lock_guard lock{ coSaveLock };
+			savedRuns = std::move(ran);
+		}
+
+		std::vector<RE::FormID> TakeLoadedRuns()
+		{
+			std::lock_guard lock{ coSaveLock };
+			return std::exchange(loadedRuns, {});
+		}
+
 		// The host's game: a run of a_quest begun (its start, or its snapshot), said; a radiant job's earlier run's word
 		// forgotten here as at the server, and this run's stages seen so far said again (the start event may come after
-		// the start-up stage's), its objectives polled anew.
+		// the start-up stage's), its objectives polled anew. An earlier run's stop still held is said first.
 		void BeginRun(const SendFn& a_send, RE::TESQuest* a_quest, Class a_class, bool a_fresh, Clock::time_point a_now, std::vector<Entry>& a_news)
 		{
 			const auto id = a_quest->GetFormID();
+			if (const auto stop = keeper.StopNow(id)) {
+				EndRun(a_send, *stop, a_now, a_news);
+			}
 			const auto run = keeper.Started(id, a_class == Class::kRadiant, a_fresh);
 			SendRun(a_send, run);
 			lastRun = std::format("{} run {}", QuestName(id), run.run);
@@ -1189,6 +1290,11 @@ namespace QuestSync
 		host = a_host;
 		view.ClearAll();
 		Forget();
+		if (a_host) {
+			follower.Forsake();  // this game's world is the session's: its jobs are its own
+		} else {
+			follower.Arm(Clock::now());  // a job left from another session's run stops here unless a run claims it
+		}
 		askAgain = false;
 		sayWorld = a_host;
 		rebase = true;
@@ -1245,16 +1351,18 @@ namespace QuestSync
 						logs::info("Quests: {} started here: run {} of the session's{}", QuestName(event.quest), keeper.RunOf(event.quest),
 							cls == Class::kRadiant ? " (a radiant job: every game does this one, with this game's targets)" : "");
 					}
+				} else if (!host) {
+					follower.StartedHere(event.quest);  // one this game started on its own is its own (not left over)
 				}
 				continue;
 			}
 			if (event.kind == StageEvent::kStop) {
 				seen.erase(event.quest);  // a run's stages end with it: a radiant job started again sets them anew
 				if (host) {
-					if (const auto stop = keeper.Stopped(event.quest)) {
-						SendRun(a_send, *stop);
-						ForgetQuest(event.quest);
-						logs::info("Quests: the radiant job {} stopped here: its run {} is over in every game", QuestName(event.quest), stop->run);
+					// a radiant job's stop is said once its stages (this batch's, and any the engine reports just after) and
+					// its end are said: StopsDue, below
+					if (keeper.Stopped(event.quest, now)) {
+						++counts.stopsHeld;
 					}
 				} else {
 					follower.StoppedHere(event.quest);
@@ -1286,7 +1394,7 @@ namespace QuestSync
 		} else {
 			for (const auto id : follower.Quests()) {
 				const auto quest = QuestOf(id);
-				switch (follower.Due(id, HereRun(quest), now)) {
+				switch (follower.Due(id, HereRun(quest), now, maker.Has(id))) {
 				case QuestRunRules::Act::kStart:
 					StartForRun(quest, now);
 					break;
@@ -1320,9 +1428,24 @@ namespace QuestSync
 						quest && ClassOf(quest) == Class::kRadiant ? "the radiant job is not this game's: its stages are dropped" : "its stages are made here as they come");
 					break;
 				case QuestRunRules::Act::kStop:
+					// what the session said of the run was made first (or STOP_WAIT passed): its word goes with it now
 					if (quest && Run(std::format("stopquest {}", EditorId(quest)))) {
 						++counts.stopsMade;
-						logs::info("Quests: stopped {} here (the host's run {} of the radiant job is over)", QuestName(id), follower.RunOf(id));
+						logs::info("Quests: stopped {} here (the host's run {} of the radiant job is over; its last word made here first: {} left)", QuestName(id),
+							follower.RunOf(id), maker.Has(id) ? "some" : "none");
+					}
+					ForgetQuest(id);
+					break;
+				case QuestRunRules::Act::kEnd:
+					++counts.endedHere;
+					logs::info("Quests: {} stopped here on its own at its end (the host's run {} of the radiant job is over too)", QuestName(id), follower.RunOf(id));
+					ForgetQuest(id);
+					break;
+				case QuestRunRules::Act::kStopOld:
+					if (quest && Run(std::format("stopquest {}", EditorId(quest)))) {
+						++counts.stopsOld;
+						logs::info("Quests: stopped {} here: its earlier run was still ending here, and the host's run {} starts it again", QuestName(id),
+							follower.RunOf(id));
 					}
 					break;
 				case QuestRunRules::Act::kNothing:
@@ -1332,6 +1455,7 @@ namespace QuestSync
 					ForceFills(quest);
 				}
 			}
+			StopOrphans(now);
 		}
 		if (now >= nextPoll) {
 			nextPoll = now + POLL_EVERY;
@@ -1340,6 +1464,7 @@ namespace QuestSync
 					news.push_back(entry);
 				}
 			}
+			NoteRan();
 		}
 		for (auto it = again.begin(); it != again.end();) {
 			if (it->due <= now) {
@@ -1349,12 +1474,13 @@ namespace QuestSync
 				++it;
 			}
 		}
-		if (!news.empty()) {
-			counts.sent += news.size();
-			for (auto& packet : Protocol::Batches(news, Protocol::MessageType::kQuests)) {
-				a_send(std::move(packet));
+		// the radiant jobs whose stop is due: each after the stages so far and its end (EndRun says them first)
+		if (host) {
+			for (const auto& stop : keeper.StopsDue(now)) {
+				EndRun(a_send, stop, now, news);
 			}
 		}
+		Flush(a_send, news);
 
 		// The session's word, made where this game is behind.
 		for (int i = 0; i < STEPS_PER_FRAME; ++i) {
@@ -1480,10 +1606,17 @@ namespace QuestSync
 		view.Clear();
 		maker.Clear();
 		checks.clear();
-		follower.Clear();  // the host's runs come again with its world
+		// the host's runs come again with its world; a radiant job this game ran for a run the new world does not have is
+		// stopped here once the runs had START_WAIT to come (StopOrphans)
+		follower.Clear();
+		if (!host) {
+			follower.Arm(Clock::now());
+		}
 		RestoreRecords();
 		rebase = true;  // what this game holds now is its own past: the host's world comes next
-		logs::info("Quests: the host's world is new (player {} loaded a save or came in): its quests follow", a_hostId);
+		logs::info("Quests: the host's world is new (player {} loaded a save or came in): its quests follow ({} job(s) this game ran for its runs wait for "
+				   "a run of the new world)",
+			a_hostId, follower.Candidates());
 	}
 
 	void HeardRun(const Protocol::QuestRun& a_run)
@@ -1500,8 +1633,11 @@ namespace QuestSync
 		}
 		++counts.runsHeard;
 		if ((a_run.flags & Protocol::QuestRun::kStopped) != 0) {
+			const auto phase = follower.PhaseOf(a_run.questId);
 			logs::info("Quests: the host's run {} of {} is over{}", a_run.run, QuestName(a_run.questId),
-				here.radiant ? ": what the session said of it is forgotten here" : "");
+				phase == QuestRunRules::Phase::kStopping ? ": what the session said of it is made here first, then it is stopped here" :
+				here.radiant                             ? ": what the session said of it is forgotten here" :
+				                                           "");
 		} else if ((a_run.flags & Protocol::QuestRun::kFilled) != 0) {
 			logs::info("Quests: the host's run {} of {}: its aliases hold {}", a_run.run, QuestName(a_run.questId), QuestRunRules::Describe(a_run.fills));
 		} else {
@@ -1519,15 +1655,77 @@ namespace QuestSync
 	{
 		Forget();
 		seen.clear();  // the loaded world's stages are its own
+		// the jobs that ran for the session's runs in the loaded world (its co-save; none for a new game): stopped here
+		// when no run claims them once the session's runs are asked for again
+		const auto saved = TakeLoadedRuns();
+		follower.Loaded(saved);
+		if (!saved.empty()) {
+			logs::info("Quests: the loaded save ran {} radiant job(s) for the session's runs when it was saved: each stops here unless a run of the host's claims it",
+				saved.size());
+		}
 		if (ourId != 0) {
 			view.Clear();
 			rebase = true;
 			if (host) {
 				sayWorld = true;
+				follower.Forsake();  // the host's world is the session's: its jobs are its own
 			} else {
 				askAgain = true;
+				follower.Arm(Clock::now());
 			}
 		}
+		NoteRan();
+	}
+
+	void WriteCoSave(SKSE::SerializationInterface* a_intf)
+	{
+		std::vector<RE::FormID> ran;
+		{
+			std::lock_guard lock{ coSaveLock };
+			ran = savedRuns;
+		}
+		if (ran.empty()) {
+			return;  // no job ran for a run here
+		}
+		if (!a_intf->OpenRecord(COSAVE_RUNS, COSAVE_RUNS_VERSION)) {
+			logs::warn("Co-save: could not open the quest runs record");
+			return;
+		}
+		const auto count = static_cast<std::uint32_t>(ran.size());
+		a_intf->WriteRecordData(&count, sizeof(count));
+		a_intf->WriteRecordData(ran.data(), static_cast<std::uint32_t>(ran.size() * sizeof(RE::FormID)));
+		logs::info("Co-save: quest runs record written ({} radiant job(s) running for the session's runs)", ran.size());
+	}
+
+	void ReadCoSave(SKSE::SerializationInterface* a_intf, std::uint32_t a_version, std::uint32_t a_length)
+	{
+		constexpr std::uint32_t MAX_RUNS = 4096;
+		std::uint32_t           count = 0;
+		if (a_version != COSAVE_RUNS_VERSION || a_length < sizeof(count) || a_intf->ReadRecordData(&count, sizeof(count)) != sizeof(count) || count > MAX_RUNS ||
+			a_length != sizeof(count) + count * sizeof(RE::FormID)) {
+			logs::warn("Co-save: a quest runs record that can't be read (version {}, {} bytes)", a_version, a_length);
+			return;
+		}
+		std::vector<RE::FormID> ran;
+		for (std::uint32_t i = 0; i < count; ++i) {
+			RE::FormID id = 0;
+			if (a_intf->ReadRecordData(&id, sizeof(id)) != sizeof(id)) {
+				logs::warn("Co-save: the quest runs record ended early");
+				return;
+			}
+			RE::FormID resolved = 0;
+			if (a_intf->ResolveFormID(id, resolved) && resolved != 0) {
+				ran.push_back(resolved);  // a quest of a plugin this load order lacks is gone
+			}
+		}
+		std::lock_guard lock{ coSaveLock };
+		loadedRuns = std::move(ran);
+	}
+
+	void RevertCoSave()
+	{
+		std::lock_guard lock{ coSaveLock };
+		loadedRuns.clear();
 	}
 
 	void Clear()
@@ -1727,7 +1925,8 @@ namespace QuestSync
 							   "apart={} lastApart={} apartStages={} apartHeld={} moved={} lastMoved={} lastMade={} unmade={} lastUnmade={} wantsDropped={} "
 							   "eventsDropped={} offmain={} norun={} runs={} runsSent={} runsHeard={} runsStarted={} runsAdopted={} runsGaveUp={} forced={} "
 							   "forcedAtStart={} locsAtStart={} ownAtStart={} startFailed={} cannotStart={} runsRetried={} stopsMade={} restarts={} rewanted={} "
-							   "notLoaded={} locApart={} rewritten={} locSlot={} locMap={} locChecked={}/{} locUnread={} lastRun={}",
+							   "notLoaded={} locApart={} rewritten={} locSlot={} locMap={} locChecked={}/{} locUnread={} stopsHeld={} endsSaid={} endedHere={} "
+							   "stopsOld={} orphansStopped={} candidates={} lastOrphan={} startsOffMain={} lastStartThread={} lastRun={}",
 				installed ? 1 : 0, host ? 1 : 0, catalog.size(), classCounts[0], classCounts[1], classCounts[2], classCounts[3], classCounts[4], classCounts[5],
 				!bit ? "unread" : bit->trusted ? "trusted" : "untrusted", view.Quests(), view.Entries(), view.Outstanding(), view.Based(), view.Kept(), maker.Size(),
 				maker.InFlight(), maker.Held(look), Counted(counts.events), Counted(counts.sent), Counted(counts.heard), Counted(counts.made), Counted(counts.has),
@@ -1742,7 +1941,8 @@ namespace QuestSync
 				Counted(counts.ownAtStart), Counted(counts.startFailed), Counted(counts.cannotStart), Counted(follower.Retried()), Counted(counts.stopsMade),
 				Counted(counts.restartsMade), Counted(counts.rewanted), Counted(follower.NotLoadedCount()), Counted(follower.LocApartCount()), rewritten.size(),
 				locSlot ? std::format("+0x{:X}", LOC_SLOT_BASE + *locSlot * sizeof(std::uintptr_t)) : "none"s, QuestRunRules::LocStateName(locCheck.Now()),
-				locCheck.Held(), locCheck.Samples(), Counted(counts.locUnread), lastRun);
+				locCheck.Held(), locCheck.Samples(), Counted(counts.locUnread), Counted(counts.stopsHeld), Counted(counts.endsSaid), Counted(counts.endedHere),
+				Counted(counts.stopsOld), Counted(counts.orphansStopped), follower.Candidates(), lastOrphan, Counted(counts.startsOffMain), lastStartThread, lastRun);
 		}
 		if (words[0] == "run" || words[0] == "start") {
 			return RunCommand(words);

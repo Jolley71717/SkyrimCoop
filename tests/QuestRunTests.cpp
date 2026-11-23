@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -352,14 +353,19 @@ TEST("quest keeper: each start is a new run, never numbered twice, fresh for a r
 	REQUIRE(snapFills);
 	CHECK(snapFills->flags == QuestRun::kFilled);
 
-	// A shared quest's stop is its own scripts' in every game; a radiant job's ends its run.
-	CHECK(!keeper.Stopped(0x10));
+	// A shared quest's stop is its own scripts' in every game; a radiant job's ends its run, said after STOP_LINGER.
+	CHECK(!keeper.Stopped(0x10, T0));
 	CHECK(!keeper.Live(0x10));
-	const auto stop = keeper.Stopped(0x20);
-	REQUIRE(stop);
-	CHECK(stop->flags == QuestRun::kStopped);
-	CHECK(stop->run == 2);
-	CHECK(!keeper.Stopped(0x20));
+	CHECK(keeper.Stopped(0x20, T0));
+	CHECK(!keeper.Stopped(0x20, T0));  // once
+	CHECK(keeper.StopsDue(T0 + QuestRunRules::STOP_LINGER - 1ms).empty());
+	const auto stops = keeper.StopsDue(T0 + QuestRunRules::STOP_LINGER);
+	REQUIRE(stops.size() == 1);
+	CHECK(stops[0].flags == QuestRun::kStopped);
+	CHECK(stops[0].run == 2);
+	CHECK(stops[0].questId == 0x20);
+	CHECK(keeper.StopsDue(T0 + 10s).empty());
+	CHECK(!keeper.Live(0x20));
 	CHECK(!keeper.Read(0x20, { Ref(0, 0x1) }, T0));
 
 	keeper.Clear();
@@ -460,20 +466,45 @@ TEST("quest follower: no fills, or no start, within START_WAIT gives the run up 
 	CHECK(f.GaveUp() == 2);
 }
 
-TEST("quest follower: the host's stop of a radiant job this game runs for it stops it here; a stop says to forget the job's word")
+TEST("quest follower: the host's stop of a radiant job this game runs for it stops it here once its last word is made; a stop of one it does not run says to forget")
 {
 	using QuestRunRules::Act;
+	using QuestRunRules::Phase;
 	QuestRunRules::Follower f;
 	auto                    job = RunsHere(true);
 	job.running = true;
 	CHECK(f.Hear(Start(0x10, 2, true), job, T0));  // fresh: the earlier run's word goes
 	CHECK(f.Due(0x10, job, T0) == Act::kAdopt);
-	CHECK(f.Hear(Stop(0x10, 2), job, T0 + 1s));
-	CHECK(!f.Ours(0x10));
+	CHECK(!f.Hear(Stop(0x10, 2), job, T0 + 1s));  // not forgotten yet: its last stages are made first
+	CHECK(f.PhaseOf(0x10) == Phase::kStopping);
+	CHECK(f.Ours(0x10));   // its stages are still made here as the run's
+	CHECK(!f.Hold(0x10));
+	CHECK(!f.ForceDue(0x10, T0 + 1s));
+	CHECK(!f.Hear(Stop(0x10, 2), job, T0 + 1s));  // the same stop again: nothing
 	CHECK(f.Quests() == (std::vector<std::uint32_t>{ 0x10 }));
-	CHECK(f.Due(0x10, job, T0 + 1s) == Act::kStop);
-	CHECK(f.Due(0x10, job, T0 + 2s) == Act::kNothing);  // once
+	CHECK(f.Due(0x10, job, T0 + 1s, true) == Act::kNothing);  // the session's word on it still waits to be made
+	CHECK(f.Due(0x10, job, T0 + 5s, true) == Act::kNothing);
+	CHECK(f.Due(0x10, job, T0 + 6s, false) == Act::kStop);    // made: stopped here, its word forgotten now
+	CHECK(!f.Ours(0x10));
+	CHECK(f.Due(0x10, job, T0 + 7s) == Act::kNothing);  // once
 	CHECK(f.Quests().empty());
+	// what waits for a far friend, or is stuck, does not keep the job running past STOP_WAIT
+	QuestRunRules::Follower w;
+	w.Hear(Start(0x11, 1, true), job, T0);
+	CHECK(w.Due(0x11, job, T0) == Act::kAdopt);
+	CHECK(!w.Hear(Stop(0x11, 1), job, T0 + 1s));
+	CHECK(w.Due(0x11, job, T0 + QuestRunRules::STOP_WAIT, true) == Act::kNothing);
+	CHECK(w.Due(0x11, job, T0 + 1s + QuestRunRules::STOP_WAIT, true) == Act::kStop);
+	// one that stopped here on its own (its last stage, made from the session's word, runs Stop) is not stopped again
+	QuestRunRules::Follower e;
+	e.Hear(Start(0x12, 1, true), job, T0);
+	CHECK(e.Due(0x12, job, T0) == Act::kAdopt);
+	CHECK(!e.Hear(Stop(0x12, 1), job, T0 + 1s));
+	auto stopped = job;
+	stopped.running = false;
+	e.StoppedHere(0x12);
+	CHECK(e.Due(0x12, stopped, T0 + 2s, true) == Act::kEnd);
+	CHECK(e.Quests().empty());
 
 	// A stop of a run this game never ran for the host stops nothing here (a friend's own job stays its own).
 	QuestRunRules::Follower g;
@@ -496,6 +527,205 @@ TEST("quest follower: the host's stop of a radiant job this game runs for it sto
 	CHECK(s.Due(0x20, quest, T0) == Act::kAdopt);
 	CHECK(!s.Hear(Stop(0x20, 1), quest, T0 + 1s));
 	CHECK(s.Due(0x20, quest, T0 + 1s) == Act::kNothing);
+}
+
+TEST("quest keeper: a radiant job's last stage and its stop in one frame: the stage is the run's, the stop is said after it; a new start says the stop first")
+{
+	QuestRunRules::Keeper keeper;
+	keeper.Started(0x20, true);
+	REQUIRE(keeper.Read(0x20, { Ref(0, 0x1) }, T0));
+	// the frame's batch: the job's stop event, and its last stage's event after it (the engine may report it so)
+	CHECK(keeper.Stopped(0x20, T0));
+	CHECK(keeper.Live(0x20));  // its last stage is still reported as the run's (QuestSync's SharedHere)
+	CHECK(keeper.Stopping(0x20));
+	CHECK(keeper.LiveQuests().empty());              // its fills are not read again
+	CHECK(!keeper.Read(0x20, { Ref(0, 0x2) }, T0));  // ... nor said
+	CHECK(keeper.StopsDue(T0).empty());              // the frame's stages go out first; the stop later
+	REQUIRE(keeper.StopsDue(T0 + QuestRunRules::STOP_LINGER).size() == 1);
+	CHECK(!keeper.Live(0x20));
+
+	// begun again before the stop was said: the stop is said first, then the new run
+	keeper.Started(0x30, true);
+	CHECK(keeper.Stopped(0x30, T0));
+	const auto stop = keeper.StopNow(0x30);
+	REQUIRE(stop);
+	CHECK(stop->flags == QuestRun::kStopped);
+	const auto again = keeper.Started(0x30, true);
+	CHECK(again.run > stop->run);
+	CHECK(!keeper.StopNow(0x30));
+	CHECK(keeper.StopsDue(T0 + 1min).empty());  // said once
+	CHECK(keeper.Live(0x30));
+	// a shared quest's stop is no word at all
+	keeper.Started(0x40, false);
+	CHECK(!keeper.Stopped(0x40, T0));
+	CHECK(!keeper.StopNow(0x40));
+}
+
+TEST("quest follower: a new run heard while the earlier one still stops here stops the earlier first, then starts the new one with its word held")
+{
+	using QuestRunRules::Act;
+	using QuestRunRules::Phase;
+	QuestRunRules::Follower f;
+	auto                    job = RunsHere(true);
+	job.running = true;
+	f.Hear(Filled(0x10, 1, { Ref(0, 0x50) }), job, T0);
+	CHECK(f.Due(0x10, job, T0) == Act::kAdopt);
+	CHECK(!f.Hear(Stop(0x10, 1), job, T0 + 1s));
+	CHECK(f.Due(0x10, job, T0 + 1s, true) == Act::kNothing);
+	CHECK(f.Hear(Start(0x10, 2, true), job, T0 + 2s));  // fresh: the earlier run's word goes
+	CHECK(f.PhaseOf(0x10) == Phase::kRestarting);
+	CHECK(f.Hold(0x10));      // the new run's word waits for its start
+	CHECK(!f.WasOurs(0x10));  // not adopted: started afresh for the new run
+	CHECK(f.Due(0x10, job, T0 + 2s) == Act::kStopOld);
+	CHECK(f.Due(0x10, job, T0 + 3s) == Act::kNothing);  // its stop not made yet
+	f.Hear(Filled(0x10, 2, { Ref(0, 0x51) }), job, T0 + 3s);
+	job.running = false;
+	CHECK(f.Due(0x10, job, T0 + 4s) == Act::kStart);
+	f.StartMade(0x10, { .refs = 1, .forces = { { 0, 0x51 } } });
+	job.running = true;
+	CHECK(f.Due(0x10, job, T0 + 5s) == Act::kStarted);
+	CHECK(f.RunOf(0x10) == 2);
+	CHECK(f.Ours(0x10));
+}
+
+TEST("quest follower: starts for runs are paced, one per START_PACE, the oldest run heard first; adoptions are not held")
+{
+	using QuestRunRules::Act;
+	QuestRunRules::Follower f;
+	const auto              idle = RunsHere(true);
+	// a welcome into a long game: forty runs heard at once, with their fills, newest quest ids first
+	for (std::uint32_t i = 0; i < 40; ++i) {
+		f.Hear(Filled(0x100 + 40 - i, 1, { Ref(0, 0x50 + i) }), idle, T0);
+	}
+	auto running = RunsHere(true);
+	running.running = true;
+	f.Hear(Filled(0x90, 1, { Ref(0, 0x50) }), running, T0);
+	const auto order = f.Quests();
+	REQUIRE(order.size() == 41);
+	CHECK(order.front() == 0x128);  // heard first
+	std::vector<std::uint32_t> starts;
+	auto                       now = T0;
+	for (int frame = 0; frame < 1000 && starts.size() < 40; ++frame, now += 16ms) {
+		std::size_t thisFrame = 0;
+		for (const auto id : f.Quests()) {
+			const auto act = f.Due(id, id == 0x90 ? running : idle, now);
+			if (act == Act::kStart) {
+				starts.push_back(id);
+				++thisFrame;
+			}
+			if (id == 0x90 && frame == 0) {
+				CHECK(act == Act::kAdopt);  // taking a quest that runs here already is no start
+			}
+		}
+		CHECK(thisFrame <= 1);
+	}
+	REQUIRE(starts.size() == 40);
+	CHECK(starts.front() == 0x128);
+	CHECK(starts.back() == 0x101);
+	CHECK(std::ranges::is_sorted(starts, std::greater<>{}));  // the order heard
+	CHECK(now - T0 >= 39 * QuestRunRules::START_PACE);
+	// a run whose turn waits is held, not given up: START_WAIT counts from its start
+	QuestRunRules::Follower g;
+	g.Hear(Filled(0x1, 1, { Ref(0, 0x50) }), idle, T0);
+	g.Hear(Filled(0x2, 1, { Ref(0, 0x50) }), idle, T0);
+	CHECK(g.Due(0x1, idle, T0) == Act::kStart);
+	CHECK(g.Due(0x2, idle, T0) == Act::kNothing);
+	CHECK(g.Hold(0x2));
+	CHECK(g.Due(0x2, idle, T0 + QuestRunRules::START_PACE) == Act::kStart);
+}
+
+TEST("quest follower: a quest that stays starting here on its own start does not hold the run's stages past START_WAIT")
+{
+	using QuestRunRules::Act;
+	using QuestRunRules::Phase;
+	QuestRunRules::Follower f;
+	auto                    starting = RunsHere(true);
+	starting.starting = true;
+	f.Hear(Filled(0x10, 1, { Ref(0, 0x50) }), starting, T0);
+	CHECK(f.Due(0x10, starting, T0) == Act::kNothing);  // its own start is under way: adopted once it runs
+	CHECK(f.Hold(0x10));
+	CHECK(f.Due(0x10, starting, T0 + QuestRunRules::START_WAIT - 1s) == Act::kNothing);
+	CHECK(f.Due(0x10, starting, T0 + QuestRunRules::START_WAIT) == Act::kGiveUp);
+	CHECK(!f.Hold(0x10));
+	// it runs after all: the run's, its dropped stages made again
+	auto running = RunsHere(true);
+	running.running = true;
+	CHECK(f.Due(0x10, running, T0 + 20s) == Act::kAdopt);
+	CHECK(f.TakeLate(0x10));
+	CHECK(f.PhaseOf(0x10) == Phase::kRunning);
+}
+
+TEST("quest follower: a radiant job this game ran for a run is stopped after the host's reset or a load when no run claims it within START_WAIT")
+{
+	using QuestRunRules::Act;
+	auto job = RunsHere(true);
+	job.running = true;
+	// the host dies mid-bounty and loads a save from before it: its world's runs come again without the bounty
+	QuestRunRules::Follower f;
+	f.Hear(Filled(0x10, 1, { Ref(0, 0x50) }), RunsHere(true), T0);
+	CHECK(f.Due(0x10, RunsHere(true), T0) == Act::kStart);
+	f.StartMade(0x10, {});
+	CHECK(f.Due(0x10, job, T0 + 1s) == Act::kStarted);
+	f.Hear(Filled(0x20, 1, { Ref(0, 0x51) }), job, T0);  // another job, taken (adopted)
+	CHECK(f.Due(0x20, job, T0 + 1s) == Act::kAdopt);
+	f.Hear(Filled(0x30, 1, { Ref(0, 0x52) }), RunsHere(), T0);  // a shared quest: the caller never stops it
+	CHECK(f.Due(0x30, RunsHere(), T0 + 1s) == Act::kStart);
+	f.Hear(Start(0x40, 1, true), RunsHere(true), T0);  // heard, never this game's
+	CHECK(f.Ran() == (std::vector<std::uint32_t>{ 0x10, 0x20, 0x30 }));
+	f.Clear();  // the host's world new (kQuestReset)
+	CHECK(f.Candidates() == 3);
+	CHECK(f.Orphans(T0 + 1h).empty());  // not armed: nothing is judged
+	f.Arm(T0 + 2s);
+	f.Hear(Filled(0x20, 2, { Ref(0, 0x51) }), job, T0 + 3s);  // the new world runs that job too: claimed
+	CHECK(f.Orphans(T0 + 2s + QuestRunRules::START_WAIT - 1s).empty());
+	CHECK(f.Orphans(T0 + 2s + QuestRunRules::START_WAIT) == (std::vector<std::uint32_t>{ 0x10, 0x30 }));
+	CHECK(f.Orphans(T0 + 1h).empty());  // once
+	CHECK(f.Candidates() == 0);
+	CHECK(f.OrphansFound() == 2);
+	CHECK(f.Due(0x20, job, T0 + 4s) == Act::kAdopt);
+
+	// a load of this game's save that ran a job for a run (its co-save): stopped unless a run claims it; a new game or a
+	// save without the record leaves none; a job this game stopped, or started on its own since, is not stopped
+	QuestRunRules::Follower g;
+	g.Loaded({ 0x10, 0x11, 0x12 });
+	g.StoppedHere(0x11);
+	g.StartedHere(0x12);
+	CHECK(g.Ran() == (std::vector<std::uint32_t>{ 0x10 }));
+	g.Arm(T0);
+	CHECK(g.Orphans(T0 + QuestRunRules::START_WAIT) == (std::vector<std::uint32_t>{ 0x10 }));
+	g.Loaded({});
+	g.Arm(T0);
+	CHECK(g.Orphans(T0 + 1h).empty());
+
+	// the session's end keeps them (a friend playing on alone keeps its jobs) until it is a friend in a session again;
+	// a game that becomes the host keeps its world's jobs as its own
+	QuestRunRules::Follower h;
+	h.Hear(Filled(0x10, 1, { Ref(0, 0x50) }), job, T0);
+	CHECK(h.Due(0x10, job, T0) == Act::kAdopt);
+	h.Clear();
+	CHECK(h.Orphans(T0 + 1h).empty());
+	CHECK(h.Ran() == (std::vector<std::uint32_t>{ 0x10 }));  // into the next save's co-save
+	h.Forsake();
+	h.Arm(T0);
+	CHECK(h.Orphans(T0 + 1h).empty());
+	CHECK(h.Ran().empty());
+}
+
+TEST("quest maker: Has says what of a quest still waits to be made here, a stage in flight included")
+{
+	QuestRules::Maker maker;
+	const auto        look = [](const QuestEntry&, std::uint32_t) { return QuestRules::Here{ .exists = true, .cls = QuestRules::Class::kShared }; };
+	CHECK(!maker.Has(0x10));
+	maker.Add(Stage(0x10, 200), 1, T0);
+	maker.Add(Stage(0x20, 5), 1, T0);
+	CHECK(maker.Has(0x10));
+	auto step = maker.Next(T0, look);
+	REQUIRE(step);
+	CHECK(step->want.entry == Stage(0x10, 200));
+	CHECK(maker.Has(0x10));  // made, not read done yet
+	maker.Done(0x10, 200, T0 + 100ms);
+	CHECK(!maker.Has(0x10));
+	CHECK(maker.Has(0x20));
 }
 
 TEST("quest follower: a new run of a quest this game runs as an earlier one is adopted again; its own stop ends it here; Clear forgets all")
@@ -598,7 +828,7 @@ TEST("quest follower: a run given up for want of fills starts when they come lat
 	h.StartMade(0x30, {});
 	late.starting = true;
 	CHECK(h.Due(0x30, late, T0 + QuestRunRules::START_WAIT) == Act::kGiveUp);
-	CHECK(h.Hear(Stop(0x30, 4), late, T0 + 11s));
+	CHECK(!h.Hear(Stop(0x30, 4), late, T0 + 11s));  // its word forgotten once stopped
 	CHECK(h.Due(0x30, late, T0 + 11s) == Act::kStop);
 
 	// a run given up that nothing of this game's started is not stopped here (a friend's own job stays its own)
@@ -963,6 +1193,39 @@ TEST("server: a joiner and a load's ask hear the live runs before the quests' st
 	const auto stages = EntriesIn(packets);
 	REQUIRE(stages.size() == 1);
 	CHECK(stages[0].second == Stage(0x51, 5));
+}
+
+TEST("server: a radiant job's last stage and its end, said just ahead of its stop, reach a friend before the stop")
+{
+	HostedSession s;
+	auto&         f = s.f;
+	REQUIRE(s.host);
+	REQUIRE(f.Join(2, Fixture::MakeHello("Friend", 0x2222)));
+	f.fake->Deliver(1, Protocol::Encode(Start(0x50, 1, true)));
+	f.fake->Deliver(1, Report({ Stage(0x50, 10) }));
+	REQUIRE(f.fake->WaitFor(2, Type(MT::kRemoteQuests)));
+	REQUIRE(f.fake->Settle());
+	f.fake->Take(2);
+	// the host's frame: the job's last stage and its end (EndRun), then its stop, in that order
+	const QuestEntry completed{ 0x50, QuestEntry::kCompleted, 0, 0 };
+	f.fake->Deliver(1, Report({ Stage(0x50, 200), completed }));
+	f.fake->Deliver(1, Protocol::Encode(Stop(0x50, 1)));
+	const auto packets = f.fake->TakeThrough(2, Type(MT::kRemoteQuestRun));
+	const auto entries = EntriesIn(packets);
+	REQUIRE(entries.size() == 2);
+	CHECK(entries[0].second == Stage(0x50, 200));
+	CHECK(entries[1].second == completed);
+	const auto lastEntry = std::ranges::find_if(packets, [](const auto& a_p) { return Protocol::PeekType(a_p) == MT::kRemoteQuests; });
+	const auto stop = std::ranges::find_if(packets, [](const auto& a_p) { return Protocol::PeekType(a_p) == MT::kRemoteQuestRun; });
+	REQUIRE(stop != packets.end());
+	CHECK(lastEntry < stop);
+	const auto runs = RunsIn(packets);
+	REQUIRE(runs.size() == 1);
+	CHECK(runs[0].flags == QuestRun::kStopped);
+	REQUIRE(f.fake->Settle());
+	// none of the host's word on the run was refused
+	const auto answers = EntriesIn(f.fake->Take(1), MT::kQuestAnswer);
+	CHECK(std::ranges::none_of(answers, [](const auto& a_a) { return a_a.second.value == QuestEntry::kRefused; }));
 }
 
 TEST("server: a radiant job's stop goes to the others and its run's stages are refused after; the host's reset clears the runs")
