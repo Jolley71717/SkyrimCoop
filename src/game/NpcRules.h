@@ -345,7 +345,9 @@ namespace NpcRules
 	// (nothing leaves its inventory): what it wears or holds that its runner's NPC does not, so a torch put away, a helmet
 	// taken off, a shield put on the back or a bow swapped for a sword is seen in every game. What the runner's game could
 	// not name to this one (a form made as it ran, a mod's this game lacks) is never taken off: the copy keeps its own
-	// there (Protocol::NpcGear's unnamed and unnamedSlots). Runtime forms (FF) name nothing here and are never looked at.
+	// there (Protocol::NpcGear's unnamed and unnamedSlots). Nor is what sits in a body slot or a hand where the runner's
+	// NPC has an item this copy lacks and may not be given (a leveled outfit rolled differently in each game): it keeps
+	// its own there rather than stand bare. Runtime forms (FF) name nothing here and are never looked at.
 	enum class Hand : std::uint8_t
 	{
 		kNone,  // worn armor, the ammunition, or whatever hand the game picks (a torch, a shield)
@@ -427,23 +429,6 @@ namespace NpcRules
 				plan.unequip.push_back({ a_id, a_hand });
 			}
 		};
-		// ---- off ----
-		for (const auto& armor : a_now.armor) {
-			// Only what the runner's game named, and not over a slot it could not name to us.
-			if (named(armor.shared) && !inGear(armor.shared) && (armor.slots & a_gear.unnamedSlots) == 0) {
-				takeOff(armor.id, Hand::kNone);
-			}
-		}
-		const auto hand = [&](std::uint32_t a_now, std::uint32_t a_wanted, std::uint8_t a_unnamedBit, Hand a_hand) {
-			// A shield is worn armor too: the armor's own rule takes it off.
-			if (a_now != 0 && a_now != a_wanted && (a_gear.unnamed & a_unnamedBit) == 0 && !wearsAsArmor(a_now)) {
-				takeOff(a_now, a_hand);
-			}
-		};
-		hand(a_now.right, a_gear.right, Protocol::kRightUnnamed, Hand::kRight);
-		hand(a_now.left, a_gear.left, Protocol::kLeftUnnamed, Hand::kLeft);
-		hand(a_now.ammo, a_gear.ammo, Protocol::kAmmoUnnamed, Hand::kNone);
-		// ---- on ----
 		const auto has = [&](std::uint32_t a_id) {
 			std::int32_t n = 0;
 			for (const auto& c : a_carried) {
@@ -454,6 +439,34 @@ namespace NpcRules
 			}
 			return n;
 		};
+		// What the runner's NPC wears or holds that this copy can't put on (it lacks it and may not be given it): the copy
+		// keeps its own there, as it does where the runner's game could not name an item. An outfit rolled from a leveled
+		// list differs in each game (a bandit in hide armor in one, in fur in the other); taken off with nothing to put
+		// on, the copy would stand bare in that slot, or fight barehanded.
+		const auto lacks = [&](std::uint32_t a_id, std::int32_t a_need) { return named(a_id) && !a_mayAdd && has(a_id) < a_need; };
+		std::uint32_t lackedSlots = 0;
+		for (const auto& item : a_gear.worn) {
+			if (std::ranges::none_of(a_now.armor, [&](const Wearing::Armor& a_a) { return a_a.shared == item.id; }) && lacks(item.id, 1)) {
+				lackedSlots |= item.slots;
+			}
+		}
+		// ---- off ----
+		for (const auto& armor : a_now.armor) {
+			// Only what the runner's game named, and not over a slot it could not name to us or one the copy can't fill.
+			if (named(armor.shared) && !inGear(armor.shared) && (armor.slots & (a_gear.unnamedSlots | lackedSlots)) == 0) {
+				takeOff(armor.id, Hand::kNone);
+			}
+		}
+		const auto hand = [&](std::uint32_t a_now, std::uint32_t a_wanted, std::int32_t a_need, std::uint8_t a_unnamedBit, Hand a_hand) {
+			// A shield is worn armor too: the armor's own rule takes it off. A hand the copy can't fill keeps its own.
+			if (a_now != 0 && a_now != a_wanted && (a_gear.unnamed & a_unnamedBit) == 0 && !wearsAsArmor(a_now) && !lacks(a_wanted, a_need)) {
+				takeOff(a_now, a_hand);
+			}
+		};
+		hand(a_now.right, a_gear.right, 1, Protocol::kRightUnnamed, Hand::kRight);
+		hand(a_now.left, a_gear.left, a_gear.left == a_gear.right ? 2 : 1, Protocol::kLeftUnnamed, Hand::kLeft);
+		hand(a_now.ammo, a_gear.ammo, 1, Protocol::kAmmoUnnamed, Hand::kNone);
+		// ---- on ----
 		const auto putOn = [&](std::uint32_t a_id, Hand a_hand, std::int32_t a_need) {
 			const auto have = has(a_id);
 			if (have >= a_need) {
@@ -513,19 +526,25 @@ namespace NpcRules
 		GearShown  out;
 		const auto named = [](std::uint32_t a_id) { return a_id != 0 && !FormIds::IsRuntime(a_id); };
 		const auto inGear = [&](std::uint32_t a_id) { return std::ranges::any_of(a_gear.worn, [&](const Protocol::WornItem& a_w) { return a_w.id == a_id; }); };
+		const auto wears = [&](std::uint32_t a_id) { return std::ranges::any_of(a_now.armor, [&](const Wearing::Armor& a_a) { return a_a.shared == a_id; }); };
 		std::vector<std::uint32_t> seen;
+		std::uint32_t              notOnSlots = 0;  // the slots of the runner's items the copy doesn't wear (lacked, or refused)
 		for (const auto& item : a_gear.worn) {
 			if (!named(item.id) || std::ranges::find(seen, item.id) != seen.end()) {
 				continue;
 			}
 			seen.push_back(item.id);
 			++out.named;
-			if (std::ranges::any_of(a_now.armor, [&](const Wearing::Armor& a_a) { return a_a.shared == item.id; })) {
+			if (wears(item.id)) {
 				++out.matched;
+			} else {
+				notOnSlots |= item.slots;
 			}
 		}
+		// The copy's own armor where the runner's item is not on is kept there (PlanGear keeps it where the copy lacks the
+		// item): not left on. That item is short already, so a slot the copy could have filled still fails the check.
 		for (const auto& armor : a_now.armor) {
-			if (named(armor.shared) && !inGear(armor.shared) && (armor.slots & a_gear.unnamedSlots) == 0) {
+			if (named(armor.shared) && !inGear(armor.shared) && (armor.slots & (a_gear.unnamedSlots | notOnSlots)) == 0) {
 				++out.extra;
 			}
 		}
@@ -533,8 +552,9 @@ namespace NpcRules
 			if ((a_gear.unnamed & a_unnamedBit) != 0 || (a_wanted != 0 && !named(a_wanted))) {
 				return true;
 			}
-			// A shield is worn armor too: the worn items count it, on or lacking; the hand need only hold nothing else.
-			return a_held == a_wanted || (inGear(a_wanted) && a_held == 0);
+			// A shield is worn armor too: the worn items count it, on or lacking; the hand need only hold nothing else,
+			// unless the shield is not on (then the hand keeps its own, and the shield is short once already).
+			return a_held == a_wanted || (inGear(a_wanted) && (a_held == 0 || !wears(a_wanted)));
 		};
 		out.right = same(a_now.right, a_gear.right, Protocol::kRightUnnamed);
 		out.left = same(a_now.left, a_gear.left, Protocol::kLeftUnnamed);

@@ -715,12 +715,13 @@ TEST("npc rules: a copy takes off what its runner's NPC put away: a torch, a hel
 	const auto    melee = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = SWORD }, archer, carried, false);
 	CHECK(melee.unequip == Items({ { BOW, Hand::kRight }, { ARROWS, Hand::kNone } }));
 	CHECK(melee.equip == Items({ { SWORD, Hand::kRight } }));
-	// ... and with a sword the copy does not carry, the bow still comes off (the runner's NPC holds no bow).
+	// ... and with a sword the copy does not carry, it keeps its bow rather than fight barehanded; the arrows, which the
+	// runner's NPC has none of, come off.
 	const auto lacking = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = 0x00099999 }, archer, carried, false);
-	CHECK(lacking.unequip == Items({ { BOW, Hand::kRight }, { ARROWS, Hand::kNone } }));
+	CHECK(lacking.unequip == Items({ { ARROWS, Hand::kNone } }));
 	CHECK(lacking.equip.empty());
 	CHECK(lacking.missing == 1u);
-	// The same for a spawn's copy (it is given the sword).
+	// A spawn's copy is given the sword, so its bow comes off.
 	const auto spawn = PlanGear({ .key = GUARD, .right = 0x00099999 }, archer, carried, true);
 	CHECK(spawn.unequip == Items({ { CUIRASS, Hand::kNone }, { BOW, Hand::kRight }, { ARROWS, Hand::kNone } }));
 	CHECK(spawn.add == std::vector<Count>({ { 0x00099999, 1 } }));
@@ -838,10 +839,17 @@ TEST("npc rules: a copy's gear read back is complete only with all of it on but 
 	bow.right = BOW;
 	CHECK(!CheckGear(gear, bow).right);
 	CHECK(!CheckGear(gear, bow).Complete(0));
-	// A torch still in the left hand where the shield should be.
+	// A torch in the left hand where the shield is not on: the copy keeps its own there when it lacks the shield, which
+	// is short once already, so it is complete only if the shield was lacked.
 	auto torch = noShield;
 	torch.left = TORCH;
-	CHECK(!CheckGear(gear, torch).left);
+	CHECK(CheckGear(gear, torch).left);
+	CHECK(!CheckGear(gear, torch).Complete(0));
+	CHECK(CheckGear(gear, torch).Complete(1));
+	// A torch still in the left hand with the shield on: the hand differs.
+	auto both = all;
+	both.left = TORCH;
+	CHECK(!CheckGear(gear, both).left);
 	// The helmet the runner's NPC took off, still on: left on, never complete, whatever it lacks.
 	const Protocol::NpcGear bare{ .key = GUARD, .worn = { { CUIRASS, BODY }, { SHIELD, SHIELD_SLOT } }, .right = SWORD, .left = SHIELD, .ammo = ARROWS };
 	CHECK(CheckGear(bare, all).extra == 1u);
@@ -861,6 +869,60 @@ TEST("npc rules: a copy's gear read back is complete only with all of it on but 
 	auto enchanted = all;
 	enchanted.armor[0] = { 0xFF000A00, CUIRASS, BODY };
 	CHECK(CheckGear(gear, enchanted).Complete(0));
+}
+
+TEST("npc rules: a copy whose outfit roll differs keeps its own where it lacks its runner's, never left bare, and is judged dressed")
+{
+	using namespace NpcRules;
+	// A bandit's leveled outfit: hide armor in the runner's game, fur armor in this one.
+	constexpr std::uint32_t HIDE = 0x00013911, FUR = 0x0006F393, ROBE = 0x0001BE1A, DAGGER = 0x0001397F;
+	const Protocol::NpcGear hide{ .key = GUARD, .worn = { { HIDE, BODY } } };
+	const Wearing           fur{ .armor = { { FUR, FUR, BODY } } };
+	// It carries its fur only: the fur stays on, the hide armor is missing.
+	const auto keep = PlanGear(hide, fur, { { FUR, 1 } }, false);
+	CHECK(keep.unequip.empty());
+	CHECK(keep.equip.empty());
+	CHECK(keep.missing == 1u);
+	CHECK(CheckGear(hide, fur).extra == 0u);
+	CHECK(CheckGear(hide, fur).Complete(1));
+	CHECK(!CheckGear(hide, fur).Complete(0));
+	// A runner's NPC with no helmet still takes the copy's helmet off; the fur stays.
+	const Wearing furHelmet{ .armor = { { FUR, FUR, BODY }, { HELMET, HELMET, HEAD } } };
+	const auto    bareHead = PlanGear(hide, furHelmet, { { FUR, 1 }, { HELMET, 1 } }, false);
+	CHECK(bareHead.unequip == Items({ { HELMET, Hand::kNone } }));
+	CHECK(bareHead.missing == 1u);
+	CHECK(CheckGear(hide, furHelmet).extra == 1u);  // the helmet left on is still caught
+	// It carries the hide armor too: the fur comes off and the hide goes on; if the game refused the hide, it is short.
+	const auto swap = PlanGear(hide, fur, { { FUR, 1 }, { HIDE, 1 } }, false);
+	CHECK(swap.unequip == Items({ { FUR, Hand::kNone } }));
+	CHECK(swap.equip == Items({ { HIDE, Hand::kNone } }));
+	CHECK(swap.missing == 0u);
+	CHECK(!CheckGear(hide, fur).Complete(swap.missing));
+	// A lacked item over two slots (a robe with its boots) keeps the copy's own in both.
+	const Wearing furBoots{ .armor = { { FUR, FUR, BODY }, { BOOTS, BOOTS, FEET } } };
+	const Protocol::NpcGear robe{ .key = GUARD, .worn = { { ROBE, BODY | FEET } } };
+	CHECK(PlanGear(robe, furBoots, { { FUR, 1 }, { BOOTS, 1 } }, false).unequip.empty());
+	CHECK(CheckGear(robe, furBoots).Complete(1));
+	// A spawn's copy is given the hide armor, so its fur comes off.
+	const auto spawn = PlanGear(hide, fur, {}, true);
+	CHECK(spawn.unequip == Items({ { FUR, Hand::kNone } }));
+	CHECK(spawn.add == std::vector<Count>({ { HIDE, 1 } }));
+	CHECK(spawn.equip == Items({ { HIDE, Hand::kNone } }));
+	// The hands too: dual swords where the copy carries one sword and a dagger: the dagger stays in the left.
+	const Protocol::NpcGear twin{ .key = GUARD, .right = SWORD, .left = SWORD };
+	const Wearing           held{ .right = SWORD, .left = DAGGER };
+	const auto              hands = PlanGear(twin, held, { { SWORD, 1 }, { DAGGER, 1 } }, false);
+	CHECK(hands.unequip.empty());
+	CHECK(hands.equip.empty());
+	CHECK(hands.missing == 1u);
+	CHECK(CheckGear(twin, held).Complete(1));
+	// A shield the copy lacks: the torch in its left hand stays, counted once (the shield).
+	const Protocol::NpcGear shield{ .key = GUARD, .worn = { { SHIELD, SHIELD_SLOT } }, .right = SWORD, .left = SHIELD };
+	const Wearing           torch{ .right = SWORD, .left = TORCH };
+	const auto              lit = PlanGear(shield, torch, { { SWORD, 1 }, { TORCH, 1 } }, false);
+	CHECK(lit.unequip.empty());
+	CHECK(lit.missing == 1u);
+	CHECK(CheckGear(shield, torch).Complete(1));
 }
 
 TEST("npc rules: a copy follows its runner again after the NPC changed hands and came back, whatever the runner numbered it")
