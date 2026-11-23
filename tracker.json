@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-23T14:03:27+00:00",
+ "updated": "2026-11-23T15:41:06+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -34,7 +34,7 @@
    "title": "A friend's attacks, blocks, bow shots, spells and shouts are shown on their character",
    "kind": "feature",
    "priority": 1,
-   "stage": 2,
+   "stage": 3,
    "note": "",
    "pr": 22
   },
@@ -76,7 +76,7 @@
    "title": "A friend's weapons, shield, spells and torch are shown in each hand",
    "kind": "feature",
    "priority": 1,
-   "stage": 2,
+   "stage": 3,
    "note": "",
    "pr": 22
   },
@@ -181,7 +181,7 @@
    "title": "Chests and containers: what one player takes is gone for the other",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
+   "stage": 2,
    "note": ""
   },
   {
@@ -392,7 +392,7 @@
    "title": "Friends look like their own character: face, hair, body and skin",
    "kind": "feature",
    "priority": 1,
-   "stage": 0,
+   "stage": 1,
    "note": ""
   },
   {
@@ -865,7 +865,7 @@
    "title": "Time of day and weather follow the host",
    "kind": "feature",
    "priority": 2,
-   "stage": 2,
+   "stage": 3,
    "note": ""
   },
   {
