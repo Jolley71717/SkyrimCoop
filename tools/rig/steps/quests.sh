@@ -291,7 +291,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	o=$(st 'error: no such command' 3); t "status: no quest sync is the rig broken" "$(grep -c '^FAIL .*rig broken (game)' <<<"$o")" 1
 
 	# the step is wired into the harness: in STEPS after doors and before final, a session step, in the default run
-	t "quests is a step, after doors, before final" "$(case " $STEPS " in *" doors "*" quests "*" final "*) echo yes;; esac)" yes
+	t "quests is a step, after doors, before final" "$(case " $STEPS " in *" doors "*"quests "*"final "*) echo yes;; esac)" yes
 	t "quests needs a session" "$(case " $SESSION_STEPS " in *" quests "*) echo yes;; esac)" yes
 	t "quests runs by default" "$(case " $OPTIN_STEPS " in *" quests "*) echo no;; *) echo yes;; esac)" yes
 	t "quests has its line" "$([ -n "${STEP_INFO[quests]:-}" ] && echo yes)" yes

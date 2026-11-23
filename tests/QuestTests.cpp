@@ -516,7 +516,7 @@ TEST("quest maker: a stage this game has already, or a quest it lacks or does no
 		verdicts.push_back(step->verdict);
 	}
 	using V = QuestRules::Verdict;
-	CHECK(verdicts == std::vector<V>{ V::kHas, V::kMissing, V::kNotHere, V::kMake });
+	CHECK((verdicts == std::vector<V>{ V::kHas, V::kMissing, V::kNotHere, V::kMake }));
 }
 
 TEST("quest maker: a stage never read done is given up after STAGE_WAIT and the quest goes on, counted stuck")
