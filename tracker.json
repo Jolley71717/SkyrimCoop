@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-23T16:07:24+00:00",
+ "updated": "2026-11-23T17:19:58+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -181,7 +181,7 @@
    "title": "Chests and containers: what one player takes is gone for the other",
    "kind": "feature",
    "priority": 2,
-   "stage": 2,
+   "stage": 3,
    "note": ""
   },
   {
