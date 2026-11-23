@@ -341,6 +341,47 @@ namespace NpcSync
 			return armor ? armor->GetSlotMask().underlying() : 0;
 		}
 
+		// Held in both hands: a weapon of a two-handed type (greatsword, battleaxe, warhammer, bow, crossbow), or any
+		// weapon or spell whose equip slot is none of the one-hand ones (the game's both-hands slot, which a ritual spell
+		// and a mod's two-handed weapon of any type name the same way).
+		bool TwoHanded(const RE::TESForm* a_form)
+		{
+			if (!a_form) {
+				return false;
+			}
+			if (const auto weapon = a_form->As<RE::TESObjectWEAP>();
+				weapon && (weapon->IsTwoHandedSword() || weapon->IsTwoHandedAxe() || weapon->IsBow() || weapon->IsCrossbow())) {
+				return true;
+			}
+			const auto type = a_form->As<RE::BGSEquipType>();
+			const auto slot = type ? type->GetEquipSlot() : nullptr;
+			const auto defaults = RE::BGSDefaultObjectManager::GetSingleton();
+			if (!slot || !defaults) {
+				return false;
+			}
+			for (const auto one : { RE::DEFAULT_OBJECTS::kLeftHandEquip, RE::DEFAULT_OBJECTS::kRightHandEquip, RE::DEFAULT_OBJECTS::kEitherHandEquip,
+					 RE::DEFAULT_OBJECTS::kVoiceEquip, RE::DEFAULT_OBJECTS::kPotionEquip }) {
+				if (defaults->GetObject<RE::BGSEquipSlot>(one) == slot) {
+					return false;
+				}
+			}
+			return true;
+		}
+
+		// The object in each hand, a two-handed one in the right alone (NpcRules::OneReportEach), for both a runner's
+		// NPC (GearOf) and a copy (Dress).
+		std::pair<RE::TESForm*, RE::TESForm*> HeldObjects(RE::Actor* a_actor)
+		{
+			const auto right = a_actor->GetEquippedObject(false);
+			const auto left = a_actor->GetEquippedObject(true);
+			const auto idOf = [](const RE::TESForm* a_form) { return a_form ? a_form->GetFormID() : 0u; };
+			const auto hands = NpcRules::OneReportEach(idOf(right), idOf(left), TwoHanded(right), TwoHanded(left));
+			const auto pick = [&](std::uint32_t a_id) -> RE::TESForm* {
+				return a_id == 0 ? nullptr : a_id == idOf(right) ? right : left;
+			};
+			return { pick(hands.right), pick(hands.left) };
+		}
+
 		// What it wears and holds, as the others are told: a runtime armor as the plugin armor it was made from
 		// (FormIds::Shareable), or left out with its body slots said; a runtime weapon or spell as an unnamed hand, never
 		// as an empty one (the others' copies keep their own there: NpcRules::PlanGear).
@@ -372,8 +413,9 @@ namespace NpcSync
 				}
 				return a_form->GetFormID();
 			};
-			gear.right = held(a_actor->GetEquippedObject(false), Protocol::kRightUnnamed);
-			gear.left = held(a_actor->GetEquippedObject(true), Protocol::kLeftUnnamed);
+			const auto [right, left] = HeldObjects(a_actor);
+			gear.right = held(right, Protocol::kRightUnnamed);
+			gear.left = held(left, Protocol::kLeftUnnamed);
 			gear.ammo = held(a_actor->GetCurrentAmmo(), Protocol::kAmmoUnnamed);
 			return gear;
 		}
@@ -497,14 +539,30 @@ namespace NpcSync
 				}
 			}
 			const auto idOf = [](const RE::TESForm* a_form) { return a_form ? a_form->GetFormID() : 0u; };
-			now.right = idOf(a_actor->GetEquippedObject(false));
-			now.left = idOf(a_actor->GetEquippedObject(true));
+			const auto [right, left] = HeldObjects(a_actor);
+			now.right = idOf(right);
+			now.left = idOf(left);
 			now.ammo = idOf(a_actor->GetCurrentAmmo());
-			const auto plan = NpcRules::PlanGear(a_gear, now, carried, a_mayAdd);
+			// A spell in the runner's NPC's hand is never in an inventory, so it is not looked for (a load-order copy would
+			// count it missing): the hand is planned as empty and the spell counted skipped. Spells in a copy's hands come
+			// with the magic work.
+			auto       wanted = a_gear;
+			const auto spell = [](std::uint32_t a_id) {
+				const auto form = a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
+				return form && form->Is(RE::FormType::Spell);
+			};
+			for (auto* hand : { &wanted.right, &wanted.left }) {
+				if (spell(*hand)) {
+					*hand = 0;
+					++out.skipped;
+				}
+			}
+			const auto plan = NpcRules::PlanGear(wanted, now, carried, a_mayAdd);
 			const auto defaults = RE::BGSDefaultObjectManager::GetSingleton();
 			const auto slotOf = [&](NpcRules::Hand a_hand, const RE::TESForm* a_form) -> const RE::BGSEquipSlot* {
-				// A weapon goes in the hand named; a torch or a shield where the game puts it.
-				if (!defaults || a_hand == NpcRules::Hand::kNone || !a_form->Is(RE::FormType::Weapon)) {
+				// A one-handed weapon goes in the hand named; a two-handed one, a torch or a shield where the game puts it
+				// (a two-handed weapon's own slot is both hands: a one-hand slot would be the wrong one).
+				if (!defaults || a_hand == NpcRules::Hand::kNone || !a_form->Is(RE::FormType::Weapon) || TwoHanded(a_form)) {
 					return nullptr;
 				}
 				return defaults->GetObject<RE::BGSEquipSlot>(a_hand == NpcRules::Hand::kLeft ? RE::DEFAULT_OBJECTS::kLeftHandEquip : RE::DEFAULT_OBJECTS::kRightHandEquip);

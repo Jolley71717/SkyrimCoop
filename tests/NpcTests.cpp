@@ -684,6 +684,53 @@ TEST("npc rules: a weapon in both hands is put in both, which takes two of it")
 	CHECK(moved.equip == Items({ { SWORD, Hand::kLeft } }));
 }
 
+TEST("npc rules: a two-handed weapon or spell is the right hand's alone, however the game reports it")
+{
+	using namespace NpcRules;
+	constexpr std::uint32_t GREATSWORD = 0x0001359D, RITUAL = 0x0010F7EC;
+	// Reported in both hands: the right only (a bow, a greatsword, a ritual spell).
+	CHECK((OneReportEach(BOW, BOW, true, true) == Hands{ BOW, 0 }));
+	CHECK((OneReportEach(GREATSWORD, GREATSWORD, true, true) == Hands{ GREATSWORD, 0 }));
+	CHECK((OneReportEach(RITUAL, RITUAL, true, true) == Hands{ RITUAL, 0 }));
+	// Reported in one hand: still the right's.
+	CHECK((OneReportEach(BOW, 0, true, false) == Hands{ BOW, 0 }));
+	CHECK((OneReportEach(0, BOW, false, true) == Hands{ BOW, 0 }));
+	// One-handed in both hands (dual wielding, dual casting) stays in both; a sword and a shield or torch are untouched.
+	CHECK((OneReportEach(SWORD, SWORD, false, false) == Hands{ SWORD, SWORD }));
+	CHECK((OneReportEach(SWORD, SHIELD, false, false) == Hands{ SWORD, SHIELD }));
+	CHECK((OneReportEach(SWORD, TORCH, false, false) == Hands{ SWORD, TORCH }));
+	CHECK((OneReportEach(0, 0, false, false) == Hands{ 0, 0 }));
+}
+
+TEST("npc rules: sword to bow and bow to sword, each carried once, needs nothing more and lacks nothing")
+{
+	using namespace NpcRules;
+	const std::vector<Count> carried{ { CUIRASS, 1 }, { SWORD, 1 }, { BOW, 1 }, { ARROWS, 20 } };
+	// Both sides report a bow as the right hand's alone (OneReportEach).
+	const auto bow = OneReportEach(BOW, BOW, true, true);
+	const auto sword = OneReportEach(SWORD, 0, false, false);
+	// A guard draws its bow: the sword comes off, the bow goes in the right, the arrows on. No second bow wanted.
+	const auto draw = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = bow.right, .left = bow.left, .ammo = ARROWS },
+		{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = sword.right, .left = sword.left }, carried, false);
+	CHECK(draw.unequip == Items({ { SWORD, Hand::kRight } }));
+	CHECK(draw.equip == Items({ { BOW, Hand::kRight }, { ARROWS, Hand::kNone } }));
+	CHECK(draw.add.empty());
+	CHECK(draw.missing == 0u);
+	// ... and back to the sword: the bow comes off once, the sword goes on.
+	const auto back = PlanGear({ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = sword.right, .left = sword.left },
+		{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = bow.right, .left = bow.left, .ammo = ARROWS }, carried, false);
+	CHECK(back.unequip == Items({ { BOW, Hand::kRight }, { ARROWS, Hand::kNone } }));
+	CHECK(back.equip == Items({ { SWORD, Hand::kRight } }));
+	CHECK(back.missing == 0u);
+	// A spawn's copy (a Dremora's greatsword) is given one, not two.
+	constexpr std::uint32_t GREATSWORD = 0x0001359D;
+	const auto              great = OneReportEach(GREATSWORD, GREATSWORD, true, true);
+	const auto              spawn = PlanGear({ .key = GUARD, .right = great.right, .left = great.left }, {}, {}, true);
+	CHECK(spawn.equip == Items({ { GREATSWORD, Hand::kRight } }));
+	CHECK(spawn.add == std::vector<Count>({ { GREATSWORD, 1 } }));
+	CHECK(spawn.missing == 0u);
+}
+
 TEST("npc rules: every kind of actor is told apart, the most telling first")
 {
 	using namespace NpcRules;

@@ -333,6 +333,30 @@ namespace NpcRules
 		bool operator==(const Count&) const = default;
 	};
 
+	// The hands as one report each, for both what a runner's NPC holds (NpcSync's GearOf) and what its copy holds now
+	// (Dress). The game may report a two-handed object (a greatsword, a battleaxe, a warhammer, a bow, a crossbow, a ritual
+	// spell, a mod's weapon of any of these) in both hands; taken as it is, a copy would want a second one for its left
+	// hand (a load-order copy counting one missing each time an archer draws, a spawn's copy given a second greatsword).
+	// So a two-handed object is the right hand's alone and the left is empty, whichever way the game reports it. One-handed
+	// weapons or spells in both hands (dual wielding, dual casting) stay in both.
+	struct Hands
+	{
+		std::uint32_t right = 0;
+		std::uint32_t left = 0;
+		bool operator==(const Hands&) const = default;
+	};
+
+	[[nodiscard]] constexpr Hands OneReportEach(std::uint32_t a_right, std::uint32_t a_left, bool a_rightTwoHanded, bool a_leftTwoHanded)
+	{
+		if (a_left != 0 && a_leftTwoHanded && (a_right == 0 || a_right == a_left)) {
+			return { a_left, 0 };  // reported in the left alone: it is still the right hand's
+		}
+		if (a_right != 0 && a_rightTwoHanded && a_left == a_right) {
+			return { a_right, 0 };
+		}
+		return { a_right, a_left };
+	}
+
 	struct GearPlan
 	{
 		std::vector<GearItem> unequip;  // first, so a hand or a slot is free for what comes
