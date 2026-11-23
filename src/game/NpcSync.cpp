@@ -19,6 +19,11 @@
 #include <unordered_map>
 #include <unordered_set>
 
+// Windows' headers name GetObjectA GetObject; BGSDefaultObjectManager's GetObject is meant here.
+#ifdef GetObject
+#	undef GetObject
+#endif
+
 namespace NpcSync
 {
 	namespace

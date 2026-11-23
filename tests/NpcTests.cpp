@@ -181,7 +181,7 @@ TEST("npc protocol: every NPC message carries forms, and this protocol is versio
 	for (const auto type : { MT::kNpcClaims, MT::kNpcOwners, MT::kNpcStates, MT::kNpcActions, MT::kNpcGear }) {
 		CHECK(FormTranslate::CarriesForms(type));
 	}
-	CHECK(Protocol::VERSION == 5);
+	static_assert(Protocol::VERSION == 5);
 }
 
 // ---- each game's edge ----

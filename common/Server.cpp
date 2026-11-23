@@ -285,8 +285,11 @@ void Server::Run()
 				}
 			}
 		}
-		// Who runs each NPC (a full list: a player back on a new connection forgets what they knew), and their gear.
-		send(a_key, Protocol::Encode(Protocol::NpcOwners{ .full = true, .owners = npcs.All() }), true);
+		// Who runs each NPC (a full list; a game forgets what it knew at each welcome), and their gear. Nothing when no NPC
+		// is run: there is nothing to forget.
+		if (auto all = npcs.All(); !all.empty()) {
+			send(a_key, Protocol::Encode(Protocol::NpcOwners{ .full = true, .owners = std::move(all) }), true);
+		}
 		for (const auto& [npc, gear] : npcGear) {
 			send(a_key, Protocol::Encode(gear), true);
 		}
