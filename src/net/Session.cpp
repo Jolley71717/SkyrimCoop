@@ -8,6 +8,7 @@
 #include "Server.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
+#include "game/LootSync.h"
 #include "game/QuestSync.h"
 #include "game/RemotePlayers.h"
 #include "game/WorldClock.h"
@@ -223,6 +224,7 @@ namespace Session
 					WorldObjects::Welcomed(playerId);  // the session's doors follow the welcome
 					QuestSync::Welcomed(playerId, playerId == hostId);  // ... and its quests (the host's game says its own)
 					WorldClock::Welcomed(playerId);  // ... and its clock: lined up afresh with the owner's
+					LootSync::Welcomed(playerId);    // ... and its loot: the moves this world lacks asked for
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -288,6 +290,21 @@ namespace Session
 			case Protocol::MessageType::kRemoteClock:
 				if (const auto msg = Protocol::DecodeClockState(a_data); msg && welcomed) {
 					WorldClock::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kRemoteLoot:
+				if (const auto msg = Protocol::DecodeLootBatch(a_data); msg && welcomed) {
+					LootSync::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kLootCaughtUp:
+				if (const auto msg = Protocol::DecodeLootCaughtUp(a_data); msg && welcomed) {
+					LootSync::CaughtUp(*msg);
+				}
+				break;
+			case Protocol::MessageType::kLootAnswer:
+				if (const auto msg = Protocol::DecodeLootBatch(a_data); msg && welcomed) {
+					LootSync::Answered(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -427,6 +444,7 @@ namespace Session
 		WorldObjects::Clear();
 		QuestSync::Clear();
 		WorldClock::Clear();
+		LootSync::Clear();
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -465,6 +483,7 @@ namespace Session
 			WorldObjects::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			QuestSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			WorldClock::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
+			LootSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 		}
 		RemotePlayers::Frame();
 	}

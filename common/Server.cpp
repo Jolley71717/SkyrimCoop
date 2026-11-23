@@ -2,6 +2,7 @@
 
 #include "EnetTransport.h"
 #include "FormIds.h"
+#include "LootLog.h"
 #include "Name.h"
 #include "QuestBook.h"
 #include "Redact.h"
@@ -69,6 +70,14 @@ namespace
 		TokenBucket       clockBudget{ 4.0, 1.0 };
 		bool              clockOwed = false;
 		bool              toldNotClockOwner = false;
+		// Loot (docs/DESIGN.md, "Containers and loot"): batches of moves, a burst of 64 then 16 a second (a Take All is one
+		// or two batches; play makes a few a minute). A batch past its budget is answered busy, move by move, and the game
+		// sends it again later. Asks for the moves from a number (a welcome, a load): 4 then one in 2 s; one past its
+		// budget is owed (the newest kept) and answered from the server's loop once the budget has room.
+		TokenBucket                         lootBudget{ 64.0, 16.0 };
+		TokenBucket                         lootAskBudget{ 4.0, 0.5 };
+		std::optional<Protocol::LootAsk>    lootAskOwed;
+		std::uint64_t                       lootDropped = 0;
 		bool        toldNotHost = false;
 		bool        toldUnknown = false;
 	};
@@ -183,6 +192,11 @@ void Server::Run()
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
+	// The session's moves of loot (common/LootLog.h), numbered in the table's numbering: a new session starts it again
+	// under a new id, so a game's ledger of the old one is caught up from the first move.
+	LootLog loot;
+	bool    lootFullSaid = false;
+	loot.Restart((std::uint64_t{ random() } << 32) | random());
 
 	const auto send = [&](const PeerKey& a_to, const std::vector<std::uint8_t>& a_packet, bool a_reliable) {
 		transports[a_to.first]->Send(a_to.second, a_packet, a_reliable);
@@ -243,6 +257,17 @@ void Server::Run()
 		}
 	};
 
+	// The moves from a game's ledger on (its world holds the ones before), as a catch-up, then the log's id and next
+	// number: the game makes the catch-up's moves, its own among them (a load took them from its world), and takes the
+	// moves passed on after it as they come.
+	const auto sendLoot = [&](const PeerKey& a_to, const Protocol::LootAsk& a_ask) {
+		const auto start = loot.StartFor(a_ask.logId, a_ask.from);
+		for (const auto& packet : Protocol::LootBatches(loot.From(start), MT::kRemoteLoot, true)) {
+			send(a_to, packet, true);
+		}
+		send(a_to, Protocol::Encode(Protocol::LootCaughtUp{ .logId = loot.Id(), .from = start, .next = loot.Next() }), true);
+	};
+
 	const auto onHello = [&](const PeerKey& a_key, Peer& a_peer, std::span<const std::uint8_t> a_data) {
 		if (a_peer.joined) {
 			return;
@@ -300,6 +325,8 @@ void Server::Run()
 			quests.Clear();        // ... and the quests
 			questsFullSaid = false;
 			sessionClock.reset();  // ... and its clock was another world's
+			loot.Restart((std::uint64_t{ random() } << 32) | random());  // ... and its loot, under a new log id
+			lootFullSaid = false;
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -556,6 +583,61 @@ void Server::Run()
 				}
 			}
 			break;
+		case MT::kLoot:
+			// Each move the log takes is numbered and goes to every game, the reporter's too, with who made it; the rest go
+			// back to the reporter alone (kLootAnswer), each with why: every move is answered, so a game never waits for
+			// an echo that is not coming. A batch past the budget is answered busy, all of it.
+			if (const auto batch = Protocol::DecodeLootBatch(a_data)) {
+				using E = Protocol::LootEntry;
+				std::vector<E> news;
+				std::vector<E> answers;
+				if (!a_peer.lootBudget.Take(Clock::now())) {
+					if (a_peer.lootDropped++ == 0) {
+						log(std::format("server: player {} reports loot faster than the server passes it on; the rest is answered busy", a_peer.playerId));
+					}
+					for (auto e : batch->entries) {
+						e.answer = E::kBusy;
+						answers.push_back(e);
+					}
+				} else {
+					for (const auto& e : batch->entries) {
+						E    out;
+						auto answer = e;
+						switch (loot.Report(e, a_peer.playerId, out)) {
+						case LootLog::Take::kNews:
+							news.push_back(out);
+							continue;
+						case LootLog::Take::kFull:
+							if (!std::exchange(lootFullSaid, true)) {
+								log(std::format("server: the session keeps {} moves of loot, its most; a new one is not kept or passed on", loot.Size()));
+							}
+							answer.answer = E::kFull;
+							break;
+						case LootLog::Take::kRefused:
+							answer.answer = E::kRefused;
+							break;
+						}
+						answers.push_back(answer);
+					}
+				}
+				for (const auto& packet : Protocol::LootBatches(news, MT::kRemoteLoot)) {
+					broadcast(packet, true, nullptr);
+				}
+				for (const auto& packet : Protocol::LootBatches(answers, MT::kLootAnswer)) {
+					send(a_key, packet, true);
+				}
+			}
+			break;
+		case MT::kAskLoot:
+			if (const auto ask = Protocol::DecodeLootAsk(a_data)) {
+				if (a_peer.lootAskBudget.Take(Clock::now())) {
+					a_peer.lootAskOwed.reset();
+					sendLoot(a_key, *ask);
+				} else {
+					a_peer.lootAskOwed = *ask;  // answered from the loop once the budget has room: never dropped
+				}
+			}
+			break;
 		case MT::kHeartbeat:
 			if (const auto beat = Protocol::DecodeHeartbeat(a_data); beat && a_peer.heartbeats.Take(Clock::now())) {
 				// Unreliable, as the heartbeat itself is sent: a resend would measure the resend, not the connection.
@@ -622,6 +704,10 @@ void Server::Run()
 			if (peer.joined && peer.questAsksOwed && peer.questAskBudget.Take(now)) {
 				peer.questAsksOwed = false;
 				sendQuests(key);
+			}
+			if (peer.joined && peer.lootAskOwed && peer.lootAskBudget.Take(now)) {
+				const auto ask = *std::exchange(peer.lootAskOwed, std::nullopt);
+				sendLoot(key, ask);
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {
 				log(std::format("server: dropped {}: no hello", transports[key.first]->Describe(key.second)));
