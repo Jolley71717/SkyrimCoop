@@ -99,7 +99,7 @@ namespace Shots
 		struct Counts
 		{
 			std::uint64_t notOurs = 0, shooterGone = 0, unfit = 0, saidNpc = 0, saidDual = 0, launchedDual = 0;
-			std::uint64_t in = 0, noShooter = 0, far = 0, unknown = 0, full = 0, launchFailed = 0, runByUs = 0, unmirrored = 0;
+			std::uint64_t in = 0, noShooter = 0, tooFar = 0, unknown = 0, full = 0, launchFailed = 0, runByUs = 0, unmirrored = 0;
 			std::uint64_t endedSave = 0, reaimed = 0, reaimedLate = 0;
 			float         aimErrMax = 0.0f, aimLeftMax = 0.0f;
 			ShotRules::KindCounts launched;
@@ -390,7 +390,7 @@ namespace Shots
 			}
 			const RE::NiPoint3 origin{ a_shot.x, a_shot.y, a_shot.z };
 			if (!ShotRules::Launchable(actor->GetPosition().GetDistance(origin), actor->GetHeight())) {
-				++counts.far;
+				++counts.tooFar;
 				return;
 			}
 			const auto base = RE::TESForm::LookupByID<RE::BGSProjectile>(a_shot.projectile);
@@ -486,9 +486,9 @@ namespace Shots
 					auto& rd = projectile->GetProjectileRuntimeData();
 					stopped = rd.linearVelocity.Length() < 1.0f && rd.livingTime > ShotRules::YOUNG;
 					if (const auto check = aimChecks.find(id); check != aimChecks.end() && rd.livingTime > 0.0f) {
-						if (const auto left = FixAim(projectile.get(), check->second.pitch, check->second.heading)) {
-							counts.aimLeftMax = (std::max)(counts.aimLeftMax, *left);
-							if (*left > ShotRules::AIM_FIX) {
+						if (const auto offBy = FixAim(projectile.get(), check->second.pitch, check->second.heading)) {
+							counts.aimLeftMax = (std::max)(counts.aimLeftMax, *offBy);
+							if (*offBy > ShotRules::AIM_FIX) {
 								++counts.reaimedLate;
 							}
 						}
@@ -626,7 +626,7 @@ namespace Shots
 			out += std::format(" | ours seen={} sent={} byKind={} npc={} dual={} coalesced={} dropped={} notOurs={} shooterGone={} unfit={} waiting={}", outbox.seen, outbox.sent,
 				outbox.byKind.Line(), counts.saidNpc, counts.saidDual, outbox.coalesced, outbox.dropped, counts.notOurs, counts.shooterGone, counts.unfit, waiting);
 			out += std::format(" | theirs in={} launched={} byKind={} dual={} late={} inboxDropped={} queued={} noShooter={} far={} unknown={} full={} launchFailed={} runByUs={} unmirrored={}",
-				counts.in, counts.launched.Total(), counts.launched.Line(), counts.launchedDual, inbox.late, inbox.dropped, inbox.Size(), counts.noShooter, counts.far, counts.unknown,
+				counts.in, counts.launched.Total(), counts.launched.Line(), counts.launchedDual, inbox.late, inbox.dropped, inbox.Size(), counts.noShooter, counts.tooFar, counts.unknown,
 				counts.full, counts.launchFailed, counts.runByUs, counts.unmirrored);
 			out += std::format(" | natives ended={} byKind={} skipped={} ending={}", shared.nativeEnded, shared.nativeByKind.Line(), shared.skipped, endingSize);
 			out += std::format(" | flying oursSeen={} raced={} pending={} live={} liveArrows={} gone={} endedStuck={} endedOld={} endedSave={}", shared.oursSeen, shared.raced,

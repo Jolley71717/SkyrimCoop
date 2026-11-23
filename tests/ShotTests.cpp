@@ -349,7 +349,7 @@ TEST("shot rules: aim: a way from its angles and back, the error of a launch off
 	const auto down = ShotRules::Direction(PI / 4.0f, 0.0f);  // a pitch above 0 looks down
 	CHECK(down[2] < 0.0f);
 
-	for (const auto [pitch, heading] : { std::pair{ 0.2f, 0.5f }, std::pair{ -0.4f, 3.0f }, std::pair{ 0.0f, 5.5f } }) {
+	for (const auto& [pitch, heading] : { std::pair{ 0.2f, 0.5f }, std::pair{ -0.4f, 3.0f }, std::pair{ 0.0f, 5.5f } }) {
 		const auto way = ShotRules::Direction(pitch, heading);
 		const auto angles = ShotRules::AnglesOf(way[0] * 3000.0f, way[1] * 3000.0f, way[2] * 3000.0f);
 		REQUIRE(angles);
