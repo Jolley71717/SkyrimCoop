@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-23T15:41:06+00:00",
+ "updated": "2026-11-23T16:07:24+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -340,6 +340,38 @@
    "note": "An idea, not planned or promised yet."
   },
   {
+   "id": "faces-are-copies-of-presets-made-before-a-load-freed-by-it",
+   "title": "Faces: are copies of presets made before a load freed by it",
+   "kind": "task",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "faces-racemenu-body-morphs-overlays-and-node-transforms-not",
+   "title": "Faces: RaceMenu body morphs, overlays and node transforms not carried to stand-ins",
+   "kind": "task",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "faces-rig-check-does-a-chargen-preset-copy-build-its-head-at",
+   "title": "Faces rig check: does a chargen-preset copy build its head at run time, and are its tint layers drawn",
+   "kind": "task",
+   "priority": 1,
+   "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "faces-the-tias-preset-index-of-a-tint-layer-chosen-by-colour",
+   "title": "Faces: the TIAS preset index of a tint layer chosen by colour match only",
+   "kind": "task",
+   "priority": 3,
+   "stage": 0,
+   "note": ""
+  },
+  {
    "id": "faction-questlines-together",
    "title": "Faction questlines together",
    "kind": "feature",
@@ -392,8 +424,9 @@
    "title": "Friends look like their own character: face, hair, body and skin",
    "kind": "feature",
    "priority": 1,
-   "stage": 1,
-   "note": ""
+   "stage": 2,
+   "note": "",
+   "pr": 24
   },
   {
    "id": "friends-shown-on-the-map-and-compass",
