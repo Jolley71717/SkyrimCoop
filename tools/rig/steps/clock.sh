@@ -261,7 +261,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	: "${VM_SSH:=selftest-no-vm}"; export SKYRIMCOOP_STAGE=${SKYRIMCOOP_STAGE:-$(mktemp -d)}
 	. "$(dirname "${BASH_SOURCE[0]}")/../steps.sh"
 	bad=0; d=$(mktemp -d); CHECKS=$d; A_OUT=$d/run; a_init clocktest >/dev/null
-	t() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got [$2] want [$3]"; bad=1; fi; }
+	t() { if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: got [$2] want [$3]"; grep -E "^(FAIL|RIG|RIGFAULT|WARN) " <<<"${o:-}" | sed "s/^/       /"; bad=1; fi; }
 	sleep() { :; }; lock_keepalive() { :; }
 	CLOCK_WAIT=2; CLOCK_SKY_WAIT=2
 
