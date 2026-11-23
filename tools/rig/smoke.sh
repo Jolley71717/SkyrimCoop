@@ -141,9 +141,11 @@ compare_saves() {
 # --keep: both ini files byte for byte, the build's install undone (when the run installed one: the run folder's
 # "build" file says so) and both DLLs the ones from before, start.ps1's game tasks removed, the tunnel closed, both Saves
 # folders compared. The run folder is then marked "restored", so it is never put back twice (a second install.sh undo
-# would take out an older install).
+# would take out an older install), but only when this restore had no FAIL: a failed undo or DLL check can be tried
+# again with --restore.
 restore_closed() {
-	local b=$1 r run; run=$(dirname "$b")
+	local b=$1 r run fails0; run=$(dirname "$b")
+	fails0=$(grep -c '^FAIL' "$A_RESULTS" 2>/dev/null); fails0=${fails0:-0}
 	restore_ini "$b"
 	if [ -s "$run/build" ]; then
 		bash "$RIG/install.sh" undo > "$A_OUT/install-undo.log" 2>&1 && pass "restore: the build's install undone" "" || fail "restore: the build's install undone" "install.sh undo failed: $A_OUT/install-undo.log"
@@ -153,7 +155,9 @@ restore_closed() {
 	vm_tasks_gone "SkyrimCoop-Game-*" "no game task left on the VM"
 	r=$(tunnel_pid); [ -n "$r" ] && taskkill //PID "$r" //F >/dev/null 2>&1
 	compare_saves "$b"
-	date '+%Y-%m-%d %H:%M:%S' > "$run/restored"
+	r=$(grep -c '^FAIL' "$A_RESULTS" 2>/dev/null); r=${r:-0}
+	if [ "$r" -eq "$fails0" ]; then date '+%Y-%m-%d %H:%M:%S' > "$run/restored"
+	else echo "restore: $((r - fails0)) check(s) failed; $run is not marked restored, so --restore $run can try again"; fi
 }
 a_on_stop() {  # a run stopped by the breaker or a signal: the crash scan, then the restore
 	[ -n "${CRASH_SCANNED:-}" ] || [ ! -f "$A_OUT/crash-before-host.txt" ] || { CRASH_SCANNED=1; crash_scan "at the stop"; }
@@ -270,6 +274,14 @@ if [ $mode = selftest ]; then
 	o=$(bash "$me" --restore "$rd" 2>&1); r=$?
 	t "--restore of a run folder put back already is refused (no second install undo)" "$r" 2
 	case "$o" in *"put back already"*) echo "ok   ... saying why";; *) echo "FAIL ... saying why: [$o]"; bad=1;; esac
+	rm -rf "$rd"
+	# restore_closed marks the folder restored only when its own checks all passed (a failed undo can be tried again)
+	rd=$(mktemp -d); mkdir -p "$rd/backup"; echo aaa > "$rd/backup/host-dll.md5"; echo aaa > "$rd/backup/vm-dll.md5"
+	rc() { ( A_OUT=$rd/r$1; RC_DLL=$2; a_init rc >/dev/null; echo "FAIL	earlier	a check before the restore	x" >> "$A_RESULTS"
+		restore_ini() { :; }; dll_md5() { echo "$RC_DLL"; }; vm_tasks_gone() { :; }; tunnel_pid() { :; }; compare_saves() { :; }
+		restore_closed "$rd/backup" ) >/dev/null 2>&1; }
+	rc 1 bbb; [ ! -e "$rd/restored" ] && echo "ok   restore_closed: a DLL check failed, the folder is not marked restored" || { echo "FAIL restore_closed marked a failed restore"; bad=1; }
+	rc 2 aaa; [ -e "$rd/restored" ] && echo "ok   restore_closed: a whole restore marks the folder (a FAIL from before the restore does not count)" || { echo "FAIL restore_closed did not mark a whole restore"; bad=1; }
 	rm -rf "$rd"
 	grep -q 'a_log_to "$A_OUT/run.log"' "$me" && ! grep -qE '^[^#]*exec > >\(tee ' "$me" && echo "ok   the run's log goes through a_log_to (a tee Ctrl-C does not kill)" || { echo "FAIL the run's log does not go through a_log_to"; bad=1; }
 	o=$(SKYRIMCOOP_RIG_OWNER=someone bash "$me" --only see 2>&1); r=$?

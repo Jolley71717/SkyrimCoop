@@ -22,9 +22,10 @@ JOIN=${JOIN:-url}                        # url: the VM's Steam is given steam://
 SAVE_NAME=${SAVE_NAME:-SkyrimCoopRig}    # the VM's test save (never the host's)
 NEAR=${NEAR:-1500}                       # units: two players further apart than this are put together again with coc
 # Each mover's legs, "dx,dy,speed[,sprint]" (pad stick 0-1; sprint: lb held the whole leg): a run, a sprint, then two
-# walks, round a square so the scene ends where it began. Each leg ends facing a new way (the facing checks at rest).
-MOVE_LEGS_VM=${MOVE_LEGS_VM:-"0,700,1.0 700,0,1.0,sprint 0,-700,0.35 -700,0,0.35"}
-MOVE_LEGS_HOST=${MOVE_LEGS_HOST:-"700,0,1.0 0,-700,1.0,sprint -700,0,0.35 0,700,0.35"}
+# walks, round a rectangle so the scene ends where it began. Each leg ends facing a new way (the facing checks at rest).
+# The sprint leg is twice as long as the run (about 3 s at a sprint), so it gets enough samples to judge.
+MOVE_LEGS_VM=${MOVE_LEGS_VM:-"0,700,1.0 1400,0,1.0,sprint 0,-700,0.35 -1400,0,0.35"}
+MOVE_LEGS_HOST=${MOVE_LEGS_HOST:-"1400,0,1.0 0,-700,1.0,sprint -1400,0,0.35 0,700,0.35"}
 # The limits a stand-in is held to. A friend's state is drawn about 100 ms late (src/game/StateBuffer.h), about 40 u at a
 # run; the samples of the two games are not taken at the same moment either.
 LIMIT_REST=${LIMIT_REST:-60}            # u: the stand-in from its friend once both stand still
@@ -35,6 +36,7 @@ LIMIT_FOLLOW=${LIMIT_FOLLOW:-80}        # %: the stand-in covers at least this m
 LIMIT_LEGS=${LIMIT_LEGS:-50}            # %: of the samples where the friend moves, the stand-in's graph Speed is above 0 in this many
 LIMIT_JOIN_MS=${LIMIT_JOIN_MS:-20000}   # ms: a join slower than this is a WARN
 LIMIT_SPRINT=${LIMIT_SPRINT:-50}        # %: of the samples where the friend sprints, the stand-in shows a sprint (shown r) in this many
+MIN_SPRINT_SAMPLES=${MIN_SPRINT_SAMPLES:-4}  # a sprint leg with fewer samples where the friend sprints is not judged (RIG)
 LIMIT_FALSE_SPRINT=${LIMIT_FALSE_SPRINT:-10}  # %: in a leg with no sprint, the stand-in shows one in at most this many samples
 LIMIT_HEADING=${LIMIT_HEADING:-0.15}    # rad: at rest, the stand-in faces within this of the way its friend faces
 MIN_TICK_RATE=${MIN_TICK_RATE:-20}      # ticks/s: a game slower than this (a display asleep, a starved machine) is the rig's fault
@@ -324,12 +326,14 @@ move_leg() {
 		[[ $r == button* ]] || { still "$mover"; rig_broken input "$label: the sprint" "$mover's pad refused lb: $r"; return; }
 	fi
 	f=$A_OUT/samples-${label//[ ()]/-}.csv; echo "i,mx,my,mz,mspeed,sx,sy,sz,sgraph,msprint,sshown" > "$f"
-	for ((k = 1; k <= 60; k++)); do
+	# a sprint leg is short in time: no pause between its samples (each costs three dev-channel calls)
+	local pause=0.5 most=60; [ "$how" = sprint ] && { pause=0; most=150; }
+	for ((k = 1; k <= most; k++)); do
 		mp=$(dc "$mover" where); sp=$(dc "$watcher" standins)
 		m=$(xyz 'pos=' "$mp"); s=$(xyz ' at=' "$sp"); m=${m:-"  "}; s=${s:-"  "}   # a missing place keeps its three columns
 		echo "$k,${m// /,},$(field speed "$mp"),${s// /,},$(field graphSpeed "$sp"),$(field graphSprint "$mp"),$(field shown "$sp")" >> "$f"
 		st=$(dc "$mover" walkto); [[ $st == "not walking"* ]] && break
-		sleep 0.5
+		[ "$pause" = 0 ] || sleep "$pause"
 	done
 	still "$mover"; sleep 2
 	st0=$(dc "$mover" walkto)
@@ -346,10 +350,7 @@ move_leg() {
 	warn_gt "$label: mean distance stand-in to friend while moving (soft)" "$(field mean "$stats")" "$SOFT_MEAN" u
 	expect_le "$label: largest distance stand-in to friend while moving" "$(field max "$stats")" "$LIMIT_MAX" u
 	expect_ge "$label: the stand-in's legs move (graph Speed above 0 while its friend moves)" "$(field legs "$stats")" "$LIMIT_LEGS" %
-	if [ "$how" = sprint ]; then
-		# the hold is the rig's input: a mover that never sprinted is a rig fault, as a walk that never got going
-		if [ "$(field sprinting "$stats")" = 0 ]; then rig_fault input "$label: the sprint" "lb held, but the $mover's graphSprint never read 1"
-		else expect_ge "$label: the stand-in sprints while its friend sprints (shown r)" "$(field sprintshown "$stats")" "$LIMIT_SPRINT" "% of $(field sprinting "$stats") samples"; fi
+	if [ "$how" = sprint ]; then sprint_judge "$label" "$mover" "$stats"
 	else
 		expect_le "$label: the stand-in shows no sprint while its friend does not" "$(field falsesprint "$stats")" "$LIMIT_FALSE_SPRINT" %
 	fi
@@ -359,6 +360,16 @@ move_leg() {
 	r=$(field graphSpeed "$(dc "$watcher" standins)")
 	expect_le "$label: at rest, the stand-in's legs stop (graph Speed)" "$r" 5
 	expect_eq "$label: at rest, the stand-in shows no sprint" "$(field shown "$(dc "$watcher" standins)" | tr -cd 'r')" ""
+}
+
+# sprint_judge <label> <mover> <move_stats line>: a sprint leg's check. The hold is the rig's input: a mover that never
+# sprinted is a rig fault, as a walk that never got going, and so are too few sprinting samples to judge a share (one or
+# two samples that fall in the ~100 ms before the stand-in shows it would be a coin toss, not the mod's failure).
+sprint_judge() {
+	local n; n=$(field sprinting "$3")
+	if ! is_num "$n" || [ "$n" = 0 ]; then rig_fault input "$1: the sprint" "lb held, but the $2's graphSprint never read 1"
+	elif [ "$n" -lt "$MIN_SPRINT_SAMPLES" ]; then rig_fault input "$1: the sprint" "too few sprinting samples ($n, fewer than $MIN_SPRINT_SAMPLES) to judge"
+	else expect_ge "$1: the stand-in sprints while its friend sprints (shown r)" "$(field sprintshown "$3")" "$LIMIT_SPRINT" "% of $n samples"; fi
 }
 
 step_gait() {
@@ -556,6 +567,16 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	printf '%s\n' i,mx,my,mz,mspeed,sx,sy,sz,sgraph,msprint,sshown 1,0,0,0,300,0,0,0,300,0,m-r- 2,0,100,0,300,0,60,0,300,0,m--- 3,0,200,0,300,0,160,0,300,0,m--- 4,0,300,0,300,0,260,0,300,0,m-r- > "$d/falsesprint.csv"
 	t "move_stats: a sprint shown while its friend runs (%)" "$(field falsesprint "$(move_stats "$d/falsesprint.csv")")" 50
 	t "move_stats: the mover never sprinted" "$(field sprinting "$(move_stats "$d/falsesprint.csv")")" 0
+	# sprint_judge: enough samples are judged; one sprinting sample (shown late) or none is RIG, never FAIL
+	sj() { local sd=$d/sj$1; mkdir -p "$sd"; ( A_OUT=$sd; a_init sj >/dev/null; sprint_judge "vm leg 2 (sprint)" vm "$(move_stats "$2")"; a_summary ) 2>&1; }
+	o=$(sj 1 "$d/sprint.csv"); t "sprint_judge: 4 samples, 75% shown, passes" "$(grep -c '^PASS .*sprints while its friend sprints' <<<"$o"),$(grep -c '^FAIL ' <<<"$o")" 1,0
+	printf '%s
+' i,mx,my,mz,mspeed,sx,sy,sz,sgraph,msprint,sshown 1,0,0,0,400,0,0,0,300,0,m--- 2,0,100,0,600,0,60,0,500,1,m--- 3,0,300,0,600,0,260,0,500,0,m-r- 4,0,500,0,0,0,490,0,0,0,---- > "$d/onesprint.csv"
+	o=$(sj 2 "$d/onesprint.csv"); t "sprint_judge: one sprinting sample, not shown yet, is RIG and not FAIL" "$(grep -c '^RIG .*too few sprinting samples (1' <<<"$o"),$(grep -c '^FAIL ' <<<"$o")" 1,0
+	o=$(sj 3 "$d/falsesprint.csv"); t "sprint_judge: no sprinting sample is RIG" "$(grep -c '^RIG .*never read 1' <<<"$o"),$(grep -c '^FAIL ' <<<"$o")" 1,0
+	printf '%s
+' i,mx,my,mz,mspeed,sx,sy,sz,sgraph,msprint,sshown 1,0,0,0,600,0,0,0,500,1,m--- 2,0,100,0,600,0,60,0,500,1,m--- 3,0,300,0,600,0,260,0,500,1,m--- 4,0,500,0,600,0,460,0,500,1,m-r- 5,0,700,0,600,0,660,0,500,1,m--- > "$d/sprintnotshown.csv"
+	o=$(sj 4 "$d/sprintnotshown.csv"); t "sprint_judge: 5 samples, 20% shown, fails" "$(grep -c '^FAIL .*sprints while its friend sprints.*20' <<<"$o")" 1
 	# the step list: every step has its function and its line
 	for s in $STEPS; do
 		declare -F "step_$s" >/dev/null || { echo "FAIL step $s has no step_$s"; bad=1; }
