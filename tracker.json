@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-23T13:33:53+00:00",
+ "updated": "2026-11-23T14:03:27+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -34,8 +34,9 @@
    "title": "A friend's attacks, blocks, bow shots, spells and shouts are shown on their character",
    "kind": "feature",
    "priority": 1,
-   "stage": 1,
-   "note": ""
+   "stage": 2,
+   "note": "",
+   "pr": 22
   },
   {
    "id": "a-friend-s-character-is-never-written-into-your-save",
@@ -75,8 +76,9 @@
    "title": "A friend's weapons, shield, spells and torch are shown in each hand",
    "kind": "feature",
    "priority": 1,
-   "stage": 1,
-   "note": ""
+   "stage": 2,
+   "note": "",
+   "pr": 22
   },
   {
    "id": "a-friend-sitting-sleeping-or-working-at-a-station-is-shown",
