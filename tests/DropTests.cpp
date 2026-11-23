@@ -171,15 +171,15 @@ TEST("drops: an item no game could place is none: no nonce, no count or too many
 TEST("drops: claims, gone and records go there and back; a claim of no drop or no known kind, and gone of no drop, are none")
 {
 	for (const auto op : { DropClaim::kTake, DropClaim::kGiveBack, DropClaim::kPlaced, DropClaim::kKept }) {
-		CHECK(Protocol::DecodeClaimDrop(Protocol::Encode(ClaimDrop{ 77, op })) == ClaimDrop{ 77, op });
+		CHECK((Protocol::DecodeClaimDrop(Protocol::Encode(ClaimDrop{ 77, op })) == ClaimDrop{ 77, op }));
 	}
 	CHECK(!Protocol::DecodeClaimDrop(Protocol::Encode(ClaimDrop{ 0, DropClaim::kTake })));
 	auto bad = Protocol::Encode(ClaimDrop{ 3, DropClaim::kTake });
 	bad.back() = 4;
 	CHECK(!Protocol::DecodeClaimDrop(bad));
 
-	CHECK(Protocol::DecodeDropGone(Protocol::Encode(DropGone{ 5, 2 })) == DropGone{ 5, 2 });
-	CHECK(Protocol::DecodeDropGone(Protocol::Encode(DropGone{ 5, 0 })) == DropGone{ 5, 0 });
+	CHECK((Protocol::DecodeDropGone(Protocol::Encode(DropGone{ 5, 2 })) == DropGone{ 5, 2 }));
+	CHECK((Protocol::DecodeDropGone(Protocol::Encode(DropGone{ 5, 0 })) == DropGone{ 5, 0 }));
 	CHECK(!Protocol::DecodeDropGone(Protocol::Encode(DropGone{ 0, 2 })));
 
 	const DropRecord record{ .sessionId = 0x1122334455667788ull, .made = { 1, 0xFFFFFFFFFFFFFFFFull }, .taken = { 4, 9, 12 } };
@@ -201,7 +201,7 @@ TEST("drops: claims, gone and records go there and back; a claim of no drop or n
 TEST("drops: a list goes in packets of MAX_DROPS_PER_PACKET, the last marked; none is one empty last packet; a drop with no number is none")
 {
 	CHECK(ListsIn(Protocol::DropLists({})).size() == 1);
-	CHECK(ListsIn(Protocol::DropLists({})).front() == DropList{ true, {} });
+	CHECK((ListsIn(Protocol::DropLists({})).front() == DropList{ true, {} }));
 	std::vector<DroppedItem> drops;
 	for (std::uint32_t i = 1; i <= Protocol::MAX_DROPS_PER_PACKET + 1; ++i) {
 		drops.push_back(Numbered(Item(i), i, 1));
@@ -341,7 +341,7 @@ TEST("drop store: a drop is an offer to its dropper until they confirm it; then 
 	REQUIRE(lying);
 	CHECK(lying->dropId == id);
 	CHECK(store.Lying().size() == 1);
-	CHECK(store.Take(2, id) == DropGone{ id, 2 });
+	CHECK((store.Take(2, id) == DropGone{ id, 2 }));
 	CHECK(!store.Take(1, id));          // too late
 	CHECK(store.TakerOf(id) == 2);
 	CHECK(store.Lying().empty());
@@ -350,7 +350,7 @@ TEST("drop store: a drop is an offer to its dropper until they confirm it; then 
 	REQUIRE(again);
 	CHECK(again->takerId == 0);
 	CHECK(store.Find(id));
-	CHECK(store.Take(1, id) == DropGone{ id, 1 });
+	CHECK((store.Take(1, id) == DropGone{ id, 1 }));
 }
 
 TEST("drop store: the same report again is the one kept; a drop picked up again is no offer; none with no nonce, base, owner or place")
@@ -415,7 +415,7 @@ TEST("drop store: a player who leaves takes their offers and their drops lying w
 	(void)store.Take(1, taken);
 	const auto gone = store.Left(1);
 	REQUIRE(gone.size() == 1);
-	CHECK(gone[0] == DropGone{ mine, 0 });
+	CHECK((gone[0] == DropGone{ mine, 0 }));
 	CHECK(store.OfferCount() == 0);
 	CHECK(!store.Find(offer));
 	CHECK(store.Find(theirs));
@@ -443,7 +443,7 @@ TEST("drop store: a record makes the book agree with a world: what it holds is i
 	// A save from before the drop: the item is in that world again, so it lies nowhere.
 	result = store.Reconcile(1, DropRecord{ S, {}, {} }, S);
 	REQUIRE(result.withdrawn.size() == 1);
-	CHECK(result.withdrawn[0] == DropGone{ id, 0 });
+	CHECK((result.withdrawn[0] == DropGone{ id, 0 }));
 	CHECK(!store.Find(id));
 	// The later save again: it lies there again.
 	result = store.Reconcile(1, DropRecord{ S, { 10 }, {} }, S);
@@ -455,7 +455,7 @@ TEST("drop store: a record makes the book agree with a world: what it holds is i
 	REQUIRE(result.returned.size() == 1);
 	result = store.Reconcile(2, DropRecord{ S, {}, { id } }, S);
 	REQUIRE(result.withdrawn.size() == 1);
-	CHECK(result.withdrawn[0] == DropGone{ id, 2 });
+	CHECK((result.withdrawn[0] == DropGone{ id, 2 }));
 	CHECK(store.TakerOf(id) == 2);
 	// Ada loads a save from before dropping it: both worlds have it (counted), and the book leaves it with Bo.
 	result = store.Reconcile(1, DropRecord{ S, {}, {} }, S);
@@ -480,7 +480,7 @@ TEST("drop store: a record settles a player's offers: one their world took out l
 	REQUIRE(result.confirmed.size() == 1);
 	CHECK(result.confirmed[0].dropId == out);
 	REQUIRE(result.unoffered.size() == 1);
-	CHECK(result.unoffered[0] == DropGone{ in, 0 });
+	CHECK((result.unoffered[0] == DropGone{ in, 0 }));
 	CHECK(store.Find(out));
 	CHECK(!store.Find(in));
 	CHECK(store.OfferCount() == 1);  // Bo's: not Ada's to settle
@@ -532,10 +532,10 @@ TEST("server: a drop is offered to its dropper alone, lies there for all once co
 	const auto toAda = GoneIn(f.fake->Take(1));
 	const auto toBo = GoneIn(f.fake->Take(2));
 	REQUIRE(toBo.size() == 1);
-	CHECK(toBo[0] == DropGone{ id, bo->playerId });
+	CHECK((toBo[0] == DropGone{ id, bo->playerId }));
 	REQUIRE(toAda.size() == 2);  // everyone's, and the answer to Ada's own claim
 	for (const auto& gone : toAda) {
-		CHECK(gone == DropGone{ id, bo->playerId });
+		CHECK((gone == DropGone{ id, bo->playerId }));
 	}
 
 	// Bo's game could not finish it: it lies there again for anyone.
@@ -548,7 +548,7 @@ TEST("server: a drop is offered to its dropper alone, lies there for all once co
 	f.fake->Drop(1);
 	const auto gone = GoneIn(f.fake->TakeThrough(2, Type(MT::kDropGone)));
 	REQUIRE(gone.size() == 1);
-	CHECK(gone[0] == DropGone{ id, 0 });
+	CHECK((gone[0] == DropGone{ id, 0 }));
 	CHECK(f.LoggedSoon("went with them"));
 }
 
@@ -576,10 +576,10 @@ TEST("server: a record is answered with what lies there; a world that has its dr
 	// Ada loads a save from before the drop.
 	f.fake->Deliver(1, Protocol::Encode(DropRecord{ ada->sessionId, {}, {} }));
 	const auto packets = f.fake->TakeThrough(1, Type(MT::kDropList));
-	CHECK(GoneIn(packets) == std::vector<DropGone>{ DropGone{ id, 0 } });
+	CHECK((GoneIn(packets) == std::vector<DropGone>{ DropGone{ id, 0 } }));
 	REQUIRE(ListsIn(packets).size() == 1);
 	CHECK(ListsIn(packets)[0].drops.empty());
-	CHECK(GoneIn(f.fake->TakeThrough(2, Type(MT::kDropGone))) == std::vector<DropGone>{ DropGone{ id, 0 } });
+	CHECK((GoneIn(f.fake->TakeThrough(2, Type(MT::kDropGone))) == std::vector<DropGone>{ DropGone{ id, 0 } }));
 }
 
 TEST("server: a drop it can't take is answered with no number, its dropper's own still: one it can't name, and one past the budget")
@@ -751,14 +751,14 @@ TEST("drop record: kept per session, the newest last; nothing kept outside a ses
 	record.Took(7);
 	CHECK(record.HasMade(100));
 	CHECK(record.HasTaken(7));
-	CHECK(record.ForSession() == DropRecord{ 10, { 100 }, { 7 } });
+	CHECK((record.ForSession() == DropRecord{ 10, { 100 }, { 7 } }));
 	record.Bind(20);
 	record.Took(8);
-	CHECK(record.ForSession() == DropRecord{ 20, {}, { 8 } });
+	CHECK((record.ForSession() == DropRecord{ 20, {}, { 8 } }));
 	record.Bind(10);  // back to the first: it is the newest now
 	record.Unmade(100);
 	record.Untook(7);
-	CHECK(record.ForSession() == DropRecord{ 10, {}, {} });
+	CHECK((record.ForSession() == DropRecord{ 10, {}, {} }));
 	record.Made(101);
 
 	const auto bytes = record.Save();
@@ -767,9 +767,9 @@ TEST("drop record: kept per session, the newest last; nothing kept outside a ses
 	CHECK(loaded.Sessions() == 2);
 	CHECK(loaded.Current() == 0);  // bound again by its welcome
 	loaded.Bind(10);
-	CHECK(loaded.ForSession() == DropRecord{ 10, { 101 }, {} });
+	CHECK((loaded.ForSession() == DropRecord{ 10, { 101 }, {} }));
 	loaded.Bind(20);
-	CHECK(loaded.ForSession() == DropRecord{ 20, {}, { 8 } });
+	CHECK((loaded.ForSession() == DropRecord{ 20, {}, { 8 } }));
 	CHECK(loaded.Save().size() == bytes.size());
 
 	auto broken = bytes;
@@ -792,7 +792,7 @@ TEST("drop record: kept per session, the newest last; nothing kept outside a ses
 	}
 	CHECK(many.Sessions() == Record::MAX_SESSIONS);
 	many.Bind(1);
-	CHECK(many.ForSession() == DropRecord{ 1, {}, {} });
+	CHECK((many.ForSession() == DropRecord{ 1, {}, {} }));
 }
 
 TEST("drop lying: a list replaces what this game heard once its last packet comes; one placed while it comes stays")
