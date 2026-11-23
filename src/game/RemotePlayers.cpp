@@ -102,6 +102,9 @@ namespace RemotePlayers
 			NpcRules::GearShown     held;
 			bool                    checked = false;
 			std::uint32_t           voiceShown = 0;
+			std::uint32_t           voiceWanted = 0;     // its friend's voice, as the looks name it (0: none ready)
+			bool                    voiceJudged = false;  // named (not unnamed): the stand-in's is checked against it
+			std::uint32_t           baseShouts = 0;       // the shouts its base kept when it was placed (Gear::BaseShouts: never changed)
 			std::uint64_t           redressed = 0;
 			std::uint64_t           ammoGiven = 0;
 			std::vector<std::uint32_t> wornLogged;  // the worn list last said in the log
@@ -558,8 +561,11 @@ namespace RemotePlayers
 							remote.lastDrawn = sample->state;
 							remote.hasDrawn = true;
 							++remote.drawn;
-							// Its friend's actions, each at the moment it was done, as the stand-in is drawn (a delay behind).
-							actions = remote.actions.Due(Clock::now() - StateBuffer::Buffer::Delay());
+							// Its friend's actions, each at the moment it was done, as the stand-in is drawn (a delay behind),
+							// told its graph where its legs' events are (the tick, in tick mode: Frame).
+							if (eventsHere) {
+								actions = remote.actions.Due(Clock::now() - StateBuffer::Buffer::Delay());
+							}
 							aim = remote.aim = StandInRules::AimPitch(sample->state);
 						}
 					}
@@ -589,7 +595,7 @@ namespace RemotePlayers
 			if (sample && eventsHere) {
 				TellGraph(a_this, playerId, step, was);
 			}
-			if (sample) {
+			if (sample && eventsHere) {
 				PlayActions(a_this, playerId, actions);
 			}
 		}
@@ -734,6 +740,8 @@ namespace RemotePlayers
 			a_remote.checked = false;
 			a_remote.wornShown = 0;
 			a_remote.voiceShown = 0;
+			a_remote.voiceWanted = 0;
+			a_remote.voiceJudged = false;
 			a_remote.drawFix.Reset();
 			a_remote.placeAfter = Clock::now() + RESPAWN_AFTER;
 		}
@@ -807,6 +815,7 @@ namespace RemotePlayers
 				actor->SetDisplayName(a_remote.name, true);
 			}
 			Neutralise(actor);
+			a_remote.baseShouts = Gear::BaseShouts(actor);
 			HookCharacterMagic(actor);
 			placedThisRun = true;
 			a_remote.standIn = actor->GetHandle();
@@ -815,6 +824,8 @@ namespace RemotePlayers
 			a_remote.checked = false;
 			a_remote.wornShown = 0;
 			a_remote.voiceShown = 0;
+			a_remote.voiceWanted = 0;
+			a_remote.voiceJudged = false;
 			a_remote.drawFix.Reset();
 			a_remote.placedAt = Clock::now();
 			++a_remote.placed;
@@ -832,52 +843,51 @@ namespace RemotePlayers
 		}
 
 		// ---- what a stand-in wears and holds ----
-		// Another player's game named it: kept only where a player could have it. Worn: armor a player can wear (no
-		// creature skins, no non-playable pieces). In a hand: a playable weapon or staff, a spell (one a player casts from
-		// a hand: no ability, disease or power), a scroll, a torch, a playable shield. The quiver: playable ammunition. The
-		// voice: a shout, or a power. Never a runtime form (FF): that ID is another game's, and here names something else or
-		// nothing (FormTranslate drops them; this holds for any that get through). What is not is left out (worn) or read
-		// as nothing held, and counted.
+		// Another player's game named it: kept only where a player could have it (StandInRules::KeptInHand, KeptInQuiver,
+		// KeptAsVoice; worn: armor a player can wear, no creature skins, no non-playable pieces). Never a runtime form
+		// (FF): that ID is another game's, and here names something else or nothing (FormTranslate drops them; this holds
+		// for any that get through). What is not is left out (worn) or read as nothing held, and counted.
 		bool WearableArmor(const RE::TESForm* a_form)
 		{
 			const auto armor = a_form ? a_form->As<RE::TESObjectARMO>() : nullptr;
 			return armor && armor->GetPlayable();
 		}
 
-		bool HoldableInHand(const RE::TESForm* a_form)
+		// What a form is, as StandInRules' rules for hands, the quiver and the voice take it.
+		StandInRules::Holdable HoldableOf(const RE::TESForm* a_form)
 		{
+			using K = StandInRules::Holdable::Kind;
+			StandInRules::Holdable out;
 			if (!a_form) {
-				return false;
+				return out;
 			}
+			out.kind = K::kOther;
 			if (a_form->GetFormType() == RE::FormType::Scroll) {
-				return true;  // a scroll is a SpellItem too: said first
+				out.kind = K::kScroll;  // a scroll is a SpellItem too: said first
+			} else if (const auto weapon = a_form->As<RE::TESObjectWEAP>()) {
+				out.kind = K::kWeapon;
+				out.playable = weapon->GetPlayable();
+				out.bound = weapon->IsBound();
+			} else if (const auto spell = a_form->GetFormType() == RE::FormType::Spell ? a_form->As<RE::SpellItem>() : nullptr) {
+				const auto type = spell->GetSpellType();
+				using ST = RE::MagicSystem::SpellType;
+				if (type == ST::kSpell) {
+					out.kind = K::kSpell;
+				} else if (type == ST::kPower || type == ST::kLesserPower || type == ST::kVoicePower) {
+					out.kind = K::kPower;
+				}
+			} else if (a_form->Is(RE::FormType::Shout)) {
+				out.kind = K::kShout;
+			} else if (const auto light = a_form->As<RE::TESObjectLIGH>()) {
+				out.kind = light->CanBeCarried() ? K::kTorch : K::kOther;
+			} else if (const auto ammo = a_form->As<RE::TESAmmo>()) {
+				out.kind = K::kAmmo;
+				out.playable = ammo->GetPlayable();
+			} else if (const auto armor = a_form->As<RE::TESObjectARMO>()) {
+				out.kind = K::kShield;
+				out.playable = armor->GetPlayable();
 			}
-			if (const auto weapon = a_form->As<RE::TESObjectWEAP>()) {
-				return weapon->GetPlayable();
-			}
-			if (const auto spell = a_form->GetFormType() == RE::FormType::Spell ? a_form->As<RE::SpellItem>() : nullptr) {
-				return spell->GetSpellType() == RE::MagicSystem::SpellType::kSpell;
-			}
-			if (const auto light = a_form->As<RE::TESObjectLIGH>()) {
-				return light->CanBeCarried();
-			}
-			return WearableArmor(a_form);
-		}
-
-		bool Voice(const RE::TESForm* a_form)
-		{
-			if (!a_form) {
-				return false;
-			}
-			if (a_form->Is(RE::FormType::Shout)) {
-				return true;
-			}
-			const auto spell = a_form->GetFormType() == RE::FormType::Spell ? a_form->As<RE::SpellItem>() : nullptr;
-			if (!spell) {
-				return false;
-			}
-			const auto type = spell->GetSpellType();
-			return type == RE::MagicSystem::SpellType::kPower || type == RE::MagicSystem::SpellType::kLesserPower || type == RE::MagicSystem::SpellType::kVoicePower;
+			return out;
 		}
 
 		Protocol::PlayerLooks Allowed(const Protocol::PlayerLooks& a_looks, std::size_t& a_refused)
@@ -893,22 +903,15 @@ namespace RemotePlayers
 					++a_refused;
 				}
 			};
-			keep(out.right, HoldableInHand(lookup(out.right)));
-			keep(out.left, HoldableInHand(lookup(out.left)));
-			const auto ammo = lookup(out.ammo);
-			keep(out.ammo, ammo && ammo->Is(RE::FormType::Ammo) && ammo->GetPlayable());
-			keep(out.voice, Voice(lookup(out.voice)));
+			const auto right = HoldableOf(lookup(out.right));
+			const auto left = HoldableOf(lookup(out.left));
+			keep(out.right, StandInRules::KeptInHand(right));
+			keep(out.left, StandInRules::KeptInHand(left));
+			// A conjured weapon kept in a hand lets its own (non-playable) ammunition into the quiver.
+			const bool boundInHand = (out.right != 0 && right.bound) || (out.left != 0 && left.bound);
+			keep(out.ammo, StandInRules::KeptInQuiver(HoldableOf(lookup(out.ammo)), boundInHand));
+			keep(out.voice, StandInRules::KeptAsVoice(HoldableOf(lookup(out.voice))));
 			return out;
-		}
-
-		// How many of an item an actor carries.
-		std::int32_t CountOf(RE::Actor* a_actor, RE::FormID a_id)
-		{
-			std::int32_t n = 0;
-			for (const auto& [item, data] : a_actor->GetInventory([&](RE::TESBoundObject& a_object) { return a_object.GetFormID() == a_id; })) {
-				n += data.first;
-			}
-			return n;
 		}
 
 		// A stand-in whose friend shoots all evening is never out of arrows (StandInRules::AmmoToAdd).
@@ -918,7 +921,7 @@ namespace RemotePlayers
 			if (!ammo) {
 				return;
 			}
-			if (const auto add = StandInRules::AmmoToAdd(CountOf(a_actor, ammo->GetFormID())); add > 0) {
+			if (const auto add = StandInRules::AmmoToAdd(Gear::CountOf(a_actor, ammo->GetFormID())); add > 0) {
 				a_actor->AddObjectToContainer(ammo, nullptr, add, nullptr);
 				a_remote.ammoGiven += static_cast<std::uint64_t>(add);
 			}
@@ -935,10 +938,13 @@ namespace RemotePlayers
 			const auto  looks = Allowed(*a_remote.looks, refused);
 			a_remote.refusedForms = refused;
 			a_remote.gear = StandInRules::GearFor(looks);
-			const auto dressed = Gear::Dress(a_remote.gear, true, a_actor);
+			const auto dressed = Gear::Dress(a_remote.gear, true, a_actor, Gear::Spells::kHands);
 			a_remote.gearMissing = dressed.missing;
 			TopUpAmmo(a_remote, a_actor);
-			if (looks.voice != 0 && (looks.unnamed & Protocol::kVoiceUnnamed) == 0 && Gear::SetVoice(a_actor, looks.voice, true)) {
+			// Its friend's voice, or none when they have none ready; one their game could not name is left as it is.
+			a_remote.voiceWanted = looks.voice;
+			a_remote.voiceJudged = (looks.unnamed & Protocol::kVoiceUnnamed) == 0;
+			if (a_remote.voiceJudged && Gear::SetVoice(a_actor, looks.voice, true)) {
 				a_remote.voiceShown = looks.voice;
 			}
 			a_remote.dressed = true;
@@ -958,19 +964,21 @@ namespace RemotePlayers
 		void Check(std::uint32_t a_id, Remote& a_remote, RE::Actor* a_actor, Clock::time_point a_now)
 		{
 			a_remote.nextCheck = a_now + CHECK_EVERY;
-			a_remote.held = Gear::Check(a_remote.gear, a_actor);
+			a_remote.held = Gear::Check(a_remote.gear, a_actor, Gear::Spells::kHands);
 			a_remote.wornShown = a_remote.held.matched;
 			a_remote.checked = true;
 			const auto voice = Gear::VoiceOf(a_actor);
 			a_remote.voiceShown = voice ? voice->GetFormID() : 0;
 			Neutralise(a_actor);
 			TopUpAmmo(a_remote, a_actor);
-			if (!a_remote.held.Complete(a_remote.gearMissing) && a_now >= a_remote.redressAfter) {
+			// A voice that did not take, or that the game cleared, is drift as a hand is.
+			const bool voiceDrifted = StandInRules::VoiceDrifted(a_remote.voiceWanted, !a_remote.voiceJudged, a_remote.voiceShown);
+			if ((!a_remote.held.Complete(a_remote.gearMissing) || voiceDrifted) && a_now >= a_remote.redressAfter) {
 				a_remote.redressAfter = a_now + REDRESS_COOL;
 				a_remote.dressed = false;
 				if (a_remote.redressed++ == 0) {
-					logs::info("Players: player {}'s stand-in {:08X} does not hold what its friend does ({} short, {} extra): dressed again", a_id, a_remote.standInId,
-						a_remote.held.Short(), a_remote.held.extra);
+					logs::info("Players: player {}'s stand-in {:08X} does not hold what its friend does ({} short, {} extra, voice {:08X} for {:08X}): dressed again", a_id,
+						a_remote.standInId, a_remote.held.Short(), a_remote.held.extra, a_remote.voiceShown, a_remote.voiceWanted);
 				}
 			}
 		}
@@ -1181,13 +1189,16 @@ namespace RemotePlayers
 			if (eventsFromTick && actor->Is3DLoaded()) {
 				Gait::Step  step;
 				Gait::Shown was;
+				std::vector<std::string> actions;
 				{
 					std::scoped_lock l{ lock };
 					was = remote.shown;
 					step = Gait::Next(was, sample->state, sample->held);
 					remote.shown = step.shown;
+					actions = remote.actions.Due(now - StateBuffer::Buffer::Delay());
 				}
 				TellGraph(actor.get(), id, step, was);
+				PlayActions(actor.get(), id, actions);  // its friend's actions from the tick too, as its legs' events
 			}
 		}
 	}
@@ -1497,12 +1508,13 @@ namespace RemotePlayers
 		{
 			int         drawnNow = -1;  // its weapon drawn (1), put away (0), no stand-in (-1)
 			float       angleX = 0.0f;
+			std::uint32_t baseShouts = 0;  // the shouts its base keeps now (Gear::BaseShouts)
 		};
 		std::unordered_map<std::uint32_t, Read> reads;
 		for (const auto& [id, remote] : players) {
 			if (const auto actor = remote.standIn.get(); actor && actor->GetFormID() == remote.standInId) {
 				const auto state = actor->AsActorState();
-				reads[id] = { state ? (state->GetWeaponState() == RE::WEAPON_STATE::kDrawn ? 1 : 0) : -1, actor->GetAngleX() };
+				reads[id] = { state ? (state->GetWeaponState() == RE::WEAPON_STATE::kDrawn ? 1 : 0) : -1, actor->GetAngleX(), Gear::BaseShouts(actor.get()) };
 			}
 		}
 		std::scoped_lock l{ lock };
@@ -1511,13 +1523,14 @@ namespace RemotePlayers
 			const auto wanted = remote.hasDrawn ? ((remote.lastDrawn.flags & Protocol::kWeaponDrawn) != 0 ? 1 : 0) : -1;
 			const auto handOk = [&](bool a_ok) { return remote.checked ? (a_ok ? "1" : "0") : "?"; };
 			out += std::format(" | player {} standin={:08X} in={} unplaced={} waiting={} lost={} played={} byKind={} refused={} refusedKinds={}{} drawn={} wanted={} drawFixes={}"
-							   " aim={:.2f} angleX={:.2f} right={:08X}:{} left={:08X}:{} ammo={:08X}:{} voice={:08X}/{:08X} gearOk={} missing={} refusedForms={} redressed={}"
+							   " aim={:.2f} angleX={:.2f} right={:08X}:{} left={:08X}:{} ammo={:08X}:{} voice={:08X}/{:08X} gearOk={} missing={} refusedForms={} redressed={} baseShouts={}/{}"
 							   " ammoGiven={} magicRefused={} magicKept={} blows={} casts={} damaged={} dealt={:.1f} undone={:.1f}",
 				id, remote.standInId, remote.actionsIn, remote.actionsUnplaced, remote.actions.Size(), remote.actions.Dropped(), remote.played.Total(),
 				remote.played.Line(), remote.refused.Total(), remote.refused.Line(), remote.lastActionRefused.empty() ? "" : " lastRefused=" + remote.lastActionRefused,
 				read.drawnNow, wanted, remote.drawFix.fixes, remote.aim, read.angleX, remote.gear.right, handOk(remote.held.right), remote.gear.left,
 				handOk(remote.held.left), remote.gear.ammo, handOk(remote.held.ammo), remote.looks ? remote.looks->voice : 0u, remote.voiceShown,
-				remote.checked ? (remote.held.Complete(remote.gearMissing) ? "1" : "0") : "?", remote.gearMissing, remote.refusedForms, remote.redressed,
+				remote.checked ? (remote.held.Complete(remote.gearMissing) && !StandInRules::VoiceDrifted(remote.voiceWanted, !remote.voiceJudged, remote.voiceShown) ? "1" : "0") : "?",
+				remote.gearMissing, remote.refusedForms, remote.redressed, read.baseShouts, remote.baseShouts,
 				remote.ammoGiven, remote.magicRefused, remote.magicKept, remote.blows, remote.casts, remote.damaged, remote.dealt, remote.undone);
 		}
 		return out;

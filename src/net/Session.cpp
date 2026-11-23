@@ -482,6 +482,7 @@ namespace Session
 			}
 		}
 		if (welcomed) {
+			PlayerActions::Sample();  // what the game shows our player doing, for the rig (dev `actions` seen=)
 			SendOurs(Clock::now());
 			NpcSync::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}

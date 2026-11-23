@@ -1052,7 +1052,7 @@ namespace NpcSync
 				}
 				if (job.check) {
 					// Read back what it wears and holds now, a while after it was dressed.
-					const auto shown = Gear::Check(gear, actor.get());
+					const auto shown = Gear::Check(gear, actor.get(), Gear::Spells::kLeft);  // spells in a copy's hands are not shared yet
 					std::scoped_lock l{ copyLock };
 					if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID() && it->second.gear == gear && it->second.geared) {
 						if (!shown.Complete(it->second.gearLacks) && (!it->second.wears || it->second.wears->Complete(it->second.gearLacks))) {
@@ -1064,7 +1064,7 @@ namespace NpcSync
 					}
 					continue;
 				}
-				const auto dressed = Gear::Dress(gear, mayAdd, actor.get());
+				const auto dressed = Gear::Dress(gear, mayAdd, actor.get(), Gear::Spells::kLeft);
 				std::scoped_lock l{ copyLock };
 				if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID() && it->second.gear == gear) {
 					it->second.geared = true;

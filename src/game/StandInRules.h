@@ -191,7 +191,149 @@ namespace StandInRules
 		TokenBucket                        budget{ BURST, PER_SECOND };
 	};
 
+	// ---- what our player did, as the game shows it ----
+
+	// What our player's actor is doing now, read from the game each tick (PlayerActions::Sample), apart from the graph
+	// events the hook hears: the rig's proof that a press did something in the game, so a press the hook heard nothing of
+	// is the mod's failure (the events go some way the hook does not see), not the rig's input.
+	struct Doing
+	{
+		std::uint32_t attackState = 0;  // the actor state's melee attack state (the game's ATTACK_STATE_ENUM numbers)
+		bool          power = false;    // its attack data is a power attack's
+		bool          blocking = false;
+		bool          castLeft = false;  // a hand's or the voice's magic caster is under way (any state but none)
+		bool          castRight = false;
+		bool          castVoice = false;
+		float         voiceRecovery = 0.0f;  // seconds left before the voice may be used again (a shout just made)
+		bool          drawn = false;
+		float         stamina = 0.0f;
+		float         magicka = 0.0f;
+	};
+
+	// The attack states, as the game numbers them (RemotePlayers.cpp checks them against the game's at compile time).
+	inline constexpr std::uint32_t kAttackNone = 0;
+	inline constexpr std::uint32_t kAttackDraw = 1;
+	inline constexpr std::uint32_t kAttackFollowThrough = 5;
+	inline constexpr std::uint32_t kAttackBash = 6;
+	inline constexpr std::uint32_t kAttackBowDraw = 8;
+	inline constexpr std::uint32_t kAttackFired = 17;
+
+	// Each kind of action the actor began (a state it was not in at the last reading), counted by kind like the events;
+	// the stamina and magicka it spent (each fall from one reading to the next, added up).
+	class Seen
+	{
+	public:
+		void Sample(const Doing& a_now)
+		{
+			if (last) {
+				const auto kindOf = [](const Doing& a_d) -> std::optional<Act> {
+					if (a_d.attackState >= kAttackDraw && a_d.attackState <= kAttackFollowThrough) {
+						return a_d.power ? Act::kPower : Act::kAttack;
+					}
+					if (a_d.attackState == kAttackBash) {
+						return Act::kBash;
+					}
+					if (a_d.attackState >= kAttackBowDraw && a_d.attackState <= kAttackFired) {
+						return Act::kBow;
+					}
+					return std::nullopt;
+				};
+				const auto was = kindOf(*last);
+				const auto now = kindOf(a_now);
+				if (now && now != was) {
+					byAct.Add(*now);
+				}
+				if (a_now.blocking && !last->blocking) {
+					byAct.Add(Act::kBlock);
+				}
+				if ((a_now.castLeft && !last->castLeft) || (a_now.castRight && !last->castRight)) {
+					byAct.Add(Act::kCast);
+				}
+				const auto shouting = [](const Doing& a_d) { return a_d.castVoice || a_d.voiceRecovery > 0.0f; };
+				if (shouting(a_now) && !shouting(*last)) {
+					byAct.Add(Act::kShout);
+				}
+				if (a_now.drawn != last->drawn) {
+					byAct.Add(Act::kDraw);
+				}
+				staminaSpent += (std::max)(0.0f, last->stamina - a_now.stamina);
+				magickaSpent += (std::max)(0.0f, last->magicka - a_now.magicka);
+			}
+			last = a_now;
+		}
+
+		// Not read for a while (out of the world, a load): the next reading starts afresh.
+		void Forget() { last.reset(); }
+
+		ActCounts byAct;
+		float     staminaSpent = 0.0f;
+		float     magickaSpent = 0.0f;
+
+	private:
+		std::optional<Doing> last;
+	};
+
 	// ---- what a stand-in holds ----
+
+	// What a form named for a hand, the quiver or the voice is, as RemotePlayers reads it from this game.
+	struct Holdable
+	{
+		enum class Kind : std::uint8_t
+		{
+			kNothing,  // no form here by that id
+			kWeapon,   // a weapon or a staff
+			kSpell,    // a spell cast from a hand (not an ability, a disease, a power)
+			kScroll,
+			kTorch,    // a light that can be carried
+			kShield,   // an armor (a shield, or any piece the game puts in a hand)
+			kAmmo,
+			kShout,
+			kPower,  // a power, a lesser power, a voice power
+			kOther,
+		};
+		Kind kind = Kind::kNothing;
+		bool playable = true;  // its non-playable flag is not set (weapons, armor, ammunition)
+		bool bound = false;    // a conjured weapon (its bound flag: Bound Sword, Bound Bow, a mod's own)
+	};
+
+	// Another player's game named it: kept only where a player could have it. In a hand: a playable weapon or staff, or a
+	// conjured one (Skyrim.esm flags its bound weapons non-playable: a player has one only from its spell, and so does
+	// their friend), a spell, a scroll, a torch, a playable shield. The quiver: playable ammunition, or any while a
+	// conjured weapon is in a hand (a mod's conjured bow may conjure non-playable arrows of its own). The voice: a shout,
+	// or a power.
+	[[nodiscard]] constexpr bool KeptInHand(const Holdable& a_held)
+	{
+		using K = Holdable::Kind;
+		switch (a_held.kind) {
+		case K::kWeapon:
+			return a_held.playable || a_held.bound;
+		case K::kSpell:
+		case K::kScroll:
+		case K::kTorch:
+			return true;
+		case K::kShield:
+			return a_held.playable;
+		default:
+			return false;
+		}
+	}
+
+	[[nodiscard]] constexpr bool KeptInQuiver(const Holdable& a_ammo, bool a_boundInHand)
+	{
+		return a_ammo.kind == Holdable::Kind::kAmmo && (a_ammo.playable || a_boundInHand);
+	}
+
+	[[nodiscard]] constexpr bool KeptAsVoice(const Holdable& a_held)
+	{
+		return a_held.kind == Holdable::Kind::kShout || a_held.kind == Holdable::Kind::kPower;
+	}
+
+	// A stand-in's voice is not its friend's: a_wanted, as its friend's looks name it (0: none ready), is not the one it
+	// has ready. Not judged when its friend's game could not name it (a_unnamed: the stand-in keeps what it has).
+	[[nodiscard]] constexpr bool VoiceDrifted(std::uint32_t a_wanted, bool a_unnamed, std::uint32_t a_shown)
+	{
+		return !a_unnamed && a_wanted != a_shown;
+	}
 
 	// The gear a stand-in is dressed in (NpcRules::PlanGear, as a spawn's copy is: the stand-in is this game's own and
 	// never saved, so it is given what it lacks): what its friend wears, holds in each hand and has for ammunition. The

@@ -511,3 +511,138 @@ TEST("stand-in rules: a stand-in aims where its friend does while drawn, held wi
 	state.pitch = -90;
 	CHECK(std::fabs(StandInRules::AimPitch(state) - radians(StandInRules::MAX_AIM_DEGREES)) < 1e-5f);
 }
+
+// ---- what the game shows our player doing (the rig's proof a press did something) ----
+
+TEST("stand-in rules: each kind of action our player begins is seen once, by the state the game shows")
+{
+	using StandInRules::Doing;
+	StandInRules::Seen seen;
+	Doing              idle;
+	idle.stamina = 100.0f;
+	idle.magicka = 100.0f;
+	seen.Sample(idle);
+	seen.Sample(idle);
+	CHECK(seen.byAct.Total() == 0);  // nothing begun
+
+	// A swing: the attack states from draw to follow-through are one attack, however many readings it lasts.
+	auto swing = idle;
+	for (const std::uint32_t state : { 1u, 2u, 3u, 5u }) {
+		swing.attackState = state;
+		seen.Sample(swing);
+	}
+	seen.Sample(idle);
+	CHECK(seen.byAct.Of(Act::kAttack) == 1);
+	CHECK(seen.byAct.Of(Act::kPower) == 0);
+
+	// A power attack: its attack data says so; its stamina spent is added up.
+	auto power = idle;
+	power.attackState = 2;
+	power.power = true;
+	power.stamina = 70.0f;
+	seen.Sample(power);
+	seen.Sample(idle);  // stamina back up: nothing spent by a rise
+	CHECK(seen.byAct.Of(Act::kPower) == 1);
+	CHECK(std::fabs(seen.staminaSpent - 30.0f) < 1e-4f);
+
+	// A bash, a bow drawn and let go (one bow action through all its states), a block, a cast in each hand, a shout
+	// (its caster, then its recovery: one shout), a weapon drawn and put away.
+	auto bash = idle;
+	bash.attackState = 6;
+	seen.Sample(bash);
+	seen.Sample(idle);
+	auto bow = idle;
+	for (const std::uint32_t state : { 8u, 9u, 10u, 11u, 12u }) {
+		bow.attackState = state;
+		seen.Sample(bow);
+	}
+	seen.Sample(idle);
+	auto block = idle;
+	block.blocking = true;
+	seen.Sample(block);
+	seen.Sample(block);
+	seen.Sample(idle);
+	auto cast = idle;
+	cast.castRight = true;
+	cast.magicka = 90.0f;
+	seen.Sample(cast);
+	cast.castLeft = true;  // the left hand begins while the right goes on: a second cast
+	cast.magicka = 80.0f;
+	seen.Sample(cast);
+	seen.Sample(idle);
+	auto shout = idle;
+	shout.castVoice = true;
+	seen.Sample(shout);
+	shout.castVoice = false;
+	shout.voiceRecovery = 5.0f;
+	seen.Sample(shout);
+	seen.Sample(idle);
+	auto drawn = idle;
+	drawn.drawn = true;
+	seen.Sample(drawn);
+	seen.Sample(idle);
+	CHECK(seen.byAct.Of(Act::kBash) == 1);
+	CHECK(seen.byAct.Of(Act::kBow) == 1);
+	CHECK(seen.byAct.Of(Act::kBlock) == 1);
+	CHECK(seen.byAct.Of(Act::kCast) == 2);
+	CHECK(seen.byAct.Of(Act::kShout) == 1);
+	CHECK(seen.byAct.Of(Act::kDraw) == 2);
+	CHECK(std::fabs(seen.magickaSpent - 20.0f) < 1e-4f);
+	CHECK(seen.byAct.Of(Act::kAttack) == 1);  // none of those was a swing
+
+	// After a while unread (a load), the first reading begins nothing: a state already under way is not counted.
+	seen.Forget();
+	seen.Sample(swing);
+	CHECK(seen.byAct.Of(Act::kAttack) == 1);
+}
+
+// ---- what a stand-in may hold ----
+
+TEST("stand-in rules: a hand keeps playable and conjured weapons, spells, scrolls, torches and playable shields")
+{
+	using StandInRules::Holdable;
+	using K = Holdable::Kind;
+	CHECK(StandInRules::KeptInHand({ K::kWeapon, true, false }));
+	CHECK(StandInRules::KeptInHand({ K::kWeapon, false, true }));  // Bound Sword, Bound Bow, a mod's conjured weapon
+	CHECK(!StandInRules::KeptInHand({ K::kWeapon, false, false }));  // a creature's or a non-playable weapon
+	CHECK(StandInRules::KeptInHand({ K::kSpell, true, false }));
+	CHECK(StandInRules::KeptInHand({ K::kScroll, true, false }));
+	CHECK(StandInRules::KeptInHand({ K::kTorch, true, false }));
+	CHECK(StandInRules::KeptInHand({ K::kShield, true, false }));
+	CHECK(!StandInRules::KeptInHand({ K::kShield, false, false }));
+	for (const auto kind : { K::kNothing, K::kAmmo, K::kShout, K::kPower, K::kOther }) {
+		CHECK(!StandInRules::KeptInHand({ kind, true, false }));
+	}
+}
+
+TEST("stand-in rules: the quiver keeps playable ammunition, and a conjured weapon's own while one is in a hand")
+{
+	using StandInRules::Holdable;
+	using K = Holdable::Kind;
+	CHECK(StandInRules::KeptInQuiver({ K::kAmmo, true, false }, false));
+	CHECK(!StandInRules::KeptInQuiver({ K::kAmmo, false, false }, false));  // a non-playable arrow, no bound bow
+	CHECK(StandInRules::KeptInQuiver({ K::kAmmo, false, false }, true));    // a conjured bow's own non-playable arrows
+	CHECK(!StandInRules::KeptInQuiver({ K::kWeapon, true, false }, true));
+	CHECK(!StandInRules::KeptInQuiver({ K::kNothing, true, false }, true));
+}
+
+TEST("stand-in rules: the voice keeps a shout or a power, nothing else")
+{
+	using StandInRules::Holdable;
+	using K = Holdable::Kind;
+	CHECK(StandInRules::KeptAsVoice({ K::kShout, true, false }));
+	CHECK(StandInRules::KeptAsVoice({ K::kPower, true, false }));
+	for (const auto kind : { K::kNothing, K::kWeapon, K::kSpell, K::kScroll, K::kTorch, K::kShield, K::kAmmo, K::kOther }) {
+		CHECK(!StandInRules::KeptAsVoice({ kind, true, false }));
+	}
+}
+
+TEST("stand-in rules: a voice that is not its friend's is drift, none included; an unnamed one is not judged")
+{
+	CHECK(!StandInRules::VoiceDrifted(0x00013E07, false, 0x00013E07));
+	CHECK(StandInRules::VoiceDrifted(0x00013E07, false, 0));           // it did not take, or the game cleared it
+	CHECK(StandInRules::VoiceDrifted(0x00013E07, false, 0x00013E08));  // another one
+	CHECK(StandInRules::VoiceDrifted(0, false, 0x00013E07));           // its friend has none ready now
+	CHECK(!StandInRules::VoiceDrifted(0, false, 0));
+	CHECK(!StandInRules::VoiceDrifted(0, true, 0x00013E07));  // their game could not name it: kept as it is
+}

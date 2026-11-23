@@ -24,10 +24,18 @@ namespace PlayerActions
 	// The events heard since the last call, at most Protocol::MAX_PLAYER_ACTIONS (the rest wait for the next).
 	[[nodiscard]] std::vector<Protocol::PlayerAction> Take();
 
-	// Developer channel `actions` (ours): hooked=, heard= by kind, sent=, dropped=, the last heard.
+	// Each tick on the main thread: what the game shows our player doing (attacking, power attacking, bashing, drawing a
+	// bow, blocking, casting from a hand, shouting, drawing; the stamina and magicka spent), apart from the graph events
+	// the hook hears (StandInRules::Seen): the rig's proof that a press did something.
+	void Sample();
+
+	// Developer channel `actions` (ours): hooked=, heard= by kind, sent=, dropped=, the last heard; seen= by kind and what
+	// was spent (Sample); what our player holds (right=, left=, ammo=, voice=, as the looks send it) and its health.
 	[[nodiscard]] std::string Describe();
 
 	// Developer channel `actions equip <right|left|ammo|voice> <hex form id>`: the rig's set-up of our player, as the
-	// console sets a scene up: what it carries or knows put in a hand, the quiver or the voice. Main thread.
+	// console sets a scene up: what it carries or knows put in a hand, the quiver or the voice. "equipped ..." when it
+	// holds it at once, "asked ..." when the game has not put it there yet (Describe says when it has), "error: ..." when
+	// it can't (not carried, not known, not that kind). Main thread.
 	[[nodiscard]] std::string Equip(std::string_view a_args);
 }
