@@ -374,15 +374,21 @@ void Server::Run()
 				Protocol::NpcOwners changes;
 				Protocol::NpcOwners refused;
 				for (const auto& claim : msg->claims) {
+					// Who ran it: a death in that game a moment after it lost the NPC still counts (NpcFates::DEATH_GRACE).
+					const auto was = npcs.Owner(claim.key);
 					switch (npcs.Claim(a_peer.playerId, claim, now)) {
 					case NpcBook::Outcome::kGranted:
 						changes.owners.push_back({ claim.key, a_peer.playerId });
 						npcGear.erase(claim.key);  // the new runner reports its own
+						if (was != a_peer.playerId) {
+							fates.HandedOver(claim.key, was, now);
+						}
 						break;
 					case NpcBook::Outcome::kReleased:
 						changes.owners.push_back({ claim.key, 0 });
 						npcGear.erase(claim.key);
 						fates.Released(claim.key);
+						fates.HandedOver(claim.key, was, now);
 						break;
 					case NpcBook::Outcome::kRefused:
 						refused.owners.push_back({ claim.key, npcs.Owner(claim.key) });
@@ -479,11 +485,13 @@ void Server::Run()
 		case MT::kNpcHealths:
 			// Only a runner's word of its own NPCs, named as its; one it says lives that the session had dead is back.
 			if (auto msg = Protocol::DecodeNpcHealths(a_data)) {
+				// One said alive just after its last runner's death reached us (NpcFates::Health::kStale) is dropped.
+				const auto  now = Clock::now();
 				std::size_t revived = 0;
 				std::erase_if(msg->npcs, [&](const Protocol::NpcHealth& a_npc) {
-					const auto taken = fates.Said(a_peer.playerId, npcs.Owner(a_npc.key), a_npc);
+					const auto taken = fates.Said(a_peer.playerId, npcs.Owner(a_npc.key), a_npc, now);
 					revived += taken == NpcFates::Health::kRevived ? 1 : 0;
-					return taken == NpcFates::Health::kRefused;
+					return taken == NpcFates::Health::kRefused || taken == NpcFates::Health::kStale;
 				});
 				if (revived != 0) {
 					log(std::format("server: player {} says {} NPC(s) the session had dead live again", a_peer.playerId, revived));
@@ -495,14 +503,26 @@ void Server::Run()
 			}
 			break;
 		case MT::kNpcDeaths:
-			// Only a runner's word, once for each NPC: no game kills one twice.
+			// Only a runner's word, once for each NPC: no game kills one twice. A death from the game that ran it a moment
+			// ago (NpcFates::Death::kLate: it died there before that game heard it lost it) goes to every game as the
+			// server's word, that game too: its body is a copy now, and the new runner kills the NPC it has alive.
 			if (auto msg = Protocol::DecodeNpcDeaths(a_data); msg && !msg->full) {
+				const auto          now = Clock::now();
+				Protocol::NpcDeaths late;
 				std::erase_if(msg->deaths, [&](const Protocol::NpcDeath& a_death) {
-					return fates.Died(a_peer.playerId, npcs.Owner(a_death.key), a_death) != NpcFates::Death::kNew;
+					const auto taken = fates.Died(a_peer.playerId, npcs.Owner(a_death.key), a_death, now);
+					if (taken == NpcFates::Death::kLate) {
+						late.deaths.push_back(a_death);
+					}
+					return taken != NpcFates::Death::kNew;
 				});
 				if (!msg->deaths.empty()) {
 					msg->runner = a_peer.playerId;
 					broadcast(Protocol::Encode(*msg), true, &a_key);
+				}
+				if (!late.deaths.empty()) {
+					log(std::format("server: player {} says {} NPC(s) it ran a moment ago died there: everyone is told", a_peer.playerId, late.deaths.size()));
+					broadcast(Protocol::Encode(late), true, nullptr);
 				}
 			}
 			break;

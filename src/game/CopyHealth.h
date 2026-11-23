@@ -17,12 +17,16 @@
 // - Our player's hit on a copy is a numbered request (Protocol::NpcHit) that ends in one answer: applied (the runner's
 //   health after it comes with it), or refused, which gives the drop back at once. A hit never answered is given back
 //   after LOST_AFTER, the one timer left.
+// - Our player's hit is what its hit event explains (one drop, within HIT_REACH), and what our player's lasting effects
+//   on the copy take as they tick (a burn, a poison, an enchantment's, a concentration spell's): only their share, at
+//   their magnitude, never a window in which any drop counts.
 // - What our player's hits did not do to a copy (a blow of an NPC's copy, a friend's stand-in, a trap, a fire, its own
 //   regeneration) is set back once it has stood JUDGE_AFTER: those are the runner's game's to deal, to its NPC.
 //   An NPC's blow is dealt in the game that runs the NPC it lands on, by the attacker's copy there, so a fight between
 //   NPCs two games run (a follower and a bandit) is counted once, never twice.
-// - Only the runner's death counts. A copy our player killed stays dead here and its killing blow goes to the runner as
-//   at least all it stood at; a copy the runner's death reaches is killed here, after any kill move it is in.
+// - Only the runner's death counts. A copy our player killed (its killer is our player, however late its hit event came)
+//   stays dead here and its killing blow goes to the runner as at least all it stood at; a copy the runner's death
+//   reaches is killed here, after any kill move it is in.
 // No game here: tests/NpcCombatTests.cpp.
 namespace CopyHealth
 {
@@ -32,24 +36,29 @@ namespace CopyHealth
 	inline constexpr float EPSILON = 0.005f;      // half a percent: a change below it is left until it adds up
 	inline constexpr auto  JUDGE_AFTER = 100ms;   // a change no hit of ours explains stands this long before it goes back
 	inline constexpr auto  HIT_REACH = 1s;        // a drop this soon after our player's hit on the copy is that hit's
-	inline constexpr auto  SPELL_REACH = 10s;     // ... after our spell or poison on it (a burn, a poison ticks on)
+	inline constexpr float DRAIN_MARGIN = 1.25f;  // our lasting effects may take this much more than their magnitude says
+	inline constexpr float DRAIN_HOLD = 0.25f;    // s: what our effects may take is held this long at most, unused (and EPSILON)
 	inline constexpr auto  LOST_AFTER = 120s;     // a hit never answered: given back (the server answers for a runner that left)
 	inline constexpr auto  REVIVE_AFTER = 5s;     // a copy dead here while its runner's NPC lives is raised after this
 	inline constexpr auto  KILL_AGAIN = 2s;       // a kill the game did not take is tried again after this
 	inline constexpr auto  REPORT_EVERY = 250ms;  // a runner says one NPC's health at most this often (its hits' answers: at once)
 	inline constexpr std::size_t MAX_IN_FLIGHT = 64;
 
-	// What a copy shows now: its health as a share of its most, dead or not, in a kill move or not; and the least share a
-	// living copy is ever set to (one point of its most): a runner's NPC down at none (an essential one) is no death here.
+	// What a copy shows now: its health as a share of its most, dead or not, in a kill move or not; the least share a
+	// living copy is ever set to (one point of its most): a runner's NPC down at none (an essential one) is no death here;
+	// what our player's lasting effects on it take a second (a share of its most: a burn, a poison, an enchantment's,
+	// a concentration spell's, each at its magnitude); and, dead, whether our player is its killer.
 	struct Seen
 	{
 		float share = 1;
 		bool  dead = false;
 		bool  inKillMove = false;
 		float floor = 0;
+		float ourDrain = 0;
+		bool  killedByUs = false;
 	};
 
-	// Our player's last hit on the copy (a hit event of theirs on it, or the kill move they are in with it).
+	// Our player's last hit on the copy (a hit event of theirs on it, or the kill move they are in with it, paired).
 	struct OurHit
 	{
 		Clock::time_point at{};
@@ -164,12 +173,18 @@ namespace CopyHealth
 				setOwed = true;
 			}
 			std::optional<OurHit> ours;
-			if (a_ourHit) {
-				const auto reach = (a_ourHit->flags & Protocol::kHitSpell) != 0 ? SPELL_REACH : HIT_REACH;
-				if (a_now - a_ourHit->at <= reach) {
-					ours = a_ourHit;
-				}
+			if (a_ourHit && a_now - a_ourHit->at <= HIT_REACH) {
+				ours = a_ourHit;
 			}
+			// What our player's lasting effects on it may have taken since the last look: their share alone, held a moment.
+			if (a_seen.ourDrain > 0.0f && !a_seen.dead && lastLook) {
+				const auto rate = a_seen.ourDrain * DRAIN_MARGIN;
+				const auto seconds = std::chrono::duration<float>(a_now - *lastLook).count();
+				drainCredit = (std::min)(drainCredit + rate * (std::max)(seconds, 0.0f), rate * DRAIN_HOLD + EPSILON);
+			} else if (a_seen.ourDrain <= 0.0f || a_seen.dead) {
+				drainCredit = 0.0f;
+			}
+			lastLook = a_now;
 			const auto book = [&](float a_share, std::uint8_t a_flags) {
 				Step step{ .what = Do::kSend };
 				step.hit = { .key = a_key, .seq = a_nextSeq(), .share = std::clamp(a_share, 0.0f, 1.0f), .flags = a_flags };
@@ -196,16 +211,17 @@ namespace CopyHealth
 
 			if (a_seen.dead) {
 				deadSince = deadSince.value_or(a_now);
-				// Killed by our player here (its hit's event may come a frame after the death): the killing blow goes as
-				// at least all it stood at, once, so it dies in its runner's game too. Killed by anything else: its
-				// runner's game deals that, or the copy is raised.
+				// Killed by our player here (its killer is our player, or its hit's event, which may come a frame after the
+				// death, is fresh): the killing blow goes as at least all it stood at, once, so it dies in its runner's game
+				// too. Killed by anything else: its runner's game deals that, or the copy is raised.
 				const auto left = Expected().value_or(a_seen.share);
 				const bool saveSays = a_hostsSave && !seenAlive && word.has_value();
-				if (!killBooked && (ours || saveSays) && left > 0.0f) {
+				const bool ourKill = ours || a_seen.killedByUs;
+				if (!killBooked && (ourKill || saveSays) && left > 0.0f) {
 					killBooked = true;
 					const auto flags = ours ? ours->flags : std::uint8_t{ 0 };
-					const auto killMove = ours && (a_seen.inKillMove || (flags & Protocol::kHitKillMove) != 0);
-					a_counts.saveKills += ours ? 0 : 1;
+					const auto killMove = ourKill && (a_seen.inKillMove || (flags & Protocol::kHitKillMove) != 0);
+					a_counts.saveKills += ourKill ? 0 : 1;
 					return book(left, static_cast<std::uint8_t>((flags & ~Protocol::kHitKillMove) | Protocol::kHitKilling | (killMove ? Protocol::kHitKillMove : 0)));
 				}
 				// Raised only to some health: a runner's NPC at none is down (an essential one), not up.
@@ -228,14 +244,25 @@ namespace CopyHealth
 			}
 			const auto expected = (std::max)(*Expected(), a_seen.floor);
 			const auto diff = a_seen.share - expected;
-			// A drop our player's hit explains: booked and sent at once. A blow's hit event explains one drop (a runner's word
-			// that differs from what the copy took is set, never sent again as more hits); a spell's, every drop while it may
-			// tick on (a burn, a poison), but not in the frame a word or an answer is set (a refused one is not sent again).
-			const bool spell = ours && (ours->flags & Protocol::kHitSpell) != 0;
-			const bool fresh = ours && (!bookedHit || ours->at > *bookedHit || (spell && !setOwed));
+			// A drop our player's hit explains: booked and sent at once. A hit event explains one drop (a runner's word that
+			// differs from what the copy took is set, never sent again as more hits).
+			const bool fresh = ours && (!bookedHit || ours->at > *bookedHit);
 			if (diff < -EPSILON && fresh) {
 				bookedHit = ours->at;
 				return book(-diff, static_cast<std::uint8_t>(ours->flags & ~Protocol::kHitKilling));
+			}
+			// A drop our player's lasting effects explain, as they tick: their share of it alone (what they may have taken
+			// since, DRAIN_MARGIN over their magnitude), never what another's blow took in the same moment; that is judged
+			// as anything else. Not in the frame a word or an answer is set (a refused one is not sent again).
+			if (diff < -EPSILON && !setOwed && drainCredit >= EPSILON) {
+				const auto take = (std::min)(-diff, drainCredit);
+				drainCredit -= take;
+				const auto since = changeSince;
+				auto       step = book(take, Protocol::kHitSpell);
+				if (-diff - take > EPSILON) {
+					changeSince = since.value_or(a_now);  // the rest is none of ours: set back once it has stood
+				}
+				return step;
 			}
 			if (std::fabs(diff) <= EPSILON) {
 				setOwed = false;
@@ -278,6 +305,8 @@ namespace CopyHealth
 		bool                             seenAlive = false;
 		bool                             killBooked = false;  // dead here: our killing blow went (once a death)
 		std::optional<Clock::time_point> bookedHit;  // the hit event whose drop was booked last
+		std::optional<Clock::time_point> lastLook;
+		float                            drainCredit = 0;  // what our lasting effects on it may still take (a share)
 		std::optional<Clock::time_point> changeSince;
 		std::optional<Clock::time_point> deadSince;
 		std::optional<Clock::time_point> killTried;

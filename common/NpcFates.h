@@ -2,6 +2,7 @@
 
 #include "Protocol.h"
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -17,6 +18,10 @@
 // - takes one death of an NPC, its runner's: a second report of it (another game's copy dying, or the same death
 //   again) is dropped, so no game kills one twice. A runner that says a dead NPC lives (raised by a spell) brings it
 //   back for the session.
+// - takes the death from the game that ran it a moment ago too (DEATH_GRACE): one whose NPC died there before it heard
+//   that it lost it (another game's fight claim, or its own release, reached the server first). Every game hears that
+//   death, that game too (its body is a copy now), and the new runner kills the NPC it has alive. What the new runner
+//   says of it alive in that moment it said before it heard, and is dropped.
 // No game and no network here: tests/NpcCombatTests.cpp.
 namespace NpcFates
 {
@@ -27,17 +32,25 @@ namespace NpcFates
 		std::optional<Protocol::HitVerdict> refused;
 	};
 
+	using Clock = std::chrono::steady_clock;
+	using namespace std::chrono_literals;
+
+	// A death from the game that ran an NPC is taken this long after it let go of it or lost it: a round trip and more.
+	inline constexpr auto DEATH_GRACE = 3s;
+
 	enum class Death
 	{
-		kNew,      // the session's first word of it: everyone else is told
+		kNew,      // the session's first word of it, from its runner: everyone else is told
+		kLate,     // the session's first word of it, from the game that ran it a moment ago: everyone is told, that game too
 		kKnown,    // dead already: dropped
-		kRefused,  // from a game that does not run it: dropped
+		kRefused,  // from a game that does not run it (and did not a moment ago): dropped
 	};
 
 	enum class Health
 	{
 		kTaken,    // passed on
 		kRevived,  // the runner says an NPC the session had dead lives: passed on, and it is dead no more
+		kStale,    // the runner says alive an NPC its last runner said died a moment ago: said before it heard, dropped
 		kRefused,  // from a game that does not run it: dropped
 	};
 
@@ -59,31 +72,56 @@ namespace NpcFates
 			return { .runner = a_runner };
 		}
 
-		Health Said(std::uint32_t a_sender, std::uint32_t a_runner, const Protocol::NpcHealth& a_health)
+		Health Said(std::uint32_t a_sender, std::uint32_t a_runner, const Protocol::NpcHealth& a_health, Clock::time_point a_now)
 		{
 			if (a_sender == 0 || a_sender != a_runner) {
 				return Health::kRefused;
 			}
-			const bool revived = dead.erase(a_health.key) != 0;
+			const auto was = dead.find(a_health.key);
+			if (was != dead.end() && was->second.late && a_now - was->second.at < DEATH_GRACE) {
+				return Health::kStale;
+			}
+			const bool revived = was != dead.end();
+			if (revived) {
+				dead.erase(was);
+			}
 			if (said.size() < Protocol::MAX_NPCS || said.contains(a_health.key)) {
 				said[a_health.key] = a_health.share;
 			}
 			return revived ? Health::kRevived : Health::kTaken;
 		}
 
-		Death Died(std::uint32_t a_sender, std::uint32_t a_runner, const Protocol::NpcDeath& a_death)
+		Death Died(std::uint32_t a_sender, std::uint32_t a_runner, const Protocol::NpcDeath& a_death, Clock::time_point a_now)
 		{
-			if (a_sender == 0 || a_sender != a_runner) {
+			if (a_sender == 0) {
 				return Death::kRefused;
+			}
+			bool late = false;
+			if (a_sender != a_runner) {
+				const auto was = lastRunner.find(a_death.key);
+				late = was != lastRunner.end() && was->second.player == a_sender && a_now - was->second.at <= DEATH_GRACE;
+				if (!late) {
+					return Death::kRefused;
+				}
 			}
 			if (dead.contains(a_death.key)) {
 				return Death::kKnown;
 			}
 			said.erase(a_death.key);
 			if (dead.size() < Protocol::MAX_NPCS) {
-				dead.emplace(a_death.key, a_death);
+				dead.emplace(a_death.key, Dead{ a_death, a_now, late });
 			}
-			return Death::kNew;
+			return late ? Death::kLate : Death::kNew;
+		}
+
+		// a_was ran it and does no more (another game won it, or it let go of it): a death there is still taken for
+		// DEATH_GRACE.
+		void HandedOver(const Protocol::NpcKey& a_key, std::uint32_t a_was, Clock::time_point a_now)
+		{
+			std::erase_if(lastRunner, [&](const auto& a_entry) { return a_now - a_entry.second.at > DEATH_GRACE; });
+			if (a_was != 0 && (lastRunner.size() < Protocol::MAX_NPCS || lastRunner.contains(a_key))) {
+				lastRunner[a_key] = { a_was, a_now };
+			}
 		}
 
 		// Nobody runs it now: its next runner says its own health (a dead one stays dead).
@@ -94,6 +132,7 @@ namespace NpcFates
 		{
 			std::erase_if(said, [&](const auto& a_entry) { return a_entry.first.spawner == a_player; });
 			std::erase_if(dead, [&](const auto& a_entry) { return a_entry.first.spawner == a_player; });
+			std::erase_if(lastRunner, [&](const auto& a_entry) { return a_entry.second.player == a_player; });
 		}
 
 		[[nodiscard]] bool IsDead(const Protocol::NpcKey& a_key) const { return dead.contains(a_key); }
@@ -114,7 +153,7 @@ namespace NpcFates
 			std::vector<Protocol::NpcDeath> out;
 			out.reserve(dead.size());
 			for (const auto& [key, death] : dead) {
-				out.push_back(death);
+				out.push_back(death.death);
 			}
 			return out;
 		}
@@ -123,10 +162,24 @@ namespace NpcFates
 		{
 			said.clear();
 			dead.clear();
+			lastRunner.clear();
 		}
 
 	private:
-		std::map<Protocol::NpcKey, float>              said;  // each NPC's runner's last word, while it is run
-		std::map<Protocol::NpcKey, Protocol::NpcDeath> dead;
+		struct Dead
+		{
+			Protocol::NpcDeath death;
+			Clock::time_point  at{};
+			bool               late = false;  // taken from the game that ran it a moment before (Death::kLate)
+		};
+		struct Was
+		{
+			std::uint32_t     player = 0;
+			Clock::time_point at{};
+		};
+
+		std::map<Protocol::NpcKey, float> said;        // each NPC's runner's last word, while it is run
+		std::map<Protocol::NpcKey, Dead>  dead;
+		std::map<Protocol::NpcKey, Was>   lastRunner;  // who ran each NPC that changed hands in the last DEATH_GRACE
 	};
 }

@@ -8,9 +8,11 @@
 #   bash tools/rig/steps/npccombat.sh selftest     the step's reading, no game and no rig (CI runs it)
 #
 # What it does, each way (one game runs the NPC, the other's player hits its copy), both players in one session near
-# each other at the harness's cell (Riverwood), after the npcs step:
-#   1. An NPC to fight: one the runner runs (a load-order NPC, alive, no child, not essential) that the hitter shows as
-#      a mirrored copy: a creature before a person (a creature is no crime), then the nearest. None is a WARN.
+# each other at the harness's cell (Riverwood), after the npcs step; a creature the host runs one way, a person the VM
+# runs the other, so both actor kinds' paths run (a person's: the crime, its killer a stand-in):
+#   1. An NPC to fight: one the runner runs (a load-order NPC, alive, no child, not essential, not protected: a protected
+#      NPC dies only to its own game's player) that the hitter shows as a mirrored copy: the way's kind first (a creature
+#      or a person), then the nearest. None is a WARN; none of the way's kind is a WARN too, and the other kind is fought.
 #      The fight's set-up: the runner's console sets it on the runner's player (`startcombat`, its confidence and
 #      aggression raised and the player given NPC_FIGHT_HEALTH health, as the npcs step's fight), and the step waits
 #      until it fights (combat=1): a game whose player hits a copy claims it as a fight, and only the runner's own
@@ -24,6 +26,11 @@
 #      sent (hitsSent= up), reaches the runner and is applied there (the hitter's hitsApplied= and the runner's
 #      hitsInApplied= up), and both games show the NPC at the same health after it; the runner still runs it (owner=).
 #      A copy that took the hit and sent none is a FAIL; a cast that never hit the copy is the scene's (RIG).
+#  3b. The core rule: what no hit of ours explains is set back. COMBAT_SETTLE after the last cast (its hit event out of
+#      reach), the hitter's console damages its copy by COMBAT_SETBACK of its most (`damageav`: no hit, as another NPC's
+#      blow or a trap would): within COMBAT_SETBACK_WAIT the copy is back where it was (its runner's word) and the
+#      hitter's givenBack= is up. Then the same with `restoreav` (a heal no runner said): back, takenBack= up. A copy
+#      that keeps either is the double blow, or the heal on hit, this design is for: FAIL.
 #   4. The kill: the runner's console brings its NPC to COMBAT_LOW (set-up), and the hitter casts until it dies. The
 #      runner's NPC dies of the hitter's hits (dead=1 there), the copy is dead in the hitter's game too, and both games
 #      have it dead for the session, the hitter its killer (sessionDead=1 killer=<the hitter's player>).
@@ -33,6 +40,9 @@
 #   6. The runner's own kill (`kill` from its console: a death no hit of the hitter's made) kills the copy in the hitter's
 #      game (copyKills= up there); raised again, it lives in both.
 #   After both ways: no hit of either game was lost (hitsLost=0); the hits refused and the healths set back are said.
+#   Then the session's dead reach a game that joins (npccombat_rejoin): the VM leaves the session, the host's console
+#   kills an NPC the host runs (set-up), and when the VM joins again its game has that NPC dead, killed as it joined
+#   (killsOnLoad=, or its copy for the death list: copyKills=); raised by the host's console, it lives in both.
 #   Put back after each way: the fight stopped, the NPC's confidence and aggression and the runner's player's health as
 #   they were, the NPC's health restored, and the hitter's bounty for the hold paid (`paycrimegold`: hitting a person is
 #   a crime there).
@@ -49,18 +59,22 @@ COMBAT_CASTS=${COMBAT_CASTS:-8}                   # casts at most, for a hit and
 COMBAT_REVIVE=${COMBAT_REVIVE:-5}                 # s: CopyHealth.h's REVIVE_AFTER
 COMBAT_RESTORE=${COMBAT_RESTORE:-100000}          # the health given back to the NPC after (restoreav: up to its most)
 COMBAT_FIGHT_HOLD=${COMBAT_FIGHT_HOLD:-11}         # s: NpcRules' FIGHT_HOLD and a second (a game claims an NPC that long after its last hit)
+COMBAT_SETTLE=${COMBAT_SETTLE:-2}                 # s: after the last cast, before the console's change (CopyHealth's HIT_REACH and more)
+COMBAT_SETBACK=${COMBAT_SETBACK:-0.2}             # the share of its most the hitter's console takes off its copy, then gives it
+COMBAT_SETBACK_WAIT=${COMBAT_SETBACK_WAIT:-5}     # s: for the copy to be set back (CopyHealth's JUDGE_AFTER, and the dev channel's rounds)
 
 # ---- the reading, free of the rig (selftest) ----------------------------------------------------------------------
 
-# combat_foes <runner rows> <watcher rows> <runner id> <x y z>: one line per NPC the hitter may fight, the best first:
-# "<key> <its id in the runner's game> <its copy's id in the watcher's game> <kind>". Each one the runner runs (a
-# load-order NPC, alive, in its world, no child) that the watcher shows as a mirrored copy, alive, in its world; a
-# creature before a person, then the nearest to that place. Rows as npc_rows writes them (steps/npcs.sh).
+# combat_foes <runner rows> <watcher rows> <runner id> <x y z> [<kind first: creature|human>]: one line per NPC the
+# hitter may fight, the best first: "<key> <its id in the runner's game> <its copy's id in the watcher's game> <kind>".
+# Each one the runner runs (a load-order NPC, alive, in its world, no child) that the watcher shows as a mirrored copy,
+# alive, in its world; the kind asked for first (a creature when none is), then the nearest to that place. Rows as
+# npc_rows writes them (steps/npcs.sh).
 combat_foes() {
-	awk -v me="$3" -v p="$4" 'BEGIN { split(p, q, " ") } NF == 0 { next }
+	awk -v me="$3" -v p="$4" -v first="${5:-creature}" 'BEGIN { split(p, q, " ") } NF == 0 { next }
 		FILENAME == ARGV[1] { if ($3 == "copy" && $5 != "-" && $15 == "0") copy[$1] = $14; next }
 		$2 == me && $3 == "run" && $1 !~ /:/ && $15 == "0" && $16 != "1" && $5 != "-" && ($4 == "human" || $4 == "creature") && ($1 in copy) {
-			d = sqrt(($5 - q[1]) ^ 2 + ($6 - q[2]) ^ 2) + ($4 == "creature" ? 0 : 1e9)
+			d = sqrt(($5 - q[1]) ^ 2 + ($6 - q[2]) ^ 2) + ($4 == first ? 0 : 1e9)
 			printf "%020.0f %s %s %s %s\n", d, $1, $14, copy[$1], $4
 		}' <(printf '%s\n' "$2") <(printf '%s\n' "$1") | sort | cut -d' ' -f2-
 }
@@ -80,6 +94,21 @@ combat_below() { [[ $1 =~ ^[0-9.]+$ ]] && [[ $2 =~ ^[0-9.]+$ ]] && awk -v a="$1"
 
 # combat_one <reply of `npcs <id>`> <name>: that field of the one NPC's line (the header's npcs= is not one)
 combat_one() { field "$2" "${1#*|}"; }
+
+# combat_pick <runner> <foes> <label>: the first of the foes (combat_foes) neither essential nor protected in the runner's
+# game (a protected NPC dies only to its own game's player, never to a friend's hits); sets COMBAT_KEY, COMBAT_R (its id
+# in the runner's game), COMBAT_W (its copy's in the other) and COMBAT_KIND. 1 when there is none.
+combat_pick() {
+	local k r w kd one ess prot
+	COMBAT_KEY=""; COMBAT_R=""; COMBAT_W=""; COMBAT_KIND=""
+	while read -r k r w kd; do
+		[ -n "$k" ] || continue
+		one=$(_combat_one "$1" "$r"); ess=$(combat_one "$one" essential); prot=$(combat_one "$one" protected)
+		if [ "$ess" = 0 ] && [ "${prot:-0}" = 0 ]; then COMBAT_KEY=$k; COMBAT_R=$r; COMBAT_W=$w; COMBAT_KIND=$kd; return 0; fi
+		say "$3: $k ($r) is essential or protected (essential=${ess:-?} protected=${prot:-?}): not this one"
+	done <<<"$2"
+	return 1
+}
 
 # ---- the step -----------------------------------------------------------------------------------------------------
 
@@ -120,6 +149,34 @@ combat_cast() {
 	return 1
 }
 
+# combat_setback <runner> <NPC id> <hitter> <copy id> <label>: the core rule (3b above). The hitter's console changes its
+# copy's health with no hit, down (damageav) then up (restoreav), each COMBAT_SETBACK of its most; each time the copy is
+# back where it was within COMBAT_SETBACK_WAIT, the hitter's givenBack= (down) or takenBack= (up) counting it.
+combat_setback() {
+	local runner=$1 rlocal=$2 hitter=$3 wlocal=$4 label=$5 what cmd counter o m h0 c0 n
+	say "$label: waiting $COMBAT_SETTLE s: the last cast's hit event out of reach, so the next change is no hit of ours"
+	sleep "$COMBAT_SETTLE"
+	for what in drop gain; do
+		if [ "$what" = drop ]; then cmd=damageav; counter=givenBack; else cmd=restoreav; counter=takenBack; fi
+		o=$(_combat_one "$hitter" "$wlocal"); m=$(combat_one "$o" max); h0=$(combat_one "$o" hp); c0=$(_combat_count "$hitter" "$counter")
+		if ! is_num "$m" || ! is_num "$h0" || ! is_num "$c0"; then
+			rig_broken game "$label: a $what no hit of ours explains is set back" "no max=, hp= or $counter= in the $hitter's replies: $(cut -c1-200 <<<"$o")"; return
+		fi
+		n=$(awk -v m="$m" -v s="$COMBAT_SETBACK" 'BEGIN { printf "%.0f\n", m * s }')
+		if [ "$(dc "$hitter" "console $wlocal.$cmd health $n")" != ran ]; then
+			rig_broken input "$label: a $what no hit of ours explains is set back" "the $hitter's console refused $cmd"; return
+		fi
+		say "$label: set-up (console): the $hitter's copy $wlocal: $cmd health $n (no hit: as another NPC's blow, a trap or a heal no runner said)"
+		if wait_until "$COMBAT_SETBACK_WAIT" _combat_back "$hitter" "$wlocal" "$h0" "$counter" "$c0"; then
+			pass "$label: a $what no hit of ours explains is set back to the runner's word" "hp $h0, $cmd $n, back to $(_combat_hp "$hitter" "$wlocal"); $counter $c0 -> $(_combat_count "$hitter" "$counter")"
+		else
+			fail "$label: a $what no hit of ours explains is set back to the runner's word" "after $COMBAT_SETBACK_WAIT s: hp $h0, $cmd $n, now $(_combat_hp "$hitter" "$wlocal"); $counter $c0 -> $(_combat_count "$hitter" "$counter"); the $runner's hp $(_combat_hp "$runner" "$rlocal")"
+		fi
+	done
+}
+# _combat_back <hitter> <copy id> <hp before> <counter> <its count before>: the copy is back at that hp, the count up
+_combat_back() { _combat_up "$1" "$4" "$5" && combat_close "$(_combat_hp "$1" "$2")" "$3"; }
+
 # _combat_fighting <runner> <NPC id>: the runner's NPC is in combat or has its weapon out
 _combat_fighting() { local o; o=$(_combat_one "$1" "$2"); [ "$(combat_one "$o" combat)" = 1 ] || [ "$(combat_one "$o" weapon)" = 1 ]; }
 
@@ -147,23 +204,21 @@ combat_engage() {
 	fi
 }
 
-# npccombat_way <runner> <hitter>: one NPC the runner runs, its copy hit and killed by the hitter's player
+# npccombat_way <runner> <hitter> [<kind: creature|human>]: one NPC the runner runs (of that kind if it has one), its copy
+# hit and killed by the hitter's player
 npccombat_way() {
-	local runner=$1 hitter=$2 label="npccombat: the $2 hits the $1's NPC" rid hid foes key rlocal wlocal kind one ess hp0 w0 sent0 applied0 in0 kills0 k r w kd
+	local runner=$1 hitter=$2 want=${3:-creature} label="npccombat: the $2 hits the $1's ${3:-creature}" rid hid foes key rlocal wlocal kind hp0 w0 sent0 applied0 in0 kills0
 	section "$label"
 	rid=$(field player "$(dc "$runner" 'session status')"); hid=$(field player "$(dc "$hitter" 'session status')")
 	if ! is_num "$rid" || ! is_num "$hid"; then rig_broken game "$label" "no player ids (runner '$rid', hitter '$hid')"; return; fi
-	foes=$(combat_foes "$(_npcs_rows "$runner")" "$(_npcs_rows "$hitter")" "$rid" "$(pos_of "$runner")")
-	key=""
-	while read -r k r w kd; do
-		[ -n "$k" ] || continue
-		one=$(_combat_one "$runner" "$r"); ess=$(combat_one "$one" essential)
-		if [ "$ess" = 0 ]; then key=$k; rlocal=$r; wlocal=$w; kind=$kd; break; fi
-		say "$label: $k ($r) is essential${ess:+ ($ess)}: not this one"
-	done <<<"$foes"
-	if [ -z "$key" ]; then
-		warn "$label: an NPC to fight" "the $runner runs no living grown person or creature, not essential, that the $hitter shows as a copy: nothing to fight this way"
+	foes=$(combat_foes "$(_npcs_rows "$runner")" "$(_npcs_rows "$hitter")" "$rid" "$(pos_of "$runner")" "$want")
+	if ! combat_pick "$runner" "$foes" "$label"; then
+		warn "$label: an NPC to fight" "the $runner runs no living grown person or creature, not essential or protected, that the $hitter shows as a copy: nothing to fight this way"
 		return
+	fi
+	key=$COMBAT_KEY; rlocal=$COMBAT_R; wlocal=$COMBAT_W; kind=$COMBAT_KIND
+	if [ "$kind" != "$want" ]; then
+		warn "$label: a $want to fight" "the $runner runs no $want (alive, grown, not essential or protected) that the $hitter shows as a copy: a $kind instead, so a $want's path is not covered this way"
 	fi
 	say "$label: the NPC: $key, a $kind ($rlocal in the $runner's game, its copy $wlocal in the $hitter's)"
 	if ! combat_engage "$runner" "$rlocal" "$label"; then npccombat_putback "$runner" "$hitter" "$rlocal"; return; fi
@@ -203,6 +258,8 @@ npccombat_way() {
 			fail "$label: the $runner still runs it (its player fights it: the hits took nothing over)" "the $runner's $(_combat_one "$runner" "$rlocal" | cut -c1-200)"
 			npccombat_putback "$runner" "$hitter" "$rlocal"; return
 		fi
+		# 3b. what no hit of ours explains is set back
+		combat_setback "$runner" "$rlocal" "$hitter" "$wlocal" "$label"
 	elif combat_below "$(_combat_hp "$hitter" "$wlocal")" "$w0"; then
 		fail "$label: the hit on the copy is sent" "the copy's hp $w0 -> $(_combat_hp "$hitter" "$wlocal") in the $hitter's game, but no hit went (hitsSent $sent0): the runner never hears of it"
 	else
@@ -276,17 +333,73 @@ npccombat_putback() {
 	say "npccombat: put back (console): the $1's $3 alive at all its health, the $2's bounty in the hold paid"
 }
 
+# npccombat_rejoin: the session's dead reach a game that joins (the joiner's full death list, killsOnLoad). An NPC the
+# host runs that the VM shows as a copy is killed by the host's console (set-up) while the VM is out of the session;
+# when the VM joins again its game has it dead, killed as it joined (killsOnLoad= up, or its copy killed for the death
+# list: copyKills=). Raised by the host's console, it lives in both. Nobody moves.
+npccombat_rejoin() {
+	local label="npccombat: an NPC killed while the VM is out is dead in its game when it joins again" rid foes r k0 rlocal wlocal
+	section "$label"
+	rid=$(field player "$(dc host 'session status')")
+	if ! is_num "$rid"; then rig_broken game "$label" "no player id for the host"; return; fi
+	foes=$(combat_foes "$(_npcs_rows host)" "$(_npcs_rows vm)" "$rid" "$(pos_of host)" creature)
+	if ! combat_pick host "$foes" "$label"; then
+		warn "$label: an NPC" "the host runs no living grown NPC, not essential or protected, that the VM shows as a copy: nothing to kill while the VM is out"
+		return
+	fi
+	rlocal=$COMBAT_R; wlocal=$COMBAT_W
+	say "$label: the NPC: $COMBAT_KEY, a $COMBAT_KIND ($rlocal in the host's game, $wlocal in the VM's)"
+	k0=$(_combat_count vm killsOnLoad); is_num "$k0" || k0=0
+	r=$(dc vm 'session leave'); if [[ $r != left* ]]; then fail "$label: the VM leaves" "$r"; return; fi
+	if ! wait_until 30 _combat_alone; then
+		fail "$label: the VM leaves" "the host still counts $(field players "$(dc host 'session status')") player(s) after 30 s"
+		_combat_rejoin_vm "$label"; return
+	fi
+	dc host "console $rlocal.kill" >/dev/null
+	say "$label: set-up (console): the host kills $rlocal (kill) while the VM is out of the session"
+	if wait_until "$NPC_WAIT" _combat_dead host "$rlocal" 1; then
+		pass "$label: the host's game has it dead for the session" "$(_combat_one host "$rlocal" | grep -o 'dead=[01]\|sessionDead=[01]' | tr '\n' ' ')"
+	else
+		fail "$label: the host's game has it dead for the session" "after $NPC_WAIT s: $(_combat_one host "$rlocal" | cut -c1-200)"
+	fi
+	_combat_rejoin_vm "$label" || return
+	if wait_until "$NPC_WAIT" _combat_dead vm "$wlocal" 1 && wait_until 5 _combat_joined_kill "$k0"; then
+		pass "$label: the VM's game kills it as it joins (the session's death list)" "killsOnLoad $k0 -> $(_combat_count vm killsOnLoad), copyKills $(_combat_count vm copyKills)"
+	else
+		fail "$label: the VM's game kills it as it joins (the session's death list)" "after $NPC_WAIT s: the VM's $(_combat_one vm "$wlocal" | cut -c1-240); killsOnLoad $k0 -> $(_combat_count vm killsOnLoad), copyKills $(_combat_count vm copyKills)"
+	fi
+	dc host "console $rlocal.resurrect 1" >/dev/null
+	say "$label: set-up (console): the host raises $rlocal (resurrect)"
+	if wait_until $((NPC_WAIT + COMBAT_REVIVE)) _combat_both host "$rlocal" vm "$wlocal" 0; then
+		pass "$label: raised by the host, it lives in both games" ""
+	else
+		fail "$label: raised by the host, it lives in both games" "the host's $(_combat_one host "$rlocal" | grep -o 'dead=[01]\|sessionDead=[01]' | tr '\n' ' ')/ the VM's $(_combat_one vm "$wlocal" | grep -o 'dead=[01]\|sessionDead=[01]\|word=[^ ]*\|runnerDead=[01]' | tr '\n' ' ')"
+	fi
+	dc host "console $rlocal.restoreav health $COMBAT_RESTORE" >/dev/null
+	say "npccombat: put back (console): the host's $rlocal alive at all its health"
+}
+_combat_alone() { [ "$(field players "$(dc host 'session status')")" = 0 ]; }
+_combat_joined_kill() { _combat_up vm killsOnLoad "$1" || _combat_up vm copyKills 0; }
+# _combat_rejoin_vm <label>: the VM joins the host's session again (as save_rejoin does); 1 (a FAIL) when it does not
+_combat_rejoin_vm() {
+	local r
+	if r=$(vm_join) && wait_until 90 joined_both; then pass "$1: the VM joins again" "$(dc vm 'session status' | cut -c1-80)"; return 0; fi
+	fail "$1: the VM joins again" "${r:-not both in the session after 90 s}"
+	return 1
+}
+
 step_npccombat() {
 	local w s
 	for w in host vm; do still $w; done
-	npccombat_way host vm
-	npccombat_way vm host
+	npccombat_way host vm creature
+	npccombat_way vm host human
 	section "npccombat: hits, both games"
 	for w in host vm; do
 		s=$(dc $w npcs)
 		expect_zero "$w: no hit on a copy lost (never answered)" "$(field hitsLost "$s")"
-		say "npccombat: $w: hits sent $(field hitsSent "$s"), applied $(field hitsApplied "$s"), refused $(field hitsRefused "$s"); friends' hits in $(field hitsIn "$s"), applied $(field hitsInApplied "$s"); set back $(field givenBack "$s") down / $(field takenBack "$s") up; deaths sent $(field deathsSent "$s"), heard $(field deathsIn "$s"); copies killed $(field copyKills "$s"), raised $(field revived "$s")"
+		say "npccombat: $w: hits sent $(field hitsSent "$s"), applied $(field hitsApplied "$s"), refused $(field hitsRefused "$s"); friends' hits in $(field hitsIn "$s"), applied $(field hitsInApplied "$s"); set back $(field givenBack "$s") down / $(field takenBack "$s") up; deaths sent $(field deathsSent "$s"), heard $(field deathsIn "$s"); copies killed $(field copyKills "$s"), raised $(field revived "$s"), killed as they loaded $(field killsOnLoad "$s")"
 	done
+	npccombat_rejoin
 }
 
 # ---- self-test: the reading, both games faked ---------------------------------------------------------------------
@@ -305,6 +418,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "foes: the other way" "$(combat_foes "$W" "$R" 2 "0 0 0")" "0001A6B0 0001A6B0 0001A6B0 human"
 	t "foes: none the watcher shows as a copy" "$(combat_foes "$R" "$(sed 's/ copy / other /' <<<"$W")" 1 "100 200 0")" ""
 	t "foes: a copy dead in the watcher's game is none" "$(combat_foes "$R" "$(sed 's/^\(0001A690 .*\) 0001A690 0 /\1 0001A690 1 /' <<<"$W")" 1 "100 200 0" | head -1 | cut -d' ' -f1)" 0001A67C
+	t "foes: a person first when a person is asked for" "$(combat_foes "$R" "$W" 1 "100 200 0" human | tr '\n' ';')" "0001A67C 0001A67C 0001A67C human;0001A690 0001A690 0001A690 creature;"
 	t "foes: the nearest person first" "$(combat_foes "$(printf '%s\n%s\n' '00000A02 1 run human 900 0 0 - - - - - - 00000A02 0 0' '00000A03 1 run human 300 0 0 - - - - - - 00000A03 0 0')" "$(printf '%s\n%s\n' '00000A02 1 copy human 900 0 0 - - - - - - 0000BA02 0' '00000A03 1 copy human 300 0 0 - - - - - - 0000BA03 0')" 1 "0 0 0" | tr '\n' ';')" "00000A03 00000A03 0000BA03 human;00000A02 00000A02 0000BA02 human;"
 	t "damage to: 70 % of 200 from 180" "$(combat_damage_to 180 200 0.7)" 40
 	t "damage to: there already" "$(combat_damage_to 100 200 0.7)" 0
@@ -325,6 +439,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	fake_fight() {
 		FK=$d/fk.$RANDOM; mkdir -p "$FK"; echo 1.000 > "$FK/rhp"; echo 1.000 > "$FK/whp"; echo 0 > "$FK/dead"; echo 0 > "$FK/killer"
 		echo 0 > "$FK/sent"; echo 0 > "$FK/applied"; echo 0 > "$FK/in"; echo 0 > "$FK/kills"; echo 0 > "$FK/combat"; echo 1 > "$FK/owner"; FK_MODE=$1
+		echo 0 > "$FK/gb"; echo 0 > "$FK/tb"
 		fk_line() {  # fk_line <who> <id>: the one NPC's line, in that game
 			local hp dead killer ess=0; [ "$FK_MODE" = essential ] && ess=1
 			dead=$(cat "$FK/dead"); killer=$(cat "$FK/killer")
@@ -336,10 +451,15 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		dc() { case "$2" in
 			'npcs list') if [ "$1" = host ]; then echo "$RUN_LIST"; else echo "$SEE_LIST"; fi ;;
 			'npcs '*) fk_line "$1" "${2#npcs }" ;;
-			npcs) if [ "$1" = host ]; then echo "hitsInApplied=$(cat "$FK/in") hitsLost=0"; else echo "hitsSent=$(cat "$FK/sent") hitsApplied=$(cat "$FK/applied") copyKills=$(cat "$FK/kills") hitsLost=0"; fi ;;
+			npcs) if [ "$1" = host ]; then echo "hitsInApplied=$(cat "$FK/in") hitsLost=0"; else echo "hitsSent=$(cat "$FK/sent") hitsApplied=$(cat "$FK/applied") copyKills=$(cat "$FK/kills") hitsLost=0 givenBack=$(cat "$FK/gb") takenBack=$(cat "$FK/tb")"; fi ;;
 			'session status') if [ "$1" = host ]; then echo 'player=1'; else echo 'player=2'; fi ;;
 			where) echo 'cell=00000000 world=0000003C pos=(100,200,0) modal=0' ;;
-			*damageav*) local h; h=$(awk -v d="${2##* }" -v r="$(cat "$FK/rhp")" 'BEGIN { printf "%.3f", r - d / 200 }'); fk_set rhp "$h"; fk_set whp "$h"; echo ran ;;
+			# the hitter's console on its copy: set back, and counted (as the plugin does), unless the mode keeps it
+			*damageav*) if [ "$1" = vm ]; then
+					if [ "$FK_MODE" = keepdrop ]; then fk_sub whp "$(awk -v d="${2##* }" 'BEGIN { printf "%.3f", d / 200 }')"; else fk_set gb $(($(cat "$FK/gb") + 1)); fi
+					echo ran; return
+				fi
+				local h; h=$(awk -v d="${2##* }" -v r="$(cat "$FK/rhp")" 'BEGIN { printf "%.3f", r - d / 200 }'); fk_set rhp "$h"; fk_set whp "$h"; echo ran ;;
 			*player.cast*)
 				[ "$FK_MODE" = miss ] && { echo ran; return; }
 				[ "$FK_MODE" = taken ] && fk_set owner 2
@@ -351,20 +471,49 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 				if [ "$(cat "$FK/rhp")" = 0.000 ] && [ "$FK_MODE" != nokill ]; then fk_set dead 1; fk_set killer 2; fi ;;
 			*startcombat*) [ "$FK_MODE" = nofight ] || fk_set combat 1; echo ran ;;
 			*stopcombat*) fk_set combat 0; echo ran ;;
+			*restoreav*) if [ "$1" = vm ]; then
+					if [ "$FK_MODE" = keepgain ]; then fk_sub whp "-$(awk -v d="${2##* }" 'BEGIN { printf "%.3f", d / 200 }')"; else fk_set tb $(($(cat "$FK/tb") + 1)); fi
+				fi
+				echo ran ;;
 			*resurrect*) fk_set dead 0; fk_set killer 0; fk_set rhp 1.000; fk_set whp 1.000; echo ran ;;
 			*.kill) fk_set dead 1; fk_set killer 0; fk_set kills $(($(cat "$FK/kills") + 1)); echo ran ;;
 			console*) echo ran ;;
 			*) echo ok ;; esac; }
 		( A_OUT=$d/fk$RANDOM; mkdir -p "$A_OUT"; a_init fk >/dev/null; npccombat_way host vm >/dev/null; cut -f1 "$A_RESULTS" | tr '\n' ' ' )
 	}
-	t "way: all of it works" "$(fake_fight ok)" "PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS "
+	t "way: all of it works" "$(fake_fight ok)" "PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS PASS "
 	t "way: a copy that takes the hit and sends none fails" "$(fake_fight nosend)" "PASS FAIL FAIL "
 	t "way: a cast that never hits is the scene's (RIG), not the mod's" "$(fake_fight miss)" "PASS RIG "
-	t "way: a hit never applied fails" "$(fake_fight noapply)" "PASS PASS FAIL FAIL PASS FAIL "
-	t "way: a runner's NPC that never dies of the hits fails" "$(fake_fight nokill)" "PASS PASS PASS PASS PASS FAIL "
+	t "way: a hit never applied fails" "$(fake_fight noapply)" "PASS PASS FAIL FAIL PASS PASS PASS FAIL "
+	t "way: a runner's NPC that never dies of the hits fails" "$(fake_fight nokill)" "PASS PASS PASS PASS PASS PASS PASS FAIL "
+	t "way: a copy that keeps a drop no hit explains fails (a double blow)" "$(fake_fight keepdrop)" "PASS PASS PASS PASS PASS FAIL PASS PASS PASS PASS PASS PASS PASS PASS PASS "
+	t "way: a copy that keeps a gain no runner said fails (heal on hit)" "$(fake_fight keepgain)" "PASS PASS PASS PASS PASS PASS FAIL PASS PASS PASS PASS PASS PASS PASS PASS "
 	t "way: only essential NPCs is a WARN" "$(fake_fight essential)" "WARN "
 	t "way: an NPC that never fights its runner's player is the scene's (RIG)" "$(fake_fight nofight)" "RIG "
 	t "way: hits that take the NPC over from its fighting runner fail" "$(fake_fight taken)" "PASS PASS PASS PASS FAIL "
+
+	# the session's dead reach a game that joins: the VM out, the host kills, the VM joins and has it dead. FR_MODE: ok, or
+	# noload (the VM's game keeps it alive).
+	fake_rejoin() {
+		FR=$d/fr.$RANDOM; mkdir -p "$FR"; echo 0 > "$FR/hdead"; echo 0 > "$FR/vdead"; echo 1 > "$FR/vin"; echo 3 > "$FR/kol"; FR_MODE=$1
+		dc() { local dd vin; case "$2" in
+			'npcs list') if [ "$1" = host ]; then echo "$RUN_LIST"; else echo "$SEE_LIST"; fi ;;
+			'npcs '*) if [ "$1" = host ]; then dd=$(cat "$FR/hdead"); else dd=$(cat "$FR/vdead"); fi
+				echo "npcs=1 | 0001A690 local=${2#npcs } owner=1 role=$([ "$1" = host ] && echo run || echo copy) kind=creature at=(900,200,0) dead=$dd child=0 weapon=0 combat=0 hp=1.000 sessionDead=$dd killer=0 health=200 max=200 essential=0 protected=0" ;;
+			npcs) echo "killsOnLoad=$(cat "$FR/kol") copyKills=0 hitsLost=0" ;;
+			'session status') vin=$(cat "$FR/vin"); if [ "$1" = host ]; then echo "player=1 players=$vin welcomed=1 connection=up"; else echo "player=2 welcomed=$vin connection=$([ "$vin" = 1 ] && echo up || echo down)"; fi ;;
+			'session leave') echo 0 > "$FR/vin"; echo left ;;
+			status) echo 'lobby=5' ;;
+			'steam join '*) echo 1 > "$FR/vin"; if [ "$FR_MODE" = ok ] && [ "$(cat "$FR/hdead")" = 1 ]; then echo 1 > "$FR/vdead"; echo 4 > "$FR/kol"; fi; echo joining ;;
+			where) echo 'cell=00000000 world=0000003C pos=(100,200,0) modal=0' ;;
+			*.kill) echo 1 > "$FR/hdead"; echo ran ;;
+			*resurrect*) echo 0 > "$FR/hdead"; echo 0 > "$FR/vdead"; echo ran ;;
+			console*) echo ran ;;
+			*) echo ok ;; esac; }
+		( A_OUT=$d/fr$RANDOM; mkdir -p "$A_OUT"; a_init fr >/dev/null; JOIN=dev; npccombat_rejoin >/dev/null; cut -f1 "$A_RESULTS" | tr '\n' ' ' )
+	}
+	t "rejoin: killed while the VM was out, dead in its game when it joins; raised, alive in both" "$(fake_rejoin ok)" "PASS PASS PASS PASS "
+	t "rejoin: a joiner whose game keeps the session's dead alive fails" "$(fake_rejoin noload)" "PASS PASS FAIL PASS "
 
 	# the step is wired into the harness: in STEPS after npcs and before final, a session step, run by default
 	t "npccombat is a step" "$(case " $STEPS " in *" npcs npccombat "*) echo yes ;; esac)" yes

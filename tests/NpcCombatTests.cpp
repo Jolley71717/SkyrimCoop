@@ -286,13 +286,14 @@ TEST("npc combat form translate: each NPC is named as each game's own, and one o
 TEST("npc fates: a hit goes to its NPC's runner; one that can go nowhere is answered: nobody runs it, the hitter does, it is dead")
 {
 	NpcFates::Book         book;
+	const auto             now = NpcFates::Clock::now();
 	const Protocol::NpcHit hit{ GUARD, 1, 0.2f, 0 };
 	const auto             toRunner = book.RouteHit(2, 1, hit);
 	CHECK(toRunner.runner == 1u);
 	CHECK(!toRunner.refused);
 	CHECK(book.RouteHit(2, 0, hit).refused == Verdict::kNobody);
 	CHECK(book.RouteHit(1, 1, hit).refused == Verdict::kYours);
-	CHECK(book.Died(1, 1, { GUARD, 2, 0 }) == NpcFates::Death::kNew);
+	CHECK(book.Died(1, 1, { GUARD, 2, 0 }, now) == NpcFates::Death::kNew);
 	CHECK(book.RouteHit(2, 1, hit).refused == Verdict::kDead);
 	CHECK(book.RouteHit(2, 0, hit).refused == Verdict::kDead);  // dead before anything else
 }
@@ -300,46 +301,79 @@ TEST("npc fates: a hit goes to its NPC's runner; one that can go nowhere is answ
 TEST("npc fates: only a runner's word counts, a death once; a runner that says a dead NPC lives brings it back")
 {
 	NpcFates::Book book;
-	CHECK(book.Said(2, 1, { GUARD, 0.5f }) == NpcFates::Health::kRefused);
-	CHECK(book.Said(0, 0, { GUARD, 0.5f }) == NpcFates::Health::kRefused);
+	const auto     now = NpcFates::Clock::now();
+	CHECK(book.Said(2, 1, { GUARD, 0.5f }, now) == NpcFates::Health::kRefused);
+	CHECK(book.Said(0, 0, { GUARD, 0.5f }, now) == NpcFates::Health::kRefused);
 	CHECK(book.Healths().empty());
-	CHECK(book.Said(1, 1, { GUARD, 0.5f }) == NpcFates::Health::kTaken);
-	CHECK(book.Said(1, 1, { WOLF, 1.0f }) == NpcFates::Health::kTaken);
+	CHECK(book.Said(1, 1, { GUARD, 0.5f }, now) == NpcFates::Health::kTaken);
+	CHECK(book.Said(1, 1, { WOLF, 1.0f }, now) == NpcFates::Health::kTaken);
 	CHECK(book.Healths() == std::vector<Protocol::NpcHealth>({ { GUARD, 0.5f }, { WOLF, 1.0f } }));
 
-	CHECK(book.Died(2, 1, { GUARD, 2, 0 }) == NpcFates::Death::kRefused);
+	CHECK(book.Died(2, 1, { GUARD, 2, 0 }, now) == NpcFates::Death::kRefused);
 	CHECK(!book.IsDead(GUARD));
 	const Protocol::NpcDeath death{ GUARD, 2, Protocol::kDeathKillMove };
-	CHECK(book.Died(1, 1, death) == NpcFates::Death::kNew);
-	CHECK(book.Died(1, 1, { GUARD, 1, 0 }) == NpcFates::Death::kKnown);
+	CHECK(book.Died(1, 1, death, now) == NpcFates::Death::kNew);
+	CHECK(book.Died(1, 1, { GUARD, 1, 0 }, now) == NpcFates::Death::kKnown);
 	CHECK(book.IsDead(GUARD));
 	CHECK(book.Dead() == std::vector<Protocol::NpcDeath>({ death }));
 	CHECK(book.Healths() == std::vector<Protocol::NpcHealth>({ { WOLF, 1.0f } }));
 
 	// Raised in its runner's game: alive again, and it may die again.
-	CHECK(book.Said(1, 1, { GUARD, 0.3f }) == NpcFates::Health::kRevived);
+	CHECK(book.Said(1, 1, { GUARD, 0.3f }, now) == NpcFates::Health::kRevived);
 	CHECK(!book.IsDead(GUARD));
 	CHECK(book.Dead().empty());
-	CHECK(book.Died(1, 1, death) == NpcFates::Death::kNew);
+	CHECK(book.Died(1, 1, death, now) == NpcFates::Death::kNew);
 }
 
 TEST("npc fates: an NPC let go of keeps no word, a dead one stays dead; a player who leaves takes their spawns with them")
 {
 	NpcFates::Book book;
-	CHECK(book.Said(1, 1, { GUARD, 0.5f }) == NpcFates::Health::kTaken);
+	const auto     now = NpcFates::Clock::now();
+	CHECK(book.Said(1, 1, { GUARD, 0.5f }, now) == NpcFates::Health::kTaken);
 	book.Released(GUARD);
 	CHECK(book.Healths().empty());
-	CHECK(book.Died(1, 1, { WOLF, 0, 0 }) == NpcFates::Death::kNew);
+	CHECK(book.Died(1, 1, { WOLF, 0, 0 }, now) == NpcFates::Death::kNew);
 	book.Released(WOLF);
 	CHECK(book.IsDead(WOLF));
 
-	CHECK(book.Said(1, 1, { ATRONACH_OF_1, 0.5f }) == NpcFates::Health::kTaken);
-	CHECK(book.Died(1, 1, { { 0xFF000802, 1 }, 0, 0 }) == NpcFates::Death::kNew);
+	CHECK(book.Said(1, 1, { ATRONACH_OF_1, 0.5f }, now) == NpcFates::Health::kTaken);
+	CHECK(book.Died(1, 1, { { 0xFF000802, 1 }, 0, 0 }, now) == NpcFates::Death::kNew);
 	book.Left(1);
 	CHECK(book.Healths().empty());
 	CHECK(book.Dead() == std::vector<Protocol::NpcDeath>({ { WOLF, 0, 0 } }));  // a load-order NPC's death stands
 	book.Clear();
 	CHECK(book.Dead().empty());
+}
+
+TEST("npc fates: a death from the game that ran it a moment ago is taken, told to all; the new runner's word of it alive then is dropped")
+{
+	NpcFates::Book book;
+	const auto     now = NpcFates::Clock::now();
+	// Ada (1) ran the guard; Bo's (2) fight claim won it. Ada's game says it died there before it heard.
+	book.HandedOver(GUARD, 1, now);
+	CHECK(book.Died(3, 2, { GUARD, 0, 0 }, now) == NpcFates::Death::kRefused);  // Cy never ran it
+	CHECK(book.Died(1, 2, { GUARD, 1, 0 }, now + 1s) == NpcFates::Death::kLate);
+	CHECK(book.IsDead(GUARD));
+	CHECK(book.Dead() == std::vector<Protocol::NpcDeath>({ { GUARD, 1, 0 } }));
+	// Bo's game said it alive before it heard: dropped, it stays dead. Bo's own death of it is known.
+	CHECK(book.Said(2, 2, { GUARD, 0.8f }, now + 2s) == NpcFates::Health::kStale);
+	CHECK(book.IsDead(GUARD));
+	CHECK(book.Died(2, 2, { GUARD, 0, 0 }, now + 2s) == NpcFates::Death::kKnown);
+	// Past the grace, Bo's word of it alive is a raise.
+	CHECK(book.Said(2, 2, { GUARD, 0.8f }, now + 1s + NpcFates::DEATH_GRACE) == NpcFates::Health::kRevived);
+	CHECK(!book.IsDead(GUARD));
+
+	// Ada let the wolf go (nobody runs it): her death of it, a moment later, is taken; long after, it is not.
+	book.HandedOver(WOLF, 1, now);
+	CHECK(book.Died(1, 0, { WOLF, 0, 0 }, now + NpcFates::DEATH_GRACE + 1ms) == NpcFates::Death::kRefused);
+	CHECK(book.Died(1, 0, { WOLF, 0, 0 }, now + NpcFates::DEATH_GRACE) == NpcFates::Death::kLate);
+	// The same runner's death and raise are as ever: no grace in its own word.
+	CHECK(book.Died(1, 1, { ATRONACH_OF_1, 0, 0 }, now) == NpcFates::Death::kNew);
+	CHECK(book.Said(1, 1, { ATRONACH_OF_1, 0.4f }, now) == NpcFates::Health::kRevived);
+	// A player who leaves is nobody's last runner.
+	book.HandedOver({ 0x00034567, 0 }, 3, now);
+	book.Left(3);
+	CHECK(book.Died(3, 0, { { 0x00034567, 0 }, 0, 0 }, now) == NpcFates::Death::kRefused);
 }
 
 // ---- a copy's health (CopyHealth.h) ----
@@ -486,7 +520,7 @@ TEST("copy health: what no hit of ours explains is set back after JUDGE_AFTER, o
 	CHECK(Near(word.share, 0.9f));
 }
 
-TEST("copy health: a spell's every tick while it may tick on is ours; a blow's reach is HIT_REACH")
+TEST("copy health: a spell's hit event explains one drop, as a blow's; a later drop is not ours for it (a follower's axe)")
 {
 	Run r;
 	r.Look({ .share = 1.0f });
@@ -494,12 +528,15 @@ TEST("copy health: a spell's every tick while it may tick on is ours; a blow's r
 	const auto first = r.Look({ .share = 0.9f }, fire);
 	CHECK(first.what == Do::kSend);
 	CHECK(first.hit.flags == Protocol::kHitSpell);
-	r.t += 3s;
-	const auto tick = r.Look({ .share = 0.85f }, fire);
-	CHECK(tick.what == Do::kSend);
-	CHECK(Near(tick.hit.share, 0.05f));
-	r.t += CopyHealth::SPELL_REACH;
-	CHECK(r.Look({ .share = 0.8f }, fire).what == Do::kNothing);  // no longer the spell's: judged later
+	// The VM's follower's axe, inside the spell's second and after it: never sent as our player's hit, set back.
+	r.t += 300ms;
+	CHECK(r.Look({ .share = 0.8f }, fire).what == Do::kNothing);
+	r.t += CopyHealth::JUDGE_AFTER;
+	const auto back = r.Look({ .share = 0.8f }, fire);
+	CHECK(back.what == Do::kSet);
+	CHECK(Near(back.share, 0.9f));
+	CHECK(r.counts.sent == 1u);
+	CHECK(r.counts.givenBack == 1u);
 
 	Run b;
 	b.Look({ .share = 1.0f });
@@ -507,6 +544,62 @@ TEST("copy health: a spell's every tick while it may tick on is ours; a blow's r
 	b.t += CopyHealth::HIT_REACH + 1ms;
 	CHECK(b.Look({ .share = 0.9f }, blow).what == Do::kNothing);
 	CHECK(b.counts.sent == 0u);
+}
+
+namespace
+{
+	// A copy looked at every 20 ms for a_for, our player's lasting effects on it taking a_drain a second and a_alsoOnce
+	// more on the second look (another's blow): what was sent as ours, and the copy as the game would show it after.
+	struct Ticks
+	{
+		float sent = 0;
+		float shown = 1;
+		bool  allSpell = true;
+	};
+}
+static Ticks Tick(Run& a_r, float a_drain, std::chrono::milliseconds a_for, float a_alsoOnce = 0)
+{
+	Ticks out;
+	a_r.Look({ .share = 1.0f, .ourDrain = a_drain });
+	for (auto at = 20ms, i = 0ms; at <= a_for; at += 20ms, i += 20ms) {
+		a_r.t += 20ms;
+		out.shown -= a_drain * 0.02f + (i == 20ms ? a_alsoOnce : 0.0f);
+		const auto step = a_r.Look({ .share = out.shown, .ourDrain = a_drain });
+		if (step.what == Do::kSend) {
+			out.sent += step.hit.share;
+			out.allSpell = out.allSpell && step.hit.flags == Protocol::kHitSpell;
+		} else if (step.what == Do::kSet) {
+			out.shown = step.share;
+		}
+	}
+	return out;
+}
+
+TEST("copy health: our player's lasting effects on a copy are ours as they tick, their share alone; another's blow then is set back")
+{
+	// A burn of 2 % a second for two seconds: about 4 % sent, nothing set back.
+	Run burn;
+	const auto alone = Tick(burn, 0.02f, 2000ms);
+	CHECK(alone.sent > 0.04f - 2 * CopyHealth::EPSILON);
+	CHECK(alone.sent <= 0.0401f);
+	CHECK(alone.allSpell);
+	CHECK(burn.counts.givenBack == 0u);
+	CHECK(burn.counts.takenBack == 0u);
+
+	// The same burn while a follower's axe takes 20 %: the axe is never sent as ours (at most the burn's own share and its
+	// margin), and it is set back once it stood.
+	Run axe;
+	const auto mixed = Tick(axe, 0.02f, 2000ms, 0.2f);
+	CHECK(mixed.sent <= 0.02f * 2 * CopyHealth::DRAIN_MARGIN + CopyHealth::EPSILON);
+	CHECK(mixed.allSpell);
+	CHECK(axe.counts.givenBack >= 1u);
+	CHECK(mixed.shown > 0.9f);  // the axe's drop given back: only the burn's ticks stand (sent, in flight)
+
+	// No effect of ours on it (a follower's burn, a trap's poison): nothing is ours, every drop is set back.
+	Run theirs;
+	const auto none = Tick(theirs, 0.0f, 500ms, 0.1f);
+	CHECK(none.sent == 0.0f);
+	CHECK(theirs.counts.givenBack >= 1u);
 }
 
 TEST("copy health: a copy our player killed sends its killing blow once, as all it had left, a kill move said so")
@@ -536,6 +629,36 @@ TEST("copy health: a copy our player killed sends its killing blow once, as all 
 	CHECK(move.what == Do::kSend);
 	CHECK(Near(move.hit.share, 1.0f));
 	CHECK(move.hit.flags == (Protocol::kHitKilling | Protocol::kHitKillMove));
+}
+
+TEST("copy health: our player's kill counts however late its hit event; a kill by anyone else is not ours, and is raised")
+{
+	// Our player's arrow killed it, its hit event long gone (or never seen): its killer says it is ours.
+	Run late;
+	late.Look({ .share = 1.0f });
+	late.t += 5s;
+	const auto kill = late.Look({ .share = 0.0f, .dead = true, .killedByUs = true });
+	CHECK(kill.what == Do::kSend);
+	CHECK(Near(kill.hit.share, 1.0f));
+	CHECK(kill.hit.flags == Protocol::kHitKilling);
+	CHECK(late.counts.saveKills == 0u);
+	late.t += CopyHealth::REVIVE_AFTER;
+	CHECK(late.Look({ .share = 0.0f, .dead = true, .killedByUs = true }).what == Do::kNothing);  // its killing blow is on its way
+
+	// Killed in a kill move of our player's, paired: said so.
+	Run move;
+	move.Look({ .share = 1.0f });
+	const auto moved = move.Look({ .share = 0.0f, .dead = true, .inKillMove = true, .killedByUs = true });
+	CHECK(moved.what == Do::kSend);
+	CHECK(moved.hit.flags == (Protocol::kHitKilling | Protocol::kHitKillMove));
+
+	// Killed by a follower (its own kill move too): nothing sent, raised after REVIVE_AFTER.
+	Run other;
+	other.Look({ .share = 1.0f });
+	CHECK(other.Look({ .share = 0.0f, .dead = true, .inKillMove = true }).what == Do::kNothing);
+	other.t += CopyHealth::REVIVE_AFTER;
+	CHECK(other.Look({ .share = 0.0f, .dead = true }).what == Do::kRevive);
+	CHECK(other.counts.sent == 0u);
 }
 
 TEST("copy health: its runner's death kills a copy, after any kill move it is in, and again if the game did not take it")
@@ -822,4 +945,37 @@ TEST("npc combat server: only a runner's word of health and deaths is passed on,
 		CHECK(Protocol::PeekType(packet.data) != MT::kNpcHealths);
 		CHECK(Protocol::PeekType(packet.data) != MT::kNpcDeaths);
 	}
+}
+
+TEST("npc combat server: a death from the game that let go of its NPC a moment ago reaches every game, that one too; the next runner's word of it alive then is dropped")
+{
+	Fixture f;
+	AllIn(f, 2);
+	// Ada ran the guard and let it go; Bo's game has it now. Ada's game says it died there before it heard.
+	f.fake->Deliver(1, Protocol::Encode(Claims({ { GUARD, Why::kHave } })));
+	f.fake->Deliver(1, Protocol::Encode(Claims({ { GUARD, Why::kRelease } })));
+	f.fake->Deliver(2, Protocol::Encode(Claims({ { GUARD, Why::kHave } })));
+	Forget(f, { 1, 2 });
+	f.fake->Deliver(1, Protocol::Encode(Protocol::NpcDeaths{ .deaths = { { GUARD, 1, 0 } } }));
+	REQUIRE(f.fake->Settle());
+	CHECK(f.LoggedSoon("server: player 1 says 1 NPC(s) it ran a moment ago died there: everyone is told"));
+	for (const PeerId peer : { 1u, 2u }) {
+		const auto told = SentOf<Protocol::NpcDeaths>(f, peer, MT::kNpcDeaths, Protocol::DecodeNpcDeaths);
+		REQUIRE(told.size() == 1u);
+		CHECK(told[0].second);
+		CHECK(told[0].first.runner == 0u);
+		CHECK(!told[0].first.full);
+		CHECK(told[0].first.deaths == std::vector<Protocol::NpcDeath>({ { GUARD, 1, 0 } }));
+	}
+
+	// Bo's game said it alive before it heard: nobody hears that. Its own death of it, after, is known: nobody hears it again.
+	f.fake->Deliver(2, Protocol::Encode(Protocol::NpcHealths{ .npcs = { { GUARD, 0.9f } } }));
+	f.fake->Deliver(2, Protocol::Encode(Protocol::NpcDeaths{ .deaths = { { GUARD, 0, 0 } } }));
+	REQUIRE(f.fake->Settle());
+	CHECK(f.fake->Take(1).empty());
+
+	// A game that never ran an NPC is refused as ever.
+	f.fake->Deliver(1, Protocol::Encode(Protocol::NpcDeaths{ .deaths = { { WOLF, 1, 0 } } }));
+	REQUIRE(f.fake->Settle());
+	CHECK(f.fake->Take(2).empty());
 }

@@ -70,6 +70,7 @@ namespace NpcSync
 			std::uint32_t                    lastHitter = 0;  // the friend whose hit we applied last, and when
 			Clock::time_point                lastHitAt{};
 			std::optional<Clock::time_point> killMoveAt;  // last seen in a kill move
+			bool                             aliveUnrun = false;  // last seen alive while no other game ran it (a death here after is ours to say)
 		};
 		std::map<Key, Loaded> loaded;
 		// The numbers of the states of every NPC we ran this session (not forgotten with its loaded entry).
@@ -224,7 +225,8 @@ namespace NpcSync
 			}
 
 			// The hit's kind, as Protocol::NpcHitFlags: a spell's (a spell, a scroll, an enchantment, a poison, an
-			// ingredient, or a staff's) lasts as long as its effect may tick on.
+			// ingredient, or a staff's) is said so. It explains one drop as a blow's does; what its lasting effects take
+			// after is judged by OurDrainOn, as they tick, never by a window after it.
 			static std::uint8_t FlagsOf(const RE::TESHitEvent& a_event)
 			{
 				using Flag = RE::TESHitEvent::Flag;
@@ -262,7 +264,7 @@ namespace NpcSync
 		{
 			std::scoped_lock l{ fightLock };
 			std::erase_if(fights, [&](const auto& a_entry) { return a_now - a_entry.second >= NpcRules::FIGHT_HOLD; });
-			std::erase_if(ourHits, [&](const auto& a_entry) { return a_now - a_entry.second.at > CopyHealth::SPELL_REACH; });
+			std::erase_if(ourHits, [&](const auto& a_entry) { return a_now - a_entry.second.at > CopyHealth::HIT_REACH; });
 		}
 
 		std::optional<CopyHealth::OurHit> OurHitOn(RE::FormID a_id)
@@ -839,6 +841,10 @@ namespace NpcSync
 					}
 					npc.kind = KindOf(actor.get());
 					npc.seen = a_now;
+					if (!actor->IsDead()) {
+						const auto owner = owners.find(key);
+						npc.aliveUnrun = owner == owners.end() || owner->second == ourId;
+					}
 				}
 			}
 			// Gone from this game's loaded world: one we ran is let go of (the next scan of the others' games claims it).
@@ -894,9 +900,18 @@ namespace NpcSync
 					}
 					continue;
 				}
-				// A body is nobody's to run, unless we ran it as it died (its death is ours to say).
+				// A body is nobody's to run, unless we ran it as it died (its death is ours to say), or it died here while
+				// nobody ran it, after this game saw it alive this session (whoever's blow it was: our player's, an NPC's we
+				// run, a trap's): then its death is this game's to say, so it is asked for as a fight and said once granted
+				// (SendFates). Refused, another game runs it: a copy here, whose killing blow goes there if our player
+				// killed it (CopyHealth::Seen::killedByUs), and which is raised if not. One that died here as a copy is
+				// its runner's to say, never ours.
+				bool sayDeath = false;
 				if (actor->IsDead() && !ours) {
-					continue;
+					if (owner != owners.end() || !npc.aliveUnrun || sessionDead.contains(key)) {
+						continue;
+					}
+					sayDeath = true;
 				}
 				NpcRules::Facts facts;
 				facts.owner = owner == owners.end() ? NpcRules::Owner::kNobody : owner->second == ourId ? NpcRules::Owner::kUs : NpcRules::Owner::kOther;
@@ -922,7 +937,7 @@ namespace NpcSync
 				if (target && target.get() == player) {
 					NoteFight(npc.id, a_now);
 				}
-				facts.fighting = FoughtLately(npc.id, a_now);
+				facts.fighting = sayDeath || FoughtLately(npc.id, a_now);
 				facts.followsUs = player && FollowsUs(actor.get(), player);
 				facts.spawn = key.IsSpawn();
 				const auto ask = NpcRules::Decide(facts, a_now);
@@ -1274,6 +1289,56 @@ namespace NpcSync
 			return a_hold.get();
 		}
 
+		// What our player's lasting effects on a_actor take from its health a second, as a share of a_most: each active
+		// harmful effect our player cast on its health that lasts (a burn, a poison, an enchantment's, a concentration
+		// spell's), at its magnitude (health a second, its resistances counted). An instant one comes with its hit event.
+		// Another's effects (a follower's, a summon's, a trap's) are not ours: what they take is the runner's game's to deal.
+		float OurDrainOn(RE::Actor* a_actor, float a_most, RE::PlayerCharacter* a_player)
+		{
+			const auto target = a_actor ? a_actor->AsMagicTarget() : nullptr;
+			if (!target || !a_player || !std::isfinite(a_most) || a_most <= 0.0f) {
+				return 0.0f;
+			}
+			const auto ours = a_player->GetHandle();
+			float      perSecond = 0.0f;
+			target->VisitActiveEffects([&](RE::ActiveEffect* a_effect) {
+				using Flag = RE::ActiveEffect::Flag;
+				using Archetype = RE::EffectSetting::Archetype;
+				if (!a_effect || a_effect->flags.any(Flag::kInactive) || a_effect->flags.any(Flag::kDispelled) || a_effect->caster != ours) {
+					return RE::BSContainer::ForEachResult::kContinue;
+				}
+				const auto base = a_effect->GetBaseObject();
+				if (!base || !base->IsDetrimental()) {
+					return RE::BSContainer::ForEachResult::kContinue;
+				}
+				const auto archetype = base->GetArchetype();
+				const bool drains = archetype == Archetype::kValueModifier || archetype == Archetype::kDualValueModifier || archetype == Archetype::kAbsorb;
+				const bool health = base->data.primaryAV == RE::ActorValue::kHealth || (archetype == Archetype::kDualValueModifier && base->data.secondaryAV == RE::ActorValue::kHealth);
+				const bool lasts = a_effect->duration > 0.0f || (a_effect->spell && a_effect->spell->GetCastingType() == RE::MagicSystem::CastingType::kConcentration);
+				if (drains && health && lasts && std::isfinite(a_effect->magnitude)) {
+					perSecond += std::fabs(a_effect->magnitude);
+				}
+				return RE::BSContainer::ForEachResult::kContinue;
+			});
+			return perSecond / a_most;
+		}
+
+		// Our player and a_actor in one kill move together: each in a kill move, one the other's partner (its process's
+		// target). A follower's kill move on a_actor, or our player's on another NPC, is not this.
+		bool InKillMoveWith(RE::PlayerCharacter* a_player, RE::Actor* a_actor)
+		{
+			if (!a_player || !a_actor || !a_player->IsInKillMove() || !a_actor->IsInKillMove()) {
+				return false;
+			}
+			const auto targetOf = [](RE::Actor* a_of) -> RE::RefHandle {
+				const auto process = a_of->GetActorRuntimeData().currentProcess;
+				return process ? process->target : 0;
+			};
+			const auto playerTarget = targetOf(a_player);
+			const auto actorTarget = targetOf(a_actor);
+			return (playerTarget != 0 && playerTarget == a_actor->GetHandle().native_handle()) || (actorTarget != 0 && actorTarget == a_player->GetHandle().native_handle());
+		}
+
 		// Who killed an NPC we ran: the player its killer shows (our player, or a friend's stand-in), else the friend
 		// whose hit we applied to it last, a moment ago; 0: no player.
 		std::uint32_t KillerOf(RE::Actor* a_actor, const Loaded& a_npc, Clock::time_point a_now)
@@ -1382,7 +1447,6 @@ namespace NpcSync
 				}
 			}
 			const auto      player = RE::PlayerCharacter::GetSingleton();
-			const bool      ourKillMove = player && player->IsInKillMove();
 			Protocol::NpcHits hits;
 			const auto      flush = [&] {
 				if (!hits.hits.empty()) {
@@ -1408,11 +1472,20 @@ namespace NpcSync
 				if (health.size() >= Protocol::MAX_NPCS && !health.contains(one.key)) {
 					continue;
 				}
-				auto&                  copy = health[one.key];
-				const CopyHealth::Seen seen{ .share = CopyHealth::ShareOf(HealthOf(actor.get()), max), .dead = actor->IsDead(), .inKillMove = actor->IsInKillMove(), .floor = 1.0f / max };
-				auto                   ourHit = OurHitOn(one.id);
-				if (ourKillMove && seen.inKillMove) {
-					// Our player and the copy in a kill move together: our player's (the paired move has no hit event).
+				auto&      copy = health[one.key];
+				const bool dead = actor->IsDead();
+				const auto killer = dead ? actor->GetKiller() : nullptr;
+				// What our player's lasting effects on it take, and whether our player killed it: only those of ours count.
+				const CopyHealth::Seen seen{ .share = CopyHealth::ShareOf(HealthOf(actor.get()), max),
+					.dead = dead,
+					.inKillMove = actor->IsInKillMove(),
+					.floor = 1.0f / max,
+					.ourDrain = dead ? 0.0f : OurDrainOn(actor.get(), max, player),
+					.killedByUs = killer && player && killer == player };
+				auto ourHit = OurHitOn(one.id);
+				if (InKillMoveWith(player, actor.get())) {
+					// Our player's kill move on this copy (the paired move has no hit event); a follower's kill move on it,
+					// or ours on another NPC, is not ours.
 					ourHit = CopyHealth::OurHit{ a_now, static_cast<std::uint8_t>((ourHit ? ourHit->flags : 0) | Protocol::kHitKillMove) };
 				}
 				// Raised when its runner's NPC lives: in every game but the host's, whose save is the truth of who is dead
@@ -1497,6 +1570,9 @@ namespace NpcSync
 			return;  // a loading screen or a menu with no world: nothing loaded to share
 		}
 		const auto friends = RemotePlayers::FriendStates();
+		// The answers to friends' hits and the deaths of the NPCs we run go first, before this frame's releases and claims:
+		// a death the server reads after we let go of its NPC is taken only for a moment (NpcFates::DEATH_GRACE).
+		SendFates(a_send, now);
 		if (now >= nextScan) {
 			nextScan = now + SCAN_EVERY;
 			// What we ran and no longer have loaded: let go of.
@@ -1521,7 +1597,6 @@ namespace NpcSync
 			SendClaims(a_send, now, here, friends);
 		}
 		SendOurs(a_send, now, here, friends);
-		SendFates(a_send, now);
 		TendCopies(now, here);
 		TendCopyHealth(a_send, now);
 	}
@@ -1986,8 +2061,8 @@ namespace NpcSync
 				if (const auto values = actor->AsActorValueOwner()) {
 					out += std::format(" confidence={:.0f} aggression={:.0f}", values->GetBaseActorValue(RE::ActorValue::kConfidence), values->GetBaseActorValue(RE::ActorValue::kAggression));
 					// and its health (the rig's combat step brings it low with the console before it is killed), essential or not
-					out += std::format(" health={:.0f} max={:.0f} essential={}", values->GetActorValue(RE::ActorValue::kHealth), actor->GetActorValueMax(RE::ActorValue::kHealth),
-						actor->IsEssential() ? 1 : 0);
+					out += std::format(" health={:.0f} max={:.0f} essential={} protected={}", values->GetActorValue(RE::ActorValue::kHealth), actor->GetActorValueMax(RE::ActorValue::kHealth),
+						actor->IsEssential() ? 1 : 0, actor->IsProtected() ? 1 : 0);
 				}
 			}
 			if (copy != copies.end()) {
