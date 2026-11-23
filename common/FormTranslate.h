@@ -16,7 +16,8 @@
 // sends goes through Translate(kToSession) and every packet it gets through Translate(kToLocal), before anything reads
 // it, so the rest of the game only ever sees its own IDs, and the server only the session's. A form is named on the
 // wire by its plugin's place in the session's table, which is its plugin's file name: never by a game's load order.
-// With the same plugins in the same places (the usual case) nothing is decoded at all.
+// With the same plugins in the same places (the usual case) no ID changes, and a packet is written again only when it
+// held a runtime form.
 //
 // What has no ID on the other side (a form of a plugin that game lacks) is skipped, never guessed, and the message it
 // was in still goes, for every message carrying forms today:
@@ -24,6 +25,9 @@
 //   shows no one there rather than someone in the wrong cell;
 // - an entry of a list is left out: a worn item;
 // - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has).
+// A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
+// same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
+// has one (FormIds::Shareable), and a receiver never looks one up.
 // Result says what was skipped and which IDs had none; SkipLog names each plugin skipped once. Free of the game:
 // tests/FormTranslateTests.cpp. Each new message type is put in CarriesForms (its switch names every type, so the
 // compiler points at a type left out), and one that carries a form ID gets its case in Translate.
@@ -48,6 +52,7 @@ namespace FormTranslate
 		std::uint32_t              fields = 0;       // details set to none
 		bool                       placeless = false;  // a place set to nowhere this game has
 		std::vector<std::uint32_t> unmapped;         // the IDs that had none, in the numbering they came in (the first few)
+		std::uint32_t              runtime = 0;      // of the IDs that had none, the runtime forms
 
 		[[nodiscard]] bool Skipped() const { return entries != 0 || fields != 0 || placeless; }
 	};
@@ -89,6 +94,9 @@ namespace FormTranslate
 			std::optional<std::uint32_t> Map(std::uint32_t a_id)
 			{
 				auto mapped = way == Way::kToSession ? mapper.ToSession(a_id) : mapper.ToLocal(a_id);
+				if (!mapped && FormIds::IsRuntime(a_id)) {
+					++out.runtime;
+				}
 				if (!mapped && out.unmapped.size() < MAX_UNMAPPED_KEPT && std::ranges::find(out.unmapped, a_id) == out.unmapped.end()) {
 					out.unmapped.push_back(a_id);
 				}
@@ -176,12 +184,13 @@ namespace FormTranslate
 	}
 
 	// a_packet as the other side numbers its forms. A packet that can't be read is left as it is (its reader refuses
-	// it as before), and so is every message that names no form.
+	// it as before), and so is every message that names no form. The identity mapper still reads each message that
+	// carries forms, for the runtime forms in it (small messages: a state, a looks).
 	[[nodiscard]] inline Result Translate(const FormIds::Mapper& a_mapper, Way a_way, std::span<const std::uint8_t> a_packet)
 	{
 		Result out;
 		const auto type = Protocol::PeekType(a_packet);
-		if (a_mapper.Identity() || !type || !CarriesForms(*type)) {
+		if (!type || !CarriesForms(*type)) {
 			return out;
 		}
 		using MT = Protocol::MessageType;
@@ -212,11 +221,14 @@ namespace FormTranslate
 	public:
 		// The plugins a_result skipped forms of that were not named before: by file name, from our own table (kToSession:
 		// IDs of ours) or the session's (kToLocal). An ID whose place names no plugin in that table (a table that grew
-		// after it was sent, or a peer's mistake) is named as "".
+		// after it was sent, or a peer's mistake) is named as "". Runtime forms are no plugin's: FreshRuntime says them.
 		[[nodiscard]] std::vector<std::string> Fresh(const FormIds::Mapper& a_mapper, Way a_way, const Result& a_result)
 		{
 			std::vector<std::string> out;
 			for (const auto id : a_result.unmapped) {
+				if (FormIds::IsRuntime(id)) {
+					continue;
+				}
 				auto name = a_way == Way::kToSession ? a_mapper.LocalPlugin(id) : a_mapper.SessionPlugin(id);
 				if (named.insert(Protocol::LowerPluginName(name)).second) {
 					out.push_back(std::move(name));
@@ -225,10 +237,25 @@ namespace FormTranslate
 			return out;
 		}
 
-		void Clear() { named.clear(); }
+		// Whether a_result is the first this session to skip a runtime form (said once in the log, as a plugin is).
+		[[nodiscard]] bool FreshRuntime(const Result& a_result)
+		{
+			if (a_result.runtime == 0 || runtimeSaid) {
+				return false;
+			}
+			runtimeSaid = true;
+			return true;
+		}
+
+		void Clear()
+		{
+			named.clear();
+			runtimeSaid = false;
+		}
 		[[nodiscard]] std::size_t Count() const { return named.size(); }
 
 	private:
 		std::unordered_set<std::string> named;  // lower case
+		bool                            runtimeSaid = false;
 	};
 }

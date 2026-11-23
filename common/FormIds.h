@@ -56,6 +56,30 @@ namespace FormIds
 		return Place{ false, static_cast<std::uint16_t>(top) };
 	}
 
+	// A form made by one game as it runs (FF): a potion brewed, a form a mod's script or SKSE plugin creates. No plugin
+	// numbers it, so its ID names nothing in any other game, or something else there (that game's own runtime form of
+	// the same number). It never goes on the wire as a form: it has no ID on the other side, whatever the load orders.
+	[[nodiscard]] constexpr bool IsRuntime(std::uint32_t a_id)
+	{
+		return (a_id >> 24) == RUNTIME_TOP;
+	}
+
+	// What a game may send for a form of its own: the form itself when a plugin numbers it, else the plugin form it was
+	// made from (a_templateOf(id): a runtime copy's template, as TESObjectARMO::templateArmor's ID; 0 when it has none),
+	// followed a few steps; none when no plugin form is found, and for 0.
+	template <class TemplateOf>
+	[[nodiscard]] std::optional<std::uint32_t> Shareable(std::uint32_t a_id, TemplateOf a_templateOf)
+	{
+		constexpr int MAX_STEPS = 8;  // a template's template; a loop in broken data ends here
+		for (int step = 0; step < MAX_STEPS && IsRuntime(a_id); ++step) {
+			a_id = a_templateOf(a_id);
+		}
+		if (a_id == 0 || IsRuntime(a_id)) {
+			return std::nullopt;
+		}
+		return a_id;
+	}
+
 	// The form's number within its plugin.
 	[[nodiscard]] constexpr std::uint32_t LocalPart(std::uint32_t a_id)
 	{
@@ -190,15 +214,22 @@ namespace FormIds
 		// Nothing to translate: every form ID is the same in both numberings.
 		[[nodiscard]] bool Identity() const { return identity; }
 
-		// Ours as the session numbers it; none for a plugin the session's table lacks.
+		// Ours as the session numbers it; none for a plugin the session's table lacks, and for a runtime form (IsRuntime:
+		// no other game has it, whatever the orders, so the identity too gives none).
 		[[nodiscard]] std::optional<std::uint32_t> ToSession(std::uint32_t a_id) const
 		{
+			if (IsRuntime(a_id)) {
+				return std::nullopt;
+			}
 			return identity ? std::optional{ a_id } : Map(a_id, localFull, localLight);
 		}
 
-		// The session's as we number it; none for a plugin our game lacks.
+		// The session's as we number it; none for a plugin our game lacks, and for a runtime form (another game's).
 		[[nodiscard]] std::optional<std::uint32_t> ToLocal(std::uint32_t a_id) const
 		{
+			if (IsRuntime(a_id)) {
+				return std::nullopt;
+			}
 			return identity ? std::optional{ a_id } : Map(a_id, sessionFull, sessionLight);
 		}
 
@@ -218,7 +249,7 @@ namespace FormIds
 		{
 			const auto place = PlaceOf(a_id);
 			if (!place) {
-				return a_id;  // 0 and runtime forms (and spawn ids) are nobody's plugin's: the same everywhere
+				return a_id;  // 0: none everywhere (runtime forms were refused before this)
 			}
 			const auto& kind = place->light ? a_light : a_full;
 			if (place->index >= kind.size() || !kind[place->index]) {

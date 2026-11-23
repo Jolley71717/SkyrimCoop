@@ -57,7 +57,8 @@ for s in $only $skip; do case " $STEPS " in *" $s "*) ;; *) echo "no step '$s' (
 [ "$JOIN" = url ] || [ "$JOIN" = dev ] || { echo "--join url or --join dev"; exit 2; }
 [[ $SMOKE_CELL =~ ^[A-Za-z0-9_]+$ ]] || { echo "--cell takes a cell's editor id (letters, digits and _ only)"; exit 2; }
 [ -z "$build" ] || { [ -f "$build/SkyrimCoop.dll" ] && [ -f "$build/SkyrimCoop.pdb" ]; } || { echo "--build: no SkyrimCoop.dll and SkyrimCoop.pdb in '$build'"; exit 2; }
-selected() { case " $skip " in *" $1 "*) return 1 ;; esac; [ -z "$only" ] && return 0; case " $only " in *" $1 "*) return 0 ;; esac; return 1; }
+# a step runs unless --skip names it; with --only, only those named; a step of OPTIN_STEPS (steps.sh) only when --only names it
+selected() { case " $skip " in *" $1 "*) return 1 ;; esac; if [ -z "$only" ]; then case " $OPTIN_STEPS " in *" $1 "*) return 1 ;; esac; return 0; fi; case " $only " in *" $1 "*) return 0 ;; esac; return 1; }
 
 if [ $mode = list ]; then
 	for s in $STEPS; do printf '  %-12s %s\n' "$s" "${STEP_INFO[$s]}"; done
@@ -106,6 +107,7 @@ smoke_restore() {
 	local b=$A_OUT/backup w r stamp
 	section "restore"
 	if [ -z "${BACKUP_OK:-}" ]; then warn "restore: nothing to put back" "the run stopped before its backup was whole: it changed nothing on either machine, and leaves them as they are"; return; fi
+	forms_restore   # steps/forms.sh: the VM's load order put back if that step left it changed (it closes the VM's game then)
 	for w in host vm; do still $w; done
 	dc vm 'session leave' >/dev/null; dc host 'session leave' >/dev/null; dc host 'steam stophost' >/dev/null
 	stamp=$(date +%Y%m%d-%H%M%S)
@@ -186,6 +188,7 @@ if [ $mode = run ]; then
 	section "set-up"
 	no_fallout || _rig_stop "Fallout 4 runs" "Fallout 4 runs on the rig: one game at a time"
 	smoke_backup
+	forms_heal      # steps/forms.sh: a load order an earlier run left changed is put back before the games start (or the run stops)
 	if [ -n "$build" ]; then
 		games_down || bash "$RIG/start.sh" stop > "$A_OUT/stop-before-install.log" 2>&1
 		# the run's own install record, named before the install begins: the restore (now, or --restore after --keep)
@@ -301,6 +304,8 @@ if [ $mode = selftest ]; then
 	echo "ok   README.md names every step"
 	only=""; skip="see"; selected see && { echo "FAIL selected: a skipped step"; bad=1; } || echo "ok   selected: a skipped step is not run"
 	only="see move_vm"; skip=""; selected move_vm && ! selected join && echo "ok   selected: --only" || { echo "FAIL selected: --only"; bad=1; }
+	only=""; skip=""; selected forms && { echo "FAIL selected: an opt-in step runs unnamed"; bad=1; } || echo "ok   selected: an opt-in step (forms) is not run unless --only names it"
+	only="join forms"; selected forms && echo "ok   selected: ... and is run when named" || { echo "FAIL selected: a named opt-in step"; bad=1; }
 	[ $bad -eq 0 ] && echo "smoke.sh selftest: all ok" || echo "smoke.sh selftest: FAILED"
 	exit $bad
 fi

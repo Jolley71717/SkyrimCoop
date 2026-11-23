@@ -86,7 +86,7 @@ namespace
 	}
 }
 
-TEST("form translate: with the same plugins in the same places every packet passes as it is, unread")
+TEST("form translate: with the same plugins in the same places every packet without a runtime form passes as it is")
 {
 	const auto   order = Order({ "Skyrim.esm", "A.esp" }, { "L.esl" });
 	const Mapper same(order, order);
@@ -144,9 +144,46 @@ TEST("form translate: what names only the game's own base forms is left as it is
 	const auto     result = Translate(g.guestEdge, Way::kToSession, state);
 	CHECK(result.kind == Result::Kind::kSame);
 	CHECK(result.unmapped.empty());
-	// Runtime forms (FF) and none (0) are nobody's plugin's.
-	const Protocol::PlayerLooks looks{ .race = 0x00013746, .worn = { 0xFF000801 } };
+	// None (0) is nobody's and stays none.
+	const Protocol::PlayerLooks looks{ .race = 0x00013746, .worn = { 0x00012E46 } };
 	CHECK(Translate(g.guestEdge, Way::kToSession, Protocol::Encode(looks)).kind == Result::Kind::kSame);
+	CHECK(Translate(g.guestEdge, Way::kToSession, Protocol::Encode(StateIn(0, 0))).kind == Result::Kind::kSame);
+}
+
+TEST("form translate: a runtime form (FF) is skipped both ways in every message, whatever the two load orders")
+{
+	// A runtime ID is one game's own: in another it names nothing, or that game's own runtime form of the same number
+	// (an enchanted helmet for an armor). With the same load orders too, so the identity mapper skips it as well.
+	const TwoGames g;
+	const auto     order = Order({ "Skyrim.esm", "A.esp" });
+	const Mapper   same(order, order);
+	REQUIRE(same.Identity());
+	for (const Mapper* edge : { &g.guestEdge, &same, &g.hostEdge }) {
+		for (const auto way : { Way::kToSession, Way::kToLocal }) {
+			// A worn runtime armor is left out of the list; the plugin armors beside it still go, and the race.
+			Result     result;
+			const auto sent = Protocol::PlayerLooks{ .race = 0x00013746, .worn = { 0x00012E46, 0xFF000D2A, 0xFF000801 } };
+			const auto looks = Protocol::DecodePlayerLooks(Through(*edge, way, Protocol::Encode(sent), &result));
+			REQUIRE(looks);
+			CHECK(looks->worn == std::vector<std::uint32_t>({ 0x00012E46 }));
+			CHECK(looks->race == 0x00013746u);
+			CHECK(result.kind == Result::Kind::kChanged);
+			CHECK(result.entries == 2u);
+			CHECK(result.runtime == 2u);
+			CHECK(result.Skipped());
+			// A runtime race reads as none (the stand-in is a Nord); a relayed looks the same.
+			const auto raced = Protocol::DecodeRemoteLooks(Through(*edge, way, Protocol::Encode(Protocol::RemoteLooks{ 3, { .race = 0xFF000900, .worn = {} } }), &result));
+			REQUIRE(raced);
+			CHECK(raced->looks.race == 0u);
+			CHECK(result.fields == 1u);
+			// A place with a runtime cell is nowhere this game has.
+			const auto state = Protocol::DecodeRemoteState(Through(*edge, way, Protocol::Encode(Protocol::RemoteState{ 3, StateIn(0xFF000A00, 0x0000003C) }), &result));
+			REQUIRE(state);
+			CHECK(state->state.cell == 0u);
+			CHECK(state->state.worldspace == 0u);
+			CHECK(result.placeless);
+		}
+	}
 }
 
 TEST("form translate: a form of a plugin the other game lacks is skipped, never guessed, and the message still goes")
@@ -268,6 +305,15 @@ TEST("form translate: each plugin whose forms were skipped is named once, by fil
 	CHECK(ours.Fresh(hostEdge, Way::kToSession, result) == Names({ "Mine.esp" }));
 	log.Clear();
 	CHECK(log.Count() == 0u);
+
+	// Runtime forms are no plugin's: never named as one, said once a session on their own.
+	result = Translate(guestEdge, Way::kToLocal, Protocol::Encode(Protocol::RemoteLooks{ 2, { .worn = { 0xFF000D2A, 0x01000900 } } }));
+	CHECK(log.Fresh(guestEdge, Way::kToLocal, result) == Names({ "Mine.esp" }));
+	CHECK(!log.FreshRuntime(Translate(guestEdge, Way::kToLocal, twenty)));  // a plugin's form skipped, no runtime one
+	CHECK(log.FreshRuntime(result));
+	CHECK(!log.FreshRuntime(result));
+	log.Clear();
+	CHECK(log.FreshRuntime(result));
 }
 
 TEST("form translate: a plugin's form is named by file name and local id, the same form in every load order that has it")

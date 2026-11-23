@@ -104,7 +104,7 @@ TEST("form ids: light plugins map among the light ones, and a plugin light in on
 	CHECK(!m.ToLocal(0x03001000));
 }
 
-TEST("form ids: a plugin the other side lacks has no IDs there; runtime forms and 0 pass as they are")
+TEST("form ids: a plugin the other side lacks has no IDs there; nor has a runtime form, in any mapper; 0 stays 0")
 {
 	const Mapper m(Order(Names{ "Skyrim.esm", "Mine.esp", "Shared.esp" }, { "MyLight.esl" }), Order(Names{ "Skyrim.esm", "Shared.esp", "Theirs.esp" }));
 	CHECK(!m.ToSession(0x01000801));  // Mine.esp
@@ -113,11 +113,47 @@ TEST("form ids: a plugin the other side lacks has no IDs there; runtime forms an
 	CHECK(!m.ToLocal(0x02000801));  // Theirs.esp
 	CHECK(!m.ToLocal(0x07000801));  // a place the session's table has no plugin at
 	CHECK(m.ToSession(0) == 0u);
-	CHECK(m.ToSession(0xFF001234) == 0xFF001234u);
-	CHECK(m.ToLocal(0xFF001234) == 0xFF001234u);
+	CHECK(!m.ToSession(0xFF001234));  // a runtime form: no other game has it
+	CHECK(!m.ToLocal(0xFF001234));
 	CHECK(m.OursOnly() == 2);
 	CHECK(m.SessionsOnly() == 1);
 	CHECK(m.LocalPlugin(0xFF001234).empty());
+	// The same plugins in the same places: every plugin's form is itself, a runtime form still has none.
+	const Mapper same(Order(Names{ "Skyrim.esm" }), Order(Names{ "Skyrim.esm" }));
+	REQUIRE(same.Identity());
+	CHECK(same.ToSession(0x00012E46) == 0x00012E46u);
+	CHECK(!same.ToSession(0xFF000D2A));
+	CHECK(!same.ToLocal(0xFF000D2A));
+	CHECK(!Mapper().ToSession(0xFF000D2A));  // before the session's table has come
+}
+
+TEST("form ids: a game sends a plugin form for a runtime one: its template, followed a few steps, or nothing")
+{
+	using FormIds::IsRuntime;
+	using FormIds::Shareable;
+	CHECK(IsRuntime(0xFF000D2A));
+	CHECK(!IsRuntime(0xFE000801));
+	CHECK(!IsRuntime(0));
+	const auto none = [](std::uint32_t) -> std::uint32_t { return 0; };
+	// A plugin's form is itself; 0 is nothing.
+	CHECK(Shareable(0x00012E46, none) == 0x00012E46u);
+	CHECK(Shareable(0xFE000801, none) == 0xFE000801u);
+	CHECK(!Shareable(0, none));
+	// A runtime copy (an armor a mod's script made) goes as the plugin armor it was made from, through a copy of a copy.
+	const auto templates = [](std::uint32_t a_id) -> std::uint32_t {
+		switch (a_id) {
+		case 0xFF000D2A: return 0x00012E46;  // Iron Armor
+		case 0xFF000D30: return 0xFF000D2A;
+		case 0xFF000E00: return 0xFF000E01;  // two runtime forms naming each other: broken data
+		case 0xFF000E01: return 0xFF000E00;
+		default: return 0;
+		}
+	};
+	CHECK(Shareable(0xFF000D2A, templates) == 0x00012E46u);
+	CHECK(Shareable(0xFF000D30, templates) == 0x00012E46u);
+	// One with no template, or only runtime ones, goes as nothing (left out), never as its own ID.
+	CHECK(!Shareable(0xFF000D40, templates));
+	CHECK(!Shareable(0xFF000E00, templates));
 }
 
 TEST("form ids: a joiner's other plugins are added after the rest of their kind, so the table's IDs stay")

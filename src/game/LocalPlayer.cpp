@@ -1,5 +1,8 @@
 #include "game/LocalPlayer.h"
 
+#include "FormIds.h"
+
+#include <algorithm>
 #include <numbers>
 
 namespace LocalPlayer
@@ -129,11 +132,22 @@ namespace LocalPlayer
 		looks.race = race->GetFormID();
 		looks.female = base->GetSex() == RE::SEX::kFemale;
 		looks.weight = std::isfinite(base->weight) ? std::clamp(base->weight, 0.0f, 100.0f) : 50.0f;
+		// A runtime armor (FF: made as this game ran, by a mod's script or plugin) names nothing in another game: the
+		// plugin armor it was made from goes instead (its template), or nothing (FormIds::Shareable). A piece worn twice
+		// that way is named once.
+		const auto templateOf = [](std::uint32_t a_id) -> std::uint32_t {
+			const auto armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(a_id);
+			return armor && armor->templateArmor ? armor->templateArmor->GetFormID() : 0;
+		};
 		const auto inventory = player->GetInventory([](RE::TESBoundObject& a_object) { return a_object.IsArmor(); });
 		for (const auto& [item, data] : inventory) {
 			const auto& [count, entry] = data;
-			if (count > 0 && entry && entry->IsWorn() && looks.worn.size() < Protocol::MAX_WORN) {
-				looks.worn.push_back(item->GetFormID());
+			if (count <= 0 || !entry || !entry->IsWorn() || looks.worn.size() >= Protocol::MAX_WORN) {
+				continue;
+			}
+			const auto shared = FormIds::Shareable(item->GetFormID(), templateOf);
+			if (shared && std::ranges::find(looks.worn, *shared) == looks.worn.end()) {
+				looks.worn.push_back(*shared);
 			}
 		}
 		std::ranges::sort(looks.worn);  // the same gear says the same looks, whatever order the inventory holds it in

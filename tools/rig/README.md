@@ -22,6 +22,7 @@ bash $STAGE/rigq.sh take <name>
 export SKYRIMCOOP_RIG_OWNER=<name>
 bash tools/rig/smoke.sh --build <folder holding SkyrimCoop.dll>    # a whole run: about ten minutes
 bash tools/rig/smoke.sh --only join,see                             # some steps (the guard sets up what they need)
+bash tools/rig/smoke.sh --only join,forms                           # a step that runs only when named (below)
 bash tools/rig/smoke.sh --list                                      # the steps, one line each
 bash $STAGE/rigq.sh free <name>
 ```
@@ -53,9 +54,12 @@ The last line is `VERDICT: PASS` (every check made and passed), `VERDICT: FAIL` 
 | `move_host` | the same, the host's player moving and the VM watching |
 | `gait` | sneak and stand up, then jump, each way: the watcher's stand-in shows it |
 | `save_rejoin` | the VM saves mid-session (no stand-in written into the save, the game lives through it), leaves (its stand-in goes on the host, nothing stray), joins again, loads its own save in the session (no stand-in comes back from it); then the host ends the session (the VM's stand-in of it goes) and hosts again |
+| `forms` | **only when named** (`--only ...,forms`; below). Two Creation Club masters swapped in the VM's load order (`Skyrim.ccc`, and `plugins.txt` when it lists both), backed up first; the VM's game restarted in the run's cell: it loads them in each other's place, joins, and translates forms by plugin name; an armor of one of them that each player puts on is on the other's stand-in actor (placed, dressed, in its `equippedIds`) as that game's own form ID, and leaves it when taken off, both ways; nothing skipped; then the files put back byte for byte (SHA-256) and the VM's game back in the session (`steps/forms.sh`) |
 | `final` | both games still up, no stray stand-ins; each plugin log since the start (no error or assertion line; warnings counted per prefix; no Steam id, IP address or private name); the host never saved or loaded; no new crash log on either machine |
 
 After the steps, always (also after the breaker or Ctrl-C: the run's log goes through a tee that Ctrl-C does not kill), the restore: virtual pads off, sessions left, the VM's test save moved aside into the project's folder on the VM (never deleted), any join task left on the VM removed; then both games closed (when one will not close, the rest waits for `--restore`), both machines' `Skyrim.ini` and `SkyrimPrefs.ini` put back byte for byte, `--build`'s install undone and both DLLs checked to be the ones from before, `start.ps1`'s game tasks removed from the VM, and both Saves folders compared with their listings from before (the host's must not have changed). `--keep` leaves the games running; once both are closed, `smoke.sh --restore <run folder>` does the rest of the restore (the ini files, the install undone and both DLLs checked, the game tasks, the Saves listings). A run folder is marked put back once its restore passes, and is not put back twice; a restore with a failed check (an undo that failed, a DLL that differs) is left unmarked, so `--restore` can try it again.
+
+**Steps that run only when named** (`OPTIN_STEPS` in `steps.sh`: today `forms`) change a game's own files for a while, outside `install.sh`. Each keeps a backup with its hashes on the VM (`$VM_DIR/forms-backup`) and a copy in the run's folder, and puts the files back at its end and in the restore. A run that died in the middle (the harness killed, the ssh link or the host down) leaves the backup behind: the next run's set-up puts it back first (a `HEAL`, the VM's game closed and started again), or stops if it can't. Such a step joins the default run only once the maintainer agrees to it.
 
 ## Adding a step for a new feature
 

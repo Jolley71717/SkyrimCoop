@@ -60,7 +60,7 @@ TEST("forms command: a form found by plugin and number, a plugin's place, and an
 
 	const FormIds::Mapper mapper(Order({ "Skyrim.esm", "Update.esm", "A.esp" }, { "L.esl" }), Order({ "Skyrim.esm", "A.esp", "Update.esm" }, { "L.esl" }));
 	CHECK(FormsCommand::DescribeId(mapper, ours, 0x02000900) == "id=02000900 plugin=A.esp local=900 session=01000900 back=02000900");
-	CHECK(FormsCommand::DescribeId(mapper, ours, 0xFF000123) == "id=FF000123 plugin=none local=123 session=FF000123 back=FF000123");
+	CHECK(FormsCommand::DescribeId(mapper, ours, 0xFF000123) == "id=FF000123 plugin=none local=123 session=none back=none");  // runtime: no other game has it
 	const FormIds::Mapper lacking(Order({ "Skyrim.esm", "A.esp" }), Order({ "Skyrim.esm" }));
 	CHECK(FormsCommand::DescribeId(lacking, FormIds::Table::Of(Order({ "Skyrim.esm", "A.esp" })), 0x01000900) == "id=01000900 plugin=A.esp local=900 session=none back=none");
 }

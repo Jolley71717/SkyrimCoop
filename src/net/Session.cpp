@@ -98,6 +98,9 @@ namespace Session
 			++formsSkipped;
 			formsPlaceless += a_result.placeless ? 1 : 0;
 			const bool out = a_way == FormTranslate::Way::kToSession;
+			if (skippedPlugins.FreshRuntime(a_result)) {
+				logs::info("Session: forms made as a game ran (FF) are skipped {}: no other game has them (said once)", out ? "on the way out" : "on the way in");
+			}
 			for (const auto& plugin : skippedPlugins.Fresh(forms, a_way, a_result)) {
 				logs::info("Session: forms of {} are skipped: {} (said once)", plugin.empty() ? "a plugin past the session's table" : FormsCommand::Shown(plugin),
 					out ? "the others' games don't all have it" : "this game doesn't have it");
