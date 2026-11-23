@@ -152,7 +152,9 @@ TEST("npc combat protocol: the longest of each fits, and one past a limit, cut s
 		auto longer = bytes;
 		longer.push_back(0);
 		for (const auto& changed : { shorter, longer }) {
-			switch (Protocol::PeekType(changed)) {
+			const auto type = Protocol::PeekType(changed);
+			CHECK(type.has_value());
+			switch (type.value_or(MT::kNpcDeaths)) {
 			case MT::kNpcHits:
 				CHECK(!Protocol::DecodeNpcHits(changed));
 				break;
