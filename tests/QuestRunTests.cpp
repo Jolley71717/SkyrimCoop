@@ -796,6 +796,28 @@ TEST("quest locations: the record's slot is the one every forced alias agrees on
 	CHECK(!c.LocsSame());
 	CHECK(QuestRunRules::Against({ Loc(1, 0x60) }, { Loc(1, 0x60) }).Same());
 	CHECK(!QuestRunRules::Against({ Loc(1, 0x60) }, { Unknown(1) }).LocsSame());  // not read here: not known to be the same
+
+	// a location this game cannot read (its map not checked) is unread: never apart (no restart, no locApart), never
+	// forced, and the references are judged on their own (the plain legs' refSame)
+	const auto u = QuestRunRules::Against({ Loc(1, 0x60), Ref(0, 0x50), Loc(2, 0x61) }, { Unknown(1), Ref(0, 0x50), Unknown(2) });
+	CHECK(u.locs.empty());
+	CHECK(u.force.empty());
+	CHECK(u.unread == 2);
+	CHECK(u.unknown == 0);
+	CHECK(u.same == 1);
+	CHECK(u.RefsSame());
+	CHECK(!u.LocsSame());
+	CHECK(!u.Same());
+	// ... and a reference apart beside it is still forced
+	const auto v = QuestRunRules::Against({ Loc(1, 0x60), Ref(0, 0x50) }, { Unknown(1), Ref(0, 0x51) });
+	CHECK(v.locs.empty());
+	CHECK(v.force == (std::vector<QuestRunRules::Force>{ { 0, 0x50 } }));
+	CHECK(!v.RefsSame());
+	// a location both games read and that differs stays apart, beside the same references
+	const auto w = QuestRunRules::Against({ Loc(1, 0x60), Ref(0, 0x50) }, { Loc(1, 0x61), Ref(0, 0x50) });
+	CHECK(w.RefsSame());
+	CHECK(!w.LocsSame());
+	CHECK(w.unread == 0);
 }
 
 // ---- the hold, and forgetting one quest ----------------------------------------------------------------------------

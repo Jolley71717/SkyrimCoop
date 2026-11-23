@@ -171,7 +171,6 @@ namespace QuestSync
 		std::string QuestName(std::uint32_t a_questId);
 		void        NoteThread();
 		bool        Run(const std::string& a_command);
-		bool        Run(const std::string& a_command);
 
 		QuestRules::Facts FactsOf(const RE::TESQuest* a_quest)
 		{
@@ -490,7 +489,7 @@ namespace QuestSync
 		bool RestartForLocations(RE::TESQuest* a_quest, std::size_t a_apart, Clock::time_point a_now)
 		{
 			const auto id = a_quest->GetFormID();
-			if (a_apart == 0 || !locSlot || ClassOf(a_quest) != Class::kRadiant || follower.CountsOf(id).startedHere || !follower.Restart(id, a_now)) {
+			if (a_apart == 0 || !LocationsRead() || ClassOf(a_quest) != Class::kRadiant || follower.CountsOf(id).startedHere || !follower.Restart(id, a_now)) {
 				return false;
 			}
 			if (Run(std::format("stopquest {}", EditorId(a_quest)))) {
@@ -1644,12 +1643,13 @@ namespace QuestSync
 			const auto compare = said ? QuestRunRules::Against(*said, fills) : QuestRunRules::Compare{};
 			const auto phase = follower.PhaseOf(id);
 			const auto c = follower.CountsOf(id);
-			return std::format("quest={} id={:08X} class={} role=friend run={} phase={} heard={} here={} running={} same={} locSame={} force={} locsApart={} "
-							   "matched={} runtime={} unknown={} extra={} locations={} wasOurs={} startedHere={} atStart={} locAtStart={} noneAtStart={} "
+			return std::format("quest={} id={:08X} class={} role=friend run={} phase={} heard={} here={} running={} same={} refSame={} locSame={} force={} locsApart={} "
+							   "matched={} runtime={} unknown={} unread={} extra={} locations={} wasOurs={} startedHere={} atStart={} locAtStart={} noneAtStart={} "
 							   "ownAtStart={} notLoadedAtStart={} missed={} later={} notLoaded={} locApart={} retries={} restarted={}",
 				QuestName(id), id, cls, follower.RunOf(id), phase ? QuestRunRules::PhaseName(*phase) : "none", said ? QuestRunRules::Describe(*said) : "-"s, here,
-				Running(quest) ? 1 : 0, said && compare.Same() ? 1 : 0, said && compare.LocsSame() ? 1 : 0, compare.force.size(), compare.locs.size(), compare.same,
-				compare.runtime, compare.unknown, compare.extra, locations, follower.WasOurs(id) ? 1 : 0, c.startedHere ? 1 : 0, c.start.refs, c.start.locs,
+				Running(quest) ? 1 : 0, said && compare.Same() ? 1 : 0, said && compare.RefsSame() ? 1 : 0, said && compare.LocsSame() ? 1 : 0, compare.force.size(),
+				compare.locs.size(), compare.same,
+				compare.runtime, compare.unknown, compare.unread, compare.extra, locations, follower.WasOurs(id) ? 1 : 0, c.startedHere ? 1 : 0, c.start.refs, c.start.locs,
 				c.start.nones, c.start.own, c.start.notLoaded, c.missed, c.later, c.notLoaded, c.locApart, c.retries, c.restarted ? 1 : 0);
 		}
 

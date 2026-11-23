@@ -20,7 +20,7 @@
 #      starts a job: the input, said). A pick the engine would not start there is stopped and passed over for the next,
 #      JOBS_PICKS of them (RIG after). Within JOBS_WAIT the host says the run with its aliases' references (live=1,
 #      fills= not -), and the VM runs the job as the host's run (phase=running, running=1) with every reference the host's
-#      aliases hold held by its own (same=1), its plugin log saying "Quests: started <quest> here for the host's run ...:
+#      aliases hold held by its own (refSame=1: the references; its locations are the location legs' and may stay its own\n#      pick where a game cannot read them), its plugin log saying "Quests: started <quest> here for the host's run ...:
 #      starting". The start itself took them, not the forcing every 2 s after (the start checks): the VM's start gave
 #      every reference the host said (atStart= equal to the host's refs=; a WARN when the rest were not loaded in the VM),
 #      its log says so with N > 0 ("with N of its aliases given the host's references"), and no reference its start gave
@@ -81,8 +81,9 @@ jobs_running() { [ "$(field running "$(jobs_q "$1" "$2")")" = 1 ]; }
 jobs_still() { [ "$(field running "$(jobs_q "$1" "$2")")" = 0 ]; }
 # jobs_said <who>: the host says the quest's run, with its aliases' references
 jobs_said() { local r; r=$(jobs_q host "$1"); [ "$(field live "$r")" = 1 ] && [ -n "$(field fills "$r")" ] && [ "$(field fills "$r")" != - ]; }
-# jobs_ours <quest>: the VM runs it as the host's run, every reference and location the host's aliases hold held by its own
-jobs_ours() { local r; r=$(jobs_q vm "$1"); [ "$(field phase "$r")" = running ] && [ "$(field running "$r")" = 1 ] && [ "$(field same "$r")" = 1 ]; }
+# jobs_ours <quest>: the VM runs it as the host's run, every reference the host's aliases hold held by its own (refSame=:
+# the references alone; locations are checked by the location legs, locSame=, and only where both games read them)
+jobs_ours() { local r; r=$(jobs_q vm "$1"); [ "$(field phase "$r")" = running ] && [ "$(field running "$r")" = 1 ] && [ "$(field refSame "$r")" = 1 ]; }
 # jobs_count <who> <field>: a count of that game's `quests`
 jobs_count() { field "$2" "$(dc "$1" quests)"; }
 
@@ -172,7 +173,7 @@ jobs_follows() {
 }
 
 # jobs_start_checks <quest> <locations: 0 or 1>: the VM's start for the run took the host's references (and locations)
-# itself: not the forcing every 2 s after it ran (that makes same=1 whatever the start did)
+# itself: not the forcing every 2 s after it ran (that makes refSame=1 whatever the start did)
 jobs_start_checks() {
 	local q=$1 locs=$2 h v refs at nl lines hl vl
 	h=$(jobs_q host "$q"); v=$(jobs_q vm "$q")
@@ -372,10 +373,13 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	# nothing logged), 3 the VM starts it for the run with its own picks and the forcing every 2 s makes it the same
 	# after (startedHere=1, atStart=0, missed=1, "with 0 of its aliases"), 0 nothing reaches the VM. NOSTART: a quest the
 	# engine never starts in the host. LEAK=1: the VM's own job runs in the host too (the mod sharing what it must not).
-	# LOCS: the games' locSlot/locMap (1 found and verified; 0 none). LOCAPART=1: the VM's start keeps its own location.
+	# LOCS: the games' locSlot/locMap (1 found and verified; 0 none); LOCSVM the VM's alone (default LOCS): a VM that cannot
+	# read locations keeps its own pick, unread (same=0 locSame=0, refSame=1). LOCAPART=1: the VM's start keeps its own
+	# location. PLAINLOCS=1: the plain jobs (BQ*) have a location alias too, as most radiant jobs do.
 	JOBS=" BQ01 BQ02 BQ03 LQ01 EQ01 EQ02 "
-	fake() {  # fake <share> [quest the host's engine never starts] [leak] [locs] [loc apart]
+	fake() {  # fake <share> [quest the host's engine never starts] [leak] [locs] [loc apart] [the VM's locs] [plain jobs' locs]
 		FK=$d/fake; rm -rf "$FK"; mkdir -p "$FK"; SHARE=$1; NOSTART=${2:-}; LEAK=${3:-0}; LOCS=${4:-1}; LOCAPART=${5:-0}; JOBS_SKIP=""
+		LOCSVM=${6:-$LOCS}; PLAINLOCS=${7:-0}
 		for w in host vm; do echo 0 > "$FK/$w.made"; : > "$FK/$w.log"; done
 		echo 0 > "$FK/away"; echo 0 > "$FK/runs"; echo 0 > "$FK/stops"; echo 0 > "$FK/adopted"
 	}
@@ -386,7 +390,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	flog() { echo "[00:00:00.000] [1] [I] $2" >> "$FK/$1.log"; }
 	away() { [ "$(cat "$FK/away")" = 1 ]; }
 	isjob() { case "$JOBS" in *" $1 "*) return 0 ;; esac; return 1; }
-	haslocs() { case "$1" in LQ* | EQ*) return 0 ;; esac; return 1; }
+	haslocs() { case "$1" in LQ* | EQ*) return 0 ;; BQ*) [ "$PLAINLOCS" = 1 ] && return 0 ;; esac; return 1; }
 	# the host's run of q is on and the VM runs it as that run
 	asrun() { [ "$(fget host "$1" live 0)" = 1 ] && [ "$(fget vm "$1" phase none)" = running ]; }
 	# shares <quest>: the other game takes a stage of it (a shared quest; a job only while the VM runs it as the host's run)
@@ -406,14 +410,15 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		case $SHARE in
 			1)
 				fput vm "$q" running 1; fput vm "$q" done -; fput vm "$q" current 0; fput vm "$q" phase running; fput vm "$q" run "$n"; fput vm "$q" started 1
-				fput vm "$q" atStart 1; fput vm "$q" missed 0
-				if [ "$LOCAPART" = 1 ] && [ $locs = 1 ]; then fput vm "$q" locAt 0; fput vm "$q" locSame 0; fput vm "$q" same 0
+				fput vm "$q" atStart 1; fput vm "$q" missed 0; fput vm "$q" refsame 1
+				if [ $locs = 1 ] && [ "$LOCSVM" != 1 ]; then fput vm "$q" locAt 0; fput vm "$q" locSame 0; fput vm "$q" same 0  # unread: its own pick
+				elif [ "$LOCAPART" = 1 ] && [ $locs = 1 ]; then fput vm "$q" locAt 0; fput vm "$q" locSame 0; fput vm "$q" same 0
 				else fput vm "$q" locAt $locs; fput vm "$q" locSame 1; fput vm "$q" same 1; fi
 				flog vm "Quests: started $q here for the host's run $n with 1 of its aliases given the host's references, $(fget vm "$q" locAt 0) of its location aliases the host's locations and 0 made empty as the host's (0 this game's own pick, 0 of them not loaded here): starting" ;;
 			2) fput vm "$q" running 1 ;;
 			3)
 				fput vm "$q" running 1; fput vm "$q" done -; fput vm "$q" current 0; fput vm "$q" phase running; fput vm "$q" run "$n"; fput vm "$q" same 1
-				fput vm "$q" started 1; fput vm "$q" atStart 0; fput vm "$q" missed 1; fput vm "$q" locAt 0; fput vm "$q" locSame 1
+				fput vm "$q" refsame 1; fput vm "$q" started 1; fput vm "$q" atStart 0; fput vm "$q" missed 1; fput vm "$q" locAt 0; fput vm "$q" locSame 1
 				flog vm "Quests: started $q here for the host's run $n with 0 of its aliases given the host's references, 0 of its location aliases the host's locations and 0 made empty as the host's (2 this game's own pick, 0 of them not loaded here): starting" ;;
 		esac
 	}
@@ -451,7 +456,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		case "$c" in
 			ping) echo pong ;;
 			quests)
-				local slot=+0x28 map=verified; [ "$LOCS" = 1 ] || { slot=none; map=unread; }
+				local slot=+0x28 map=verified ls=$LOCS; [ "$w" = vm ] && ls=$LOCSVM; [ "$ls" = 1 ] || { slot=none; map=unread; }
 				echo "installed=1 host=$([ "$w" = host ] && echo 1 || echo 0) made=$(cat "$FK/$w.made") moved=0 stuck=0 unmade=0 runs=1 runsSent=4 runsHeard=4 runsStarted=1 runsAdopted=$(cat "$FK/adopted") runsGaveUp=0 runsRetried=0 forced=2 forcedAtStart=2 locsAtStart=1 ownAtStart=0 startFailed=0 cannotStart=0 stopsMade=$(cat "$FK/stops") restarts=0 rewanted=0 notLoaded=0 locApart=0 rewritten=0 locSlot=$slot locMap=$map locChecked=5/5 locUnread=0 lastRun=none" ;;
 			"quests runpick "*)
 				read -r _ _ cls n mode <<<"$c"
@@ -464,7 +469,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 					if [ "$(fget host "$q" live 0)" = 1 ]; then fills=0:00012345,1:-; haslocs "$q" && { fills="$fills,2:L00012399"; locs=1; }; fi
 					echo "quest=$q id=00012001 class=radiant role=host run=$(fget host "$q" run 0) live=$(fget host "$q" live 0) fills=$fills refs=$([ "$fills" = - ] && echo 0 || echo 1) locs=$locs here=- running=$(fget host "$q" running 0) locations=$locs"
 				else
-					echo "quest=$q id=00012001 class=radiant role=friend run=$(fget vm "$q" run 0) phase=$(fget vm "$q" phase none) heard=- here=- running=$(fget vm "$q" running 0) same=$(fget vm "$q" same 0) locSame=$(fget vm "$q" locSame 0) force=0 locsApart=0 matched=1 runtime=0 unknown=0 extra=0 locations=0 wasOurs=0 startedHere=$(fget vm "$q" started 0) atStart=$(fget vm "$q" atStart 0) locAtStart=$(fget vm "$q" locAt 0) noneAtStart=0 ownAtStart=0 notLoadedAtStart=0 missed=$(fget vm "$q" missed 0) later=0 notLoaded=0 locApart=0 retries=0 restarted=0"
+					echo "quest=$q id=00012001 class=radiant role=friend run=$(fget vm "$q" run 0) phase=$(fget vm "$q" phase none) heard=- here=- running=$(fget vm "$q" running 0) same=$(fget vm "$q" same 0) refSame=$(fget vm "$q" refsame 0) locSame=$(fget vm "$q" locSame 0) force=0 locsApart=0 matched=1 runtime=0 unknown=0 unread=0 extra=0 locations=0 wasOurs=0 startedHere=$(fget vm "$q" started 0) atStart=$(fget vm "$q" atStart 0) locAtStart=$(fget vm "$q" locAt 0) noneAtStart=0 ownAtStart=0 notLoadedAtStart=0 missed=$(fget vm "$q" missed 0) later=0 notLoaded=0 locApart=0 retries=0 restarted=0"
 				fi ;;
 			"quest "*)
 				q=${c#quest }
@@ -485,7 +490,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		[ "$SHARE" = 1 ] || return 0
 		for q in $JOBS DA05 DA06; do
 			if [ "$(fget host "$q" live 0)" = 1 ] && [ "$(fget vm "$q" running 0)" = 1 ]; then
-				fput vm "$q" phase running; fput vm "$q" run "$(fget host "$q" run 0)"; fput vm "$q" same 1; fbump adopted
+				fput vm "$q" phase running; fput vm "$q" run "$(fget host "$q" run 0)"; fput vm "$q" refsame 1; fbump adopted
+				if haslocs "$q" && [ "$LOCSVM" != 1 ]; then fput vm "$q" same 0; else fput vm "$q" same 1; fi
 				flog vm "Quests: $q ran here already: it is the host's run $(fget host "$q" run 0) now, with the host's references"
 			fi
 		done
@@ -526,7 +532,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	fake 0; o=$(run 4 step_jobs)
 	t "step: with nothing reaching the VM it fails" "$( [ "$(count "$o" '^FAIL ')" -ge 2 ] && echo yes)" yes
 	fake 1 "" 0 1 1; o=$(run 4b step_jobs)
-	t "step: a VM start that keeps its own location fails the location legs (not the host's run: its locations differ)" "$(count "$o" '^FAIL vm: runs (LQ01|EQ01) as the host.s run'),$(count "$o" '^FAIL vm: runs (BQ01|DA05) as the host.s run')" 2,0
+	t "step: a VM start that keeps its own location fails the location legs (its locations differ), not the reference checks" "$(count "$o" '^FAIL vm: (LQ01|EQ01).s location aliases hold the host.s locations'),$(count "$o" '^FAIL vm: its start gave every location'),$(count "$o" '^FAIL vm: runs .* as the host.s run')" 2,2,0
+	fake 1 "" 0 1 0 0 1; o=$(run 4d step_jobs)
+	t "step: a host that shares locations with a VM that cannot: a WARN, the plain legs (jobs with a location alias) pass, no location legs" "$(count "$o" '^WARN vm: reads and writes quests. locations'),$(count "$o" '^WARN '),$(count "$o" '^(FAIL|RIG|RIGFAULT) '),$(count "$o" '^PASS vm: runs .* as the host.s run, its aliases holding'),$(count "$o" '^(PASS|FAIL) host: says .*.s locations')" 1,1,0,4,0
 	fake 1 "" 0 0; o=$(run 4c step_jobs)
 	t "step: a game that cannot share locations is a WARN, and the location legs are not run" "$(count "$o" '^WARN .*reads and writes quests. locations'),$(count "$o" '^(PASS|FAIL) host: says .*.s locations'),$(count "$o" '^(FAIL|RIG)')" 2,0,0
 	fake 1 "" 1; o=$(run 5 jobs_own_leg)

@@ -275,7 +275,7 @@ Every game judges again by its own record before it makes anything, so a quest o
 - Dialogue and scenes play for the player who started them; the others see the stage it set.
 - Quest items and rewards go to the player who got them.
 - Misc quests are each game's own, and so is a radiant job a friend's game starts on its own (only the host's jobs are the session's).
-- An actor a quest creates for its alias is each game's own until NPCs are paired, and so is a quest's location alias in a game that cannot find where the engine keeps it (`locSlot=none` or `locMap` not verified).
+- An actor a quest creates for its alias is each game's own until NPCs are paired, and so is a quest's location alias in a game that cannot find where the engine keeps it (`locSlot=none` or `locMap` not verified). Such a location is not read there, so it is neither the same as the host's nor apart from it (`unread=` in `quests run`): it never restarts a radiant job, is never said apart, and the run's references are judged on their own (`refSame=`).
 - A choice a quest keeps in a script variable rather than a stage (which side a player took in a dialogue) is not shared.
 - A quest a friend took further in its own save than the host has (apart) stays the friend's own until the host reaches that stage; the friend cannot hand it to the host.
 

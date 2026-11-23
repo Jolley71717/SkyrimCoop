@@ -854,8 +854,11 @@ namespace QuestRunRules
 		std::size_t        runtime = 0;  // the host's alias holds a reference its game made as it ran: ours stays our own
 		std::size_t        unknown = 0;  // ... a form of a plugin this game lacks (or not read): ours stays our own
 		std::size_t        extra = 0;    // the host's alias holds nothing, ours something (no alias is cleared here)
-		[[nodiscard]] bool Same() const { return force.empty() && locs.empty(); }
-		[[nodiscard]] bool LocsSame() const { return locs.empty(); }
+		std::size_t        unread = 0;   // the session's alias holds a form, ours cannot be read here (a location while
+		                                 // this game's location map is not checked): neither same nor apart
+		[[nodiscard]] bool Same() const { return force.empty() && locs.empty() && unread == 0; }
+		[[nodiscard]] bool RefsSame() const { return force.empty(); }    // the references alone: what the plain legs read
+		[[nodiscard]] bool LocsSame() const { return locs.empty() && unread == 0; }  // only where both games read locations
 	};
 
 	[[nodiscard]] inline Compare Against(const std::vector<Fill>& a_session, const std::vector<Fill>& a_ours)
@@ -873,6 +876,10 @@ namespace QuestRunRules
 			case Fill::kLoc:
 				if (here && here->kind == fill.kind && here->refId == fill.refId) {
 					++out.same;
+				} else if (here && here->kind == Fill::kUnknown) {
+					// this game cannot read what its alias holds (a location while its location map is not checked): not
+					// known to be apart, so never forced, restarted for or said apart; each game's own pick
+					++out.unread;
 				} else if (fill.kind == Fill::kRef) {
 					out.force.push_back({ fill.aliasId, fill.refId });
 				} else {
