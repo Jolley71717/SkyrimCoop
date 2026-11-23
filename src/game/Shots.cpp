@@ -486,7 +486,7 @@ namespace Shots
 					auto& rd = projectile->GetProjectileRuntimeData();
 					stopped = rd.linearVelocity.Length() < 1.0f && rd.livingTime > ShotRules::YOUNG;
 					if (const auto check = aimChecks.find(id); check != aimChecks.end() && rd.livingTime > 0.0f) {
-						if (const auto offBy = FixAim(projectile.get(), check->second.pitch, check->second.heading)) {
+						if (const auto offBy = FixAim(projectile, check->second.pitch, check->second.heading)) {
 							counts.aimLeftMax = (std::max)(counts.aimLeftMax, *offBy);
 							if (*offBy > ShotRules::AIM_FIX) {
 								++counts.reaimedLate;
