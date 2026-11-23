@@ -53,11 +53,12 @@ declare -A STEP_INFO=(
 	[save_rejoin]="the VM saves mid-session (no stand-in in the save), leaves, rejoins, loads that save; the host ends the session and hosts again"
 	[forms]="(only when named) the VM's plugins in another order: it joins, and an armor each puts on is on the other's stand-in as that game's own form (steps/forms.sh)"
 	[doors]="a door, a load door and a container one game locks are locked in the other, and unlocked back; a door one opens is open in the other, and after the VM loads a save or joins again; a pillar one player uses is used by their stand-in, and its script and the gates near it read the same in both (steps/doors.sh)"
+	[quests]="a shared quest neither game has started: a stage the VM sets is done on the host, one the host sets is done on the VM, its objectives read the same; after the VM loads a save and joins again it takes the session's stages; MQ101 is each player's own; no stage made moved a player (steps/quests.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
-STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors final"
+STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors quests final"
 # Steps that need the two games in one session; the state guard puts them back in one first (smoke.sh run()).
-SESSION_STEPS="see move_vm move_host gait save_rejoin forms doors"
+SESSION_STEPS="see move_vm move_host gait save_rejoin forms doors quests"
 # Steps a run makes only when --only names them: they change a game's files for a while (each puts them back, and the
 # set-up heals what a run that died left), which the maintainer agrees to before they run by default.
 OPTIN_STEPS="forms"
@@ -480,6 +481,7 @@ step_final() {
 # Steps in files of their own (steps/<name>.sh), each with its own self-test
 declare -F step_forms >/dev/null || . "$RIG/steps/forms.sh"
 declare -F step_doors >/dev/null || . "$RIG/steps/doors.sh"
+declare -F step_quests >/dev/null || . "$RIG/steps/quests.sh"
 
 # --- self-test: the steps' reading of the games, both games faked ------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then

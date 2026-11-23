@@ -35,7 +35,11 @@ namespace Protocol
 	//    player uses (a lever, a pull chain, a pillar) is used in every game by that player's stand-in. Every report is
 	//    answered: the session's word, or kRefRefused. (A branch written at the same time takes 5 for NPCs: whichever
 	//    is merged second moves to 6; the message numbers do not clash.)
-	inline constexpr std::uint16_t VERSION = 5;
+	// 7: quests (QuestBatch, docs/DESIGN.md "Quests"): a shared quest's stages, objectives and end are the session's,
+	//    kept by the server for whoever joins or loads later; the host's game says what its world holds at its welcome
+	//    and after each load (kQuestReset, then its quests). Written beside 5 (doors) and 6 (NPCs, another branch): the
+	//    number is this branch's; whichever of them is merged later renumbers, the message numbers do not clash.
+	inline constexpr std::uint16_t VERSION = 7;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -91,6 +95,11 @@ namespace Protocol
 		kRemoteActivate = 27,  // server -> the others: that player used it, so their stand-in uses it here too
 		kAskRefStates = 28,    // client -> server, reliable: send me every kept RefState again (after a load)
 		kRefRefused = 29,      // server -> the reporter alone, reliable: its kRefState was not taken, and why
+		kQuests = 30,          // client -> server, reliable: stages, objectives and ends of shared quests, new here
+		kRemoteQuests = 31,    // server -> everyone, the reporter too: what is new to the session (and all of it, to a joiner)
+		kQuestAnswer = 32,     // server -> the reporter alone, reliable: its entries that were not new, each with why
+		kAskQuests = 33,       // client -> server, reliable: send me every kept quest entry again (after a load)
+		kQuestReset = 34,      // host -> server: my world is new (a welcome, a load): its quests follow; server -> the others
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -357,6 +366,66 @@ namespace Protocol
 	// The most reference states the server keeps for a session: a long evening opens a few hundred doors; past this the
 	// oldest word is not dropped, a new reference is refused (common/RefBook.h).
 	inline constexpr std::size_t MAX_REF_STATES = 16384;
+
+	// One thing about a shared quest (docs/DESIGN.md, "Quests"): a stage done, an objective's state, or the quest's end.
+	// questId is in the session's numbering (PluginTable); an entry whose quest the reading game lacks is left out of
+	// its batch (FormTranslate.h). What a stage or an objective is, is the quest's own numbering: the same in every game
+	// that has the quest.
+	struct QuestEntry
+	{
+		enum Kind : std::uint8_t
+		{
+			kStage = 0,      // stage `index` is done
+			kObjective = 1,  // objective `index` is in state `value` (RE::QUEST_OBJECTIVE_STATE: 0 dormant to 5)
+			kCompleted = 2,  // the quest is completed (index and value 0)
+			kFailed = 3,     // the quest failed (index and value 0)
+		};
+		static constexpr std::uint8_t KIND_MAX = kFailed;
+		static constexpr std::uint8_t OBJECTIVE_STATE_MAX = 5;
+
+		// In a kQuestAnswer, why the session did not take it as new (value holds it).
+		enum Answer : std::uint8_t
+		{
+			kSame = 0,     // the session had it already (nothing to pass on)
+			kBusy = 1,     // past that player's budget: report it again a little later
+			kFull = 2,     // the session keeps MAX_QUESTS quests (or MAX_QUEST_ENTRIES of this one) already
+			kRefused = 3,  // no quest (0), a runtime one, a state out of range, or not the host's to say
+		};
+		static constexpr std::uint8_t ANSWER_MAX = kRefused;
+
+		std::uint32_t questId = 0;
+		std::uint8_t  kind = kStage;
+		std::uint16_t index = 0;
+		std::uint8_t  value = 0;
+
+		[[nodiscard]] bool SameThing(const QuestEntry& a_other) const { return questId == a_other.questId && kind == a_other.kind && index == a_other.index; }
+		bool operator==(const QuestEntry&) const = default;
+	};
+
+	// A batch of quest entries: kQuests (a game's news, playerId 0), kRemoteQuests (the server's word, with the player
+	// who said it; 0 for the session's word sent again: to a joiner, or after a load), kQuestAnswer (to the reporter
+	// alone; each entry's value is its QuestEntry::Answer, so an objective's state is not said).
+	struct QuestBatch
+	{
+		std::uint32_t           playerId = 0;
+		std::vector<QuestEntry> entries;
+		bool operator==(const QuestBatch&) const = default;
+	};
+
+	// The host's world is new (kQuestReset): from the host, empty; from the server, to the others, the host's player id.
+	struct QuestReset
+	{
+		std::uint32_t playerId = 0;
+		bool operator==(const QuestReset&) const = default;
+	};
+
+	// The most entries in one batch (a few hundred bytes: one reliable packet).
+	inline constexpr std::size_t MAX_QUEST_BATCH = 64;
+	// The most quests the server keeps for a session (Skyrim and its DLC have about 1,400 quests; mods add more), and
+	// the most entries (stages, objectives, its end) it keeps of one quest (a quest has a few dozen stages at most).
+	// Past either, a new one is refused (kFull), never the oldest dropped.
+	inline constexpr std::size_t MAX_QUESTS = 4096;
+	inline constexpr std::size_t MAX_QUEST_ENTRIES = 512;
 
 	// ---- serialization -------------------------------------------------------------
 
@@ -971,6 +1040,107 @@ namespace Protocol
 		Activation msg;
 		msg.refId = r.U32();
 		if (type == MessageType::kRemoteActivate) {
+			msg.playerId = r.U32();
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kQuests, kRemoteQuests, kQuestAnswer: playerId (kRemoteQuests only), a count (1 to MAX_QUEST_BATCH), then each
+	// entry: questId, kind, index, value. None for an empty batch, a kind not known, an objective state past
+	// OBJECTIVE_STATE_MAX, or an answer past ANSWER_MAX. Encode writes at most MAX_QUEST_BATCH entries (Batches splits).
+	inline std::vector<std::uint8_t> Encode(const QuestBatch& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		if (a_type == MessageType::kRemoteQuests) {
+			w.U32(a_msg.playerId);
+		}
+		const auto count = (std::min)(a_msg.entries.size(), MAX_QUEST_BATCH);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& e = a_msg.entries[i];
+			w.U32(e.questId);
+			w.U8(e.kind);
+			w.U16(e.index);
+			w.U8(e.value);
+		}
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const QuestBatch& a_msg) { return Encode(a_msg, MessageType::kQuests); }
+
+	// a_entries in batches of MAX_QUEST_BATCH, in order, each encoded as a_type with a_playerId (none for no entries).
+	inline std::vector<std::vector<std::uint8_t>> Batches(const std::vector<QuestEntry>& a_entries, MessageType a_type, std::uint32_t a_playerId = 0)
+	{
+		std::vector<std::vector<std::uint8_t>> out;
+		for (std::size_t at = 0; at < a_entries.size(); at += MAX_QUEST_BATCH) {
+			QuestBatch batch{ a_playerId, {} };
+			const auto end = (std::min)(a_entries.size(), at + MAX_QUEST_BATCH);
+			batch.entries.assign(a_entries.begin() + static_cast<std::ptrdiff_t>(at), a_entries.begin() + static_cast<std::ptrdiff_t>(end));
+			out.push_back(Encode(batch, a_type));
+		}
+		return out;
+	}
+
+	inline std::optional<QuestBatch> DecodeQuestBatch(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kQuests && type != MessageType::kRemoteQuests && type != MessageType::kQuestAnswer) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		QuestBatch msg;
+		if (type == MessageType::kRemoteQuests) {
+			msg.playerId = r.U32();
+		}
+		const auto count = r.U8();
+		if (count == 0 || count > MAX_QUEST_BATCH) {
+			return std::nullopt;
+		}
+		msg.entries.reserve(count);
+		for (std::uint8_t i = 0; i < count; ++i) {
+			QuestEntry e;
+			e.questId = r.U32();
+			e.kind = r.U8();
+			e.index = r.U16();
+			e.value = r.U8();
+			if (e.kind > QuestEntry::KIND_MAX) {
+				return std::nullopt;
+			}
+			const bool badValue = type == MessageType::kQuestAnswer ? e.value > QuestEntry::ANSWER_MAX
+			                                                         : (e.kind == QuestEntry::kObjective && e.value > QuestEntry::OBJECTIVE_STATE_MAX);
+			if (badValue) {
+				return std::nullopt;
+			}
+			msg.entries.push_back(e);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kQuestReset: from the host, nothing more; from the server, the host's player id.
+	inline std::vector<std::uint8_t> Encode(const QuestReset& a_msg, bool a_fromServer)
+	{
+		Writer w{ MessageType::kQuestReset };
+		if (a_fromServer) {
+			w.U32(a_msg.playerId);
+		}
+		return w.Data();
+	}
+
+	inline std::optional<QuestReset> DecodeQuestReset(std::span<const std::uint8_t> a_data, bool a_fromServer)
+	{
+		if (PeekType(a_data) != MessageType::kQuestReset) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		QuestReset msg;
+		if (a_fromServer) {
 			msg.playerId = r.U32();
 		}
 		if (!r.AtEnd()) {

@@ -13,6 +13,7 @@
 #include "game/LocalPlayer.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
+#include "game/QuestSync.h"
 #include "game/WorldObjects.h"
 #include "net/Session.h"
 #include "steam/Steam.h"
@@ -170,6 +171,9 @@ namespace
 		} else {
 			logs::info("Steam: left alone (bSteam = false)");
 		}
+		if (!QuestSync::Install()) {
+			logs::warn("Quests: quests are not shared in this game; a session still runs");
+		}
 		if (!WorldObjects::Install()) {
 			logs::warn("World: doors, locks and mechanisms are not shared in this game; a session still runs");
 		}
@@ -214,12 +218,14 @@ namespace
 			logs::info("Load: {}", a_msg->data ? "done" : "failed");
 			RemotePlayers::AfterLoad();  // any stand-in the save brought back goes
 			WorldObjects::AfterLoad();   // the loaded world's doors are the save's: the session's words are asked for again
+			QuestSync::AfterLoad();      // ... and its quests: the host says them again, a friend asks for the session's
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
 			RemotePlayers::ForgetStandIns();
 			WorldObjects::AfterLoad();
+			QuestSync::AfterLoad();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:

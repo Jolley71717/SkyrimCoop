@@ -8,6 +8,7 @@
 #include "game/Console.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
+#include "game/QuestSync.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "game/WorldObjects.h"
@@ -196,6 +197,17 @@ namespace DevCommands
 			return WorldObjects::Scripts(a_args);
 		}
 
+		// quests [pick [n]] | quest <editor id or hex>: shared quests (QuestSync)
+		std::string Quests(std::string_view a_args)
+		{
+			return QuestSync::Command(a_args);
+		}
+
+		std::string Quest(std::string_view a_args)
+		{
+			return QuestSync::One(a_args);
+		}
+
 		struct Entry
 		{
 			std::string_view name;
@@ -218,6 +230,8 @@ namespace DevCommands
 			{ "ref", Ref },
 			{ "use", UseCommand },
 			{ "script", Script },
+			{ "quests", Quests },
+			{ "quest", Quest },
 		};
 	}
 
@@ -233,7 +247,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex> | script <hex>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex> | script <hex> | quests [pick [n]] | quest <editor id or hex>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

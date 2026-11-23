@@ -395,7 +395,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "mechanism: a stand-in out of reach is RIG, and no use is made" "$(grep -c '^RIG .*host: its stand-in of the vm comes within reach' <<<"$o"),$(grep -c '^FAIL ' <<<"$o")" 1,0
 
 	# the step is wired into the harness: in STEPS before final, a session step, in the default run
-	t "doors is a step, before final" "$(case " $STEPS " in *" doors final "*) echo yes;; esac)" yes
+	t "doors is a step, before final" "$(case " $STEPS " in *" doors "*" final "*) echo yes;; esac)" yes
 	t "doors needs a session" "$(case " $SESSION_STEPS " in *" doors "*) echo yes;; esac)" yes
 	t "doors runs by default" "$(case " $OPTIN_STEPS " in *" doors "*) echo no;; *) echo yes;; esac)" yes
 	t "doors has its line" "$([ -n "${STEP_INFO[doors]:-}" ] && echo yes)" yes

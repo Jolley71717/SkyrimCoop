@@ -26,7 +26,9 @@
 // - an entry of a list is left out: a worn item;
 // - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has);
 // - the reference a door's state or a mechanism's use is about becomes 0, which no game applies and the server keeps
-//   nothing of: a door of a plugin some game lacks is that game's own.
+//   nothing of: a door of a plugin some game lacks is that game's own;
+// - an entry of a quest batch whose quest has no ID is left out (a mod's quest some game lacks is that game's own); a
+//   batch left with no entry is not sent at all (kDrop), as it could not be read.
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -47,6 +49,7 @@ namespace FormTranslate
 		{
 			kSame,     // send or read the packet as it is
 			kChanged,  // send or read `packet` instead
+			kDrop,     // nothing of it is the other side's: neither send nor read it
 		};
 		Kind                       kind = Kind::kSame;
 		std::vector<std::uint8_t>  packet;
@@ -75,6 +78,9 @@ namespace FormTranslate
 		case MT::kActivate:
 		case MT::kRemoteActivate:
 		case MT::kRefRefused:
+		case MT::kQuests:
+		case MT::kRemoteQuests:
+		case MT::kQuestAnswer:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -85,6 +91,8 @@ namespace FormTranslate
 		case MT::kHeartbeatAck:
 		case MT::kPluginTable:
 		case MT::kAskRefStates:
+		case MT::kAskQuests:
+		case MT::kQuestReset:
 			return false;
 		}
 		return false;  // a type this version does not know
@@ -200,6 +208,34 @@ namespace FormTranslate
 			}
 		}
 
+		// A quest batch, written back with its own type: the entries whose quest has an ID on the other side; none left
+		// is kDrop (an empty batch is no message).
+		inline void ApplyQuests(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeQuestBatch(a_packet);
+			if (!msg) {
+				return;
+			}
+			std::vector<Protocol::QuestEntry> kept;
+			kept.reserve(msg->entries.size());
+			for (auto entry : msg->entries) {
+				if (a_ctx.Key(entry.questId)) {
+					kept.push_back(entry);
+				}
+			}
+			const auto left = msg->entries.size() - kept.size();
+			a_ctx.out.entries += static_cast<std::uint32_t>(left);
+			if (kept.empty()) {
+				a_ctx.out.kind = Result::Kind::kDrop;
+				return;
+			}
+			if (a_ctx.changed || left != 0) {
+				msg->entries = std::move(kept);
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
@@ -242,6 +278,11 @@ namespace FormTranslate
 			break;
 		case MT::kRefRefused:
 			detail::ApplyRef<Protocol::RefRefusal>(a_packet, ctx, *type, Protocol::DecodeRefRefusal);
+			break;
+		case MT::kQuests:
+		case MT::kRemoteQuests:
+		case MT::kQuestAnswer:
+			detail::ApplyQuests(a_packet, ctx, *type);
 			break;
 		default:
 			break;

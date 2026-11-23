@@ -3,6 +3,7 @@
 #include "EnetTransport.h"
 #include "FormIds.h"
 #include "Name.h"
+#include "QuestBook.h"
 #include "Redact.h"
 #include "RefBook.h"
 #include "Text.h"
@@ -54,6 +55,15 @@ namespace
 		bool        asksOwed = false;
 		std::uint64_t refsDropped = 0;  // past the budget: said once in the log, counted after
 		std::uint64_t actsDropped = 0;
+		// Quests (docs/DESIGN.md, "Quests"): batches of entries, a burst of 64 then 8 a second (the host's game says its
+		// whole world at its welcome and after a load, a few dozen batches; play makes a few a minute). A batch past its
+		// budget is answered busy, entry by entry, and the game sends it again later. Asks for every kept entry again, as
+		// for doors.
+		TokenBucket questBudget{ 64.0, 8.0 };
+		TokenBucket questAskBudget{ 2.0, 0.2 };
+		bool        questAsksOwed = false;
+		std::uint64_t questsDropped = 0;
+		bool        toldNotHost = false;
 		bool        toldUnknown = false;
 	};
 
@@ -158,6 +168,10 @@ void Server::Run()
 	// (its first player in) starts it again with the table.
 	RefBook refs;
 	bool    refsFullSaid = false;
+	// The session's word on each shared quest (common/QuestBook.h), in the table's numbering: started again with a new
+	// session, and cleared when the host's game says its world is new (kQuestReset).
+	QuestBook quests;
+	bool      questsFullSaid = false;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -193,6 +207,13 @@ void Server::Run()
 	const auto sendRefs = [&](const PeerKey& a_to) {
 		for (const auto& state : refs.All()) {
 			send(a_to, Protocol::Encode(state, MT::kRemoteRefState), true);
+		}
+	};
+
+	// Every kept quest entry to one game, the session's word (player id 0), in the book's order.
+	const auto sendQuests = [&](const PeerKey& a_to) {
+		for (const auto& packet : Protocol::Batches(quests.All(), MT::kRemoteQuests, 0)) {
+			send(a_to, packet, true);
 		}
 	};
 
@@ -250,6 +271,8 @@ void Server::Run()
 			sessionTable.clear();  // the first player's load order numbers the new session
 			refs.Clear();          // ... and the doors were numbered by the old one
 			refsFullSaid = false;
+			quests.Clear();        // ... and the quests
+			questsFullSaid = false;
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -297,6 +320,7 @@ void Server::Run()
 		}
 		// The session's doors, after the players: what was opened, closed, locked and picked before they came.
 		sendRefs(a_key);
+		sendQuests(a_key);  // ... and its quests: the stages done, the objectives, the ends
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
 		log(std::format("server: player {} joined from {}{} ({} in the session)", a_peer.playerId, transports[a_key.first]->Describe(a_key.second),
@@ -405,6 +429,79 @@ void Server::Run()
 				}
 			}
 			break;
+		case MT::kQuests:
+			// Each entry new to the session goes to every game, the reporter's too, with who said it; the rest go back to
+			// the reporter alone (kQuestAnswer), each with why: every entry is answered, so a game never waits for an
+			// echo that is not coming. A batch past the budget is answered busy, all of it.
+			if (const auto batch = Protocol::DecodeQuestBatch(a_data)) {
+				using E = Protocol::QuestEntry;
+				std::vector<E> news;
+				std::vector<E> answers;
+				if (!a_peer.questBudget.Take(Clock::now())) {
+					if (a_peer.questsDropped++ == 0) {
+						log(std::format("server: player {} reports quests faster than the server passes them on; the rest are answered busy", a_peer.playerId));
+					}
+					for (auto e : batch->entries) {
+						e.value = E::kBusy;
+						answers.push_back(e);
+					}
+				} else {
+					for (const auto& e : batch->entries) {
+						E out;
+						auto answer = e;
+						switch (quests.Report(e, out)) {
+						case QuestBook::Take::kNews:
+							news.push_back(out);
+							continue;
+						case QuestBook::Take::kSame:
+							answer.value = E::kSame;
+							break;
+						case QuestBook::Take::kFull:
+							if (!std::exchange(questsFullSaid, true)) {
+								log(std::format("server: the session keeps {} quests ({} entries), its most; a new one is not kept or passed on", quests.Quests(), quests.Entries()));
+							}
+							answer.value = E::kFull;
+							break;
+						case QuestBook::Take::kRefused:
+							answer.value = E::kRefused;
+							break;
+						}
+						answers.push_back(answer);
+					}
+				}
+				for (const auto& packet : Protocol::Batches(news, MT::kRemoteQuests, a_peer.playerId)) {
+					broadcast(packet, true, nullptr);
+				}
+				for (const auto& packet : Protocol::Batches(answers, MT::kQuestAnswer)) {
+					send(a_key, packet, true);
+				}
+			}
+			break;
+		case MT::kAskQuests:
+			if (a_data.size() == 1) {
+				if (a_peer.questAskBudget.Take(Clock::now())) {
+					a_peer.questAsksOwed = false;
+					sendQuests(a_key);
+				} else {
+					a_peer.questAsksOwed = true;  // answered from the loop once the budget has room: never dropped
+				}
+			}
+			break;
+		case MT::kQuestReset:
+			// The host's world is new (its welcome, a load): the session's quests are what its game says next. Only the
+			// host's game may say so; a friend's world is never the session's.
+			if (Protocol::DecodeQuestReset(a_data, false)) {
+				if (a_peer.playerId != hostId || hostId == 0) {
+					if (!std::exchange(a_peer.toldNotHost, true)) {
+						log(std::format("server: player {} is not the host: its quest reset is ignored", a_peer.playerId));
+					}
+					break;
+				}
+				quests.Clear();
+				questsFullSaid = false;
+				broadcast(Protocol::Encode(Protocol::QuestReset{ a_peer.playerId }, true), true, &a_key);
+			}
+			break;
 		case MT::kHeartbeat:
 			if (const auto beat = Protocol::DecodeHeartbeat(a_data); beat && a_peer.heartbeats.Take(Clock::now())) {
 				// Unreliable, as the heartbeat itself is sent: a resend would measure the resend, not the connection.
@@ -463,6 +560,10 @@ void Server::Run()
 			if (peer.joined && peer.asksOwed && peer.askBudget.Take(now)) {
 				peer.asksOwed = false;
 				sendRefs(key);
+			}
+			if (peer.joined && peer.questAsksOwed && peer.questAskBudget.Take(now)) {
+				peer.questAsksOwed = false;
+				sendQuests(key);
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {
 				log(std::format("server: dropped {}: no hello", transports[key.first]->Describe(key.second)));
