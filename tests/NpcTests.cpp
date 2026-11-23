@@ -280,7 +280,7 @@ TEST("npc form translate: an NPC of a plugin both games have is named as each ga
 		Protocol::NpcGear{ .key = ofB, .worn = { { 0x00012E49, 0x4 }, { 0x04000901, 0x1 | 0x2 } }, .right = 0x04000902, .left = 0x03000903, .ammo = 0 })));
 	REQUIRE(gear);
 	CHECK(gear->key.id == 0x01000ABCu);
-	CHECK(gear->worn == std::vector<Protocol::WornItem>{ { 0x00012E49, 0x4 } });
+	CHECK(gear->worn == std::vector<Protocol::WornItem>({ { 0x00012E49, 0x4 } }));
 	CHECK(gear->unnamedSlots == 0x3u);
 	CHECK(gear->right == 0u);
 	CHECK(gear->left == 0x01000903u);
