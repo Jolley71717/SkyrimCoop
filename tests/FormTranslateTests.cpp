@@ -76,10 +76,13 @@ namespace
 	// The server passes a player's state and looks on as they came, under the player's number.
 	std::vector<std::uint8_t> Relayed(const std::vector<std::uint8_t>& a_sent)
 	{
-		if (const auto state = Protocol::DecodePlayerState(a_sent)) {
+		// By the message's type, as the server reads it: a decoder reads only its own layout, and a looks of three worn
+		// items is as long as a state.
+		const auto type = Protocol::PeekType(a_sent);
+		if (const auto state = type == Protocol::MessageType::kPlayerState ? Protocol::DecodePlayerState(a_sent) : std::nullopt) {
 			return Protocol::Encode(Protocol::RemoteState{ 1, *state });
 		}
-		if (const auto looks = Protocol::DecodePlayerLooks(a_sent)) {
+		if (const auto looks = type == Protocol::MessageType::kPlayerLooks ? Protocol::DecodePlayerLooks(a_sent) : std::nullopt) {
 			return Protocol::Encode(Protocol::RemoteLooks{ 1, *looks });
 		}
 		return {};
