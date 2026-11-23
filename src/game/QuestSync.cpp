@@ -113,7 +113,7 @@ namespace QuestSync
 			return id ? std::string{ id } : std::string{};
 		}
 
-		std::string NameOf(std::uint32_t a_questId);
+		std::string QuestName(std::uint32_t a_questId);
 
 		QuestRules::Facts FactsOf(const RE::TESQuest* a_quest)
 		{
@@ -208,7 +208,7 @@ namespace QuestSync
 			return a_id != 0 ? RE::TESForm::LookupByID<RE::TESQuest>(a_id) : nullptr;
 		}
 
-		std::string NameOf(std::uint32_t a_questId)
+		std::string QuestName(std::uint32_t a_questId)
 		{
 			const auto quest = QuestOf(a_questId);
 			const auto name = quest ? EditorId(quest) : std::string{};
@@ -525,7 +525,7 @@ namespace QuestSync
 			if (apart.Quests() != before) {
 				logs::info("Quests: {} is further on here (stage {}) than in the session: what moves on in it here is this game's own until the session "
 						   "reaches stage {}",
-					NameOf(a_questId), stage, stage);
+					QuestName(a_questId), stage, stage);
 			}
 			return say;
 		}
@@ -709,8 +709,8 @@ namespace QuestSync
 			}
 			const auto here = Look(it->entry, 0);
 			if (here.exists && !here.has) {
-				lastUnmade = it->entry.kind == Entry::kObjective ? std::format("{} objective {}", NameOf(it->entry.questId), it->entry.index)
-				                                                 : std::format("{} completed", NameOf(it->entry.questId));
+				lastUnmade = it->entry.kind == Entry::kObjective ? std::format("{} objective {}", QuestName(it->entry.questId), it->entry.index)
+				                                                 : std::format("{} completed", QuestName(it->entry.questId));
 				if (counts.unmade++ < 20) {
 					logs::warn("Quests: made {} here, but the game does not read it so {} s later (the console could not compile the command, "
 							   "or the game would not take it)",
@@ -720,11 +720,11 @@ namespace QuestSync
 			it = checks.erase(it);
 		}
 		if (const auto moved = guard.Check(PlaceOf(Player()), now)) {
-			lastMoved = std::format("{} {}", NameOf(moved->questId), moved->index);
+			lastMoved = std::format("{} {}", QuestName(moved->questId), moved->index);
 			counts.moved = guard.Moves();
 			logs::warn("Quests: our player moved (another place, or {:.0f} u) within {} s of making {} stage {} here: the stage may move the player "
 					   "(a row for QuestRules::STAGE_RULES), or our player took a load door at that moment",
-				QuestRules::MOVE_FAR, QuestRules::MOVE_WATCH.count(), NameOf(moved->questId), moved->index);
+				QuestRules::MOVE_FAR, QuestRules::MOVE_WATCH.count(), QuestName(moved->questId), moved->index);
 		}
 	}
 
@@ -776,7 +776,7 @@ namespace QuestSync
 				}
 			} else if (entry.value == Entry::kRefused || entry.value == Entry::kFull) {
 				if (counts.refused++ == 0) {
-					logs::info("Quests: the session did not take our report on {} ({}); it stays this game's own and is not offered again", NameOf(entry.questId),
+					logs::info("Quests: the session did not take our report on {} ({}); it stays this game's own and is not offered again", QuestName(entry.questId),
 						entry.value == Entry::kFull ? "its book is full" : "refused");
 				}
 			}
@@ -841,7 +841,7 @@ namespace QuestSync
 				Counted(counts.failedKept), Counted(counts.answered), Counted(counts.busy), Counted(counts.refused), Counted(maker.Stuck()),
 				maker.LastStuck() ? std::format("{:08X}:{}", maker.LastStuck()->questId, maker.LastStuck()->index) : "none"s, Counted(counts.asks),
 				Counted(counts.resets), Counted(counts.rebases), Counted(counts.snapshots), Counted(counts.snapshotEntries), Counted(apart.Quests()),
-				apart.Quests() ? NameOf(apart.LastQuest()) : "none"s, Counted(counts.apartStages), heldStages.size(), Counted(guard.Moves()), lastMoved, lastMade,
+				apart.Quests() ? QuestName(apart.LastQuest()) : "none"s, Counted(counts.apartStages), heldStages.size(), Counted(guard.Moves()), lastMoved, lastMade,
 				Counted(counts.unmade), lastUnmade, Counted(maker.Dropped()), Counted(dropped), Counted(counts.offMain), Counted(counts.noRun));
 		}
 		if (words[0] != "pick" || words.size() > 2) {
