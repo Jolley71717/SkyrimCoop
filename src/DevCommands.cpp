@@ -223,7 +223,7 @@ namespace DevCommands
 			return LootSync::Command(a_args);
 		}
 
-		// drops [list | drop <item> <n> | take <drop id> | count <item>]: items given by dropping them (DropSync)
+		// drops [list | drop <item> <n> | take <drop id> | count <item> | ref <ref>]: items given by dropping them (DropSync)
 		std::string DropsCommand(std::string_view a_args)
 		{
 			return DropSync::Command(a_args);
@@ -271,7 +271,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex> | script <hex> | quests [pick [n]] | quest <editor id or hex> | clock [pick <clear|cloudy|rain|snow> [n] | weather <hex> | release] | loot [near [radius] | inv <hex> | take <holder> <item> <n> | put <holder> <item> <n> | find <book|key|weapon|misc>] | drops [list | drop <item hex> <n> | take <drop id> | count <item hex>]";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex> | script <hex> | quests [pick [n]] | quest <editor id or hex> | clock [pick <clear|cloudy|rain|snow> [n] | weather <hex> | release] | loot [near [radius] | inv <hex> | take <holder> <item> <n> | put <holder> <item> <n> | find <book|key|weapon|misc>] | drops [list | drop <item hex> <n> | take <drop id> | count <item hex> | ref <ref hex>]";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

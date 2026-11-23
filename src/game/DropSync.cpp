@@ -9,6 +9,8 @@
 #include "net/FormsCommand.h"
 
 #include <array>
+#include <atomic>
+#include <iterator>
 #include <map>
 #include <set>
 
@@ -27,6 +29,7 @@ namespace DropSync
 			RE::FormID    ref = 0;
 			RE::FormID    base = 0;
 			std::uint32_t count = 0;
+			bool          byPlayer = false;  // a drop menu was open (the inventory, the console), or the dev channel dropped it
 		};
 
 		// What the sinks queue (under queueLock, never stateLock): our player's drops, and the references they activated.
@@ -35,6 +38,20 @@ namespace DropSync
 		std::vector<RE::FormID> activateQueue;
 		constexpr std::size_t   MAX_QUEUED = 256;
 		std::uint64_t           queueDropped = 0;
+
+		// The dev channel's drop (`drops drop`, a script's DropObject as a weapon rack's is): the event it makes is our
+		// player's own, by this flag when the engine sends it from inside the call, by the reference the call returned
+		// when it sends it later. Every other drop with no drop menu open is a script's (DropRules::Givable::kScripted).
+		std::atomic<bool>     devDropping{ false };
+		std::set<RE::FormID>  devDrops;  // under stateLock
+		constexpr std::size_t MAX_DEV_DROPS = 32;
+
+		// Whether a menu our player drops items from is open: the inventory (Drop), or the console (player.drop).
+		bool DropMenuOpen()
+		{
+			const auto ui = RE::UI::GetSingleton();
+			return ui && (ui->IsMenuOpen(RE::InventoryMenu::MENU_NAME) || ui->IsMenuOpen(RE::Console::MENU_NAME));
+		}
 
 		// Everything below, between the tick and SKSE's callbacks on the main thread. Never held while sending.
 		std::mutex stateLock;
@@ -81,11 +98,13 @@ namespace DropSync
 			std::uint64_t                    disabledTick = 0;
 		};
 
-		// One of our items going back to our world after a session (its copy, when one lies here).
+		// One of our items going back to our world after a session (its copy, when one lies here), and the session the
+		// record says it left our world in: unmade there once it is back (the record is bound to no session by then).
 		struct Return
 		{
-			DroppedItem item;
-			RE::FormID  copy = 0;
+			DroppedItem   item;
+			RE::FormID    copy = 0;
+			std::uint64_t session = 0;
 		};
 
 		bool          installed = false;
@@ -361,6 +380,28 @@ namespace DropSync
 			}
 		}
 
+		// Buried with its first step taken now (disabled: out of the world and out of our player's reach this frame), the
+		// delete still a second and some ticks later (Retire.h). For our own item the session's copy replaces: a Take on it
+		// in between would give our player an item that also lies in the session.
+		void BuryNow(RE::TESObjectREFR* a_ref, RE::FormID a_base, Clock::time_point a_now)
+		{
+			if (!a_ref) {
+				return;
+			}
+			const auto id = a_ref->GetFormID();
+			auto       it = std::ranges::find(graveyard, id, &Retiring::id);
+			if (it == graveyard.end()) {
+				graveyard.push_back({ .id = id, .base = a_base });
+				it = std::prev(graveyard.end());
+			}
+			if (!it->disabledAt) {
+				NoteThread("our dropped item disabled for the session's copy");
+				a_ref->Disable();
+				it->disabledAt = a_now;
+				it->disabledTick = GameThread::Ticks();
+			}
+		}
+
 		// Our copy of a drop goes (the drop with it, or our player walked away).
 		void RemoveCopy(std::uint32_t a_dropId)
 		{
@@ -454,7 +495,9 @@ namespace DropSync
 						continue;
 					}
 				}
-				record.Unmade(back.item.nonce);
+				// Back in our world: the session it left our world in no longer has it out (a rejoin, or a save made now
+				// and loaded later in that session, sends this entry). One that could not be given back stays out.
+				record.Unmade(back.session, back.item.nonce);
 				++counts.returned;
 			}
 		}
@@ -483,6 +526,8 @@ namespace DropSync
 				DropRules::ItemFacts facts;
 				facts.named = ref != nullptr;
 				facts.created = FormIds::IsRuntime(event.ref);
+				const bool dev = event.ref != 0 && devDrops.erase(event.ref) != 0;
+				facts.scripted = !event.byPlayer && !dev;
 				if (ref) {
 					(void)Describe(ref, facts);
 				}
@@ -682,9 +727,14 @@ namespace DropSync
 					return RE::BSEventNotifyControl::kContinue;
 				}
 				const auto ref = a_event->reference.get();
+				// Our player's own drop (a drop menu open, or the dev channel's call), else a script's.
+				const bool      byPlayer = devDropping.exchange(false) || DropMenuOpen();
 				std::lock_guard guard{ queueLock };
 				if (dropQueue.size() < MAX_QUEUED) {
-					dropQueue.push_back({ .ref = ref ? ref->GetFormID() : 0, .base = a_event->baseObj, .count = static_cast<std::uint32_t>(a_event->itemCount) });
+					dropQueue.push_back({ .ref = ref ? ref->GetFormID() : 0,
+						.base = a_event->baseObj,
+						.count = static_cast<std::uint32_t>(a_event->itemCount),
+						.byPlayer = byPlayer });
 				} else {
 					++queueDropped;
 				}
@@ -769,7 +819,9 @@ namespace DropSync
 			std::lock_guard guard{ stateLock };
 			const auto      now = Clock::now();
 			if (LocalPlayer::InWorld()) {
-				if (recordDue) {
+				// Not while items of ours are still going back to our world (Idle gives them back first): the record would
+				// say they are out, and the server would lay them down again.
+				if (recordDue && returns.empty()) {
 					recordDue = false;
 					const auto mine = record.ForSession();
 					logs::info("Drops: told the session what this world holds of its drops ({} of ours out, {} taken in)", mine.made.size(), mine.taken.size());
@@ -820,7 +872,9 @@ namespace DropSync
 				Claim(a_drop.dropId, Protocol::DropClaim::kKept);  // too many waiting: it stays ours
 				return;
 			}
-			Bury(ours->GetFormID(), ourBase);
+			// Out of our world now, before kPlaced goes: a Take on it this frame would give our player the item the session's
+			// copy stands for (disabled at once, deleted later).
+			BuryNow(ours, ourBase, Clock::now());
 			record.Made(a_drop.nonce);
 			Claim(a_drop.dropId, Protocol::DropClaim::kPlaced);
 			++counts.swapped;
@@ -924,6 +978,7 @@ namespace DropSync
 		reported.clear();
 		unconfirmed.Clear();
 		returns.clear();
+		devDrops.clear();
 		{
 			std::lock_guard queueGuard{ queueLock };
 			dropQueue.clear();
@@ -967,17 +1022,19 @@ namespace DropSync
 	void Clear()
 	{
 		std::lock_guard guard{ stateLock };
-		// Ours lying there, and ours the server had not confirmed: back to our world (the server withdrew them as we left).
+		// Ours lying there, and ours the server had not confirmed: back to our world (the server withdrew them as we left),
+		// each unmade in this session's entry once it is back (TendReturns, after the record is bound to none).
+		const auto              left = record.Current();
 		std::set<std::uint32_t> back;
 		for (const auto& drop : lying.OwnedBy(ourId)) {
 			const auto it = copies.find(drop.dropId);
-			returns.push_back({ drop, it != copies.end() ? it->second : 0 });
+			returns.push_back({ drop, it != copies.end() ? it->second : 0, left });
 			back.insert(drop.dropId);
 		}
 		for (const auto& drop : unconfirmed.TakeAll()) {
 			if (back.insert(drop.dropId).second) {
 				const auto it = copies.find(drop.dropId);
-				returns.push_back({ drop, it != copies.end() ? it->second : 0 });
+				returns.push_back({ drop, it != copies.end() ? it->second : 0, left });
 			}
 		}
 		for (const auto id : back) {
@@ -1083,6 +1140,9 @@ namespace DropSync
 			const auto player = Player();
 			std::string out = std::format("lying={}", lying.Size());
 			std::size_t shown = 0;
+			// What our crosshair is on (the rig's real Take: the copy in the crosshair, then the pad's a).
+			const auto        pick = RE::CrosshairPickData::GetSingleton();
+			const auto        aimedAt = pick ? pick->GetActiveTarget().get() : RE::NiPointer<RE::TESObjectREFR>{};
 			for (const auto& [id, drop] : lying.All()) {
 				if (shown++ == 40) {
 					break;
@@ -1093,9 +1153,10 @@ namespace DropSync
 				if (player) {
 					(void)SameSpace(drop, distance);
 				}
-				out += std::format(" | id={} owner={} base={:08X} count={} health={:.2f} ench={:08X} charge={:.0f} poison={:08X} poisonCount={} soul={} named={} copy={} blocked={} dist={:.0f}",
+				out += std::format(" | id={} owner={} base={:08X} count={} health={:.2f} ench={:08X} charge={:.0f} poison={:08X} poisonCount={} soul={} named={} copy={} blocked={} aimed={} dist={:.0f}",
 					id, drop.ownerId, drop.base, drop.count, drop.health, drop.enchantment, drop.charge, drop.poison, drop.poisonCount, drop.soul,
-					drop.name.empty() ? 0 : 1, copy ? std::format("{:08X}", copy->GetFormID()) : "none", copy && copy->IsActivationBlocked() ? 1 : 0, distance);
+					drop.name.empty() ? 0 : 1, copy ? std::format("{:08X}", copy->GetFormID()) : "none", copy && copy->IsActivationBlocked() ? 1 : 0,
+					copy && aimedAt.get() == copy ? 1 : 0, distance);
 			}
 			return out;
 		}
@@ -1117,8 +1178,18 @@ namespace DropSync
 				return std::format("error: our player has {} of {:08X}", have, item->GetFormID());
 			}
 			logs::info("Drops: the developer channel has our player drop {} x {:08X}", *n, item->GetFormID());
+			// A script's DropObject, which is ours here: the event it makes is our player's drop (devDropping when it is
+			// sent from inside the call, devDrops when later); any other script's stays an ordinary local item.
+			devDropping = true;
 			const auto handle = player->DropObject(item, nullptr, static_cast<std::int32_t>(*n), nullptr, nullptr);
+			devDropping = false;
 			const auto ref = handle.get();
+			if (ref) {
+				if (devDrops.size() >= MAX_DEV_DROPS) {
+					devDrops.erase(devDrops.begin());
+				}
+				devDrops.insert(ref->GetFormID());
+			}
 			return ref ? std::format("dropped ref={:08X}", ref->GetFormID()) : "dropped ref=none";
 		}
 
@@ -1150,6 +1221,22 @@ namespace DropSync
 				return "error: usage: drops count <item hex>";
 			}
 			return std::format("count={}", CountOf(item));
+		}
+
+		// ref <hex>: what became of a reference (the rig's check that a dropper's own item left its world in the swap).
+		std::string RefCommand(const std::vector<std::string_view>& a_words)
+		{
+			const auto id = a_words.size() == 2 ? FormsCommand::ParseHex(a_words[1]) : std::nullopt;
+			if (!id) {
+				return "error: usage: drops ref <ref hex>";
+			}
+			const auto ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(*id);
+			if (!ref) {
+				return std::format("ref={:08X} found=0 inworld=0", *id);
+			}
+			const bool deleted = ref->IsDeleted() || ref->IsMarkedForDeletion();
+			return std::format("ref={:08X} found=1 inworld={} disabled={} deleted={} buried={}", *id, !deleted && InWorld(ref) ? 1 : 0, ref->IsDisabled() ? 1 : 0,
+				deleted ? 1 : 0, std::ranges::find(graveyard, *id, &Retiring::id) != graveyard.end() ? 1 : 0);
 		}
 	}
 
@@ -1192,6 +1279,9 @@ namespace DropSync
 		if (words[0] == "count") {
 			return CountCommand(words);
 		}
-		return "error: usage: drops [list | drop <item hex> <n> | take <drop id> | count <item hex>]";
+		if (words[0] == "ref") {
+			return RefCommand(words);
+		}
+		return "error: usage: drops [list | drop <item hex> <n> | take <drop id> | count <item hex> | ref <ref hex>]";
 	}
 }

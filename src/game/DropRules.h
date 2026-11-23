@@ -42,12 +42,16 @@ namespace DropRules
 		bool          runtimeEnchantment = false;  // an enchantment a player made (a runtime form no other game has)
 		bool          runtimePoison = false;       // a poison a player brewed
 		bool          quest = false;               // a quest alias holds it
+		bool          scripted = false;            // no drop menu was open and the dev channel did not drop it: a script's
+		                                           // DropObject (a weapon rack, a mannequin, a mod placing our gear)
 	};
 
 	enum class Givable : std::uint8_t
 	{
 		kYes,
 		kNoReference,  // the engine's event named no reference: nothing to take out of our world for the copy
+		kScripted,     // a script dropped it (DropObject with no drop menu open): the script keeps the reference (a rack
+		               // holds it, a mod placed it) and would be left holding a deleted one; it stays an ordinary item
 		kPlaced,       // a plugin's own reference (picked up and dropped again): its pickup is not shared yet, so a
 		               // friend's world still has it where the plugin placed it, and a copy would be a second
 		kNotItem,      // not an item a player carries (or a kind this class doesn't know)
@@ -62,6 +66,9 @@ namespace DropRules
 	{
 		if (!a_item.named) {
 			return Givable::kNoReference;
+		}
+		if (a_item.scripted) {
+			return Givable::kScripted;
 		}
 		if (!a_item.created) {
 			return Givable::kPlaced;
@@ -91,6 +98,8 @@ namespace DropRules
 			return "given";
 		case Givable::kNoReference:
 			return "noref";
+		case Givable::kScripted:
+			return "scripted";
 		case Givable::kPlaced:
 			return "placed";
 		case Givable::kNotItem:
@@ -318,6 +327,14 @@ namespace DropRules
 		// An item we dropped is back in our world after all (we left before the server confirmed it, or it went back
 		// with us as we left).
 		void Unmade(std::uint64_t a_nonce) { Erase(Entry()->made, a_nonce); }
+		// ... in a_session's entry, bound or not: an item given back to our world after we left a_session (the record is
+		// bound to no session by then, and that entry is the one a rejoin or a later save sends). Nothing if not kept.
+		void Unmade(std::uint64_t a_session, std::uint64_t a_nonce)
+		{
+			if (const auto s = Find(a_session)) {
+				Erase(s->made, a_nonce);
+			}
+		}
 		// We took a drop: it is in our world.
 		void Took(std::uint32_t a_dropId) { Add(Entry()->taken, a_dropId); }
 		// A take we could not finish: it is not in our world.
@@ -443,6 +460,14 @@ namespace DropRules
 			return &sessions.back();
 		}
 		[[nodiscard]] const Session* Find(std::uint64_t a_id) const
+		{
+			if (a_id == 0) {
+				return nullptr;
+			}
+			const auto it = std::ranges::find(sessions, a_id, &Session::id);
+			return it != sessions.end() ? &*it : nullptr;
+		}
+		Session* Find(std::uint64_t a_id)
 		{
 			if (a_id == 0) {
 				return nullptr;

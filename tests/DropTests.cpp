@@ -645,6 +645,11 @@ TEST("drop judge: a dropped item made at run time is given; no reference, a plug
 	};
 	CHECK(with([](ItemFacts& a_f) { a_f.named = false; }) == Givable::kNoReference);
 	CHECK(with([](ItemFacts& a_f) { a_f.created = false; }) == Givable::kPlaced);
+	// A script's DropObject on our player (a weapon rack, a mannequin, a mod placing our gear) is never given, whatever
+	// the item: the script keeps that reference.
+	CHECK(with([](ItemFacts& a_f) { a_f.scripted = true; }) == Givable::kScripted);
+	CHECK(with([](ItemFacts& a_f) { a_f.scripted = true; a_f.created = false; }) == Givable::kScripted);
+	CHECK(with([](ItemFacts& a_f) { a_f.scripted = true; a_f.kind = ItemKind::kArmor; }) == Givable::kScripted);
 	CHECK(with([](ItemFacts& a_f) { a_f.kind = ItemKind::kOther; }) == Givable::kNotItem);
 	CHECK(with([](ItemFacts& a_f) { a_f.kind = ItemKind::kKey; }) == Givable::kOwn);
 	CHECK(with([](ItemFacts& a_f) { a_f.kind = ItemKind::kBook; }) == Givable::kOwn);
@@ -793,6 +798,53 @@ TEST("drop record: kept per session, the newest last; nothing kept outside a ses
 	CHECK(many.Sessions() == Record::MAX_SESSIONS);
 	many.Bind(1);
 	CHECK((many.ForSession() == DropRecord{ 1, {}, {} }));
+}
+
+TEST("drop record: an item given back after we left is unmade in the session it left in, so a rejoin or a later save does not lay it down again")
+{
+	constexpr std::uint64_t S = 0x5E55;
+	Record                  record;
+	record.Bind(S);
+	record.Made(40);  // our 4 gold swapped for the session's copy
+	record.Made(41);
+	record.Bind(0);  // we left: bound to no session
+	record.Unmade(40);  // ... so the plain call keeps nothing, and the session's entry still has it out
+	record.Bind(S);
+	CHECK(record.HasMade(40));
+	record.Bind(0);
+	record.Unmade(S, 40);  // given back to our world: unmade where it was made
+	record.Unmade(S + 1, 41);  // another session's entry, not kept: nothing
+	record.Unmade(0, 41);
+	CHECK(!record.Empty());
+	const auto saved = record.Save();  // a save made after leaving
+	record.Bind(S);  // the same identity joins again: the same session
+	CHECK((record.ForSession() == DropRecord{ S, { 41 }, {} }));
+	Record loaded;
+	CHECK(loaded.Load(saved));
+	loaded.Bind(S);
+	CHECK((loaded.ForSession() == DropRecord{ S, { 41 }, {} }));
+
+	// The server's half: it remembered the drop as the leaver's as they left; their record, sent on the rejoin, says their
+	// world holds it again, so it does not lie there again.
+	DropStore  store;
+	const auto added = store.Add(1, Item(40, 0xF, 4));
+	REQUIRE(added.drop);
+	const auto id = added.drop->dropId;
+	REQUIRE(store.Confirm(1, id));
+	CHECK(store.Left(1).size() == 1);
+	CHECK(store.TakerOf(id) == 1);
+	auto result = store.Reconcile(1, record.ForSession(), S);
+	CHECK(result.returned.empty());
+	CHECK(store.LyingCount() == 0);
+	// Without the fix (the nonce still out in the session's entry) it lay there again: both in the leaver's world and
+	// lying in the session.
+	DropStore before;
+	const auto again = before.Add(1, Item(40, 0xF, 4));
+	REQUIRE(again.drop);
+	REQUIRE(before.Confirm(1, again.drop->dropId));
+	before.Left(1);
+	result = before.Reconcile(1, DropRecord{ S, { 40, 41 }, {} }, S);
+	CHECK(result.returned.size() == 1);
 }
 
 TEST("drop lying: a list replaces what this game heard once its last packet comes; one placed while it comes stays")
