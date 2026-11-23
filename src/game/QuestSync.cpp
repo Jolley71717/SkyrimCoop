@@ -305,7 +305,7 @@ namespace QuestSync
 			}
 			const auto a = PlaceOf(player);
 			const auto b = PlaceOf(standIn);
-			return a.space != 0 && a.space == b.space && std::hypot(a.x - b.x, a.y - b.y, a.z - b.z) <= QuestRules::NEAR;
+			return a.space != 0 && a.space == b.space && std::hypot(a.x - b.x, a.y - b.y, a.z - b.z) <= QuestRules::NEAR_FRIEND;
 		}
 
 		// What this game reads of one thing the session says (QuestRules::Judge).

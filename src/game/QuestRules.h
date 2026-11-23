@@ -281,7 +281,7 @@ namespace QuestRules
 	// The most entries waiting to be made: past it a new one is dropped (counted).
 	inline constexpr std::size_t MAX_WANTS = 8192;
 	// A friend this near (in one space) is "near" for a stage that moves the player.
-	inline constexpr float NEAR = 4096.0f;
+	inline constexpr float NEAR_FRIEND = 4096.0f;
 
 	// What this game reads of one thing the session says, for Judge.
 	struct Here
