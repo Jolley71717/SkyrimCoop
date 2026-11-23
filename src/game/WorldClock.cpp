@@ -3,6 +3,7 @@
 #include "DevLine.h"
 #include "game/ClockRules.h"
 #include "game/LocalPlayer.h"
+#include "net/FormsCommand.h"
 
 namespace WorldClock
 {
@@ -22,6 +23,9 @@ namespace WorldClock
 		std::uint64_t                       heardCount = 0;
 		std::uint64_t                       reports = 0;
 		std::uint64_t                       scaleBacks = 0;  // our own timescale put back (a save, the session's end)
+		ClockRules::WaitGate                waitGate;        // our own Sleep/Wait: nothing followed while it runs
+		bool                                openingSaid = false;  // the log last said the opening holds our clock
+		std::uint64_t                       waitSaid = 0;          // the wait of ours the log last said holds the clock
 
 		RE::Calendar* Calendar()
 		{
@@ -48,15 +52,73 @@ namespace WorldClock
 			return quest;
 		}
 
+		// The opening's quest as this game has it, and whether it holds our clock (ClockRules::OpeningHolds).
+		struct Opening
+		{
+			bool          found = false;
+			bool          running = false;
+			bool          completed = false;
+			std::uint16_t stage = 0;
+			bool          canMove = true;
+			bool          holds = false;
+		};
+
+		Opening ReadOpening()
+		{
+			Opening    opening;
+			const auto quest = OpeningQuest();
+			if (!quest) {
+				return opening;
+			}
+			const auto controls = RE::ControlMap::GetSingleton();
+			opening.found = true;
+			opening.running = quest->IsRunning();
+			opening.completed = quest->IsCompleted();
+			opening.stage = quest->GetCurrentStageID();
+			opening.canMove = !controls || controls->IsMovementControlsEnabled();
+			opening.holds = ClockRules::OpeningHolds(opening.running, opening.completed, opening.stage, opening.canMove);
+			return opening;
+		}
+
 		bool InOpening()
 		{
-			const auto quest = OpeningQuest();
-			return quest && quest->IsRunning() && !quest->IsCompleted();
+			return ReadOpening().holds;
 		}
 
 		bool Ready()
 		{
 			return LocalPlayer::InWorld() && Calendar() && !InOpening();
+		}
+
+		// The log says each time the opening starts or stops holding our clock, with what it read: a game that never
+		// follows or says a clock is never silent about why.
+		void SayOpening(const Opening& a_opening)
+		{
+			if (a_opening.holds == openingSaid) {
+				return;
+			}
+			openingSaid = a_opening.holds;
+			if (a_opening.holds) {
+				logs::info("Clock: the Helgen opening holds this game's clock (MQ101 running at stage {}, movement {}): its own time and weather, and nothing said, until it ends",
+					a_opening.stage, a_opening.canMove ? "on" : "off");
+			} else {
+				logs::info("Clock: the Helgen opening no longer holds this game's clock (MQ101 running={} completed={} stage {}, movement {}): the session's clock from now on",
+					a_opening.running ? 1 : 0, a_opening.completed ? 1 : 0, a_opening.stage, a_opening.canMove ? "on" : "off");
+			}
+		}
+
+		bool SleepWaitOpen()
+		{
+			const auto ui = RE::UI::GetSingleton();
+			return ui && ui->IsMenuOpen(RE::SleepWaitMenu::MENU_NAME);
+		}
+
+		// The worldspace the player stands in, and the one whose sky it has (a walled city's is Tamriel's).
+		RE::TESWorldSpace* SkyOf(RE::TESWorldSpace* a_world)
+		{
+			return ClockRules::SkyWorld(a_world, [](RE::TESWorldSpace* a_child) -> RE::TESWorldSpace* {
+				return a_child->parentUseFlags.any(RE::TESWorldSpace::ParentUseFlag::kUseClimateData) ? a_child->parentWorld : nullptr;
+			});
 		}
 
 		ClockRules::Sky HereSky()
@@ -73,9 +135,18 @@ namespace WorldClock
 			here.overridden = sky->overrideWeather != nullptr;
 			if (!cell->IsInteriorCell() && world && sky->mode.get() == RE::Sky::Mode::kFull) {
 				here.outside = true;
-				here.worldspace = world->GetFormID();
+				here.worldspace = SkyOf(world)->GetFormID();
 			}
 			return here;
+		}
+
+		// The worldspace the player stands in (0 inside), for the dev line: the rig tells a walled city from its sky by it.
+		std::uint32_t HerePlace()
+		{
+			const auto player = RE::PlayerCharacter::GetSingleton();
+			const auto cell = player ? player->GetParentCell() : nullptr;
+			const auto world = player ? player->GetWorldspace() : nullptr;
+			return cell && !cell->IsInteriorCell() && world ? world->GetFormID() : 0;
 		}
 
 		Protocol::ClockState Ours(RE::Calendar* a_calendar)
@@ -137,6 +208,57 @@ namespace WorldClock
 				a_owner.playerId);
 		}
 
+		// The owner's clock followed, this tick: a move forward under way, the owner's report not yet followed, its
+		// timescale and its sky. Never while our own Sleep/Wait runs (Frame).
+		void FollowOwner(RE::Calendar* a_calendar, Clock::time_point a_now)
+		{
+			if (const auto set = follower.Advance(a_calendar->gameHour->value)) {
+				Shift(a_calendar, *set, set->hour >= ClockRules::BEFORE_MIDNIGHT ? "forward to midnight" : "forward");
+			}
+			if (!heard) {
+				return;
+			}
+			if (fresh && !follower.Moving()) {
+				fresh = false;
+				if (const auto set = follower.Follow(*heard, a_calendar->gameHour->value, a_calendar->gameDaysPassed->value)) {
+					Shift(a_calendar, *set, set->days < 0.0 ? "back" : set->hour >= ClockRules::BEFORE_MIDNIGHT ? "forward to midnight" : "forward");
+				}
+			}
+			if (const auto value = scale.Follow(heard->timeScale, a_calendar->timeScale->value)) {
+				SetScale(a_calendar, *value, std::format("player {}'s", heard->playerId));
+			}
+			FollowWeather(*heard, a_now);
+		}
+
+		// Dev `clock weather <hex>`: this game's own weather changed as its climate changes it (Sky::ForceWeather, not an
+		// override), for the rig: a change no script holds, so the session's weather may undo it.
+		std::string ForceOwn(std::string_view a_id)
+		{
+			const auto id = FormsCommand::ParseHex(a_id);
+			const auto sky = RE::Sky::GetSingleton();
+			const auto target = id ? RE::TESForm::LookupByID<RE::TESWeather>(*id) : nullptr;
+			if (!sky || !target) {
+				return "error: usage: clock weather <weather form id, hex>";
+			}
+			sky->ForceWeather(target, false);
+			return std::format("weather={:08X} forced override={}", *id, sky->overrideWeather ? 1 : 0);
+		}
+
+		// Dev `clock release`: any weather a script or the console forced as an override let go (the rig, at the end of
+		// its weather legs).
+		std::string Release()
+		{
+			const auto sky = RE::Sky::GetSingleton();
+			if (!sky) {
+				return "error: no sky";
+			}
+			const bool had = sky->overrideWeather != nullptr;
+			if (had) {
+				sky->ReleaseWeatherOverride();
+			}
+			return std::format("released={} override={}", had ? 1 : 0, sky->overrideWeather ? 1 : 0);
+		}
+
 		bool Kind(RE::TESWeather* a_weather, std::string_view a_kind)
 		{
 			using F = RE::TESWeather::WeatherDataFlag;
@@ -192,16 +314,20 @@ namespace WorldClock
 			const auto here = HereSky();
 			const auto kept = scale.Kept();
 			const auto age = heard ? std::chrono::duration<double>(Clock::now() - heardAt).count() : -1.0;
+			const auto opening = ReadOpening();
 			return std::format(
 				"ready={} opening={} hour={:.3f} days={:.4f} raw={:.4f} midnights={} day={} month={} scale={:.2f} own={} outside={} world={:08X} weather={:08X} "
 				"override={} owner={} heard={} heardAge={:.1f} ownerHour={} ownerWeather={:08X} offset={} moving={:.3f} reports={} lineUps={} hourSets={} "
-				"backSets={} midnightSteps={} forced={} eased={} held={} scaleSets={} scaleBacks={}",
-				Ready() ? 1 : 0, InOpening() ? 1 : 0, c->gameHour->value, c->gameDaysPassed->value, c->rawDaysPassed, c->midnightsPassed,
+				"backSets={} midnightSteps={} forced={} eased={} held={} scaleSets={} scaleBacks={} place={:08X} waiting={} waits={} mq101={} canMove={}",
+				Ready() ? 1 : 0, opening.holds ? 1 : 0, c->gameHour->value, c->gameDaysPassed->value, c->rawDaysPassed, c->midnightsPassed,
 				c->gameDay ? c->gameDay->value : 0.0f, c->gameMonth ? c->gameMonth->value + 1.0f : 0.0f, c->timeScale->value,
 				kept ? std::format("{:.2f}", *kept) : std::string{ "-" }, here.outside ? 1 : 0, here.worldspace, here.weather, here.overridden ? 1 : 0,
 				heard ? heard->playerId : 0, heardCount, age, heard ? std::format("{:.3f}", heard->gameHour) : std::string{ "-" }, heard ? heard->weather : 0,
 				follower.Offset() ? std::format("{:.4f}", *follower.Offset()) : std::string{ "-" }, follower.Left(), reports, follower.lineUps, follower.hourSets,
-				follower.backSets, follower.midnightSteps, weather.forced, weather.eased, weather.held, scale.sets, scaleBacks);
+				follower.backSets, follower.midnightSteps, weather.forced, weather.eased, weather.held, scale.sets, scaleBacks, HerePlace(), waitGate.Open() ? 1 : 0,
+				waitGate.waits,
+				opening.found ? std::format("{}/{}/{}", opening.running ? "running" : "stopped", opening.completed ? "completed" : "open", opening.stage) : std::string{ "-" },
+				opening.canMove ? 1 : 0);
 		}
 	}
 
@@ -213,12 +339,19 @@ namespace WorldClock
 		follower.Rebaseline();
 		weather.Reset();
 		reporter.Reset();  // ours goes on the first tick in the world
+		waitGate.Reset();
+		openingSaid = false;  // a new session says again whether the opening holds our clock
 	}
 
 	void Frame(const SendFn& a_send)
 	{
 		const auto calendar = Calendar();
-		if (!calendar || !Ready()) {
+		if (!calendar || !LocalPlayer::InWorld()) {
+			return;
+		}
+		const auto opening = ReadOpening();
+		SayOpening(opening);
+		if (opening.holds) {
 			return;
 		}
 		const auto now = Clock::now();
@@ -227,20 +360,25 @@ namespace WorldClock
 			fresh = false;
 			weather.Reset();
 		}
-		if (const auto set = follower.Advance(calendar->gameHour->value)) {
-			Shift(calendar, *set, set->hour >= ClockRules::BEFORE_MIDNIGHT ? "forward to midnight" : "forward");
-		}
-		if (heard) {
-			if (fresh && !follower.Moving()) {
-				fresh = false;
-				if (const auto set = follower.Follow(*heard, calendar->gameHour->value, calendar->gameDaysPassed->value)) {
-					Shift(calendar, *set, set->days < 0.0 ? "back" : set->hour >= ClockRules::BEFORE_MIDNIGHT ? "forward to midnight" : "forward");
-				}
+		// Our own Sleep/Wait runs: the engine passes the hours and ends the wait by the clock, so nothing of ours moves it
+		// (the hour, the day count, the timescale, the sky) until the menu shuts; then the owner's last report is followed
+		// from where the wait left us. Our clock is still said meanwhile (the server passes on only the owner's).
+		switch (waitGate.Next(SleepWaitOpen())) {
+		case ClockRules::WaitStep::kHold:
+			if (waitGate.waits != waitSaid) {
+				waitSaid = waitGate.waits;
+				logs::info("Clock: our own sleep or wait runs at {:.2f}: nothing of the session's clock is followed until it ends", calendar->gameHour->value);
 			}
-			if (const auto value = scale.Follow(heard->timeScale, calendar->timeScale->value)) {
-				SetScale(calendar, *value, std::format("player {}'s", heard->playerId));
-			}
-			FollowWeather(*heard, now);
+			break;
+		case ClockRules::WaitStep::kShut:
+			follower.Drop();
+			fresh = heard.has_value();
+			logs::info("Clock: our own sleep or wait ended at {:.2f}: {}", calendar->gameHour->value,
+				heard ? std::format("player {}'s clock followed again from here", heard->playerId) : std::string{ "no clock to follow" });
+			[[fallthrough]];
+		case ClockRules::WaitStep::kRun:
+			FollowOwner(calendar, now);
+			break;
 		}
 		const auto ours = Ours(calendar);
 		if (reporter.Due(now, ours)) {
@@ -284,6 +422,7 @@ namespace WorldClock
 	void AfterLoad()
 	{
 		follower.Rebaseline();
+		waitGate.Reset();
 		scale.Forget();
 		weather.Reset();
 		reporter.Reset();
@@ -304,6 +443,7 @@ namespace WorldClock
 		fresh = false;
 		ourId = 0;
 		follower.Rebaseline();
+		waitGate.Reset();
 		weather.Reset();
 		reporter.Reset();
 	}
@@ -321,6 +461,12 @@ namespace WorldClock
 			}
 			return Pick(words[1], *skip);
 		}
-		return "error: usage: clock [status] | clock pick <clear|cloudy|rain|snow> [n]";
+		if (words[0] == "weather" && words.size() >= 2) {
+			return ForceOwn(words[1]);
+		}
+		if (words[0] == "release") {
+			return Release();
+		}
+		return "error: usage: clock [status] | clock pick <clear|cloudy|rain|snow> [n] | clock weather <hex> | clock release";
 	}
 }

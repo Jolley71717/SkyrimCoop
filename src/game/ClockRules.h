@@ -23,7 +23,9 @@
 //   across midnight goes forward to the owner's hour on its next day, as waiting would.
 // - The timescale is the owner's while following; the follower's own is put back when the session ends and while a save
 //   is written, so nothing of the session goes into its save.
-// - Weather, only outside, in the owner's worldspace: forced at once when this game comes into the owner's sky (a join,
+// - Nothing moves while this game's own Sleep/Wait runs (WaitGate); its wait is undone once it ends.
+// - Weather, only outside, under the owner's sky (the same worldspace, or one on its climate: a walled city and the land
+//   round it are one sky, SkyWorld): forced at once when this game comes into the owner's sky (a join,
 //   stepping outside), eased in when the owner's weather turns (forced if it has not taken after WEATHER_PATIENCE). A
 //   weather this game's own scripts forced (an override: a quest's storm) is left alone.
 namespace ClockRules
@@ -148,6 +150,13 @@ namespace ClockRules
 		void Rebaseline()
 		{
 			dayOffset.reset();
+			Drop();
+		}
+
+		// This game passed time itself (its own sleep or wait, WaitGate): a move forward under way is dropped, and the next
+		// report is followed from where the wait left us, by the day offset kept.
+		void Drop()
+		{
 			advanceLeft = 0.0;
 			atMidnight = false;
 		}
@@ -169,6 +178,80 @@ namespace ClockRules
 		double                advanceLeft = 0.0;  // hours still to move forward
 		bool                  atMidnight = false;
 	};
+
+	// This game's own Sleep/Wait: the engine passes the hours itself while its menu stays open (a sleep in a bed, a wait
+	// anywhere), and ends the wait by the clock it reads. Nothing of ours moves the clock under it: while the menu is open
+	// the owner's clock is not followed (its last report is kept), and once it shuts any move under way is dropped
+	// (Follower::Drop) and the owner's clock is lined up from where the wait left us: a wait of a friend's is undone after
+	// it, never during it. The game's other ways of passing time (fast travel, a carriage, jail, training) jump the clock
+	// at once with no menu running, and are followed as any other jump is.
+	enum class WaitStep
+	{
+		kRun,   // no wait of ours: follow as usual
+		kHold,  // a wait of ours runs: follow nothing
+		kShut,  // a wait of ours just ended: drop any move, follow the owner's last report again
+	};
+
+	class WaitGate
+	{
+	public:
+		// Once a tick, with whether the Sleep/Wait menu is open now.
+		[[nodiscard]] WaitStep Next(bool a_menuOpen)
+		{
+			if (a_menuOpen) {
+				if (!open) {
+					open = true;
+					++waits;
+				}
+				return WaitStep::kHold;
+			}
+			if (open) {
+				open = false;
+				return WaitStep::kShut;
+			}
+			return WaitStep::kRun;
+		}
+
+		[[nodiscard]] bool Open() const { return open; }
+
+		// A load or a new session: no wait of ours runs.
+		void Reset() { open = false; }
+
+		std::uint64_t waits = 0;  // waits of ours the gate held through
+
+	private:
+		bool open = false;
+	};
+
+	// Whether the Helgen opening holds this game's clock (its own time and weather, nothing said): its quest (MQ101)
+	// runs, is not done, and has begun in this game: a stage of it set, or the player's movement taken from them (the
+	// cart ride). A game put in the world another way (the console's coc from the main menu, an alternate start) that
+	// leaves the quest running untouched at its first stage, with the player free to move, is no opening.
+	[[nodiscard]] constexpr bool OpeningHolds(bool a_running, bool a_completed, std::uint16_t a_stage, bool a_canMove)
+	{
+		return a_running && !a_completed && (a_stage > 0 || !a_canMove);
+	}
+
+	// Parents walked at most, for a worldspace whose parents loop (a broken mod).
+	inline constexpr int MAX_SKY_PARENTS = 8;
+
+	// The worldspace whose sky a worldspace has: a_world itself, or the parent whose climate it uses, walked up. The walled
+	// cities (Whiterun, Solitude, Windhelm, Riften, Markarth) are child worldspaces of Tamriel on its climate, and so is
+	// any mod's world made the same way: one sky with their parent, so a player inside the walls and one on the plains
+	// outside share a weather. a_parentSky(world) gives the parent whose climate that world uses, or none (World{}). World
+	// is a form ID (the tests) or a worldspace pointer (the game).
+	template <class World, class ParentSky>
+	[[nodiscard]] World SkyWorld(World a_world, ParentSky&& a_parentSky)
+	{
+		for (int i = 0; a_world != World{} && i < MAX_SKY_PARENTS; ++i) {
+			const World parent = a_parentSky(a_world);
+			if (parent == World{} || parent == a_world) {
+				break;
+			}
+			a_world = parent;
+		}
+		return a_world;
+	}
 
 	// When a game says its clock: every REPORT_EVERY, and at once (looked at every LOOK_EVERY) when its weather,
 	// worldspace or timescale changed or its clock jumped (a sleep, a wait, a console), so the others follow in a second
@@ -217,7 +300,7 @@ namespace ClockRules
 	struct Sky
 	{
 		bool          outside = false;     // in an exterior cell, under the full sky
-		std::uint32_t worldspace = 0;      // 0 inside
+		std::uint32_t worldspace = 0;      // the worldspace whose sky this is (SkyWorld: a walled city's is its parent's); 0 inside
 		std::uint32_t weather = 0;         // the current weather (0 none)
 		bool          overridden = false;  // a script of this game forced a weather (Sky::overrideWeather)
 	};

@@ -589,3 +589,119 @@ TEST("clock rules: the owner's timescale while following, ours kept for the save
 	CHECK(*loaded.Kept() == 10.0f);
 	CHECK(loaded.sets == 2u);
 }
+
+TEST("clock rules: a walled city and the land round it are one sky: a world on its parent's climate is its parent's")
+{
+	// Tamriel (3C); Whiterun inside its walls (1A26F), a child world on Tamriel's climate; a mod's world on the city's;
+	// a world on its own climate (Solstheim, a mod's land); two worlds whose parents loop (a broken mod).
+	const auto parentSky = [](std::uint32_t a_world) -> std::uint32_t {
+		switch (a_world) {
+		case 0x1A26F:
+			return 0x3C;
+		case 0x50001:
+			return 0x1A26F;
+		case 0x60001:
+			return 0x60002;
+		case 0x60002:
+			return 0x60001;
+		default:
+			return 0;
+		}
+	};
+	CHECK(SkyWorld(std::uint32_t{ 0x3C }, parentSky) == 0x3Cu);
+	CHECK(SkyWorld(std::uint32_t{ 0x1A26F }, parentSky) == 0x3Cu);
+	CHECK(SkyWorld(std::uint32_t{ 0x50001 }, parentSky) == 0x3Cu);  // walked up two
+	CHECK(SkyWorld(std::uint32_t{ 0x7777 }, parentSky) == 0x7777u);
+	CHECK(SkyWorld(std::uint32_t{ 0 }, parentSky) == 0u);
+	const auto looped = SkyWorld(std::uint32_t{ 0x60001 }, parentSky);  // stops
+	CHECK(looped == 0x60001u || looped == 0x60002u);
+
+	using Clock = std::chrono::steady_clock;
+	const auto t0 = Clock::time_point{} + 1000s;
+	const auto at = [&](std::uint32_t a_world, std::uint32_t a_weather) {
+		return Sky{ .outside = true, .worldspace = SkyWorld(a_world, parentSky), .weather = a_weather };
+	};
+	const auto says = [&](std::uint32_t a_world, std::uint32_t a_weather) { return Outside(a_weather, SkyWorld(a_world, parentSky)); };
+
+	// Compared by the raw worldspace, a friend outside never follows a host inside the walls (the gap this closes).
+	WeatherFollower raw;
+	CHECK(raw.Decide(Outside(0xAAAA, 0x1A26F), Sky{ .outside = true, .worldspace = 0x3C, .weather = 0xBBBB }, t0) == WeatherMove::kNone);
+
+	// The host inside Whiterun's walls, a friend on the plains: one sky. Arriving: forced once; the host's weather turns:
+	// eased in, as under one sky.
+	WeatherFollower weather;
+	CHECK(says(0x1A26F, 0xAAAA).worldspace == 0x3Cu);
+	CHECK(weather.Decide(says(0x1A26F, 0xAAAA), at(0x3C, 0xBBBB), t0) == WeatherMove::kForce);
+	CHECK(weather.Decide(says(0x1A26F, 0xAAAA), at(0x3C, 0xAAAA), t0 + 5s) == WeatherMove::kNone);
+	CHECK(weather.Decide(says(0x1A26F, 0xCCCC), at(0x3C, 0xAAAA), t0 + 10s) == WeatherMove::kEase);
+	CHECK(weather.Decide(says(0x1A26F, 0xCCCC), at(0x3C, 0xCCCC), t0 + 20s) == WeatherMove::kNone);
+	// The host walks out of the gate: still one sky, no arrival snap; its next turn eases in.
+	CHECK(weather.Decide(says(0x3C, 0xCCCC), at(0x3C, 0xCCCC), t0 + 30s) == WeatherMove::kNone);
+	CHECK(weather.Decide(says(0x3C, 0xDDDD), at(0x3C, 0xCCCC), t0 + 40s) == WeatherMove::kEase);
+	// The friend walks in through the gate: still one sky; the host's turn eases in there too.
+	CHECK(weather.Decide(says(0x3C, 0xDDDD), at(0x1A26F, 0xDDDD), t0 + 50s) == WeatherMove::kNone);
+	CHECK(weather.Decide(says(0x3C, 0xEEEE), at(0x1A26F, 0xDDDD), t0 + 60s) == WeatherMove::kEase);
+	CHECK(weather.forced == 1u);
+	CHECK(weather.eased == 3u);
+
+	// A world on its own climate is another sky: not followed.
+	CHECK(weather.Decide(says(0x3C, 0xEEEE), at(0x7777, 0xDDDD), t0 + 70s) == WeatherMove::kNone);
+}
+
+TEST("clock rules: nothing follows while this game's own Sleep/Wait runs; once it shuts, the owner's clock is lined up from there")
+{
+	WaitGate gate;
+	CHECK(gate.Next(false) == WaitStep::kRun);
+	CHECK(gate.Next(true) == WaitStep::kHold);
+	CHECK(gate.Next(true) == WaitStep::kHold);
+	CHECK(gate.Open());
+	CHECK(gate.waits == 1u);
+	CHECK(gate.Next(false) == WaitStep::kShut);
+	CHECK(gate.Next(false) == WaitStep::kRun);
+	CHECK(gate.Next(true) == WaitStep::kHold);
+	CHECK(gate.waits == 2u);
+	gate.Reset();  // a load
+	CHECK(!gate.Open());
+	CHECK(gate.Next(false) == WaitStep::kRun);
+
+	// A friend lined up at 01:30 sleeps eleven hours, to 12:30; nothing is followed meanwhile. Once the menu shuts, the
+	// owner's last report (01:36) brings it back within the day, the day count with it: one move back after the sleep.
+	{
+		auto       follower = LinedUp(1.5f, 3.0625);
+		const auto set = follower.Follow(Owner(1.6f, static_cast<float>(13.0625 + 0.1 / 24.0)), 12.5f, 3.0625 + 11.0 / 24.0);
+		REQUIRE(set);
+		CHECK(Near(set->hour, 1.6, 0.01));
+		CHECK(Near(set->days, -10.9 / 24.0, 1e-3));
+		CHECK(follower.backSets == 1u);
+		CHECK(follower.lineUps == 1u);  // by the day offset, not lined up again
+	}
+
+	// A move forward to midnight was under way (the owner slept) when the friend's own wait began: dropped when the wait
+	// ends, and the owner's clock followed from where the wait left the friend (past midnight already): forward to it.
+	{
+		auto       follower = LinedUp(20.0f, 3.8333);
+		const auto first = follower.Follow(Owner(4.0f, static_cast<float>(13.8333 + 8.0 / 24.0)), 20.0f, 3.8333);
+		REQUIRE(first);
+		CHECK(follower.Moving());
+		follower.Drop();
+		CHECK(!follower.Moving());
+		CHECK(!follower.Advance(1.99f));
+		// The friend's own wait took it from 23:59 to 01:59 of its next day.
+		const auto set = follower.Follow(Owner(4.1f, static_cast<float>(13.8333 + 8.1 / 24.0)), 1.99f, 3.8333 + 5.99 / 24.0);
+		REQUIRE(set);
+		CHECK(Near(set->hour, 4.1, 0.01));
+		CHECK(Near(set->days, 2.11 / 24.0, 1e-3));
+		CHECK(follower.lineUps == 1u);
+		CHECK(!follower.Moving());
+	}
+}
+
+TEST("clock rules: the Helgen opening holds the clock only once it has begun: a stage set, or the player held still in the cart")
+{
+	CHECK(OpeningHolds(true, false, 0, false));    // the cart: the quest at its start, the player's movement taken
+	CHECK(OpeningHolds(true, false, 10, true));    // a stage set: in Helgen, free to move
+	CHECK(!OpeningHolds(true, false, 0, true));    // running untouched, free to move: coc from the main menu, an alternate start
+	CHECK(!OpeningHolds(true, true, 1000, true));  // done
+	CHECK(!OpeningHolds(false, false, 0, false));  // not running (a scene elsewhere holds the player)
+	CHECK(!OpeningHolds(false, true, 1000, true));
+}

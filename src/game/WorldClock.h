@@ -12,7 +12,9 @@
 // src/game/ClockRules.h). Every game says its clock every 5 s and at once on a change (kClock); the server passes on only
 // the clock owner's (the host's game, else the player there longest), and every other game follows it: its hour (a
 // sleep or a wait of the owner's is one here too; its own are undone within the day), its timescale, and outside in
-// the owner's worldspace its weather. A game in the Helgen opening (MQ101 running) keeps its own and says nothing.
+// the owner's sky (its worldspace, or one on its climate: a walled city) its weather. Nothing is followed while this
+// game's own Sleep/Wait runs. A game in the Helgen opening (ClockRules::OpeningHolds) keeps its own and says nothing,
+// and its log says when that starts and ends.
 //
 // From the tick only (GameThread), and from SKSE's messages on the main thread (BeforeSave, AfterLoad).
 namespace WorldClock
@@ -42,6 +44,7 @@ namespace WorldClock
 
 	// Developer channel: `clock` (one line: the hour, the day count, the timescale, the sky, the counts) and `clock pick
 	// <clear|cloudy|rain|snow> [n]` (the n-th weather of the base game of that kind that is not the current one, for the
-	// rig: both games pick the same).
+	// rig: both games pick the same), `clock weather <hex>` (this game's own weather changed, not as an override: one the
+	// session's weather may undo) and `clock release` (any weather override let go).
 	[[nodiscard]] std::string Command(std::string_view a_args);
 }
