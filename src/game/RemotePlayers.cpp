@@ -1895,7 +1895,7 @@ namespace RemotePlayers
 			const auto at = actor->GetPosition();
 			read.z = at.z;
 			read.pitch = -actor->GetAngleX() * 180.0f / std::numbers::pi_v<float>;
-			read.body = Water::BodyRise(actor);
+			read.body = Water::BodyRise(actor.get());
 			read.water = Water::HeightAt(at, actor->GetParentCell());
 			reads[id] = read;
 		}
