@@ -141,7 +141,31 @@ Since protocol 5. Not tested in a game yet; the rig step `doors` is ready for it
 
 ## The world
 
-Not designed yet (phase 4), beyond doors, locks and mechanisms (above). The host's world is the world: containers, items lying about, bodies, harvested and mined things, time and weather. To settle: what a friend who joins late is told, respawning cells, what a friend's save keeps, houses and Hearthfire.
+Not designed yet (phase 4), beyond doors, locks and mechanisms (above) and time and weather (below). The host's world is the world: containers, items lying about, bodies, harvested and mined things. To settle: what a friend who joins late is told, respawning cells, what a friend's save keeps, houses and Hearthfire.
+
+### Time and weather
+
+Since protocol 9. Not tested in a game yet; the rig step `clock` is ready for it. The rules, free of the game, are `src/game/ClockRules.h`; the game side is `src/game/WorldClock`.
+
+**Whose clock.** The session's clock is the clock owner's: the host's game, or on a dedicated server the player there longest (the sister project's rule). Every game says its clock (`kClock`: the hour, the day count, the timescale, and outside its worldspace and weather) every 5 seconds, and within a second of a change (a weather, a worldspace, a timescale, or an hour or day that jumped: a wait, a sleep, a load, the console). The server passes on only the owner's (`kRemoteClock`), keeps the last one for a friend who joins, and drops anyone else's (logged once per connection). A kept clock whose owner left is not given to a joiner; a new session forgets it. At most 4 clocks a second go out per game, the newest owed when the budget is spent.
+
+**Following the hour.** A friend's game keeps the owner's hour (and the 20 seconds after the owner's last word; after that it keeps its own until the owner speaks again):
+- The first clock heard lines the two up: forward to the owner's hour, or back within the same day, never back across midnight (a friend's date never goes back).
+- From then on the two day counts are kept a fixed number of days apart, and each move of the owner's (a wait, a sleep, the hours passing) is the friend's too. A move forward stops at 23.99 for the game to roll its own date over (its calendar and its timers see midnight), then goes on.
+- The day count moves with the hour we set (`GameDaysPassed`), as it does when the game waits; a console `set gamehour` moves the hour alone, and is followed the same way.
+- The two are lined up afresh when the offset no longer fits (the owner loaded a save, or set its hour by hand), when another player becomes the owner, when a move would be more than 72 hours, or when a move back would cross midnight.
+- A friend's own wait or sleep is undone: back to the owner's hour within the day. One that crossed midnight cannot go back without the date going back: that friend goes on to the owner's hour the next day. The owner's game never follows anyone.
+
+**Timescale.** A friend's game runs at the owner's timescale. Its own is kept: it goes into its saves (set back just before a save is written, the owner's again on the next tick) and is set back when the session ends. A save loaded in the session has its own timescale, which is kept as the game's own from then on.
+
+**Weather.** Only outside, in the owner's worldspace (a weather is a worldspace's: a worldspace this game lacks has no weather either, and a weather made at run time is not sent). On arrival under the owner's sky the weather is forced at once; when the owner's turns, it is eased in as the game changes weather; an ease that has not taken after 30 seconds is forced. A weather this game's own script forced (an override: a quest's storm, a dragon's) is held, not fought, and logged once. The weather is set without an override of ours, so a friend's climate may roll its own weather between the owner's reports; it is eased back.
+
+**The Helgen opening.** A game in the opening (`MQ101` running and not completed) keeps its own clock and says nothing: the opening's scenes are timed by its own hour and weather.
+
+**Not yet:**
+- A shout or spell that changes the weather (Clear Skies, Storm Call) in a friend's game is undone by the owner's; it does not reach the owner.
+- A friend's save keeps the session's hour and date; loading it alone, outside the session, is that day.
+- Weather inside (none) and in a worldspace other than the owner's is each game's own.
 
 ## Quests
 
@@ -218,3 +242,8 @@ Choices made to keep moving. Each is the obvious option, cheap to change now, an
 | The ban list, load-order translation, the mod comparison shown to a refused player, and the log-privacy test over all sources are not carried yet ([PORTING.md](PORTING.md)). | Carry them now. |
 | Whether to ever build on another project's GPL code. | [PRIOR-ART.md](PRIOR-ART.md) sets out what that would and would not allow. Nothing has been taken. |
 | Proton and the Steam Deck are reported in the log and otherwise untested. | Test them from phase 1. |
+| The session's clock is the host's, else the player there longest, and a friend's own wait or sleep is undone (pulled back to the owner's hour within the day). | Let a friend's wait or sleep move everyone (any player may pass time), or let each game keep its own hour. |
+| A friend's clock never goes back across midnight: a friend just past midnight while the owner is just before it (or one that waited past midnight itself) goes on to the owner's hour the next day, nearly a day forward, its date rolling over. | Go back across midnight, the date going back a day (timers and calendars that saw midnight would run twice). |
+| The timescale follows the owner's in the session; each game's own goes into its saves. | Each game keeps its own timescale. |
+| The owner's weather is set without an override, so a script's override in a friend's game is held and a climate may roll its own weather between reports. | Set it with an override while following, which a quest's or a shout's weather would then fight. |
+| The Helgen opening keeps its own clock and weather. | Follow the owner's from the first frame. |

@@ -13,6 +13,7 @@
 #include "game/LocalPlayer.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
+#include "game/WorldClock.h"
 #include "game/QuestSync.h"
 #include "game/WorldObjects.h"
 #include "net/Session.h"
@@ -219,6 +220,7 @@ namespace
 			RemotePlayers::AfterLoad();  // any stand-in the save brought back goes
 			WorldObjects::AfterLoad();   // the loaded world's doors are the save's: the session's words are asked for again
 			QuestSync::AfterLoad();      // ... and its quests: the host says them again, a friend asks for the session's
+			WorldClock::AfterLoad();     // ... and its clock: the save's day count and timescale, lined up with the owner's again
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
@@ -226,12 +228,14 @@ namespace
 			RemotePlayers::ForgetStandIns();
 			WorldObjects::AfterLoad();
 			QuestSync::AfterLoad();
+			WorldClock::AfterLoad();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:
 			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
 			RemotePlayers::BeforeSave();
+			WorldClock::BeforeSave();  // ... and our own timescale goes into it, not the session's
 			break;
 		case SKSE::MessagingInterface::kDeleteGame:
 			logs::debug("Save: \"{}\" was deleted", MessageText(a_msg));

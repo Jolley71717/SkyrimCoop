@@ -39,7 +39,11 @@ namespace Protocol
 	//    kept by the server for whoever joins or loads later; the host's game says what its world holds at its welcome
 	//    and after each load (kQuestReset, then its quests). Written beside 5 (doors) and 6 (NPCs, another branch): the
 	//    number is this branch's; whichever of them is merged later renumbers, the message numbers do not clash.
-	inline constexpr std::uint16_t VERSION = 7;
+	// 9: the session's clock and weather (ClockState, docs/DESIGN.md "Time and weather"): every game says its time of day,
+	//    day count, timescale and outdoor weather; the server passes on the clock owner's alone (the host's game, else
+	//    the player there longest) and keeps it for whoever joins. Written on top of 7 (quests) beside 8 (NPC health,
+	//    another branch): whichever is merged later renumbers; the message numbers (39, 40) do not clash.
+	inline constexpr std::uint16_t VERSION = 9;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -100,6 +104,8 @@ namespace Protocol
 		kQuestAnswer = 32,     // server -> the reporter alone, reliable: its entries that were not new, each with why
 		kAskQuests = 33,       // client -> server, reliable: send me every kept quest entry again (after a load)
 		kQuestReset = 34,      // host -> server: my world is new (a welcome, a load): its quests follow; server -> the others
+		kClock = 39,           // client -> server, reliable: our time of day, day count, timescale and weather (every 5 s, and on a change)
+		kRemoteClock = 40,     // server -> the others: the clock owner's (and the kept one, to a joiner)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -421,6 +427,24 @@ namespace Protocol
 		std::uint32_t playerId = 0;
 		bool operator==(const QuestReset&) const = default;
 	};
+
+	// A game's clock and weather (kClock, playerId 0; kRemoteClock, the clock owner's player id). Its forms are the
+	// worldspace the sender stands in outside (0: inside, or a place the reader's game lacks) and the weather there (0:
+	// none said, or one the reader's game lacks); a reader forces no weather from a report without both.
+	struct ClockState
+	{
+		std::uint32_t playerId = 0;
+		float         gameHour = 0.0f;    // GameHour, 0 to under 24
+		float         daysPassed = 0.0f;  // GameDaysPassed: tells a long sleep from a short one, and a load from both
+		float         timeScale = 0.0f;   // TimeScale: game seconds per real second (0 stands time still)
+		std::uint32_t worldspace = 0;
+		std::uint32_t weather = 0;
+		bool operator==(const ClockState&) const = default;
+	};
+	// The most days a clock may say (a save of years of play is a few thousand) and the largest timescale (mods offer a
+	// few hundred at most): a number past either is no game's.
+	inline constexpr float MAX_DAYS_PASSED = 1.0e6f;
+	inline constexpr float MAX_TIME_SCALE = 100000.0f;
 
 	// The most entries in one batch (a few hundred bytes: one reliable packet).
 	inline constexpr std::size_t MAX_QUEST_BATCH = 64;
@@ -1149,6 +1173,49 @@ namespace Protocol
 			msg.playerId = r.U32();
 		}
 		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kClock (no player id: the server knows whose it is) or kRemoteClock (the owner's player id first).
+	inline std::vector<std::uint8_t> Encode(const ClockState& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		if (a_type == MessageType::kRemoteClock) {
+			w.U32(a_msg.playerId);
+		}
+		w.F32(a_msg.gameHour);
+		w.F32(a_msg.daysPassed);
+		w.F32(a_msg.timeScale);
+		w.U32(a_msg.worldspace);
+		w.U32(a_msg.weather);
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const ClockState& a_msg) { return Encode(a_msg, MessageType::kClock); }
+
+	// A clock no game could have (an hour out of the day, a day count or timescale out of range, not a number) is no
+	// message: a game never moves its clock by it.
+	inline std::optional<ClockState> DecodeClockState(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kClock && type != MessageType::kRemoteClock) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		ClockState msg;
+		if (type == MessageType::kRemoteClock) {
+			msg.playerId = r.U32();
+		}
+		msg.gameHour = r.F32();
+		msg.daysPassed = r.F32();
+		msg.timeScale = r.F32();
+		msg.worldspace = r.U32();
+		msg.weather = r.U32();
+		if (!r.AtEnd() || !std::isfinite(msg.gameHour) || msg.gameHour < 0.0f || msg.gameHour >= 24.0f || !std::isfinite(msg.daysPassed) ||
+			msg.daysPassed < 0.0f || msg.daysPassed > MAX_DAYS_PASSED || !std::isfinite(msg.timeScale) || msg.timeScale < 0.0f ||
+			msg.timeScale > MAX_TIME_SCALE) {
 			return std::nullopt;
 		}
 		return msg;

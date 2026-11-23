@@ -11,6 +11,7 @@
 #include "game/QuestSync.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
+#include "game/WorldClock.h"
 #include "game/WorldObjects.h"
 #include "net/Session.h"
 #include "steam/Steam.h"
@@ -208,6 +209,12 @@ namespace DevCommands
 			return QuestSync::One(a_args);
 		}
 
+		// clock [status] | clock pick <clear|cloudy|rain|snow> [n]: the session's time and weather (WorldClock)
+		std::string ClockCommand(std::string_view a_args)
+		{
+			return WorldClock::Command(a_args);
+		}
+
 		struct Entry
 		{
 			std::string_view name;
@@ -232,6 +239,7 @@ namespace DevCommands
 			{ "script", Script },
 			{ "quests", Quests },
 			{ "quest", Quest },
+			{ "clock", ClockCommand },
 		};
 	}
 
@@ -247,7 +255,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex> | script <hex> | quests [pick [n]] | quest <editor id or hex>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | refs [near [radius]] | ref <hex> | use <hex> | script <hex> | quests [pick [n]] | quest <editor id or hex> | clock [pick <clear|cloudy|rain|snow> [n]]";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)
