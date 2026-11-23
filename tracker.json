@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-23T09:33:55+00:00",
+ "updated": "2026-11-23T13:33:53+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -27,6 +27,14 @@
    "kind": "feature",
    "priority": 1,
    "stage": 0,
+   "note": ""
+  },
+  {
+   "id": "a-friend-s-attacks-blocks-bow-shots-spells-and-shouts-are-sh",
+   "title": "A friend's attacks, blocks, bow shots, spells and shouts are shown on their character",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 1,
    "note": ""
   },
   {
@@ -67,7 +75,7 @@
    "title": "A friend's weapons, shield, spells and torch are shown in each hand",
    "kind": "feature",
    "priority": 1,
-   "stage": 0,
+   "stage": 1,
    "note": ""
   },
   {
@@ -542,6 +550,15 @@
    "note": ""
   },
   {
+   "id": "npc-health-and-deaths-agree-in-both-games",
+   "title": "NPC health and deaths agree in both games",
+   "kind": "feature",
+   "priority": 1,
+   "stage": 3,
+   "note": "Built and reviewed (PR 20, protocol 8, stacked on NPC sync); waits for its rig step; not tested in a game",
+   "pr": 20
+  },
+  {
    "id": "npcs-sit-in-both-games",
    "title": "NPCs sit in both games",
    "kind": "feature",
@@ -634,8 +651,8 @@
    "title": "Quests shared: whoever does the step moves everyone on",
    "kind": "feature",
    "priority": 2,
-   "stage": 2,
-   "note": "PR 19 open (protocol 7, stacked on the doors PR): CI running; not tested in a game",
+   "stage": 3,
+   "note": "Built and reviewed (PR 19, protocol 7, stacked on the doors PR); waits for its rig step; not tested in a game",
    "pr": 19
   },
   {
@@ -846,7 +863,7 @@
    "title": "Time of day and weather follow the host",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
+   "stage": 2,
    "note": ""
   },
   {
