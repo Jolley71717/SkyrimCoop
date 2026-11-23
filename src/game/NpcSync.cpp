@@ -2,6 +2,7 @@
 
 #include "DevLine.h"
 #include "FormIds.h"
+#include "game/CopyHealth.h"
 #include "game/Gait.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcRules.h"
@@ -45,6 +46,10 @@ namespace NpcSync
 
 		std::atomic<bool> active{ false };  // read by the hit sink
 		std::uint32_t ourId = 0;
+		std::uint32_t hostId = 0;
+
+		// A friend's hit on an NPC we run counts as theirs at its death for this long (its killer, for the others).
+		constexpr auto KILLER_HOLD = 5s;
 
 		// Every NPC this game has loaded and shares, whoever runs it (main thread).
 		struct Loaded
@@ -59,6 +64,12 @@ namespace NpcSync
 			std::optional<Clock::time_point> saidFollows;  // NpcRules::Facts::saidFollows
 			std::optional<Protocol::NpcGear> sentGear;
 			Clock::time_point                nextGear{};
+			// Its health and death, while we run it (CopyHealth::Reporter; deathSent: its death went out).
+			CopyHealth::Reporter             reporter;
+			bool                             deathSent = false;
+			std::uint32_t                    lastHitter = 0;  // the friend whose hit we applied last, and when
+			Clock::time_point                lastHitAt{};
+			std::optional<Clock::time_point> killMoveAt;  // last seen in a kill move
 		};
 		std::map<Key, Loaded> loaded;
 		// The numbers of the states of every NPC we ran this session (not forgotten with its loaded entry).
@@ -116,6 +127,18 @@ namespace NpcSync
 		// The last moment our player fought each actor: a blow either way, or its combat target was our player (any thread).
 		std::mutex                                   fightLock;
 		std::unordered_map<RE::FormID, Clock::time_point> fights;
+		// Our player's last hit on each actor, from its hit event (under fightLock): what a drop on a copy is judged by.
+		std::unordered_map<RE::FormID, CopyHealth::OurHit> ourHits;
+
+		// ---- health and deaths (docs/DESIGN.md, "NPC health and deaths"; main thread) ----
+		std::map<Key, CopyHealth::Copy>  health;  // each copy's (CopyHealth.h), by its NPC
+		CopyHealth::Counts               healthCounts;
+		std::uint32_t                    hitSeq = 0;      // our hits on copies, numbered for the session
+		Protocol::NpcHitAnswers          answersOwed;     // to friends' hits on NPCs we run: sent next frame, before healths
+		std::set<Key>                    hitApplied;      // NPCs we run whose health goes out at once (a friend's hit applied)
+		std::map<Key, Protocol::NpcDeath> sessionDead;    // every NPC the session has dead (its runner's word), and how
+		std::set<Key>                    ourDeaths;       // of those, the ones this game said
+		std::unordered_set<RE::FormID>   killedOnLoad;    // actors killed for the session's word since the world loaded
 
 		// Counts for the developer channel.
 		struct Counts
@@ -124,6 +147,9 @@ namespace NpcSync
 			std::uint64_t statesSent = 0, statesIn = 0, actionsSent = 0, actionsIn = 0, gearSent = 0, gearIn = 0, gearMissing = 0, gearSkipped = 0, gearTakenOff = 0;
 			std::uint64_t spawnsPlaced = 0, spawnsTaken = 0, unshared = 0, lookDiffers = 0;
 			std::uint64_t fallbackSilent = 0, fallbackElsewhere = 0, fallbackFar = 0;
+			// A friend's hits on NPCs we run: came, applied; the healths and deaths we said and heard; NPCs killed as
+			// they loaded for the session's word; copies set to a share.
+			std::uint64_t hitsIn = 0, hitsApplied = 0, healthsSent = 0, healthsIn = 0, deathsSent = 0, deathsIn = 0, killsOnLoad = 0, healthSets = 0;
 		};
 		Counts counts;
 
@@ -186,10 +212,35 @@ namespace NpcSync
 				// Our player hit it, or it hit our player.
 				const RE::TESObjectREFR* other = cause->IsPlayerRef() ? target : target->IsPlayerRef() ? cause : nullptr;
 				if (other && other->IsActor()) {
+					const auto now = Clock::now();
 					std::scoped_lock l{ fightLock };
-					fights[other->GetFormID()] = Clock::now();
+					fights[other->GetFormID()] = now;
+					if (other == target) {
+						// Our player's hit: a drop on a copy of it is that hit's (CopyHealth::Copy::Look).
+						ourHits[target->GetFormID()] = { now, FlagsOf(*a_event) };
+					}
 				}
 				return RE::BSEventNotifyControl::kContinue;
+			}
+
+			// The hit's kind, as Protocol::NpcHitFlags: a spell's (a spell, a scroll, an enchantment, a poison, an
+			// ingredient, or a staff's) lasts as long as its effect may tick on.
+			static std::uint8_t FlagsOf(const RE::TESHitEvent& a_event)
+			{
+				using Flag = RE::TESHitEvent::Flag;
+				std::uint8_t flags = 0;
+				flags |= a_event.flags.all(Flag::kPowerAttack) ? Protocol::kHitPower : 0;
+				flags |= a_event.flags.all(Flag::kSneakAttack) ? Protocol::kHitSneak : 0;
+				flags |= a_event.flags.all(Flag::kBashAttack) ? Protocol::kHitBash : 0;
+				if (const auto source = a_event.source != 0 ? RE::TESForm::LookupByID(a_event.source) : nullptr) {
+					using FT = RE::FormType;
+					const auto type = source->GetFormType();
+					const auto weapon = source->As<RE::TESObjectWEAP>();
+					if (type == FT::Spell || type == FT::Scroll || type == FT::Enchantment || type == FT::AlchemyItem || type == FT::Ingredient || (weapon && weapon->IsStaff())) {
+						flags |= Protocol::kHitSpell;
+					}
+				}
+				return flags;
 			}
 		};
 		HitSink hitSink;
@@ -211,6 +262,14 @@ namespace NpcSync
 		{
 			std::scoped_lock l{ fightLock };
 			std::erase_if(fights, [&](const auto& a_entry) { return a_now - a_entry.second >= NpcRules::FIGHT_HOLD; });
+			std::erase_if(ourHits, [&](const auto& a_entry) { return a_now - a_entry.second.at > CopyHealth::SPELL_REACH; });
+		}
+
+		std::optional<CopyHealth::OurHit> OurHitOn(RE::FormID a_id)
+		{
+			std::scoped_lock l{ fightLock };
+			const auto       it = ourHits.find(a_id);
+			return it == ourHits.end() ? std::nullopt : std::optional{ it->second };
 		}
 
 		// A form id as the console shows it (hex, an 0x before it or not).
@@ -821,6 +880,24 @@ namespace NpcSync
 					continue;
 				}
 				const auto owner = owners.find(key);
+				const bool ours = owner != owners.end() && owner->second == ourId;
+				// The session has it dead (a death said while it was not loaded here, or before we joined) and it lives
+				// here: killed, not asked for (CopyHealth::KillsOnLoad: the host's game keeps its own save's word).
+				if (!actor->IsDead() && sessionDead.contains(key) && CopyHealth::KillsOnLoad(ourId == hostId, ourDeaths.contains(key))) {
+					// (one in a kill move is left to the move, and killed after it if it lives)
+					if (!actor->IsInKillMove() && killedOnLoad.insert(npc.id).second) {
+						++counts.killsOnLoad;
+						const auto& death = sessionDead[key];
+						const auto  by = RemotePlayers::StandInOf(death.killer);
+						logs::info("NPCs: {:08X} is dead in the session (player {}'s kill) and lives here: killed as it loaded", key.id, death.killer);
+						actor->KillImpl(by.get(), 0.0f, true, false);
+					}
+					continue;
+				}
+				// A body is nobody's to run, unless we ran it as it died (its death is ours to say).
+				if (actor->IsDead() && !ours) {
+					continue;
+				}
 				NpcRules::Facts facts;
 				facts.owner = owner == owners.end() ? NpcRules::Owner::kNobody : owner->second == ourId ? NpcRules::Owner::kUs : NpcRules::Owner::kOther;
 				if (facts.owner == NpcRules::Owner::kNobody) {
@@ -1039,7 +1116,8 @@ namespace NpcSync
 							actor = nullptr;
 						}
 					}
-					const bool mirror = actor && mode == NpcRules::Mode::kMirror;
+					// A body is never moved: it lies where its death left it (ragdolled by its own game).
+					const bool mirror = actor && mode == NpcRules::Mode::kMirror && !actor->IsDead();
 					if (copy.mirror && !mirror) {
 						copy.actions.Clear();
 						if (actor) {
@@ -1161,6 +1239,218 @@ namespace NpcSync
 			}
 		}
 
+		// ---- health and deaths (main thread) ----
+		float HealthOf(RE::Actor* a_actor)
+		{
+			const auto values = a_actor->AsActorValueOwner();
+			return values ? values->GetActorValue(RE::ActorValue::kHealth) : 0.0f;
+		}
+
+		// Its health set to a_share of its most (a damage or a restore: no hit, no event).
+		void SetShare(RE::Actor* a_actor, float a_share, float a_max)
+		{
+			const auto values = a_actor->AsActorValueOwner();
+			if (!values) {
+				return;
+			}
+			const auto change = CopyHealth::ChangeTo(a_share, a_max, values->GetActorValue(RE::ActorValue::kHealth));
+			if (change > 0.0f) {
+				values->RestoreActorValue(RE::ActorValue::kHealth, change);
+			} else if (change < 0.0f) {
+				values->DamageActorValue(RE::ActorValue::kHealth, -change);
+			}
+		}
+
+		// The actor that shows a player here: our player, or a friend's stand-in (none: not placed, or no player).
+		RE::Actor* ActorOfPlayer(std::uint32_t a_playerId, RE::NiPointer<RE::Actor>& a_hold)
+		{
+			if (a_playerId == 0) {
+				return nullptr;
+			}
+			if (a_playerId == ourId) {
+				return RE::PlayerCharacter::GetSingleton();
+			}
+			a_hold = RemotePlayers::StandInOf(a_playerId);
+			return a_hold.get();
+		}
+
+		// Who killed an NPC we ran: the player its killer shows (our player, or a friend's stand-in), else the friend
+		// whose hit we applied to it last, a moment ago; 0: no player.
+		std::uint32_t KillerOf(RE::Actor* a_actor, const Loaded& a_npc, Clock::time_point a_now)
+		{
+			if (const auto killer = a_actor->GetKiller()) {
+				if (killer->IsPlayerRef()) {
+					return ourId;
+				}
+				if (const auto player = RemotePlayers::PlayerOf(killer)) {
+					return player;
+				}
+			}
+			return a_npc.lastHitter != 0 && a_now - a_npc.lastHitAt <= KILLER_HOLD ? a_npc.lastHitter : 0;
+		}
+
+		// The answers to friends' hits, then the health and deaths of the NPCs we run.
+		void SendFates(const SendFn& a_send, Clock::time_point a_now)
+		{
+			for (std::size_t i = 0; i < answersOwed.answers.size(); i += Protocol::MAX_NPC_HITS) {
+				Protocol::NpcHitAnswers chunk;
+				const auto              begin = answersOwed.answers.begin() + static_cast<std::ptrdiff_t>(i);
+				chunk.answers.assign(begin, begin + static_cast<std::ptrdiff_t>((std::min)(Protocol::MAX_NPC_HITS, answersOwed.answers.size() - i)));
+				a_send(Protocol::Encode(chunk), true);
+			}
+			answersOwed.answers.clear();
+
+			Protocol::NpcHealths healths;
+			Protocol::NpcDeaths  deaths;
+			const auto           flush = [&] {
+				if (!healths.npcs.empty()) {
+					counts.healthsSent += healths.npcs.size();
+					a_send(Protocol::Encode(healths), true);
+					healths.npcs.clear();
+				}
+				if (!deaths.deaths.empty()) {
+					counts.deathsSent += deaths.deaths.size();
+					a_send(Protocol::Encode(deaths), true);
+					deaths.deaths.clear();
+				}
+			};
+			for (auto& [key, npc] : loaded) {
+				if (!Runs(key)) {
+					continue;
+				}
+				const auto actor = npc.handle.get();
+				if (!actor || actor->GetFormID() != npc.id) {
+					continue;
+				}
+				if (actor->IsInKillMove()) {
+					npc.killMoveAt = a_now;
+				}
+				if (actor->IsDead()) {
+					if (!npc.deathSent) {
+						npc.deathSent = true;
+						const bool killMove = npc.killMoveAt && a_now - *npc.killMoveAt <= 3s;
+						const Protocol::NpcDeath death{ .key = key, .killer = KillerOf(actor.get(), npc, a_now), .flags = static_cast<std::uint8_t>(killMove ? Protocol::kDeathKillMove : 0) };
+						deaths.deaths.push_back(death);
+						sessionDead[key] = death;
+						ourDeaths.insert(key);
+						logs::info("NPCs: {:08X}{} died here (killer: player {}{})", key.id, key.IsSpawn() ? std::format(" (player {}'s spawn)", key.spawner) : "", death.killer,
+							killMove ? ", a kill move" : "");
+					}
+					continue;
+				}
+				if (npc.deathSent) {
+					// Raised (a spell, a script): its health says so, and the session has it alive again.
+					npc.deathSent = false;
+					npc.reporter.Reset();
+					sessionDead.erase(key);
+					ourDeaths.erase(key);
+				}
+				const auto max = actor->GetActorValueMax(RE::ActorValue::kHealth);
+				// A living NPC's share is never said as 0 (that is a death): one down at none (an essential one) is at least this.
+				const auto share = (std::max)(CopyHealth::ShareOf(HealthOf(actor.get()), max), 0.001f);
+				if (npc.reporter.Due(share, hitApplied.contains(key), a_now)) {
+					npc.reporter.Sent(share, a_now);
+					healths.npcs.push_back({ key, share });
+				}
+				if (healths.npcs.size() >= Protocol::MAX_NPC_HEALTHS || deaths.deaths.size() >= Protocol::MAX_NPC_HEALTHS) {
+					flush();
+				}
+			}
+			hitApplied.clear();
+			flush();
+		}
+
+		// Each copy's health and death (CopyHealth::Copy): our player's hits on it sent to its runner, what nothing of
+		// ours explains set back, killed for its runner's death, raised for its runner's NPC living.
+		void TendCopyHealth(const SendFn& a_send, Clock::time_point a_now)
+		{
+			struct Shown
+			{
+				Key             key;
+				RE::ActorHandle handle;
+				RE::FormID      id = 0;
+				std::uint32_t   runner = 0;
+			};
+			std::vector<Shown> shown;
+			{
+				std::scoped_lock l{ copyLock };
+				for (const auto& [key, copy] : copies) {
+					const auto owner = owners.find(key);
+					if (copy.actorId != 0 && owner != owners.end() && owner->second != ourId) {
+						shown.push_back({ key, copy.handle, copy.actorId, owner->second });
+					}
+				}
+			}
+			const auto      player = RE::PlayerCharacter::GetSingleton();
+			const bool      ourKillMove = player && player->IsInKillMove();
+			Protocol::NpcHits hits;
+			const auto      flush = [&] {
+				if (!hits.hits.empty()) {
+					a_send(Protocol::Encode(hits), true);
+					hits.hits.clear();
+				}
+			};
+			const auto nextSeq = [] {
+				if (++hitSeq == 0) {
+					++hitSeq;  // 0 is no hit
+				}
+				return hitSeq;
+			};
+			for (const auto& one : shown) {
+				const auto actor = one.handle.get();
+				if (!actor || actor->GetFormID() != one.id || !actor->Is3DLoaded()) {
+					continue;
+				}
+				const auto max = actor->GetActorValueMax(RE::ActorValue::kHealth);
+				if (!std::isfinite(max) || max <= 0.0f) {
+					continue;
+				}
+				if (health.size() >= Protocol::MAX_NPCS && !health.contains(one.key)) {
+					continue;
+				}
+				auto&                  copy = health[one.key];
+				const CopyHealth::Seen seen{ .share = CopyHealth::ShareOf(HealthOf(actor.get()), max), .dead = actor->IsDead(), .inKillMove = actor->IsInKillMove(), .floor = 1.0f / max };
+				auto                   ourHit = OurHitOn(one.id);
+				if (ourKillMove && seen.inKillMove) {
+					// Our player and the copy in a kill move together: our player's (the paired move has no hit event).
+					ourHit = CopyHealth::OurHit{ a_now, static_cast<std::uint8_t>((ourHit ? ourHit->flags : 0) | Protocol::kHitKillMove) };
+				}
+				// Raised when its runner's NPC lives: in every game but the host's, whose save is the truth of who is dead
+				// (a body there that was never alive this session is killed in its runner's game instead).
+				const bool hostsSave = ourId == hostId;
+				const auto step = copy.Look(one.key, seen, ourHit, nextSeq, copy.SeenAlive() || !hostsSave, hostsSave, a_now, healthCounts);
+				switch (step.what) {
+				case CopyHealth::Do::kSend:
+					hits.hits.push_back(step.hit);
+					if (hits.hits.size() >= Protocol::MAX_NPC_HITS) {
+						flush();
+					}
+					break;
+				case CopyHealth::Do::kSet:
+					SetShare(actor.get(), step.share, max);
+					++counts.healthSets;
+					break;
+				case CopyHealth::Do::kKill:
+					{
+						const auto               death = sessionDead.find(one.key);
+						RE::NiPointer<RE::Actor> hold;
+						const auto               by = death != sessionDead.end() ? ActorOfPlayer(death->second.killer, hold) : nullptr;
+						logs::info("NPCs: copy {:08X} of {:08X} killed: its runner (player {}) said it died", one.id, one.key.id, one.runner);
+						actor->KillImpl(by, 0.0f, true, false);
+					}
+					break;
+				case CopyHealth::Do::kRevive:
+					logs::info("NPCs: copy {:08X} of {:08X} raised: it lives in its runner's game (player {}) at {:.0f}%", one.id, one.key.id, one.runner, step.share * 100.0f);
+					actor->Resurrect(false, true);
+					SetShare(actor.get(), step.share, max);
+					break;
+				case CopyHealth::Do::kNothing:
+					break;
+				}
+			}
+			flush();
+		}
+
 		Copy& CopyOf(const Key& a_key, std::uint32_t a_runner)  // under copyLock
 		{
 			auto& copy = copies[a_key];
@@ -1187,10 +1477,11 @@ namespace NpcSync
 		return true;
 	}
 
-	void Started(std::uint32_t a_ourId)
+	void Started(std::uint32_t a_ourId, std::uint32_t a_hostId)
 	{
 		Clear();
 		ourId = a_ourId;
+		hostId = a_hostId;
 		active = true;
 		logs::info("NPCs: in a session as player {}: the NPCs near us are shared", ourId);
 	}
@@ -1230,7 +1521,9 @@ namespace NpcSync
 			SendClaims(a_send, now, here, friends);
 		}
 		SendOurs(a_send, now, here, friends);
+		SendFates(a_send, now);
 		TendCopies(now, here);
+		TendCopyHealth(a_send, now);
 	}
 
 	void Clear()
@@ -1254,12 +1547,22 @@ namespace NpcSync
 		{
 			std::scoped_lock l{ fightLock };
 			fights.clear();
+			ourHits.clear();
 		}
 		loaded.clear();
 		sequences.Clear();
 		owners.clear();
 		active = false;
 		ourId = 0;
+		hostId = 0;
+		health.clear();
+		healthCounts = {};
+		hitSeq = 0;
+		answersOwed.answers.clear();
+		hitApplied.clear();
+		sessionDead.clear();
+		ourDeaths.clear();
+		killedOnLoad.clear();
 	}
 
 	void Owners(const Protocol::NpcOwners& a_msg)
@@ -1288,6 +1591,10 @@ namespace NpcSync
 			}
 			if (owner == 0) {
 				owners.erase(key);
+				// Its next runner says its health (a dead one's copy stays dead).
+				if (const auto h = health.find(key); h != health.end() && !h->second.RunnerDead()) {
+					health.erase(h);
+				}
 				counts.released += was != 0 ? 1 : 0;
 				continue;
 			}
@@ -1305,12 +1612,15 @@ namespace NpcSync
 				if (const auto npc = loaded.find(key); npc != loaded.end()) {
 					npc->second.sentGear.reset();  // the new runner's gear goes out at once
 					npc->second.nextGear = {};
+					npc->second.reporter.Reset();  // and its health (CopyHealth::Reporter)
 				}
 				logs::info("NPCs: {:08X}{} is run {} now{}", key.id, key.IsSpawn() ? std::format(" (player {}'s spawn)", key.spawner) : "",
 					owner == ourId ? "here" : std::format("by player {}", owner), was != 0 ? std::format(" (was player {})", was) : "");
 			}
 			if (owner == ourId) {
-				// Ours now: its copy, if this game showed one, is let go of; its AI runs here from where it stands.
+				// Ours now: its copy, if this game showed one, is let go of; its AI runs here from where it stands, at the
+				// health it shows (our hits on it still in flight stand: CopyHealth::Copy::Answer's kYours).
+				health.erase(key);
 				std::scoped_lock l{ copyLock };
 				if (const auto copy = copies.find(key); copy != copies.end()) {
 					if (const auto actor = copy->second.handle.get()) {
@@ -1379,6 +1689,110 @@ namespace NpcSync
 		++counts.gearIn;
 	}
 
+	void Hits(const Protocol::NpcHits& a_msg)
+	{
+		if (!active || a_msg.hitter == 0 || a_msg.hitter == ourId) {
+			return;
+		}
+		const auto now = Clock::now();
+		for (const auto& hit : a_msg.hits) {
+			++counts.hitsIn;
+			Protocol::NpcHitAnswer   answer{ .key = hit.key, .hitter = a_msg.hitter, .seq = hit.seq, .verdict = Protocol::HitVerdict::kNotHere };
+			const auto               npc = Runs(hit.key) ? loaded.find(hit.key) : loaded.end();
+			RE::NiPointer<RE::Actor> actor;
+			if (npc != loaded.end()) {
+				actor = npc->second.handle.get();
+			}
+			if (!actor || actor->GetFormID() != npc->second.id) {
+				answersOwed.answers.push_back(answer);  // not loaded here, or not ours (an old book's): the hitter gives it back
+				continue;
+			}
+			if (actor->IsDead()) {
+				answer.verdict = Protocol::HitVerdict::kDead;
+				answersOwed.answers.push_back(answer);
+				continue;
+			}
+			// The same share of its most as it took off the friend's copy. The friend's stand-in is its attacker (its
+			// killer when it dies of it: a killing blow kills it whatever it has left, the friend's copy being dead).
+			auto&                    run = npc->second;
+			RE::NiPointer<RE::Actor> hold;
+			const auto               by = ActorOfPlayer(a_msg.hitter, hold);
+			const auto               max = actor->GetActorValueMax(RE::ActorValue::kHealth);
+			const auto               damage = CopyHealth::DamageOf(hit.share, max);
+			const bool               killing = (hit.flags & Protocol::kHitKilling) != 0 || HealthOf(actor.get()) - damage <= 0.0f;
+			run.lastHitter = a_msg.hitter;
+			run.lastHitAt = now;
+			if ((hit.flags & Protocol::kHitKillMove) != 0) {
+				run.killMoveAt = now;
+			}
+			if (killing && !actor->IsEssential()) {
+				actor->KillImpl(by, damage, true, false);  // killed first, so the friend is its killer
+			}
+			if (const auto values = actor->AsActorValueOwner(); values && damage > 0.0f) {
+				values->DamageActorValue(RE::ActorValue::kHealth, damage);  // an essential one goes down
+			}
+			answer.verdict = Protocol::HitVerdict::kApplied;
+			answer.share = actor->IsDead() ? 0.0f : CopyHealth::ShareOf(HealthOf(actor.get()), max);
+			answersOwed.answers.push_back(answer);
+			hitApplied.insert(hit.key);
+			++counts.hitsApplied;
+		}
+	}
+
+	void HitAnswers(const Protocol::NpcHitAnswers& a_msg)
+	{
+		if (!active) {
+			return;
+		}
+		for (const auto& answer : a_msg.answers) {
+			const auto it = answer.hitter == ourId ? health.find(answer.key) : health.end();
+			if (it == health.end()) {
+				continue;  // ours now (what the copy took stands), or not our hit
+			}
+			const auto refusedBefore = healthCounts.refused;
+			it->second.Answer(answer.seq, answer.verdict, answer.share, healthCounts);
+			// The first refusals, then one in a hundred: a refused hit is given back, which a player sees.
+			if (healthCounts.refused != refusedBefore && (healthCounts.refused <= 20 || healthCounts.refused % 100 == 0)) {
+				logs::info("NPCs: our hit {} on {:08X} was refused ({}): given back ({} refused in all)", answer.seq, answer.key.id, static_cast<int>(answer.verdict), healthCounts.refused);
+			}
+		}
+	}
+
+	void Healths(const Protocol::NpcHealths& a_msg)
+	{
+		if (!active || (a_msg.runner != 0 && a_msg.runner == ourId)) {
+			return;
+		}
+		for (const auto& npc : a_msg.npcs) {
+			++counts.healthsIn;
+			if (Runs(npc.key) || (health.size() >= Protocol::MAX_NPCS && !health.contains(npc.key))) {
+				continue;  // ours now (an old runner's last word), or too many
+			}
+			health[npc.key].Word(npc.share);
+			// It lives: the session has it dead no more (its runner raised it).
+			sessionDead.erase(npc.key);
+			ourDeaths.erase(npc.key);
+		}
+	}
+
+	void Deaths(const Protocol::NpcDeaths& a_msg)
+	{
+		if (!active || (a_msg.runner != 0 && a_msg.runner == ourId)) {
+			return;
+		}
+		for (const auto& death : a_msg.deaths) {
+			++counts.deathsIn;
+			if (sessionDead.size() < Protocol::MAX_NPCS || sessionDead.contains(death.key)) {
+				sessionDead[death.key] = death;
+			}
+			// A copy here dies with it (CopyHealth::Copy::Look); one we run and have alive is killed as SendClaims finds it
+			// (our game ran it after its death was said: a hand-over on its way).
+			if (!Runs(death.key) && (health.size() < Protocol::MAX_NPCS || health.contains(death.key))) {
+				health[death.key].Died();
+			}
+		}
+	}
+
 	bool UpdateCopy(RE::Actor* a_actor, float a_delta)
 	{
 		const auto                          now = Clock::now();
@@ -1443,6 +1857,11 @@ namespace NpcSync
 		copyByActor.clear();
 		RemotePlayers::SetCopies(0);
 		loaded.clear();
+		// The new world's actors are new ones: the session's dead are killed again as they load; our hits were on the old.
+		killedOnLoad.clear();
+		hitApplied.clear();
+		std::scoped_lock f{ fightLock };
+		ourHits.clear();
 	}
 
 	void BeforeSave()
@@ -1493,11 +1912,14 @@ namespace NpcSync
 			return std::format(
 				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} letGo={} graphsReset={} statesSent={} statesIn={} "
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
-				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={}",
+				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
+				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
 				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
-				counts.fallbackFar, originalNotify ? 1 : 0);
+				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
+				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad,
+				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size());
 		}
 		// One line per NPC: `npcs list`, or `npcs <form id>` for one. Its local form id, who runs it, its kind, where its
 		// actor is here (at=) and, for a copy, where its runner's state puts it (target=) and how far apart they are.
@@ -1545,10 +1967,27 @@ namespace NpcSync
 			out += std::format(" | {:08X}{} local={:08X} owner={} role={} kind={} at={} dead={} child={} weapon={} combat={}", key.id,
 				key.IsSpawn() ? std::format(" spawner={}", key.spawner) : "", localId, runner, role, npc != loaded.end() ? NpcRules::KindName(npc->second.kind) : "?", at,
 				actor && actor->IsDead() ? 1 : 0, actor && actor->IsChild() ? 1 : 0, actor && actor->AsActorState() && actor->AsActorState()->IsWeaponDrawn() ? 1 : 0, actor && actor->IsInCombat() ? 1 : 0);
+			// hp: its health here, as a share of its most; for a copy, its runner's word and our hits on it not answered yet;
+			// sessionDead: its runner said it died.
+			if (actor) {
+				out += std::format(" hp={:.3f}", CopyHealth::ShareOf(HealthOf(actor), actor->GetActorValueMax(RE::ActorValue::kHealth)));
+			}
+			if (const auto h = health.find(key); h != health.end()) {
+				const auto word = h->second.RunnersWord();
+				out += std::format(" word={} inFlight={} runnerDead={}", word ? std::format("{:.3f}", *word) : std::string{ "none" }, h->second.InFlight(), h->second.RunnerDead() ? 1 : 0);
+			}
+			if (const auto death = sessionDead.find(key); death != sessionDead.end()) {
+				out += std::format(" sessionDead=1 killer={}", death->second.killer);
+			} else {
+				out += " sessionDead=0";
+			}
 			if (only && actor) {
 				// One NPC asked for: its base confidence and aggression too (the rig sets them for a fight and puts them back).
 				if (const auto values = actor->AsActorValueOwner()) {
 					out += std::format(" confidence={:.0f} aggression={:.0f}", values->GetBaseActorValue(RE::ActorValue::kConfidence), values->GetBaseActorValue(RE::ActorValue::kAggression));
+					// and its health (the rig's combat step brings it low with the console before it is killed), essential or not
+					out += std::format(" health={:.0f} max={:.0f} essential={}", values->GetActorValue(RE::ActorValue::kHealth), actor->GetActorValueMax(RE::ActorValue::kHealth),
+						actor->IsEssential() ? 1 : 0);
 				}
 			}
 			if (copy != copies.end()) {

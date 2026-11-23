@@ -212,7 +212,7 @@ namespace Session
 					hostId = msg->hostId;
 					sentLooks.reset();
 					nextState = nextLooks = nextBeat = Clock::now();
-					NpcSync::Started(playerId);
+					NpcSync::Started(playerId, hostId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -262,6 +262,26 @@ namespace Session
 			case Protocol::MessageType::kNpcGear:
 				if (const auto msg = Protocol::DecodeNpcGear(a_data); msg && msg->runner != playerId) {
 					NpcSync::Gear(*msg);
+				}
+				break;
+			case Protocol::MessageType::kNpcHits:
+				if (const auto msg = Protocol::DecodeNpcHits(a_data); msg && msg->hitter != playerId) {
+					NpcSync::Hits(*msg);
+				}
+				break;
+			case Protocol::MessageType::kNpcHitAnswers:
+				if (const auto msg = Protocol::DecodeNpcHitAnswers(a_data)) {
+					NpcSync::HitAnswers(*msg);
+				}
+				break;
+			case Protocol::MessageType::kNpcHealths:
+				if (const auto msg = Protocol::DecodeNpcHealths(a_data); msg && msg->runner != playerId) {
+					NpcSync::Healths(*msg);
+				}
+				break;
+			case Protocol::MessageType::kNpcDeaths:
+				if (const auto msg = Protocol::DecodeNpcDeaths(a_data); msg && msg->runner != playerId) {
+					NpcSync::Deaths(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:

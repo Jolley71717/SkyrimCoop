@@ -843,6 +843,36 @@ namespace RemotePlayers
 		return byActor.contains(actor) || retiring.contains(actor);
 	}
 
+	RE::NiPointer<RE::Actor> StandInOf(std::uint32_t a_playerId)
+	{
+		RE::ActorHandle handle;
+		RE::FormID      id = 0;
+		{
+			std::scoped_lock l{ lock };
+			const auto       it = players.find(a_playerId);
+			if (it == players.end()) {
+				return {};
+			}
+			handle = it->second.standIn;
+			id = it->second.standInId;
+		}
+		auto actor = handle.get();
+		if (!actor || id == 0 || actor->GetFormID() != id) {
+			return {};
+		}
+		return actor;
+	}
+
+	std::uint32_t PlayerOf(const RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return 0;
+		}
+		std::scoped_lock l{ lock };
+		const auto       it = byActor.find(const_cast<RE::Actor*>(a_actor));
+		return it == byActor.end() ? 0 : it->second;
+	}
+
 	std::vector<Protocol::PlayerState> FriendStates()
 	{
 		std::vector<Protocol::PlayerState> out;

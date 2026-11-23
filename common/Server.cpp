@@ -4,6 +4,7 @@
 #include "FormIds.h"
 #include "Name.h"
 #include "NpcBook.h"
+#include "NpcFates.h"
 #include "Redact.h"
 #include "Text.h"
 #include "TokenBucket.h"
@@ -43,6 +44,9 @@ namespace
 		bool        looksOwed = false;
 		// Heartbeats answered: a burst of twenty, then ten a second (the game sends a few a second at most).
 		TokenBucket heartbeats{ 20.0, 10.0 };
+		// Hits on copies sent on (NpcFates.h): a burst of 64, then 20 a second (a flurry of daggers, a flame spell's
+		// ticks on a few copies). Past it, a hit is answered kBusy, never dropped: the hitter gives the drop back.
+		TokenBucket hitBudget{ 64.0, 20.0 };
 		bool        toldUnknown = false;
 	};
 
@@ -147,6 +151,8 @@ void Server::Run()
 	// Only an NPC's runner's states, events and gear are passed on.
 	NpcBook::Book                                  npcs;
 	std::map<Protocol::NpcKey, Protocol::NpcGear> npcGear;
+	// The health of the NPCs run and those dead (common/NpcFates.h), for whoever joins after, and where each hit on a copy goes.
+	NpcFates::Book fates;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -160,6 +166,15 @@ void Server::Run()
 				send(key, a_packet, a_reliable);
 			}
 		}
+	};
+	// The connection of a player in the session (none: not in it).
+	const auto peerOf = [&](std::uint32_t a_playerId) -> std::optional<PeerKey> {
+		for (const auto& [key, peer] : peers) {
+			if (peer.joined && peer.playerId == a_playerId) {
+				return key;
+			}
+		}
+		return std::nullopt;
 	};
 	const auto countPlayers = [&] {
 		return static_cast<std::size_t>(std::ranges::count_if(peers, [](const auto& a_entry) { return a_entry.second.joined; }));
@@ -182,10 +197,12 @@ void Server::Run()
 			for (const auto& key : released) {
 				told.owners.push_back({ key, 0 });
 				npcGear.erase(key);
+				fates.Released(key);
 			}
 			broadcast(Protocol::Encode(told), true, &a_key);
 			log(std::format("server: the {} NPC(s) player {} ran are nobody's now", released.size(), a_peer.playerId));
 		}
+		fates.Left(a_peer.playerId);
 	};
 
 	const auto onHello = [&](const PeerKey& a_key, Peer& a_peer, std::span<const std::uint8_t> a_data) {
@@ -240,6 +257,7 @@ void Server::Run()
 		if (!othersIn) {
 			sessionHash = hello->contentHash;
 			sessionTable.clear();  // the first player's load order numbers the new session
+			fates.Clear();         // and the deaths and wounds of the last one are not this one's
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -292,6 +310,14 @@ void Server::Run()
 		}
 		for (const auto& [npc, gear] : npcGear) {
 			send(a_key, Protocol::Encode(gear), true);
+		}
+		// The health of the NPCs run now and those the session has dead (NpcFates.h): a joiner's copies show them so (one
+		// its save has dead is raised), and its game kills the dead ones it has alive. Nothing when there are none.
+		if (auto said = fates.Healths(); !said.empty()) {
+			send(a_key, Protocol::Encode(Protocol::NpcHealths{ .npcs = std::move(said) }), true);
+		}
+		if (auto dead = fates.Dead(); !dead.empty()) {
+			send(a_key, Protocol::Encode(Protocol::NpcDeaths{ .full = true, .deaths = std::move(dead) }), true);
 		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
@@ -356,6 +382,7 @@ void Server::Run()
 					case NpcBook::Outcome::kReleased:
 						changes.owners.push_back({ claim.key, 0 });
 						npcGear.erase(claim.key);
+						fates.Released(claim.key);
 						break;
 					case NpcBook::Outcome::kRefused:
 						refused.owners.push_back({ claim.key, npcs.Owner(claim.key) });
@@ -398,6 +425,85 @@ void Server::Run()
 				msg->runner = a_peer.playerId;
 				npcGear[msg->key] = *msg;
 				broadcast(Protocol::Encode(*msg), true, &a_key);
+			}
+			break;
+		case MT::kNpcHits:
+			// Each hit to its NPC's runner alone, by the server's own book (NpcFates.h), the hitter named; one that can go
+			// nowhere (nobody runs it, the hitter does, the session has it dead, past the hitter's budget) is answered here.
+			if (const auto msg = Protocol::DecodeNpcHits(a_data)) {
+				const auto                                  now = Clock::now();
+				Protocol::NpcHitAnswers                     answers;
+				std::map<std::uint32_t, Protocol::NpcHits> toRunners;
+				for (const auto& hit : msg->hits) {
+					auto route = fates.RouteHit(a_peer.playerId, npcs.Owner(hit.key), hit);
+					if (!route.refused && !peerOf(route.runner)) {
+						route.refused = Protocol::HitVerdict::kNobody;
+					}
+					if (!route.refused && !a_peer.hitBudget.Take(now)) {
+						route.refused = Protocol::HitVerdict::kBusy;
+					}
+					if (route.refused) {
+						answers.answers.push_back({ hit.key, a_peer.playerId, hit.seq, *route.refused, 0.0f });
+						continue;
+					}
+					auto& out = toRunners[route.runner];
+					out.hitter = a_peer.playerId;
+					out.hits.push_back(hit);
+				}
+				for (const auto& [runner, hits] : toRunners) {
+					if (const auto to = peerOf(runner)) {
+						send(*to, Protocol::Encode(hits), true);
+					}
+				}
+				if (!answers.answers.empty()) {
+					send(a_key, Protocol::Encode(answers), true);
+				}
+			}
+			break;
+		case MT::kNpcHitAnswers:
+			// A runner's answers, each to its hitter alone.
+			if (const auto msg = Protocol::DecodeNpcHitAnswers(a_data)) {
+				std::map<std::uint32_t, Protocol::NpcHitAnswers> toHitters;
+				for (const auto& answer : msg->answers) {
+					if (answer.hitter != a_peer.playerId) {
+						toHitters[answer.hitter].answers.push_back(answer);
+					}
+				}
+				for (const auto& [hitter, answers] : toHitters) {
+					if (const auto to = peerOf(hitter)) {
+						send(*to, Protocol::Encode(answers), true);
+					}
+				}
+			}
+			break;
+		case MT::kNpcHealths:
+			// Only a runner's word of its own NPCs, named as its; one it says lives that the session had dead is back.
+			if (auto msg = Protocol::DecodeNpcHealths(a_data)) {
+				std::size_t revived = 0;
+				std::erase_if(msg->npcs, [&](const Protocol::NpcHealth& a_npc) {
+					const auto taken = fates.Said(a_peer.playerId, npcs.Owner(a_npc.key), a_npc);
+					revived += taken == NpcFates::Health::kRevived ? 1 : 0;
+					return taken == NpcFates::Health::kRefused;
+				});
+				if (revived != 0) {
+					log(std::format("server: player {} says {} NPC(s) the session had dead live again", a_peer.playerId, revived));
+				}
+				if (!msg->npcs.empty()) {
+					msg->runner = a_peer.playerId;
+					broadcast(Protocol::Encode(*msg), true, &a_key);
+				}
+			}
+			break;
+		case MT::kNpcDeaths:
+			// Only a runner's word, once for each NPC: no game kills one twice.
+			if (auto msg = Protocol::DecodeNpcDeaths(a_data); msg && !msg->full) {
+				std::erase_if(msg->deaths, [&](const Protocol::NpcDeath& a_death) {
+					return fates.Died(a_peer.playerId, npcs.Owner(a_death.key), a_death) != NpcFates::Death::kNew;
+				});
+				if (!msg->deaths.empty()) {
+					msg->runner = a_peer.playerId;
+					broadcast(Protocol::Encode(*msg), true, &a_key);
+				}
 			}
 			break;
 		case MT::kHeartbeat:
