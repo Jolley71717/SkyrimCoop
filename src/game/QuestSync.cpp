@@ -147,7 +147,7 @@ namespace QuestSync
 			std::uint16_t              fillType = 0;
 			std::size_t                offset = 0;  // the fill's bytes in the record
 			std::size_t                size = 0;
-			std::array<std::byte, 16>  bytes{};
+			std::array<std::byte, 0x18> bytes{};  // a reference alias's fill data (the largest), or a location slot
 		};
 		struct Rewritten
 		{
@@ -170,6 +170,8 @@ namespace QuestSync
 
 		std::string QuestName(std::uint32_t a_questId);
 		void        NoteThread();
+		bool        Run(const std::string& a_command);
+		bool        Run(const std::string& a_command);
 
 		QuestRules::Facts FactsOf(const RE::TESQuest* a_quest)
 		{
