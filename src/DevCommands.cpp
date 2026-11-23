@@ -6,6 +6,7 @@
 #include "Protocol.h"
 #include "Redact.h"
 #include "game/Console.h"
+#include "game/Face.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
@@ -161,6 +162,20 @@ namespace DevCommands
 			return PlayerActions::Describe() + " | " + RemotePlayers::Actions();
 		}
 
+		// faces [nudge [undo]]: our player's face as it is read and was sent (Face), and each friend's on their stand-in
+		// (RemotePlayers::Faces); nudge: the rig changes our face (a slider and the hair colour), undo puts it back.
+		std::string FacesCommand(std::string_view a_args)
+		{
+			const auto words = DevLine::Words(a_args);
+			if (!words.empty() && words[0] == "nudge") {
+				return Face::Nudge(words.size() > 1 ? words[1] : std::string_view{});
+			}
+			if (!words.empty()) {
+				return "error: usage: faces [nudge [undo]]";
+			}
+			return Face::Describe() + " | " + RemotePlayers::Faces();
+		}
+
 		std::string Npcs(std::string_view a_args)
 		{
 			return NpcSync::Describe(a_args);
@@ -210,6 +225,7 @@ namespace DevCommands
 			{ "where", Where },
 			{ "standins", StandIns },
 			{ "actions", ActionsCommand },
+			{ "faces", FacesCommand },
 			{ "strays", Strays },
 			{ "npcs", Npcs },
 			{ "graph", Graph },
@@ -231,7 +247,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

@@ -6,6 +6,8 @@
 #include "Protocol.h"
 #include "Redact.h"
 #include "Server.h"
+#include "game/Face.h"
+#include "game/FaceRules.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
@@ -58,6 +60,10 @@ namespace Session
 		// whenever they change. What comes the other way is another player's game's word: RemotePlayers takes a race
 		// only as the race of a load-order preset and a worn id only as a TESObjectARMO.
 		std::optional<Protocol::PlayerLooks> sentLooks;
+		// Our face, the same way: sent after every welcome and when it changed (FaceRules::Settle: once it holds still).
+		std::optional<Protocol::PlayerFace> sentFace;
+		FaceRules::Settle                   faceSettle;
+		std::uint64_t                       facesSent = 0;
 		std::unordered_map<std::uint32_t, Clock::time_point> beats;  // heartbeat token -> when it went
 		std::uint32_t                     beatToken = 0;
 		float                             rttMs = -1.0f;
@@ -85,6 +91,8 @@ namespace Session
 			playerId = 0;
 			hostId = 0;
 			sentLooks.reset();
+			sentFace.reset();
+			faceSettle.Reset();
 			PlayerActions::Recording(false);
 			beats.clear();
 			rttMs = -1.0f;
@@ -218,6 +226,8 @@ namespace Session
 					playerId = msg->playerId;
 					hostId = msg->hostId;
 					sentLooks.reset();
+					sentFace.reset();
+					faceSettle.Reset();
 					nextState = nextLooks = nextHands = nextBeat = Clock::now();
 					PlayerActions::Recording(true);
 					NpcSync::Started(playerId, hostId);
@@ -250,6 +260,11 @@ namespace Session
 			case Protocol::MessageType::kRemoteLooks:
 				if (const auto msg = Protocol::DecodeRemoteLooks(a_data); msg && msg->playerId != playerId) {
 					RemotePlayers::Looked(msg->playerId, msg->looks);
+				}
+				break;
+			case Protocol::MessageType::kRemoteFace:
+				if (const auto msg = Protocol::DecodeRemoteFace(a_data); msg && msg->playerId != playerId) {
+					RemotePlayers::Faced(msg->playerId, msg->face);
 				}
 				break;
 			case Protocol::MessageType::kRemoteActions:
@@ -340,6 +355,15 @@ namespace Session
 					++looksSent;
 					if (body) {
 						logs::info("Session: sent our looks (race {:08X}, {}, {} worn items)", looks->race, looks->female ? "female" : "male", looks->worn.size());
+					}
+				}
+				// Our face, read at the same pace: the first of the session at once, a change once it holds still.
+				if (const auto read = Face::Read()) {
+					if (const auto face = faceSettle.Next(*read, sentFace)) {
+						Send(Protocol::Encode(*face), true);
+						sentFace = face;
+						++facesSent;
+						Face::Sent(*face);  // which says it in the log
 					}
 				}
 			}
@@ -526,10 +550,10 @@ namespace Session
 	std::string Describe()
 	{
 		const auto status = client ? client->GetStatus() : ClientConnection::Status::kDisconnected;
-		return std::format("role={} connection={} welcomed={} player={} host={} players={} sent={} received={} looksSent={} actionsSent={} rtt={} serverPlayers={} lastEnd={}",
+		return std::format("role={} connection={} welcomed={} player={} host={} players={} sent={} received={} looksSent={} facesSent={} actionsSent={} rtt={} serverPlayers={} lastEnd={}",
 			role == Role::kHost ? "host" : role == Role::kFriend ? "friend" : "none",
 			status == ClientConnection::Status::kConnected ? "up" : status == ClientConnection::Status::kConnecting ? "connecting" : "down",
-			welcomed ? 1 : 0, playerId, hostId, RemotePlayers::Count(), statesSent, statesIn, looksSent, actionsSent, rttMs < 0 ? std::string{ "?" } : std::format("{:.0f}", rttMs),
+			welcomed ? 1 : 0, playerId, hostId, RemotePlayers::Count(), statesSent, statesIn, looksSent, facesSent, actionsSent, rttMs < 0 ? std::string{ "?" } : std::format("{:.0f}", rttMs),
 			server ? std::to_string(server->Players()) : std::string{ "-" }, lastEnd);
 	}
 }

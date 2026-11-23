@@ -43,6 +43,11 @@ namespace
 		// the server's loop once the budget has room.
 		TokenBucket looksBudget{ 10.0, 4.0 };
 		bool        looksOwed = false;
+		// The player's newest face, kept and passed on like the looks: a game sends it once it settles after a change (a
+		// barber, a mirror, a race menu), so a burst of four, then one a second, and the newest owed past that.
+		std::optional<Protocol::PlayerFace> face;
+		TokenBucket                         faceBudget{ 4.0, 1.0 };
+		bool                                faceOwed = false;
 		// Heartbeats answered: a burst of twenty, then ten a second (the game sends a few a second at most).
 		TokenBucket heartbeats{ 20.0, 10.0 };
 		// Hits on copies sent on (NpcFates.h): a burst of 64, then 20 a second (a flurry of daggers, a flame spell's
@@ -307,6 +312,9 @@ void Server::Run()
 				if (peer.looks) {
 					send(a_key, Protocol::Encode(Protocol::RemoteLooks{ peer.playerId, *peer.looks }), true);
 				}
+				if (peer.face) {
+					send(a_key, Protocol::Encode(Protocol::RemoteFace{ peer.playerId, *peer.face }), true);
+				}
 			}
 		}
 		// Who runs each NPC (a full list; a game forgets what it knew at each welcome), and their gear. Nothing when no NPC
@@ -369,6 +377,21 @@ void Server::Run()
 					broadcast(Protocol::Encode(Protocol::RemoteLooks{ a_peer.playerId, *a_peer.looks }), true, &a_key);
 				} else {
 					a_peer.looksOwed = true;  // the newest goes once the budget allows
+				}
+			}
+			break;
+		case MT::kPlayerFace:
+			// As the looks: kept for whoever joins later, passed on to those there now, the same again ignored.
+			if (auto face = Protocol::DecodePlayerFace(a_data)) {
+				if (a_peer.face && *a_peer.face == *face) {
+					break;
+				}
+				a_peer.face = std::move(*face);
+				if (a_peer.faceBudget.Take(Clock::now())) {
+					a_peer.faceOwed = false;
+					broadcast(Protocol::Encode(Protocol::RemoteFace{ a_peer.playerId, *a_peer.face }), true, &a_key);
+				} else {
+					a_peer.faceOwed = true;
 				}
 			}
 			break;
@@ -595,12 +618,17 @@ void Server::Run()
 		}
 
 		// A connection that never says hello holds one of the few spare slots: dropped after a while. Its kDisconnect
-		// event removes it; until then it is not asked again. And looks held back by the budget go once it has room.
+		// event removes it; until then it is not asked again. And looks and faces held back by the budget go once it has
+		// room.
 		const auto now = Clock::now();
 		for (auto& [key, peer] : peers) {
 			if (peer.joined && peer.looksOwed && peer.looks && peer.looksBudget.Take(now)) {
 				peer.looksOwed = false;
 				broadcast(Protocol::Encode(Protocol::RemoteLooks{ peer.playerId, *peer.looks }), true, &key);
+			}
+			if (peer.joined && peer.faceOwed && peer.face && peer.faceBudget.Take(now)) {
+				peer.faceOwed = false;
+				broadcast(Protocol::Encode(Protocol::RemoteFace{ peer.playerId, *peer.face }), true, &key);
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {
 				log(std::format("server: dropped {}: no hello", transports[key.first]->Describe(key.second)));
