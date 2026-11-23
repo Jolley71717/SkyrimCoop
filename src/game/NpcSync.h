@@ -86,4 +86,8 @@ namespace NpcSync
 	[[nodiscard]] std::optional<Protocol::NpcKey>                                  KeyOf(RE::Actor* a_actor);
 	[[nodiscard]] std::uint32_t                                                    RunnerOf(const Protocol::NpcKey& a_key);
 	[[nodiscard]] std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> RunActors();
+	// For projectiles (src/game/Shots.h): whether a_actor is a copy this game moves by its runner's states now (any
+	// thread: the projectile hook asks), and the moment on this game's clock its runner's a_sentMs was (none: not known).
+	[[nodiscard]] bool                                                             Mirrored(const RE::Actor* a_actor);
+	[[nodiscard]] std::optional<std::chrono::steady_clock::time_point>             SenderTime(const Protocol::NpcKey& a_key, std::uint32_t a_sentMs);
 }

@@ -13,6 +13,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Shots.h"
 #include "game/VirtualPad.h"
 #include "game/Water.h"
 #include "net/Session.h"
@@ -195,6 +196,12 @@ namespace DevCommands
 			return Riding::Command(a_args);
 		}
 
+		// shots [find <kind> | last]: projectiles said and launched, natives ended (Shots::Command).
+		std::string ShotsCommand(std::string_view a_args)
+		{
+			return Shots::Command(a_args);
+		}
+
 		std::string Strays(std::string_view)
 		{
 			return RemotePlayers::Strays();
@@ -242,6 +249,7 @@ namespace DevCommands
 			{ "faces", FacesCommand },
 			{ "swim", SwimCommand },
 			{ "ride", RideCommand },
+			{ "shots", ShotsCommand },
 			{ "strays", Strays },
 			{ "npcs", Npcs },
 			{ "graph", Graph },
@@ -263,7 +271,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

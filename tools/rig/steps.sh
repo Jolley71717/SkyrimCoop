@@ -57,12 +57,13 @@ declare -A STEP_INFO=(
 	[faces]="each way, the watcher's stand-in has the mover's face: it stands on a copy of its preset with the mover's head parts, hair colour, sliders and tint layers (all of what came held, the same session face hash), its built head showing the copy's parts and hair colour, not the preset's (read from its 3D); kept with the watcher in first person; the mover's face changed (dev faces nudge) places it again with the new face, and put back with the first; the VM saves with a stand-in on a copy (its preset put back and named), loads the save alone (no stray, no copy back) and joins again; none given up (steps/faces.sh)"
 	[swim]="each way, outside: the mover walks into deep water near the scene (dev swim find) with its virtual pad and swims, dives and comes up; the watcher's stand-in swims with it (graph events taken, and its engine's own swimming state), at its depth with no jitter (the engine's refloats at rest), its body as drawn diving as the mover's does and level at the surface, and walks out with it; a person and a creature the mover's game runs, moved into the water, swim as copies in the watcher's game the same way, and a fish's copy is told no swim event; the swim events the mover's own graph took are said (steps/swim.sh)"
 	[ride]="each way, outside: the mover's console places a plain horse by it (set-up), it aims at it and presses A to get on; at rest the watcher's stand-in of it is seated by the engine on its copy of that horse (the same mount key); it rides forward and, read each second, the stand-in stays seated in its saddle and the engine carries it (never put back by the plugin); the VM saves with a seated stand-in and leaves and joins again while the mover rides, and it is seated again; it gets off with the mover; a person the mover runs is set on a load-order horse with the console, its copy is seated on the copy of that horse and the horse goes to its rider's game, and gets off with it (steps/ride.sh)"
+	[shots]="each way, the mover looses an arrow and a bolt, casts a spell of each projectile kind the load order has (missile, flame, beam, rune), dual casts and shouts with its virtual pad (console and dev set-up); its game says each shot and the watcher launches the same kind from its stand-in of it; an arrow at the watcher harms no one there; each game's launches fly on their shooter's aim, none fails and all are ended once their flight is over; the VM saves with a launch of its own lying (all ended for the save); a person each game runs casts at a stand-in (console set-up) and the other game launches it from its copy (steps/shots.sh)"
 	[forms]="(only when named) the VM's plugins in another order: it joins, and an armor each puts on is on the other's stand-in as that game's own form (steps/forms.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
-STEPS="preflight world join see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride forms final"
+STEPS="preflight world join see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots forms final"
 # Steps that need the two games in one session; the state guard puts them back in one first (smoke.sh run()).
-SESSION_STEPS="see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride forms"
+SESSION_STEPS="see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots forms"
 # Steps a run makes only when --only names them: they change a game's files for a while (each puts them back, and the
 # set-up heals what a run that died left), which the maintainer agrees to before they run by default.
 OPTIN_STEPS="forms"
@@ -490,6 +491,7 @@ declare -F step_actions >/dev/null || . "$RIG/steps/actions.sh"
 declare -F step_faces >/dev/null || . "$RIG/steps/faces.sh"
 declare -F step_swim >/dev/null || . "$RIG/steps/swim.sh"
 declare -F step_ride >/dev/null || . "$RIG/steps/ride.sh"
+declare -F step_shots >/dev/null || . "$RIG/steps/shots.sh"
 
 # --- self-test: the steps' reading of the games, both games faked ------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then

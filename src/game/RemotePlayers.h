@@ -78,6 +78,8 @@ namespace RemotePlayers
 	// thread.
 	[[nodiscard]] RE::NiPointer<RE::Actor> StandInOf(std::uint32_t a_playerId);
 	[[nodiscard]] std::uint32_t            PlayerOf(const RE::Actor* a_actor);
+	// The moment on this game's clock a friend's a_sentMs was (none: not known yet), for their shots (src/game/Shots.h).
+	[[nodiscard]] std::optional<std::chrono::steady_clock::time_point> SenderTime(std::uint32_t a_playerId, std::uint32_t a_sentMs);
 	// Each friend's newest state, as it came (their place, for who is nearest an NPC).
 	[[nodiscard]] std::vector<Protocol::PlayerState> FriendStates();
 	// How many copies NpcSync moves: while any, the actor update hook asks NpcSync::UpdateCopy about every Character

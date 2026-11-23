@@ -2058,6 +2058,30 @@ namespace NpcSync
 		return it != owners.end() ? it->second : 0;
 	}
 
+	bool Mirrored(const RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return false;
+		}
+		std::scoped_lock l{ copyLock };
+		const auto       byActor = copyByActor.find(const_cast<RE::Actor*>(a_actor));
+		if (byActor == copyByActor.end()) {
+			return false;
+		}
+		const auto it = copies.find(byActor->second);
+		return it != copies.end() && it->second.mirror && it->second.actorId == a_actor->GetFormID();
+	}
+
+	std::optional<Clock::time_point> SenderTime(const Protocol::NpcKey& a_key, std::uint32_t a_sentMs)
+	{
+		if (a_sentMs == 0) {
+			return std::nullopt;
+		}
+		std::scoped_lock l{ copyLock };
+		const auto       it = copies.find(a_key);
+		return it != copies.end() ? it->second.buffer.sender.At(a_sentMs) : std::nullopt;
+	}
+
 	std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> RunActors()
 	{
 		std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> out;

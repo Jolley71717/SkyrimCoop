@@ -1642,6 +1642,16 @@ namespace RemotePlayers
 		return it == byActor.end() ? 0 : it->second;
 	}
 
+	std::optional<Clock::time_point> SenderTime(std::uint32_t a_playerId, std::uint32_t a_sentMs)
+	{
+		if (a_sentMs == 0) {
+			return std::nullopt;
+		}
+		std::scoped_lock l{ lock };
+		const auto       it = players.find(a_playerId);
+		return it != players.end() ? it->second.buffer.sender.At(a_sentMs) : std::nullopt;
+	}
+
 	std::vector<Protocol::PlayerState> FriendStates()
 	{
 		std::vector<Protocol::PlayerState> out;

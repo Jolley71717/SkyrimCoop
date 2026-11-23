@@ -14,6 +14,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Shots.h"
 #include "game/Water.h"
 #include "net/FormsCommand.h"
 #include "net/Identity.h"
@@ -236,6 +237,7 @@ namespace Session
 					PlayerActions::Recording(true);
 					NpcSync::Started(playerId, hostId);
 					Riding::Started(playerId);
+					Shots::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -321,6 +323,11 @@ namespace Session
 			case Protocol::MessageType::kRides:
 				if (const auto msg = Protocol::DecodeRides(a_data); msg && msg->sender != playerId) {
 					Riding::Rides(*msg);
+				}
+				break;
+			case Protocol::MessageType::kShots:
+				if (const auto msg = Protocol::DecodeShots(a_data); msg && msg->sender != playerId) {
+					Shots::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -490,6 +497,7 @@ namespace Session
 				Steam::Leave();
 			}
 		}
+		Shots::Clear();   // our launches ended while the stand-ins and copies that shot them are still there
 		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
 		NpcSync::Clear();
 		RemotePlayers::Clear();
@@ -532,6 +540,7 @@ namespace Session
 			SendOurs(Clock::now());
 			NpcSync::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Riding::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 	}
