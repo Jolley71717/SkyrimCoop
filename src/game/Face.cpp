@@ -322,7 +322,7 @@ namespace Face
 				.color = Pack(mask->color),
 				.value = static_cast<std::uint8_t>(std::lround(alpha * 100.0f)),
 				.type = static_cast<std::uint8_t>(type < Protocol::TINT_TYPES ? type : 0u) });
-			if (type == std::to_underlying(RE::TintMask::Type::kSkinTone)) {
+			if (type == static_cast<std::uint32_t>(std::to_underlying(RE::TintMask::Type::kSkinTone))) {
 				face.bodyTint = Protocol::PackColor(mask->color.red, mask->color.green, mask->color.blue, 255);
 			}
 		}
