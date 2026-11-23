@@ -109,7 +109,7 @@ namespace NpcFates
 			}
 			said.erase(a_death.key);
 			if (dead.size() < Protocol::MAX_NPCS) {
-				dead.emplace(a_death.key, Dead{ a_death, a_now, late });
+				dead.emplace(a_death.key, Fallen{ a_death, a_now, late });
 			}
 			return late ? Death::kLate : Death::kNew;
 		}
@@ -166,7 +166,7 @@ namespace NpcFates
 		}
 
 	private:
-		struct Dead
+		struct Fallen
 		{
 			Protocol::NpcDeath death;
 			Clock::time_point  at{};
@@ -179,7 +179,7 @@ namespace NpcFates
 		};
 
 		std::map<Protocol::NpcKey, float> said;        // each NPC's runner's last word, while it is run
-		std::map<Protocol::NpcKey, Dead>  dead;
+		std::map<Protocol::NpcKey, Fallen> dead;
 		std::map<Protocol::NpcKey, Was>   lastRunner;  // who ran each NPC that changed hands in the last DEATH_GRACE
 	};
 }
