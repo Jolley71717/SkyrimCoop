@@ -770,7 +770,7 @@ TEST("loot ledger: a move out too long is lost; our puts out count for the marke
 	CHECK(ledger.PutsOut(0x1A332, 0xF) == 5);
 }
 
-/ ---- moves that wait ----------------------------------------------------------------------------------------------
+// ---- moves that wait ----------------------------------------------------------------------------------------------
 
 TEST("loot waiting: each holder's moves in order, a waiting one holding back its later ones, other holders not")
 {
