@@ -1,0 +1,76 @@
+# The rig scripts
+
+Scripts that drive two games of Skyrim on the rig: a host PC and a virtual machine, each signed in to its own Steam account that owns the game ([docs/GETTING-STARTED.md](../../docs/GETTING-STARTED.md)). They run from Git Bash on the host. Every script says at its top what it does and what it assumes.
+
+| Script | What it does |
+|---|---|
+| `install.sh` | puts SKSE64, the Address Library, Crash Logger and a build of the plugin into both games (`install.sh undo` takes it out again) |
+| `firststart.sh` | the ini files the launcher would write on a first run, a window instead of the full screen (`check`, `undo`) |
+| `start.sh` | starts both games through SKSE and waits for the plugin; `--cell <cell>` puts each player there with `coc`; `start.sh stop` closes them |
+| `lobbytest.sh` | the first test: a Steam lobby and pings over Steam's relay, at the main menu |
+| `smoke.sh` | **the functional test**: named steps with asserting checks, both directions, a verdict, and the restore |
+| `fetchlogs.sh` | copies both machines' logs (the plugin's, SKSE's, Crash Logger's) into one folder |
+| `assert.sh`, `crashlib.sh`, `steps.sh` | the checks, the crash logs and the steps `smoke.sh` is made of |
+| `selftest.sh` | the harness's own tests, with no game (the Linux tests run it on every push) |
+
+## Running the functional test
+
+Hold the rig first: one user at a time, and never while Fallout 4 runs ([AGENTS.md](../../AGENTS.md)).
+
+```bash
+bash $STAGE/rigq.sh take <name>
+export SKYRIMCOOP_RIG_OWNER=<name>
+bash tools/rig/smoke.sh --build <folder holding SkyrimCoop.dll>    # a whole run: about ten minutes
+bash tools/rig/smoke.sh --only join,see                             # some steps (the guard sets up what they need)
+bash tools/rig/smoke.sh --list                                      # the steps, one line each
+bash $STAGE/rigq.sh free <name>
+```
+
+`--build` installs that build on both machines first (a CI build: `gh run download`), and takes it out again at the end. Without it the run tests what is installed. The games are started if they are not running, with `coc` from the main menu (`--cell`, default Riverwood): a run never uses Continue or Load on the host, whose Saves folder may hold the maintainer's own saves.
+
+A run's folder is `$STAGE/checks/skyrim-smoke-<time>/`: `run.log` (everything it printed), `results.tsv` (one line per check), `summary.txt`, the movement samples, the plugin log lines of the run, and copies of any crash log. It holds the two machines' ini files as they were before the run, and the listings of both Saves folders, so it stays in the rig's folder: never attach it as it is.
+
+### What the verdict says
+
+Every check is one line: `PASS`, `FAIL` or `WARN`, with what was read. Four more words are about the rig, not the mod:
+
+- `RIG`: a check the rig could not make this time (a scripted walk that stuck before it got anywhere, a button press the game never saw). A step that meets one runs once more; the lines of the first attempt from the fault on are set aside (`VOID`), and a check that fails in both attempts stays a `FAIL`.
+- `HEAL`: the rig was found in a wrong state and put right before a step (a player at the main menu put in the world with `coc`, a walk left going stopped, the two games put in one session again). No verdict either way; listed.
+- `RIGFAULT`: a wrong state that could not be put right; that step's checks were not made.
+- `rig broken` (inside a `FAIL`): a game not answering, ssh to the VM down, the pad moving nobody. Two of them end the run at once: the rest would measure the rig.
+
+The last line is `VERDICT: PASS` (every check made and passed), `VERDICT: FAIL` (a check failed: the mod's), or `VERDICT: RIG` (nothing failed, but the rig kept some checks from being made: fix the rig and run again). The exit code is the number of failed checks, and a run that made no check never passes.
+
+### The steps
+
+| Step | What it checks |
+|---|---|
+| `preflight` | both games run the same build of the plugin on 1.7.104 with the Address Library, Steam usable, the tick running; the host's game loaded no save since it started (the run stops if it did) |
+| `world` | both players in the world with no box open, near each other (`coc` from the main menu when not: console placement, said as a `HEAL`) |
+| `join` | the host hosts; the VM joins over Steam through `steam://joinlobby` (the path an accepted invite takes; `--join dev` joins by lobby id); both say so; the join's time; nobody turned away |
+| `see` | each game has a stand-in of the other: placed, dressed, named as its friend, standing where its friend stands (within 60 u); its friend's states keep coming; no stray stand-ins |
+| `move_vm` | the VM's player runs out and walks back (the virtual pad); on the host the stand-in follows the whole way (mean and largest distance, the share of the way it covers), its legs move while its friend moves, and it stops where its friend stopped |
+| `move_host` | the same, the host's player moving and the VM watching |
+| `gait` | sneak and stand up, then jump, each way: the watcher's stand-in shows it |
+| `save_rejoin` | the VM saves mid-session (no stand-in written into the save, the game lives through it), leaves (its stand-in goes on the host, nothing stray), joins again, loads its own save in the session (no stand-in comes back from it); then the host ends the session (the VM's stand-in of it goes) and hosts again |
+| `final` | both games still up, no stray stand-ins; each plugin log since the start (no error or assertion line; warnings counted per prefix; no Steam id, IP address or private name); the host never saved or loaded; no new crash log on either machine |
+
+After the steps, always (also after the breaker or Ctrl-C), the restore: virtual pads off, sessions left, the VM's test save moved aside into the project's folder on the VM (never deleted), any join task left on the VM removed; then both games closed, both machines' `Skyrim.ini` and `SkyrimPrefs.ini` put back byte for byte, `--build`'s install undone and both DLLs checked to be the ones from before, and both Saves folders compared with their listings from before (the host's must not have changed). `--keep` leaves the games running; their ini files are then put back with `smoke.sh --restore <run folder>` once both are closed.
+
+## Adding a step for a new feature
+
+Every feature's pull request adds its own step, so the rig can test it the day it is free. A step is written before anyone has run it; the pull request says so ("Not tested in a game yet; rig step `<name>` is ready for it").
+
+1. **One step per class of thing, not per object.** `doors` covers every kind of door, gate and activator it can reach; `quests` every way a quest stage moves. Name it after the class, in lower case.
+2. **In `steps.sh`:** add the name to `STEPS` (before `final`), a one-line `STEP_INFO` entry, the name to `SESSION_STEPS` when it needs the two games in one session, and write `step_<name>`. In `smoke.sh`, add it to `RERUN_STEPS` only if running it twice in a row changes nothing (no save, no quest stage set for good).
+3. **Both directions.** Do it on the VM with the host watching, then on the host with the VM watching, each in its own `section`. A check names the game it reads (`host: ...`, `vm: ...`).
+4. **Real input only.** Players move with the virtual pad (`walkto <ref>` to walk up to a reference, `walkto <x> <y>`, `pad button a` to activate); nothing is placed or moved by a script. `coc` from the main menu (or to bring both players to a scene) is allowed and is said in the run's log. The host's attacks may be injected for combat steps.
+5. **Read both games.** The feature adds a developer-channel command that answers in one line of `key=value` (no names, no Steam ids: `Redact.h`), and the step asserts on it in both games with `expect_*`: the two games agree, and they agree with what was done. Read the plugin log since the run's mark with `log_since_mark <who> '<regex>'` for lines that must (or must not) be there.
+6. **Say whose fault it is.** A press that never reached the acting game (its own state did not change) is `rig_fault input`; a game that does not answer is `rig_broken game`. Only what the mod does wrong is a `fail`.
+7. **Saves.** A persistence check saves and loads on the VM only, under `$SAVE_NAME` (moved aside at the end). The host's game never saves and never loads.
+8. **Test the reading.** Add a case to the self-test at the end of `steps.sh` that fakes both games' replies (in the plugin's real format) and shows a good reply passes and a bad one fails. `bash tools/rig/selftest.sh` runs every self-test; CI runs it on every push. Add the step to the table above (`smoke.sh --selftest` checks every step is named here).
+9. **Fast.** A step is a functional check of a minute or two, not a soak.
+
+## What these scripts never do
+
+They never download anything (the maintainer puts SKSE, the Address Library and Crash Logger in the rig's `skyrim-downloads` folder; `install.sh` checks their hashes), never use Continue or Load on the host, never save on the host, never delete a save (the VM's test save is moved aside), never teleport a player or move one by a script, and never steer a game by screenshots. They print no Steam id and no name: the VM's join address names the host's Steam id and is passed from one game to the other without being printed or kept.
