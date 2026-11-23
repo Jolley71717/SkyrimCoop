@@ -292,7 +292,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	# a use the game did not make (its own door unchanged) is the rig's input: RIG, never FAIL
 	fake 1; dc() { case "$2" in "use 0001A6A5") echo used ;; "ref 0001A6A5") echo "ref=0001A6A5 kind=door open=0 locked=0 level=- loaded=1 known=-/-/- dist=300 at=(40,50,60) name=Door" ;; esac; }
 	o=$(run 6 doors_open 0001A6A5)
-	t "open: the VM's own door unchanged is RIG, not FAIL" "$(grep -c '^RIG vm: uses the door' <<<"$o"),$(grep -c '^FAIL ' <<<"$o")" 1,0
+	t "open: the VM's own door unchanged is RIG, not FAIL" "$(grep -c '^RIG .*vm: uses the door' <<<"$o"),$(grep -c '^FAIL ' <<<"$o")" 1,0
 
 	# the mechanism: the watcher's stand-in within reach, its made count up with none refused
 	mech() {  # mech <made after the use> <refused after>
@@ -314,7 +314,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	o=$(mech 0 1); t "mechanism: refused fails" "$(grep -c '^FAIL host: its stand-in of the vm uses' <<<"$o"),$(grep -c '^FAIL host: refused none' <<<"$o")" 1,1
 	dc() { case "$2" in "console player.moveto"*) echo ran ;; standins) echo "standin=FF0008AE placed=1 at=(5000,1000,0)" ;; "ref 000C0002") echo "ref=000C0002 kind=mechanism at=(1000,1000,0) name=Pillar" ;; esac; }
 	o=$(run m3 doors_use vm 000C0002)
-	t "mechanism: a stand-in out of reach is RIG, and no use is made" "$(grep -c '^RIG host: its stand-in of the vm comes within reach' <<<"$o"),$(grep -c '^FAIL ' <<<"$o")" 1,0
+	t "mechanism: a stand-in out of reach is RIG, and no use is made" "$(grep -c '^RIG .*host: its stand-in of the vm comes within reach' <<<"$o"),$(grep -c '^FAIL ' <<<"$o")" 1,0
 
 	# the step is wired into the harness: in STEPS before final, a session step, in the default run
 	t "doors is a step, before final" "$(case " $STEPS " in *" doors final "*) echo yes;; esac)" yes
