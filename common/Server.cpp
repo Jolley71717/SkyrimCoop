@@ -38,15 +38,21 @@ namespace
 		// The player's newest looks, for whoever joins after (none until the first come). Always the newest: looks are
 		// state, and the last of a burst is the one that counts.
 		std::optional<Protocol::PlayerLooks> looks;
-		// Looks passed on: a burst of ten, then one a second (a game sends them when its player changes clothes). Past
-		// it, the newest are kept and owed: passed on from the server's loop once the budget has room.
-		TokenBucket looksBudget{ 10.0, 1.0 };
+		// Looks passed on: a burst of ten, then four a second (a game sends them when its player changes clothes, or
+		// what a hand holds: a sword for a bow, a spell for a torch). Past it, the newest are kept and owed: passed on from
+		// the server's loop once the budget has room.
+		TokenBucket looksBudget{ 10.0, 4.0 };
 		bool        looksOwed = false;
 		// Heartbeats answered: a burst of twenty, then ten a second (the game sends a few a second at most).
 		TokenBucket heartbeats{ 20.0, 10.0 };
 		// Hits on copies sent on (NpcFates.h): a burst of 64, then 20 a second (a flurry of daggers, a flame spell's
 		// ticks on a few copies). Past it, a hit is answered kBusy, never dropped: the hitter gives the drop back.
 		TokenBucket hitBudget{ 64.0, 20.0 };
+		// A player's graph events passed on, each one: a burst of 96, then 48 a second (a player's fight sends a few a
+		// second: a swing is two or three, a cast two). Past it, an event is dropped, never kept: a stand-in shows
+		// the next one.
+		TokenBucket actionBudget{ 96.0, 48.0 };
+		bool        toldActionsDropped = false;
 		bool        toldUnknown = false;
 	};
 
@@ -523,6 +529,21 @@ void Server::Run()
 				if (!late.deaths.empty()) {
 					log(std::format("server: player {} says {} NPC(s) it ran a moment ago died there: everyone is told", a_peer.playerId, late.deaths.size()));
 					broadcast(Protocol::Encode(late), true, nullptr);
+				}
+			}
+			break;
+		case MT::kPlayerActions:
+			// To the others, the sender named, each event within the sender's budget.
+			if (auto msg = Protocol::DecodePlayerActions(a_data)) {
+				const auto now = Clock::now();
+				const auto before = msg->actions.size();
+				std::erase_if(msg->actions, [&](const Protocol::PlayerAction&) { return !a_peer.actionBudget.Take(now); });
+				if (msg->actions.size() < before && !a_peer.toldActionsDropped) {
+					a_peer.toldActionsDropped = true;
+					log(std::format("server: player {} sends graph events faster than they are passed on: the rest are dropped (said once)", a_peer.playerId));
+				}
+				if (!msg->actions.empty()) {
+					broadcast(Protocol::Encode(Protocol::RemoteActions{ a_peer.playerId, std::move(msg->actions) }), true, &a_key);
 				}
 			}
 			break;

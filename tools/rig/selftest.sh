@@ -6,7 +6,7 @@
 export VM_SSH=selftest-no-vm SKYRIMCOOP_STAGE=${SKYRIMCOOP_STAGE:-$(mktemp -d)}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 failed=0
-for part in "assert.sh selftest" "crashlib.sh selftest" "steps.sh selftest" "steps/forms.sh selftest" "steps/npcs.sh selftest" "steps/npccombat.sh selftest" "smoke.sh --selftest"; do
+for part in "assert.sh selftest" "crashlib.sh selftest" "steps.sh selftest" "steps/forms.sh selftest" "steps/npcs.sh selftest" "steps/npccombat.sh selftest" "steps/actions.sh selftest" "smoke.sh --selftest"; do
 	echo "### $part"
 	# shellcheck disable=SC2086
 	bash "$here"/$part || { failed=$((failed + 1)); echo "### $part: FAILED"; }

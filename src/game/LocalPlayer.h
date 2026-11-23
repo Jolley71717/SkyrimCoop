@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Protocol.h"
+#include "game/Gear.h"
 
 // The player of this game: what the other players are told about them. Main thread only.
 namespace LocalPlayer
@@ -13,9 +14,12 @@ namespace LocalPlayer
 	// sentMs are the sender's to set). Nothing while not InWorld.
 	[[nodiscard]] std::optional<Protocol::PlayerState> Read();
 
-	// What the character looks like, as a friend's stand-in of them shows it: race, sex, weight and the armor worn.
-	// Nothing while not InWorld.
+	// What the character looks like, as a friend's stand-in of them shows it: race, sex, weight, the armor worn, and
+	// what each hand, the quiver and the voice hold. Nothing while not InWorld.
 	[[nodiscard]] std::optional<Protocol::PlayerLooks> Looks();
+	// What each hand, the quiver and the voice hold, alone: read often (a few times a second), so a sword taken out is
+	// on the friend's stand-in before its swing is. Nothing while not InWorld.
+	[[nodiscard]] std::optional<Gear::Hands> Hands();
 
 	// At data load, before any game: the name the game gives a character that has none yet ("Prisoner").
 	void NoteDefaultName();

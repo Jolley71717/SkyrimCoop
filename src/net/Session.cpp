@@ -9,6 +9,7 @@
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
+#include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "net/FormsCommand.h"
 #include "net/Identity.h"
@@ -28,6 +29,9 @@ namespace Session
 
 		constexpr auto STATE_EVERY = 50ms;  // 20 states a second (StateBuffer's delay holds two of them)
 		constexpr auto LOOKS_EVERY = 1s;    // looks are read this often and sent when they changed
+		// What the hands hold is read this often alone, and the looks go at once when it changed: a sword taken out, a
+		// spell readied or a bow put away is on the others' stand-in before the swing, cast or shot that follows it.
+		constexpr auto HANDS_EVERY = 100ms;
 		constexpr auto BEAT_EVERY = 2s;
 
 		enum class Role
@@ -46,6 +50,7 @@ namespace Session
 		std::uint32_t                     sequence = 0;
 		Clock::time_point                 nextState{};
 		Clock::time_point                 nextLooks{};
+		Clock::time_point                 nextHands{};
 		Clock::time_point                 nextBeat{};
 		Clock::time_point                 joinedAt{};
 		// The looks last sent on this connection. The contract with the server: a game sends its looks after every
@@ -59,6 +64,7 @@ namespace Session
 		std::uint64_t                     statesSent = 0;
 		std::uint64_t                     statesIn = 0;
 		std::uint64_t                     looksSent = 0;
+		std::uint64_t                     actionsSent = 0;  // our player's graph events sent (PlayerActions)
 		std::string                       lastEnd = "none";
 		// This game's edge to the session's form IDs (common/FormTranslate.h): our load order as the hello sent it, and
 		// the session's plugin table once the server sends it (before the welcome, and again whenever it grows). Until
@@ -79,6 +85,7 @@ namespace Session
 			playerId = 0;
 			hostId = 0;
 			sentLooks.reset();
+			PlayerActions::Recording(false);
 			beats.clear();
 			rttMs = -1.0f;
 			forms = {};
@@ -211,7 +218,8 @@ namespace Session
 					playerId = msg->playerId;
 					hostId = msg->hostId;
 					sentLooks.reset();
-					nextState = nextLooks = nextBeat = Clock::now();
+					nextState = nextLooks = nextHands = nextBeat = Clock::now();
+					PlayerActions::Recording(true);
 					NpcSync::Started(playerId, hostId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
@@ -242,6 +250,11 @@ namespace Session
 			case Protocol::MessageType::kRemoteLooks:
 				if (const auto msg = Protocol::DecodeRemoteLooks(a_data); msg && msg->playerId != playerId) {
 					RemotePlayers::Looked(msg->playerId, msg->looks);
+				}
+				break;
+			case Protocol::MessageType::kRemoteActions:
+				if (const auto msg = Protocol::DecodeRemoteActions(a_data); msg && msg->playerId != playerId) {
+					RemotePlayers::Acted(msg->playerId, msg->actions);
 				}
 				break;
 			case Protocol::MessageType::kNpcOwners:
@@ -310,14 +323,30 @@ namespace Session
 					++statesSent;
 				}
 			}
+			if (a_now >= nextHands) {
+				nextHands = a_now + HANDS_EVERY;
+				if (const auto hands = LocalPlayer::Hands(); hands && sentLooks &&
+					*hands != Gear::Hands{ sentLooks->right, sentLooks->left, sentLooks->ammo, sentLooks->voice, sentLooks->unnamed }) {
+					nextLooks = a_now;
+				}
+			}
 			if (a_now >= nextLooks) {
 				nextLooks = a_now + LOOKS_EVERY;
 				if (const auto looks = LocalPlayer::Looks(); looks && looks != sentLooks) {
 					Send(Protocol::Encode(*looks), true);
+					// Said when the body or the armor changed; a hand's change (many a fight) is counted only.
+					const bool body = !sentLooks || sentLooks->race != looks->race || sentLooks->female != looks->female || sentLooks->worn != looks->worn;
 					sentLooks = looks;
 					++looksSent;
-					logs::info("Session: sent our looks (race {:08X}, {}, {} worn items)", looks->race, looks->female ? "female" : "male", looks->worn.size());
+					if (body) {
+						logs::info("Session: sent our looks (race {:08X}, {}, {} worn items)", looks->race, looks->female ? "female" : "male", looks->worn.size());
+					}
 				}
+			}
+			// What our player did since the last tick: reliable, in order, so a swing is never played without its end.
+			for (auto actions = PlayerActions::Take(); !actions.empty(); actions = PlayerActions::Take()) {
+				actionsSent += actions.size();
+				Send(Protocol::Encode(Protocol::PlayerActions{ std::move(actions) }), true);
 			}
 			if (a_now >= nextBeat) {
 				nextBeat = a_now + BEAT_EVERY;
@@ -496,10 +525,10 @@ namespace Session
 	std::string Describe()
 	{
 		const auto status = client ? client->GetStatus() : ClientConnection::Status::kDisconnected;
-		return std::format("role={} connection={} welcomed={} player={} host={} players={} sent={} received={} looksSent={} rtt={} serverPlayers={} lastEnd={}",
+		return std::format("role={} connection={} welcomed={} player={} host={} players={} sent={} received={} looksSent={} actionsSent={} rtt={} serverPlayers={} lastEnd={}",
 			role == Role::kHost ? "host" : role == Role::kFriend ? "friend" : "none",
 			status == ClientConnection::Status::kConnected ? "up" : status == ClientConnection::Status::kConnecting ? "connecting" : "down",
-			welcomed ? 1 : 0, playerId, hostId, RemotePlayers::Count(), statesSent, statesIn, looksSent, rttMs < 0 ? std::string{ "?" } : std::format("{:.0f}", rttMs),
+			welcomed ? 1 : 0, playerId, hostId, RemotePlayers::Count(), statesSent, statesIn, looksSent, actionsSent, rttMs < 0 ? std::string{ "?" } : std::format("{:.0f}", rttMs),
 			server ? std::to_string(server->Players()) : std::string{ "-" }, lastEnd);
 	}
 }

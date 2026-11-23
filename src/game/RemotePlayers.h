@@ -34,8 +34,12 @@ namespace RemotePlayers
 
 	// A state of a player who has joined, as it came; one of a player who has not is dropped.
 	void Moved(std::uint32_t a_playerId, const Protocol::PlayerState& a_state);
-	// What a player's character looks like; a stand-in already there is made again if it changed.
+	// What a player's character looks like: a stand-in already there is made again for another body (race, sex,
+	// weight), or dressed again for other gear (what they wear, hold in each hand, shoot and have in their voice).
 	void Looked(std::uint32_t a_playerId, const Protocol::PlayerLooks& a_looks);
+	// What a player did (their graph's events: attacks, blocks, casts, shouts, draws), each played on their stand-in at
+	// the moment it is drawn at. Those of a player with no stand-in here are counted and dropped.
+	void Acted(std::uint32_t a_playerId, const std::vector<Protocol::PlayerAction>& a_actions);
 
 	// Once a tick: places, dresses and takes away stand-ins as the players and this game's world say.
 	void Frame();
@@ -84,6 +88,10 @@ namespace RemotePlayers
 	// Developer channel: `standins` (one line each), `strays` (placed actors of a preset base in the loaded game:
 	// 0 outside a session means nothing of a session was saved), `graph <player> [event <name> | vars]`.
 	[[nodiscard]] std::string Describe();
+	// Developer channel `actions` (the stand-ins' part): per player, the actions that came and were played or turned
+	// away by kind, the weapon drawn against its friend's, what each hand holds against the looks, and what it did here
+	// (its spells' effects refused, blows, casts, health taken and given back).
+	[[nodiscard]] std::string Actions();
 	[[nodiscard]] std::string Strays();
 	[[nodiscard]] std::string Graph(std::string_view a_args);
 
