@@ -20,9 +20,10 @@
 //   physics, never by a list of forms: a mod's clutter is shared as the game's is; a door, a lever, a trap's moving part
 //   (keyframed) or a static never are.
 // - Frames: what a player holds is said in their frame (ToHolder) and drawn in front of their stand-in (FromHolder).
-// - Causes: whose move it is. A grab, a hit, an explosion, a projectile's path, a body standing by it: ours (our player,
-//   an NPC this game runs) or theirs (a friend's stand-in, a copy of an NPC another game runs, an explosion or a
-//   projectile one of those set off). Ours to report when our strongest cause that reached it is at least theirs.
+// - Causes: whose move it is. A grab, a hit, an explosion, a projectile's path, a body standing by it, a dead body's
+//   fall, a loose object's flight: ours (our player, an NPC this game runs, an object we watch) or theirs (a friend's
+//   stand-in, a copy of an NPC another game runs, an explosion or a projectile one of those set off, an object a
+//   friend's move sent flying). Ours to report when our strongest cause that reached it is at least theirs.
 // - Settle: at rest once it moved under MOVE_EPSILON and turned under TURN_EPSILON for STILL_FOR, or GIVE_UP after its move
 //   began.
 // - Pacer: rests go out BURST at once, then PER_SECOND; one that waits past WAIT_MAX is dropped and counted.
@@ -444,14 +445,47 @@ namespace ObjectRules
 		[[nodiscard]] bool Ours() const { return ours != Strength::kNone && ours >= theirs; }
 	};
 
+	// At most MAX_CAUSES. A cause that goes on from where one of the same side, strength and reach ends, nearly straight
+	// on (a flight's next stretch, a body standing where it stood), makes that one longer and last longer instead of
+	// adding one. When full, a friend's cause takes the place of our own that ends first (a friend's cause dropped
+	// could make their move ours, and our game would say it back to them); one that finds no room is dropped and counted.
 	class Causes
 	{
 	public:
+		static constexpr float JOIN_EPSILON = 1.0f;  // units: a stretch from within this of where another ends goes on from it
+		static constexpr float JOIN_BEND = 0.25f;    // of its reach: how far the joint may lie off the joined path
+
 		void Add(const Cause& a_cause)
 		{
-			if (a_cause.strength != Strength::kNone && Finite(a_cause.from) && Finite(a_cause.to) && causes.size() < MAX_CAUSES) {
-				causes.push_back(a_cause);
+			if (a_cause.strength == Strength::kNone || !Finite(a_cause.from) || !Finite(a_cause.to)) {
+				return;
 			}
+			if (a_cause.object == 0) {
+				for (auto it = causes.rbegin(); it != causes.rend(); ++it) {
+					if (it->object == 0 && it->ours == a_cause.ours && it->strength == a_cause.strength && it->reach == a_cause.reach &&
+						Distance(it->to, a_cause.from) <= JOIN_EPSILON && DistanceToPath(it->to, it->from, a_cause.to) <= a_cause.reach * JOIN_BEND) {
+						it->to = a_cause.to;
+						it->until = (std::max)(it->until, a_cause.until);
+						++joined;
+						return;
+					}
+				}
+			}
+			if (causes.size() < MAX_CAUSES) {
+				causes.push_back(a_cause);
+				return;
+			}
+			if (!a_cause.ours) {
+				const auto ours = std::min_element(causes.begin(), causes.end(), [](const Cause& a_a, const Cause& a_b) {
+					return a_a.ours != a_b.ours ? a_a.ours : a_a.until < a_b.until;  // our own first, the one ending first
+				});
+				if (ours != causes.end() && ours->ours) {
+					*ours = a_cause;
+					++dropped;
+					return;
+				}
+			}
+			++dropped;
 		}
 		void Prune(Clock::time_point a_now)
 		{
@@ -485,6 +519,9 @@ namespace ObjectRules
 		}
 
 		static constexpr std::size_t MAX_CAUSES = 1024;
+
+		std::uint64_t joined = 0;   // causes that went on from another
+		std::uint64_t dropped = 0;  // causes that found no room (or our own that made room for a friend's)
 
 	private:
 		std::vector<Cause> causes;
@@ -573,6 +610,12 @@ namespace ObjectRules
 			it->second.pose = a_pose;
 			return before;
 		}
+		// Where a_id lay at the last look, if it was looked at.
+		[[nodiscard]] std::optional<Pose> Peek(std::uint32_t a_id) const
+		{
+			const auto it = seen.find(a_id);
+			return it != seen.end() ? std::optional<Pose>{ it->second.pose } : std::nullopt;
+		}
 		// Its baseline is now a_pose (we put it there, or its move is over).
 		void Set(std::uint32_t a_id, const Pose& a_pose, Clock::time_point a_now) { seen[a_id] = Entry{ a_pose, a_now }; }
 		void Forget(std::uint32_t a_id) { seen.erase(a_id); }
@@ -590,6 +633,147 @@ namespace ObjectRules
 			Clock::time_point lastSeen{};
 		};
 		std::map<std::uint32_t, Entry> seen;
+	};
+
+	// ---- causes that move ----
+	//
+	// What flies or falls knocks over what it passes, so its path is a cause, whose its owner is: a projectile's flight
+	// (every update of it, from the projectiles' own update: a fast arrow or a cone that launches and lands between two
+	// looks is still a cause), a dead body falling (its runner's), and a loose object in flight (ours while we watch it, a
+	// friend's while their move of it lasts here).
+
+	inline constexpr auto  FLIGHT_EVERY = 100ms;     // a flight's path is said as a stretch this often
+	inline constexpr auto  FLIGHT_END = 250ms;       // a flight not updated this long is over: its last stretch is said
+	inline constexpr float FLIGHT_JUMP = 4000.0f;    // a jump this far in one update is another projectile in a freed one's memory
+	inline constexpr float CONE_RANGE_MAX = 4096.0f;  // a cone's line reaches at most this far (its record's range)
+	inline constexpr float BODY_MOVE = 8.0f;         // a body that moved less between two looks lies still
+	inline constexpr float MIN_BODY_REACH = 64.0f;   // a falling body reaches its bound's radius, at least this
+	inline constexpr float MAX_BODY_REACH = 400.0f;  // and at most this (a dragon's bound would reach the whole room)
+	inline constexpr float OBJECT_MARGIN = 32.0f;    // a flying object reaches its bound's radius and this
+	inline constexpr float MIN_OBJECT_REACH = 32.0f;
+	inline constexpr float MAX_OBJECT_REACH = 256.0f;
+
+	// How far a body or an object of bound radius a_radius reaches as it moves.
+	[[nodiscard]] inline float BodyReach(float a_radius)
+	{
+		return std::isfinite(a_radius) ? std::clamp(a_radius, MIN_BODY_REACH, MAX_BODY_REACH) : MIN_BODY_REACH;
+	}
+	[[nodiscard]] inline float ObjectReach(float a_radius)
+	{
+		return std::isfinite(a_radius) ? std::clamp(a_radius + OBJECT_MARGIN, MIN_OBJECT_REACH, MAX_OBJECT_REACH) : MIN_OBJECT_REACH;
+	}
+
+	// A stretch of a path, from where it was to where it went.
+	struct Stretch
+	{
+		Vec from;
+		Vec to;
+		bool operator==(const Stretch&) const = default;
+	};
+
+	// A cone's line (Unrelenting Force): from where it leaves, a_range along a_way (a unit way), at most CONE_RANGE_MAX.
+	[[nodiscard]] inline std::optional<Stretch> ConeLine(const Vec& a_origin, const Vec& a_way, float a_range)
+	{
+		const auto length = Length(a_way);
+		if (!Finite(a_origin) || !std::isfinite(length) || length < 1e-3f || !std::isfinite(a_range) || a_range <= 0.0f) {
+			return std::nullopt;
+		}
+		const auto range = (std::min)(a_range, CONE_RANGE_MAX);
+		return Stretch{ a_origin, a_origin + a_way * (range / length) };
+	}
+
+	// One projectile's flight, from its updates: a stretch each FLIGHT_EVERY, and the last when it is over.
+	class Flight
+	{
+	public:
+		Flight(const Vec& a_at, Clock::time_point a_now) :
+			from(a_at), last(a_at), lastUpdate(a_now), lastSaid(a_now)
+		{}
+
+		// An update at a_at: the stretch since the last one said, once FLIGHT_EVERY passed.
+		std::optional<Stretch> Update(const Vec& a_at, Clock::time_point a_now)
+		{
+			if (!Finite(a_at)) {
+				return std::nullopt;
+			}
+			last = a_at;
+			lastUpdate = a_now;
+			if (a_now - lastSaid < FLIGHT_EVERY) {
+				return std::nullopt;
+			}
+			const Stretch out{ from, last };
+			from = last;
+			lastSaid = a_now;
+			return out;
+		}
+		// Whether a_at is not this flight's next place: too far, or it was not updated for FLIGHT_END (a new projectile
+		// in a freed one's memory).
+		[[nodiscard]] bool Another(const Vec& a_at, Clock::time_point a_now) const { return Over(a_now) || !Finite(a_at) || Distance(a_at, last) > FLIGHT_JUMP; }
+		[[nodiscard]] bool Over(Clock::time_point a_now) const { return a_now - lastUpdate >= FLIGHT_END; }
+		// Its last stretch (since the last said), when it went anywhere.
+		[[nodiscard]] std::optional<Stretch> Rest() const
+		{
+			if (Distance(from, last) < MOVE_EPSILON) {
+				return std::nullopt;
+			}
+			return Stretch{ from, last };
+		}
+
+	private:
+		Vec               from;
+		Vec               last;
+		Clock::time_point lastUpdate{};
+		Clock::time_point lastSaid{};
+	};
+
+	// Where each dead body near us lay at the last look, so its fall is a path (at most MAX_BODIES; one not seen for
+	// FORGET_AFTER is forgotten).
+	class Falls
+	{
+	public:
+		static constexpr std::size_t MAX_BODIES = 256;
+		static constexpr auto        FORGET_AFTER = 5s;
+
+		// A look at body a_id, at a_at: the stretch it fell since the last look, when it moved BODY_MOVE or more. The first
+		// look is its baseline.
+		std::optional<Stretch> Look(std::uint32_t a_id, const Vec& a_at, Clock::time_point a_now)
+		{
+			if (!Finite(a_at)) {
+				return std::nullopt;
+			}
+			auto it = bodies.find(a_id);
+			if (it == bodies.end()) {
+				if (bodies.size() >= MAX_BODIES) {
+					Prune(a_now);
+					if (bodies.size() >= MAX_BODIES) {
+						return std::nullopt;
+					}
+				}
+				bodies.emplace(a_id, Entry{ a_at, a_now });
+				return std::nullopt;
+			}
+			it->second.lastSeen = a_now;
+			if (Distance(it->second.at, a_at) < BODY_MOVE) {
+				return std::nullopt;
+			}
+			const Stretch out{ it->second.at, a_at };
+			it->second.at = a_at;
+			return out;
+		}
+		void Prune(Clock::time_point a_now)
+		{
+			std::erase_if(bodies, [&](const auto& a_entry) { return a_now - a_entry.second.lastSeen > FORGET_AFTER; });
+		}
+		void                      Clear() { bodies.clear(); }
+		[[nodiscard]] std::size_t Size() const { return bodies.size(); }
+
+	private:
+		struct Entry
+		{
+			Vec               at;
+			Clock::time_point lastSeen{};
+		};
+		std::map<std::uint32_t, Entry> bodies;
 	};
 
 	// ---- what goes out ----

@@ -5,6 +5,8 @@
 #include "game/NpcSync.h"
 #include "game/ObjectRules.h"
 #include "game/RemotePlayers.h"
+#include "game/ShotRules.h"
+#include "game/Shots.h"
 #include "game/VtableHook.h"
 #include "net/FormsCommand.h"
 
@@ -51,6 +53,10 @@ namespace LooseObjects
 		// Explosion::Update, the explosion's own update (SE and AE; this plugin is not built for VR).
 		constexpr std::size_t EXPLOSION_UPDATE_SLOT = 0xA3;
 		constexpr std::size_t MAX_RECORDED = 64;
+		// Projectiles followed at once (each update of each, from the projectiles' own update), and stretches of their paths
+		// waiting for the main thread.
+		constexpr std::size_t MAX_FLIGHTS = 256;
+		constexpr std::size_t MAX_STRETCHES = 512;
 
 		std::atomic<bool> active{ false };
 		std::uint32_t     ourId = 0;
@@ -75,6 +81,85 @@ namespace LooseObjects
 		std::vector<Hit>               hits;
 		std::vector<RE::FormID>        pickups;
 		std::atomic<std::uint64_t>     blastsHeard{ 0 }, hitsHeard{ 0 }, pickupsHeard{ 0 };
+
+		// A projectile's flight, from its updates (Flew), and the stretches of the paths of all of them.
+		struct FlightOf
+		{
+			ObjectRules::Flight flight;
+			RE::ObjectRefHandle shooter;
+			float               reach = 0.0f;
+		};
+		struct ShotPath
+		{
+			ObjectRules::Stretch stretch;
+			float                reach = 0.0f;
+			RE::ObjectRefHandle  shooter;
+			Clock::time_point    when{};
+		};
+		std::map<std::pair<std::uintptr_t, std::uint32_t>, FlightOf> flights;  // by the object and its form id
+		std::vector<ShotPath>                                         shotPaths;
+		std::atomic<std::uint64_t> flightsHeard{ 0 }, flightsDropped{ 0 }, stretchesHeard{ 0 }, stretchesDropped{ 0 }, conesHeard{ 0 };
+
+		// Under recordLock.
+		void PushPath(const ObjectRules::Stretch& a_stretch, float a_reach, RE::ObjectRefHandle a_shooter, Clock::time_point a_now)
+		{
+			if (shotPaths.size() >= MAX_STRETCHES) {
+				stretchesDropped.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			shotPaths.push_back({ a_stretch, a_reach, a_shooter, a_now });
+			stretchesHeard.fetch_add(1, std::memory_order_relaxed);
+		}
+
+		// After each update of a projectile that flies (Shots::WatchFlights), on the thread that updates it: its path, a
+		// stretch each FLIGHT_EVERY and the last as it ends, so a fast arrow or a cone that launches and lands between two
+		// looks is a cause of what it knocks over. A cone (Unrelenting Force) is its whole line at once, as far as its
+		// record's range. Whose it is, is the main thread's (its shooter's).
+		void Flew(RE::Projectile* a_projectile)
+		{
+			if (!a_projectile || !active.load(std::memory_order_relaxed)) {
+				return;
+			}
+			const auto& rd = a_projectile->GetProjectileRuntimeData();
+			const auto  p = a_projectile->GetPosition();
+			const Vec   at{ p.x, p.y, p.z };
+			if (!ObjectRules::Finite(at)) {
+				return;
+			}
+			const auto key = std::pair{ reinterpret_cast<std::uintptr_t>(a_projectile), a_projectile->GetFormID() };
+			const bool cone = a_projectile->GetFormType() == RE::FormType::ProjectileCone;
+			const auto reach = cone ? ObjectRules::CONE_REACH : ObjectRules::SHOT_REACH;
+			const auto now = Clock::now();
+			std::scoped_lock l{ recordLock };
+			auto it = flights.find(key);
+			if (it != flights.end() && it->second.flight.Another(at, now)) {
+				if (const auto rest = it->second.flight.Rest()) {
+					PushPath(*rest, it->second.reach, it->second.shooter, now);
+				}
+				flights.erase(it);
+				it = flights.end();
+			}
+			if (it == flights.end()) {
+				if (flights.size() >= MAX_FLIGHTS) {
+					flightsDropped.fetch_add(1, std::memory_order_relaxed);
+					return;
+				}
+				flights.emplace(key, FlightOf{ ObjectRules::Flight{ at, now }, rd.shooter, reach });
+				flightsHeard.fetch_add(1, std::memory_order_relaxed);
+				if (cone) {
+					const auto base = a_projectile->GetProjectileBase();
+					const auto way = ShotRules::Direction(a_projectile->data.angle.x, a_projectile->data.angle.z);
+					if (const auto line = base ? ObjectRules::ConeLine(at, { way[0], way[1], way[2] }, base->data.range) : std::nullopt) {
+						PushPath(*line, reach, rd.shooter, now);
+						conesHeard.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+				return;
+			}
+			if (const auto stretch = it->second.flight.Update(at, now)) {
+				PushPath(*stretch, it->second.reach, it->second.shooter, now);
+			}
+		}
 
 		using ExplosionUpdateFn = void (*)(RE::Explosion*, float);
 		// The explosion classes whose update is hooked (a chain explosion has its own vtable), each with its original.
@@ -193,6 +278,7 @@ namespace LooseObjects
 		ObjectRules::HoldPace                     holdPace;
 		ObjectRules::Quiet                        quiet;
 		ObjectRules::Echo                         echo;
+		ObjectRules::Falls                        falls;  // dead bodies near us: their falls are causes
 		ObjectRules::Waiting                      waiting;
 		std::map<RE::FormID, Watch>               watches;
 		std::map<RE::FormID, FollowOn>            followOns;
@@ -215,6 +301,7 @@ namespace LooseObjects
 			std::uint64_t restsSaid = 0, restsSent = 0, restsHeard = 0, restsApplied = 0, restsLeft = 0, answers = 0, catchUps = 0;
 			std::uint64_t placesApplied = 0, goneSent = 0, goneHeard = 0;
 			std::uint64_t scans = 0, started = 0, notOurs = 0, hushed = 0, followOns = 0, lost = 0, gaveUp = 0;
+			std::uint64_t bodyFalls = 0, ourPaths = 0, theirPaths = 0;
 			std::uint64_t badPoses = 0, writes = 0, writeFails = 0, refWrites = 0, refUnwritten = 0, bodyOnly = 0, keyframes = 0, releases = 0;
 		};
 		Counts counts;
@@ -647,11 +734,28 @@ namespace LooseObjects
 			std::vector<Blast>      takenBlasts;
 			std::vector<Hit>        takenHits;
 			std::vector<RE::FormID> takenPickups;
+			std::vector<ShotPath>   takenPaths;
 			{
 				std::scoped_lock l{ recordLock };
 				takenBlasts.swap(blasts);
 				takenHits.swap(hits);
 				takenPickups.swap(pickups);
+				// Flights no update came for are over: their last stretch.
+				for (auto it = flights.begin(); it != flights.end();) {
+					if (it->second.flight.Over(a_now)) {
+						if (const auto rest = it->second.flight.Rest()) {
+							PushPath(*rest, it->second.reach, it->second.shooter, a_now);
+						}
+						it = flights.erase(it);
+					} else {
+						++it;
+					}
+				}
+				takenPaths.swap(shotPaths);
+			}
+			for (const auto& path : takenPaths) {
+				const auto shooter = path.shooter.get();
+				AddCause(path.stretch.from, path.stretch.to, path.reach, ObjectRules::Strength::kStrike, WhoseRef(shooter.get()), path.when + ObjectRules::SHOT_HOLD);
 			}
 			for (const auto& blast : takenBlasts) {
 				const auto owner = blast.owner.get();
@@ -659,7 +763,7 @@ namespace LooseObjects
 			}
 			for (const auto& hit : takenHits) {
 				const auto cause = hit.cause.get();
-			AddCause({}, {}, 0.0f, ObjectRules::Strength::kStrike, WhoseRef(cause.get()), hit.when + ObjectRules::HIT_HOLD, hit.target);
+				AddCause({}, {}, 0.0f, ObjectRules::Strength::kStrike, WhoseRef(cause.get()), hit.when + ObjectRules::HIT_HOLD, hit.target);
 			}
 			for (const auto id : takenPickups) {
 				watches.erase(id);
@@ -679,6 +783,7 @@ namespace LooseObjects
 			causes.Prune(a_now);
 			seen.Prune(a_now);
 			quiet.Prune(a_now);
+			falls.Prune(a_now);
 			const auto me = At(a_player);
 			AddCause(me, me, ObjectRules::PLAYER_REACH, ObjectRules::Strength::kBody, Whose::kOurs, a_now + ObjectRules::BODY_HOLD);
 			for (const auto& [id, hold] : friendHolds) {
@@ -698,6 +803,8 @@ namespace LooseObjects
 			if (!tes) {
 				return;
 			}
+			// Every projectile's path comes from its own updates (Flew) when every class is hooked; else from these looks.
+			const bool sampleShots = !Shots::AllHooked();
 			tes->ForEachReferenceInRange(a_player, SCAN_RANGE + ObjectRules::CONE_REACH, [&](RE::TESObjectREFR* a_ref) {
 				if (!a_ref || a_ref == a_player) {
 					return RE::BSContainer::ForEachResult::kContinue;
@@ -708,7 +815,21 @@ namespace LooseObjects
 						const auto whose = WhoseActor(actor);
 						const auto reach = RemotePlayers::PlayerOf(actor) != 0 ? ObjectRules::PLAYER_REACH : ObjectRules::NPC_REACH;
 						AddCause(at, at, reach, ObjectRules::Strength::kBody, whose, a_now + ObjectRules::BODY_HOLD);
+					} else if (const auto root = actor->Get3D()) {
+						// A dead body falling (a ragdoll knocks a table's clutter flying): its path since the last look, by the
+						// middle of its bound (the reference stays where it died while the bones fly), its runner's.
+						const auto& bound = root->worldBound;
+						if (const auto fall = falls.Look(actor->GetFormID(), { bound.center.x, bound.center.y, bound.center.z }, a_now)) {
+							const auto whose = WhoseActor(actor);
+							if (whose != Whose::kNobody) {
+								AddCause(fall->from, fall->to, ObjectRules::BodyReach(bound.radius), ObjectRules::Strength::kStrike, whose, a_now + ObjectRules::SHOT_HOLD);
+								++counts.bodyFalls;
+							}
+						}
 					}
+					return RE::BSContainer::ForEachResult::kContinue;
+				}
+				if (a_ref->As<RE::Projectile>() && !sampleShots) {
 					return RE::BSContainer::ForEachResult::kContinue;
 				}
 				if (const auto projectile = a_ref->As<RE::Projectile>()) {
@@ -736,6 +857,15 @@ namespace LooseObjects
 				nearBy.resize(MAX_LOOKED);
 			}
 
+			// First every look, and the paths of what flies (an object in flight knocks over what it passes); then whose
+			// each move is, every path known.
+			struct Looked
+			{
+				RE::FormID id;
+				Pose       before;
+				Pose       pose;
+			};
+			std::vector<Looked> moved;
 			for (const auto& one : nearBy) {
 				const auto id = one.ref->GetFormID();
 				if (!bodySense.Done() || !angleSense.Done()) {
@@ -745,8 +875,20 @@ namespace LooseObjects
 				if (!pose) {
 					continue;
 				}
-				if ((ourHold && *ourHold == id) || friendHolds.contains(id) || watches.contains(id)) {
+				if ((ourHold && *ourHold == id) || friendHolds.contains(id)) {
 					seen.Set(id, *pose, a_now);
+					continue;
+				}
+				const auto root = one.ref->Get3D();
+				const auto reach = ObjectRules::ObjectReach(root ? root->worldBound.radius : 0.0f);
+				if (watches.contains(id)) {
+					// Ours in flight: its path is ours.
+					const auto prior = seen.Peek(id);
+					seen.Set(id, *pose, a_now);
+					if (prior && ObjectRules::Moved(*prior, *pose)) {
+						AddCause(prior->at, pose->at, reach, ObjectRules::Strength::kStrike, Whose::kOurs, a_now + ObjectRules::SHOT_HOLD);
+						++counts.ourPaths;
+					}
 					continue;
 				}
 				const auto before = seen.Look(id, *pose, a_now);
@@ -754,10 +896,21 @@ namespace LooseObjects
 					continue;
 				}
 				if (quiet.Hushed(id, a_now)) {
+					// A friend's move put it there: our physics settling it is not ours to say, and what it knocks over on
+					// the way is theirs.
 					++counts.hushed;
-					continue;  // a friend's move put it there: our physics settling it is not ours to say
+					AddCause(before->at, pose->at, reach, ObjectRules::Strength::kStrike, Whose::kTheirs, a_now + ObjectRules::SHOT_HOLD);
+					++counts.theirPaths;
+					continue;
 				}
-				bool ours = causes.Judge(id, before->at, pose->at, a_now).Ours();
+				moved.push_back({ id, *before, *pose });
+			}
+
+			for (const auto& one : moved) {
+				const auto  id = one.id;
+				const auto* before = &one.before;
+				const auto* pose = &one.pose;
+				bool        ours = causes.Judge(id, before->at, pose->at, a_now).Ours();
 				if (!ours) {
 					if (const auto follow = followOns.find(id); follow != followOns.end() && a_now < follow->second.until && follow->second.count < FOLLOW_ON_MAX) {
 						ours = true;  // a rest of ours that rolls on
@@ -1030,6 +1183,7 @@ namespace LooseObjects
 			events->AddEventSink<RE::TESHitEvent>(&hitSink);
 			events->AddEventSink<RE::TESContainerChangedEvent>(&containerSink);
 		}
+		Shots::WatchFlights(&Flew);  // every projectile's path, from Shots' hook of their updates
 		return explosionHooked;
 	}
 
@@ -1159,6 +1313,7 @@ namespace LooseObjects
 		quiet.Clear();
 		echo.Clear();
 		waiting.Clear();
+		falls.Clear();
 		watches.clear();
 		followOns.clear();
 		heard.clear();
@@ -1175,6 +1330,8 @@ namespace LooseObjects
 		blasts.clear();
 		hits.clear();
 		pickups.clear();
+		flights.clear();
+		shotPaths.clear();
 	}
 
 	void ForgetWorld()
@@ -1190,12 +1347,15 @@ namespace LooseObjects
 		letGo.reset();
 		refusedGrab.reset();
 		quiet.Clear();
+		falls.Clear();
 		// The session's places are its word on the new world too: asked for again once the game runs.
 		askPlaces = active.load();
 		std::scoped_lock l{ recordLock };
 		blasts.clear();
 		hits.clear();
 		pickups.clear();
+		flights.clear();
+		shotPaths.clear();
 	}
 
 	void BeforeSave()
@@ -1231,11 +1391,12 @@ namespace LooseObjects
 			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} | letGos sent={} heard={} applied={} | "
 			"rests said={} sent={} heard={} applied={} left={} answers={} placesApplied={} catchUps={} waiting={} waitingRefused={} | gone sent={} heard={} | "
 			"scans={} started={} notOurs={} hushed={} followOns={} lost={} gaveUp={} watched={} seen={} causes={} paced={} pacedDropped={} echoStopped={} | "
-			"blasts={} hits={} pickups={} | writes={} refWrites={} refUnwritten={} bodyOnly={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
+			"blasts={} hits={} pickups={} | flights watched={} heard={} dropped={} stretches={} stretchesDropped={} cones={} | bodyFalls={} ourPaths={} theirPaths={} causesJoined={} causesDropped={} | writes={} refWrites={} refUnwritten={} bodyOnly={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
 			active.load() ? 1 : 0, explosionHooked ? 1 : 0, c.holdsSent, c.holdsHeard, c.holdsDrawn, c.holdsRefused, c.grabsDropped, c.holdsEnded, c.keyframes, c.releases,
 			c.letGosSent, c.letGosHeard, c.letGosApplied, c.restsSaid, c.restsSent, c.restsHeard, c.restsApplied, c.restsLeft, c.answers, c.placesApplied, c.catchUps,
 			waiting.Size(), waiting.refused, c.goneSent, c.goneHeard, c.scans, c.started, c.notOurs, c.hushed, c.followOns, c.lost, c.gaveUp, watches.size(), seen.Size(),
-			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), c.writes, c.refWrites, c.refUnwritten, c.bodyOnly,
+			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), Shots::AllHooked() ? 1 : 0,
+			flightsHeard.load(), flightsDropped.load(), stretchesHeard.load(), stretchesDropped.load(), conesHeard.load(), c.bodyFalls, c.ourPaths, c.theirPaths, causes.joined, causes.dropped, c.writes, c.refWrites, c.refUnwritten, c.bodyOnly,
 			c.writeFails, c.badPoses, SenseName(bodySense.Settled()), bodySense.same, bodySense.transposed, SenseName(angleSense.Settled()), angleSense.same,
 			angleSense.transposed);
 	}

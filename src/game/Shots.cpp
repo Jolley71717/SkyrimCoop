@@ -58,6 +58,7 @@ namespace Shots
 		} };
 		std::array<UpdateFn, CLASSES.size()> originals{};
 		std::size_t                          hooked = 0;
+		std::atomic<FlightFn>                flightWatcher{ nullptr };
 
 		std::atomic<bool>          active{ false };
 		std::atomic<std::uint32_t> ourId{ 0 };
@@ -368,6 +369,9 @@ namespace Shots
 			}
 			if (!step.tracked) {
 				originals[I](a_this, a_delta);
+				if (const auto watcher = flightWatcher.load(std::memory_order_relaxed); watcher && a_this) {
+					watcher(a_this);
+				}
 				return;
 			}
 			// A launch of ours: turned to its shooter's aim here, in its own update, before the game's update (its launch
@@ -380,6 +384,9 @@ namespace Shots
 			originals[I](a_this, a_delta);
 			if (step.aim && step.fix) {
 				after = AimAt(a_this, *step.aim, true);
+			}
+			if (const auto watcher = flightWatcher.load(std::memory_order_relaxed); watcher && a_this) {
+				watcher(a_this);  // before Left: the main thread does not end it while it is read
 			}
 			std::scoped_lock l{ lock };
 			tracker.Left(step.ident);
@@ -891,6 +898,10 @@ namespace Shots
 		}
 		return hooked > 0;
 	}
+
+	bool AllHooked() { return hooked == CLASSES.size(); }
+
+	void WatchFlights(FlightFn a_watcher) { flightWatcher.store(a_watcher, std::memory_order_relaxed); }
 
 	void Started(std::uint32_t a_ourId)
 	{

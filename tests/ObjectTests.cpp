@@ -637,10 +637,44 @@ TEST("object causes: ours when our strongest cause that reached it is at least t
 	causes.Add({ { std::nanf(""), 0.0f, 0.0f }, {}, 100.0f, Strength::kBody, true, t + 1s });
 	CHECK(causes.Size() == 0u);
 	for (std::size_t i = 0; i < ObjectRules::Causes::MAX_CAUSES + 5; ++i) {
-		causes.Add({ {}, {}, 100.0f, Strength::kBody, true, t + 1s });
+		const Vec at{ 1000.0f * static_cast<float>(i), 0.0f, 0.0f };
+		causes.Add({ at, at, 100.0f, Strength::kBody, true, t + 1s + std::chrono::milliseconds(i) });
 	}
 	CHECK(causes.Size() == ObjectRules::Causes::MAX_CAUSES);
+	CHECK(causes.dropped == 5u);
+	// Full of our own: a friend's takes the place of ours that ends first (the first added here), and counts.
+	const Vec friendAt{ -3000.0f, 0.0f, 0.0f };
+	causes.Add({ friendAt, friendAt, 100.0f, Strength::kBody, false, t + 1s });
+	CHECK(causes.Size() == ObjectRules::Causes::MAX_CAUSES);
+	CHECK(causes.dropped == 6u);
+	CHECK(!causes.Judge(BUCKET, friendAt, friendAt, t).Ours());
+	CHECK(!causes.Judge(BUCKET, Vec{}, Vec{}, t).Ours());  // ours there made room
+	CHECK(causes.Judge(BUCKET, Vec{ 1000.0f, 0.0f, 0.0f }, Vec{ 1000.0f, 0.0f, 0.0f }, t).Ours());
+	CHECK(causes.Judge(BUCKET, friendAt, friendAt, t).theirs == Strength::kBody);
 	CHECK(Near(ObjectRules::DistanceToPath({ 0.0f, 5.0f, 0.0f }, { -1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }), 5.0f));
+
+	// A flight's stretches, one going on from the last, nearly straight: one cause, as long as all of them, lasting as
+	// long as the newest. A turn past JOIN_BEND of its reach, or another side's, starts another.
+	causes.Clear();
+	for (int i = 0; i < 20; ++i) {
+		const auto x = 100.0f * static_cast<float>(i);
+		causes.Add({ { x, 0.0f, 0.0f }, { x + 100.0f, 0.0f, -1.0f }, ObjectRules::SHOT_REACH, Strength::kStrike, true, t + std::chrono::milliseconds(100 * i) });
+	}
+	CHECK(causes.Size() == 1u);
+	CHECK(causes.joined == 19u);
+	CHECK(causes.Judge(TANKARD, { 1950.0f, 100.0f, 0.0f }, { 1950.0f, 100.0f, 0.0f }, t + 1800ms).Ours());
+	CHECK(causes.Judge(TANKARD, { 50.0f, 100.0f, 0.0f }, { 50.0f, 100.0f, 0.0f }, t + 1800ms).Ours());  // its start lasts with it
+	causes.Add({ { 2000.0f, 0.0f, -20.0f }, { 2000.0f, 1000.0f, -20.0f }, ObjectRules::SHOT_REACH, Strength::kStrike, true, t + 2s });  // a ricochet
+	CHECK(causes.Size() == 2u);
+	causes.Add({ { 2000.0f, 1000.0f, -20.0f }, { 2000.0f, 1100.0f, -20.0f }, ObjectRules::SHOT_REACH, Strength::kStrike, false, t + 2s });  // a friend's
+	CHECK(causes.Size() == 3u);
+	// A body standing where it stood: one cause, lasting on.
+	causes.Clear();
+	for (int i = 0; i < 8; ++i) {
+		causes.Add({ { 50.0f, 50.0f, 0.0f }, { 50.0f, 50.0f, 0.0f }, ObjectRules::NPC_REACH, Strength::kBody, false, t + 1s + std::chrono::milliseconds(250 * i) });
+	}
+	CHECK(causes.Size() == 1u);
+	CHECK(causes.Judge(TANKARD, here, here, t + 2500ms).theirs == Strength::kBody);
 	CHECK(Near(ObjectRules::DistanceToPath({ 4.0f, 3.0f, 0.0f }, { -1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }), std::sqrt(18.0f)));
 }
 
@@ -946,4 +980,128 @@ TEST("object book: past MAX_MOVES the moves that are over are forgotten; while e
 	}
 	CHECK(book.Hold(1, HoldOf(BUCKET), t + 3s + ObjectBook::HOLD_TIMEOUT).Passes());
 	CHECK(book.Moves() == 2u);  // the throw and the bucket
+}
+
+TEST("object causes: a flight's path is said a stretch each FLIGHT_EVERY and its last when over; another projectile in a freed one's memory is told apart")
+{
+	using namespace ObjectRules;
+	const auto t = Steady::now();
+	Flight     flight{ Vec{ 0, 0, 100 }, t };
+	CHECK(!flight.Update({ 50, 0, 100 }, t + 20ms));  // too soon
+	const auto first = flight.Update({ 300, 0, 100 }, t + FLIGHT_EVERY);
+	CHECK(first.has_value());
+	CHECK(Near(first->from, Vec{ 0, 0, 100 }));
+	CHECK(Near(first->to, Vec{ 300, 0, 100 }));
+	CHECK(!flight.Update({ 350, 0, 99 }, t + FLIGHT_EVERY + 10ms));
+	CHECK(!flight.Over(t + FLIGHT_EVERY + 10ms + FLIGHT_END - 1ms));
+	CHECK(flight.Over(t + FLIGHT_EVERY + 10ms + FLIGHT_END));
+	const auto rest = flight.Rest();
+	CHECK(rest.has_value());
+	CHECK(Near(rest->from, Vec{ 300, 0, 100 }));
+	CHECK(Near(rest->to, Vec{ 350, 0, 99 }));
+	// Not a stretch of NaN.
+	CHECK(!flight.Update({ std::numeric_limits<float>::quiet_NaN(), 0, 0 }, t + 1s));
+	// Another: far, gone quiet, or not a place.
+	Flight arrow{ Vec{ 0, 0, 0 }, t };
+	CHECK(!arrow.Another({ 100, 0, 0 }, t + 10ms));
+	CHECK(arrow.Another({ FLIGHT_JUMP + 1.0f, 0, 0 }, t + 10ms));
+	CHECK(arrow.Another({ 100, 0, 0 }, t + FLIGHT_END));
+	CHECK(arrow.Another({ std::numeric_limits<float>::infinity(), 0, 0 }, t + 10ms));
+	// A flight that went nowhere has no last stretch (a rune lying where it was cast).
+	Flight rune{ Vec{ 5, 5, 5 }, t };
+	(void)rune.Update({ 5.5f, 5, 5 }, t + 10ms);
+	CHECK(!rune.Rest());
+}
+
+TEST("object causes: a fast arrow that launches and lands between two looks still reaches what lies on its path")
+{
+	using namespace ObjectRules;
+	const auto t = Steady::now();
+	// Launched and stuck within one look: only its updates say where it went.
+	Flight     arrow{ Vec{ 0, 0, 100 }, t };
+	(void)arrow.Update({ 900, 0, 100 }, t + 30ms);
+	(void)arrow.Update({ 1800, 0, 95 }, t + 60ms);
+	CHECK(arrow.Over(t + 60ms + FLIGHT_END));
+	const auto stretch = arrow.Rest();
+	CHECK(stretch.has_value());
+	Causes causes;
+	causes.Add({ stretch->from, stretch->to, SHOT_REACH, Strength::kStrike, false, t + SHOT_HOLD, 0 });
+	causes.Add({ Vec{ 1000, 40, 0 }, Vec{ 1000, 40, 0 }, PLAYER_REACH, Strength::kBody, true, t + BODY_HOLD, 0 });
+	causes.Add({ Vec{ 1000, -400, 0 }, Vec{ 1000, -400, 0 }, PLAYER_REACH, Strength::kBody, true, t + BODY_HOLD, 0 });
+	// A plate beside the path at x 1000: the shot is a friend's, stronger than our player standing by.
+	const auto claim = causes.Judge(TANKARD, { 1000, 60, 90 }, { 1040, 90, 80 }, t + 300ms);
+	CHECK(claim.theirs == Strength::kStrike);
+	CHECK(!claim.Ours());
+	// Far off the path: our player's alone.
+	CHECK(causes.Judge(BUCKET, { 1000, -450, 0 }, { 1000, -460, 0 }, t + 300ms).Ours());
+}
+
+TEST("object causes: a cone's line runs its record's range along its way, at most CONE_RANGE_MAX; a cone with no way or range is none")
+{
+	using namespace ObjectRules;
+	const auto line = ConeLine({ 10, 20, 30 }, { 0, 2, 0 }, 1500.0f);
+	CHECK(line.has_value());
+	CHECK(Near(line->from, Vec{ 10, 20, 30 }));
+	CHECK(Near(line->to, Vec{ 10, 1520, 30 }));
+	const auto far = ConeLine({ 0, 0, 0 }, { 1, 0, 0 }, 1e7f);
+	CHECK(far.has_value());
+	CHECK(Near(far->to, Vec{ CONE_RANGE_MAX, 0, 0 }));
+	CHECK(!ConeLine({ 0, 0, 0 }, { 0, 0, 0 }, 100.0f));
+	CHECK(!ConeLine({ 0, 0, 0 }, { 1, 0, 0 }, 0.0f));
+	CHECK(!ConeLine({ 0, 0, 0 }, { 1, 0, 0 }, std::numeric_limits<float>::quiet_NaN()));
+	CHECK(!ConeLine({ std::numeric_limits<float>::quiet_NaN(), 0, 0 }, { 1, 0, 0 }, 100.0f));
+}
+
+TEST("object causes: a dead body's fall is a path from look to look; a body lying still, or seen first, is none; reaches are bound")
+{
+	using namespace ObjectRules;
+	const auto t = Steady::now();
+	Falls      falls;
+	CHECK(!falls.Look(0x00051111, { 0, 0, 100 }, t));                  // its baseline
+	CHECK(!falls.Look(0x00051111, { BODY_MOVE - 1.0f, 0, 100 }, t + 250ms));  // lying still (jitter)
+	const auto fall = falls.Look(0x00051111, { 120, 0, 40 }, t + 500ms);
+	CHECK(fall.has_value());
+	CHECK(Near(fall->from, Vec{ 0, 0, 100 }));
+	CHECK(Near(fall->to, Vec{ 120, 0, 40 }));
+	CHECK(!falls.Look(0x00051111, { 121, 0, 40 }, t + 750ms));
+	CHECK(falls.Size() == 1u);
+	falls.Prune(t + 750ms + Falls::FORGET_AFTER + 1ms);
+	CHECK(falls.Size() == 0u);
+	CHECK(!falls.Look(0x00052222, { std::numeric_limits<float>::quiet_NaN(), 0, 0 }, t));
+	for (std::uint32_t i = 0; i < Falls::MAX_BODIES + 4; ++i) {
+		(void)falls.Look(0x00060000 + i, { 0, 0, 0 }, t);
+	}
+	CHECK(falls.Size() == Falls::MAX_BODIES);
+
+	CHECK(BodyReach(10.0f) == MIN_BODY_REACH);
+	CHECK(BodyReach(150.0f) == 150.0f);
+	CHECK(BodyReach(2000.0f) == MAX_BODY_REACH);  // a dragon
+	CHECK(BodyReach(std::numeric_limits<float>::quiet_NaN()) == MIN_BODY_REACH);
+	CHECK(ObjectReach(0.0f) == MIN_OBJECT_REACH);
+	CHECK(ObjectReach(20.0f) == 20.0f + OBJECT_MARGIN);
+	CHECK(ObjectReach(1000.0f) == MAX_OBJECT_REACH);
+}
+
+TEST("object causes: an object of ours in flight, or a friend's, claims what it knocks over; ours beats a friend's body standing by, theirs beats ours")
+{
+	using namespace ObjectRules;
+	const auto t = Steady::now();
+	Seen       seen;
+	(void)seen.Look(TANKARD, Pose{ { 0, 0, 0 } }, t);
+	CHECK(seen.Peek(TANKARD).has_value());
+	CHECK(!seen.Peek(BUCKET).has_value());
+	CHECK(Near(seen.Peek(TANKARD)->at, Vec{ 0, 0, 0 }));
+	seen.Set(TANKARD, Pose{ { 200, 0, 0 } }, t + 250ms);
+	CHECK(Near(seen.Peek(TANKARD)->at, Vec{ 200, 0, 0 }));
+
+	// Our thrown tankard flew from 0 to 200; a friend stands by the bucket it hit.
+	Causes causes;
+	causes.Add({ Vec{ 0, 0, 0 }, Vec{ 200, 0, 0 }, ObjectReach(16.0f), Strength::kStrike, true, t + SHOT_HOLD, 0 });
+	causes.Add({ Vec{ 180, 100, 0 }, Vec{ 180, 100, 0 }, PLAYER_REACH, Strength::kBody, false, t + BODY_HOLD, 0 });
+	CHECK(causes.Judge(BUCKET, { 190, 20, 0 }, { 260, 40, 0 }, t + 250ms).Ours());
+	// A friend's thrown object's path, our player standing by: theirs.
+	Causes theirs;
+	theirs.Add({ Vec{ 0, 0, 0 }, Vec{ 200, 0, 0 }, ObjectReach(16.0f), Strength::kStrike, false, t + SHOT_HOLD, 0 });
+	theirs.Add({ Vec{ 180, 100, 0 }, Vec{ 180, 100, 0 }, PLAYER_REACH, Strength::kBody, true, t + BODY_HOLD, 0 });
+	CHECK(!theirs.Judge(BUCKET, { 190, 20, 0 }, { 260, 40, 0 }, t + 250ms).Ours());
 }
