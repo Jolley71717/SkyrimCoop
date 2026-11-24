@@ -53,12 +53,13 @@ declare -A STEP_INFO=(
 	[save_rejoin]="the VM saves mid-session (no stand-in in the save), leaves, rejoins, loads that save; the host ends the session and hosts again"
 	[npcs]="every NPC near both players has one runner both games agree on; copies stand where their runners have them and wear their gear; a fighting NPC's copy plays its actions, a summon cast with the pad is shared, both ways; walking the road away hands NPCs over, both ways (steps/npcs.sh)"
 	[npccombat]="a player's hits on a copy of an NPC the other game runs reach that game and are applied there; both show the same health; the hits kill it there, dead in both with the hitter its killer; raised, it lives in both; the runner's own kill kills the copy; a change no hit explains is set back; a creature one way, a person the other; an NPC killed while the VM is out is dead in its game when it joins again (steps/npccombat.sh)"
+	[actions]="each way, the mover's hands given a sword and shield, a bow and arrows, Bound Bow, Flames and Healing, a shout (console and dev set-up, read back), and the watcher's stand-in holds each; the mover draws, swings, power attacks, blocks, bashes, looses an arrow (a conjured one too), casts from each hand and shouts with its virtual pad, and the stand-in plays each kind (an action the mover's game did that its hook never heard fails); it walks up to the watcher's player and casts, shoots and shouts at it: the stand-in does the same there, all refused, the watcher keeps its health; no shout taught to a stand-in's base (steps/actions.sh)"
 	[forms]="(only when named) the VM's plugins in another order: it joins, and an armor each puts on is on the other's stand-in as that game's own form (steps/forms.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
-STEPS="preflight world join see move_vm move_host gait save_rejoin npcs npccombat forms final"
+STEPS="preflight world join see move_vm move_host gait save_rejoin npcs npccombat actions forms final"
 # Steps that need the two games in one session; the state guard puts them back in one first (smoke.sh run()).
-SESSION_STEPS="see move_vm move_host gait save_rejoin npcs npccombat forms"
+SESSION_STEPS="see move_vm move_host gait save_rejoin npcs npccombat actions forms"
 # Steps a run makes only when --only names them: they change a game's files for a while (each puts them back, and the
 # set-up heals what a run that died left), which the maintainer agrees to before they run by default.
 OPTIN_STEPS="forms"
@@ -482,6 +483,7 @@ step_final() {
 declare -F step_forms >/dev/null || . "$RIG/steps/forms.sh"
 declare -F step_npcs >/dev/null || . "$RIG/steps/npcs.sh"
 declare -F step_npccombat >/dev/null || . "$RIG/steps/npccombat.sh"
+declare -F step_actions >/dev/null || . "$RIG/steps/actions.sh"
 
 # --- self-test: the steps' reading of the games, both games faked ------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then

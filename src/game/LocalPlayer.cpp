@@ -1,6 +1,7 @@
 #include "game/LocalPlayer.h"
 
 #include "FormIds.h"
+#include "game/Gear.h"
 
 #include <algorithm>
 #include <numbers>
@@ -151,7 +152,21 @@ namespace LocalPlayer
 			}
 		}
 		std::ranges::sort(looks.worn);  // the same gear says the same looks, whatever order the inventory holds it in
+		const auto hands = Gear::HandsOf(player);
+		looks.right = hands.right;
+		looks.left = hands.left;
+		looks.ammo = hands.ammo;
+		looks.voice = hands.voice;
+		looks.unnamed = hands.unnamed;
 		return looks;
+	}
+
+	std::optional<Gear::Hands> Hands()
+	{
+		if (!InWorld()) {
+			return std::nullopt;
+		}
+		return Gear::HandsOf(RE::PlayerCharacter::GetSingleton());
 	}
 
 	void NoteDefaultName()

@@ -4,6 +4,7 @@
 #include "FormIds.h"
 #include "game/CopyHealth.h"
 #include "game/Gait.h"
+#include "game/Gear.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcRules.h"
 #include "game/RemotePlayers.h"
@@ -176,7 +177,11 @@ namespace NpcSync
 
 		bool NotifyHook(RE::IAnimationGraphManagerHolder* a_this, const RE::BSFixedString& a_event)
 		{
+			if (RemotePlayers::HoldsOffSheathe(static_cast<RE::TESObjectREFR*>(a_this), a_event.c_str())) {
+				return false;
+			}
 			const bool taken = originalNotify(a_this, a_event);
+			RemotePlayers::TraceEvent(static_cast<RE::TESObjectREFR*>(a_this), a_event.c_str(), taken);
 			if (!taken || recording.load(std::memory_order_relaxed) == 0) {
 				return taken;
 			}
@@ -398,60 +403,6 @@ namespace NpcSync
 			return NpcRules::KindOf(commanded, a_actor->IsPlayerTeammate(), flies, mount, person);
 		}
 
-		// A runtime armor's plugin armor (the one it was made from: an enchanted or tempered copy), for FormIds::Shareable.
-		std::uint32_t ArmorTemplateOf(std::uint32_t a_id)
-		{
-			const auto armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(a_id);
-			return armor && armor->templateArmor ? armor->templateArmor->GetFormID() : 0;
-		}
-
-		std::uint32_t SlotsOf(const RE::TESBoundObject* a_object)
-		{
-			const auto armor = a_object ? a_object->As<RE::TESObjectARMO>() : nullptr;
-			return armor ? armor->GetSlotMask().underlying() : 0;
-		}
-
-		// Held in both hands: a weapon of a two-handed type (greatsword, battleaxe, warhammer, bow, crossbow), or any
-		// weapon or spell whose equip slot is none of the one-hand ones (the game's both-hands slot, which a ritual spell
-		// and a mod's two-handed weapon of any type name the same way).
-		bool TwoHanded(const RE::TESForm* a_form)
-		{
-			if (!a_form) {
-				return false;
-			}
-			if (const auto weapon = a_form->As<RE::TESObjectWEAP>();
-				weapon && (weapon->IsTwoHandedSword() || weapon->IsTwoHandedAxe() || weapon->IsBow() || weapon->IsCrossbow())) {
-				return true;
-			}
-			const auto type = a_form->As<RE::BGSEquipType>();
-			const auto slot = type ? type->GetEquipSlot() : nullptr;
-			const auto defaults = RE::BGSDefaultObjectManager::GetSingleton();
-			if (!slot || !defaults) {
-				return false;
-			}
-			for (const auto one : { RE::DEFAULT_OBJECTS::kLeftHandEquip, RE::DEFAULT_OBJECTS::kRightHandEquip, RE::DEFAULT_OBJECTS::kEitherHandEquip,
-					 RE::DEFAULT_OBJECTS::kVoiceEquip, RE::DEFAULT_OBJECTS::kPotionEquip }) {
-				if (defaults->GetObject<RE::BGSEquipSlot>(one) == slot) {
-					return false;
-				}
-			}
-			return true;
-		}
-
-		// The object in each hand, a two-handed one in the right alone (NpcRules::OneReportEach), for both a runner's
-		// NPC (GearOf) and a copy (Dress).
-		std::pair<RE::TESForm*, RE::TESForm*> HeldObjects(RE::Actor* a_actor)
-		{
-			const auto right = a_actor->GetEquippedObject(false);
-			const auto left = a_actor->GetEquippedObject(true);
-			const auto idOf = [](const RE::TESForm* a_form) { return a_form ? a_form->GetFormID() : 0u; };
-			const auto hands = NpcRules::OneReportEach(idOf(right), idOf(left), TwoHanded(right), TwoHanded(left));
-			const auto pick = [&](std::uint32_t a_id) -> RE::TESForm* {
-				return a_id == 0 ? nullptr : a_id == idOf(right) ? right : left;
-			};
-			return { pick(hands.right), pick(hands.left) };
-		}
-
 		// What it wears and holds, as the others are told: a runtime armor as the plugin armor it was made from
 		// (FormIds::Shareable), or left out with its body slots said; a runtime weapon or spell as an unnamed hand, never
 		// as an empty one (the others' copies keep their own there: NpcRules::PlanGear).
@@ -464,8 +415,8 @@ namespace NpcSync
 				if (count <= 0 || !entry || !entry->IsWorn()) {
 					continue;
 				}
-				const auto slots = SlotsOf(item);
-				const auto shared = FormIds::Shareable(item->GetFormID(), ArmorTemplateOf);
+				const auto slots = Gear::SlotsOf(item);
+				const auto shared = FormIds::Shareable(item->GetFormID(), Gear::ArmorTemplateOf);
 				if (!shared || gear.worn.size() >= Protocol::MAX_WORN) {
 					gear.unnamedSlots |= slots;
 				} else if (std::ranges::none_of(gear.worn, [&](const Protocol::WornItem& a_w) { return a_w.id == *shared; })) {
@@ -483,7 +434,7 @@ namespace NpcSync
 				}
 				return a_form->GetFormID();
 			};
-			const auto [right, left] = HeldObjects(a_actor);
+			const auto [right, left] = Gear::HeldObjects(a_actor);
 			gear.right = held(right, Protocol::kRightUnnamed);
 			gear.left = held(left, Protocol::kLeftUnnamed);
 			gear.ammo = held(a_actor->GetCurrentAmmo(), Protocol::kAmmoUnnamed);
@@ -654,127 +605,6 @@ namespace NpcSync
 				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivate) | std::to_underlying(RE::ExtraFlags::Flag::kBlockPlayerActivate) |
 				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivateText)), true);
 			return actor;
-		}
-
-		// ---- dressing a copy (main thread, outside copyLock) ----
-		struct Dressed
-		{
-			std::size_t equipped = 0;
-			std::size_t unequipped = 0;
-			std::size_t missing = 0;
-			std::size_t skipped = 0;
-		};
-
-		// What a copy wears and holds now (and, given a_carried, what it carries), as NpcRules::PlanGear and CheckGear take it.
-		NpcRules::Wearing WearingOf(RE::Actor* a_actor, std::vector<NpcRules::Count>* a_carried)
-		{
-			NpcRules::Wearing now;
-			for (const auto& [item, data] : a_actor->GetInventory()) {
-				const auto& [count, entry] = data;
-				if (count <= 0) {
-					continue;
-				}
-				if (a_carried) {
-					a_carried->push_back({ item->GetFormID(), count });
-				}
-				if (entry && entry->IsWorn() && item->IsArmor()) {
-					now.armor.push_back({ item->GetFormID(), FormIds::Shareable(item->GetFormID(), ArmorTemplateOf).value_or(0), SlotsOf(item) });
-				}
-			}
-			const auto idOf = [](const RE::TESForm* a_form) { return a_form ? a_form->GetFormID() : 0u; };
-			const auto [right, left] = HeldObjects(a_actor);
-			now.right = idOf(right);
-			now.left = idOf(left);
-			now.ammo = idOf(a_actor->GetCurrentAmmo());
-			return now;
-		}
-
-		bool IsSpell(std::uint32_t a_id)
-		{
-			const auto form = a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
-			return form && form->Is(RE::FormType::Spell);
-		}
-
-		// The copy's gear read back against its runner's (NpcRules::CheckGear). A hand with a spell in it, the runner's NPC's
-		// or the copy's own, is not judged: spells in a copy's hands come with the magic work, and Dress leaves them be.
-		NpcRules::GearShown CheckWorn(const Protocol::NpcGear& a_gear, RE::Actor* a_actor)
-		{
-			const auto now = WearingOf(a_actor, nullptr);
-			auto       judged = a_gear;
-			if (IsSpell(judged.right) || IsSpell(now.right)) {
-				judged.unnamed = static_cast<std::uint8_t>(judged.unnamed | Protocol::kRightUnnamed);
-			}
-			if (IsSpell(judged.left) || IsSpell(now.left)) {
-				judged.unnamed = static_cast<std::uint8_t>(judged.unnamed | Protocol::kLeftUnnamed);
-			}
-			return NpcRules::CheckGear(judged, now);
-		}
-
-		Dressed Dress(const Protocol::NpcGear& a_gear, bool a_mayAdd, RE::Actor* a_actor)
-		{
-			Dressed    out;
-			const auto manager = RE::ActorEquipManager::GetSingleton();
-			if (!manager) {
-				return out;
-			}
-			std::vector<NpcRules::Count> carried;
-			const auto                   now = WearingOf(a_actor, &carried);
-			// A spell in the runner's NPC's hand is never in an inventory, so it is not looked for (a load-order copy would
-			// count it missing): the hand is planned as empty and the spell counted skipped. Spells in a copy's hands come
-			// with the magic work.
-			auto wanted = a_gear;
-			for (auto* hand : { &wanted.right, &wanted.left }) {
-				if (IsSpell(*hand)) {
-					*hand = 0;
-					++out.skipped;
-				}
-			}
-			const auto plan = NpcRules::PlanGear(wanted, now, carried, a_mayAdd);
-			// What is put on is held on against the copy's own AI (the equip's "force", Papyrus' abPreventRemoval) only on a
-			// spawn's copy, which is never saved: on a load-order NPC that lock would stay in the friend's save after the
-			// session (a follower who will not take other armor). Its AI does not run while it is mirrored, and its gear is
-			// its own to change once it runs again.
-			const bool holdOn = FormIds::IsRuntime(a_actor->GetFormID());
-			const auto defaults = RE::BGSDefaultObjectManager::GetSingleton();
-			const auto slotOf = [&](NpcRules::Hand a_hand, const RE::TESForm* a_form) -> const RE::BGSEquipSlot* {
-				// A one-handed weapon goes in the hand named; a two-handed one, a torch or a shield where the game puts it
-				// (a two-handed weapon's own slot is both hands: a one-hand slot would be the wrong one).
-				if (!defaults || a_hand == NpcRules::Hand::kNone || !a_form->Is(RE::FormType::Weapon) || TwoHanded(a_form)) {
-					return nullptr;
-				}
-				return defaults->GetObject<RE::BGSEquipSlot>(a_hand == NpcRules::Hand::kLeft ? RE::DEFAULT_OBJECTS::kLeftHandEquip : RE::DEFAULT_OBJECTS::kRightHandEquip);
-			};
-			// A spell in a hand is the runner's AI's to cast; what a copy shows of it is the runner's events (the cast's
-			// look on a copy comes with the magic work: docs/DESIGN.md). Neither taken off nor put on here.
-			const auto object = [&](std::uint32_t a_id) -> RE::TESBoundObject* {
-				const auto form = RE::TESForm::LookupByID(a_id);
-				return form && !form->Is(RE::FormType::Spell) ? form->As<RE::TESBoundObject>() : nullptr;
-			};
-			for (const auto& item : plan.unequip) {
-				const auto bound = object(item.id);
-				if (!bound) {
-					++out.skipped;
-					continue;
-				}
-				manager->UnequipObject(a_actor, bound, nullptr, 1, slotOf(item.hand, bound), false, true, false, true);
-				++out.unequipped;
-			}
-			for (const auto& add : plan.add) {
-				if (const auto bound = object(add.id); bound && add.count > 0) {
-					a_actor->AddObjectToContainer(bound, nullptr, add.count, nullptr);
-				}
-			}
-			for (const auto& item : plan.equip) {
-				const auto bound = object(item.id);
-				if (!bound) {
-					++out.skipped;
-					continue;
-				}
-				manager->EquipObject(a_actor, bound, nullptr, 1, slotOf(item.hand, bound), false, holdOn, false, true);
-				++out.equipped;
-			}
-			out.missing = plan.missing;
-			return out;
 		}
 
 		// ---- the loaded NPCs (main thread) ----
@@ -1226,7 +1056,7 @@ namespace NpcSync
 				}
 				if (job.check) {
 					// Read back what it wears and holds now, a while after it was dressed.
-					const auto shown = CheckWorn(gear, actor.get());
+					const auto shown = Gear::Check(gear, actor.get(), Gear::Spells::kLeft);  // spells in a copy's hands are not shared yet
 					std::scoped_lock l{ copyLock };
 					if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID() && it->second.gear == gear && it->second.geared) {
 						if (!shown.Complete(it->second.gearLacks) && (!it->second.wears || it->second.wears->Complete(it->second.gearLacks))) {
@@ -1238,7 +1068,7 @@ namespace NpcSync
 					}
 					continue;
 				}
-				const auto dressed = Dress(gear, mayAdd, actor.get());
+				const auto dressed = Gear::Dress(gear, mayAdd, actor.get(), Gear::Spells::kLeft);
 				std::scoped_lock l{ copyLock };
 				if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID() && it->second.gear == gear) {
 					it->second.geared = true;
@@ -1910,6 +1740,7 @@ namespace NpcSync
 		RemotePlayers::DriveLegs(a_actor, { step.speed, step.direction });
 		a_actor->UpdateNoAI(a_delta);
 		TellCopy(a_actor, key, step.events, events);
+		RemotePlayers::FinishDraw(a_actor);  // a draw or a sheathe still wanted, asked again as the game's own update would
 		return true;
 	}
 

@@ -803,7 +803,7 @@ TEST("server: a burst of looks faster than a game changes clothes is held back, 
 	(void)f.fake->Take(1);
 
 	// Thirty different looks at once (a load that re-equips everything): the burst passes ten on at once, and the
-	// newest follows once the budget has room, about a second later; never the ones between.
+	// newest follows once the budget has room, a moment later; never the ones between.
 	constexpr std::uint32_t BURST = 30;
 	const auto              last = LooksOf(0x00013746, 0x00020000 + (BURST - 1) * 2);
 	for (std::uint32_t i = 0; i < BURST; ++i) {

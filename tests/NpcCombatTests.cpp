@@ -207,12 +207,12 @@ TEST("npc combat protocol: the longest of each fits, and one past a limit, cut s
 	CHECK(!Protocol::DecodeNpcDeaths(fullTwo));
 }
 
-TEST("npc combat protocol: hits, answers, healths and deaths carry forms, and this protocol is version 8")
+TEST("npc combat protocol: hits, answers, healths and deaths carry forms, and came in protocol version 8")
 {
 	for (const auto type : { MT::kNpcHits, MT::kNpcHitAnswers, MT::kNpcHealths, MT::kNpcDeaths }) {
 		CHECK(FormTranslate::CarriesForms(type));
 	}
-	static_assert(Protocol::VERSION == 8);
+	static_assert(Protocol::VERSION >= 8);
 	static_assert(static_cast<int>(MT::kNpcHits) == 35 && static_cast<int>(MT::kNpcDeaths) == 38);
 }
 

@@ -38,7 +38,10 @@ namespace Protocol
 	// 8: NPC health and deaths agree in every game: a player's hits on a copy go to the NPC's runner as numbered requests
 	//    it answers (kNpcHits, kNpcHitAnswers); the runner says each NPC's health (kNpcHealths) and its death
 	//    (kNpcDeaths): message types 35-38. (7 is the shared quests' change; whichever lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 8;
+	// 9: a friend's stand-in does what they do: the graph events of each player's actions (kPlayerActions,
+	//    kRemoteActions: message types 39-40), and the looks say what each hand, the quiver and the voice hold.
+	//    (Another change that lands first with 9 takes it; this one renumbers then.)
+	inline constexpr std::uint16_t VERSION = 9;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -98,6 +101,8 @@ namespace Protocol
 		kNpcHitAnswers = 36,  // runner (or the server) -> server -> the hitter, reliable: each hit applied, or refused and why
 		kNpcHealths = 37,     // runner -> server -> everyone, reliable: the health of NPCs it runs (to a joiner: the hurt ones)
 		kNpcDeaths = 38,      // runner -> server -> everyone, reliable: NPCs it runs that died (to a joiner: every one dead)
+		kPlayerActions = 39,  // client -> server, reliable: our player's graph events (attacks, blocks, casts, shouts...)
+		kRemoteActions = 40,  // server -> the others, reliable: that player's, for their stand-in to play
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -244,8 +249,22 @@ namespace Protocol
 		std::uint32_t token = 0;
 	};
 
+	// A hand (or the quiver, or the voice) holds something the sending game could not name to this one (a form made as
+	// that game ran, or a mod's this game lacks), which is not the same as holding nothing: the one who shows it keeps
+	// its own there (NpcGear::unnamed, PlayerLooks::unnamed).
+	enum GearUnnamed : std::uint8_t
+	{
+		kRightUnnamed = 1 << 0,
+		kLeftUnnamed = 1 << 1,
+		kAmmoUnnamed = 1 << 2,
+		kAllUnnamed = kRightUnnamed | kLeftUnnamed | kAmmoUnnamed,  // an NPC's gear: the hands and the quiver
+		kVoiceUnnamed = 1 << 3,                                     // a player's looks: the voice too
+		kAllLooksUnnamed = kAllUnnamed | kVoiceUnnamed,
+	};
+
 	// What a player's character looks like, as the others' stand-in of them shows it. Form ids in the session's numbering
-	// (PluginTable): a race the reading game lacks reads 0, worn items it lacks are left out (FormTranslate.h).
+	// (PluginTable): a race the reading game lacks reads 0, worn items it lacks are left out, a held one it lacks reads 0
+	// with its unnamed bit set (FormTranslate.h).
 	struct PlayerLooks
 	{
 		std::uint32_t race = 0;  // TESRace form id; 0: not known
@@ -253,6 +272,14 @@ namespace Protocol
 		float         weight = 0.0f;  // the body's weight, 0 to 100
 		// The armor (and clothing) worn, as base form ids, at most MAX_WORN.
 		std::vector<std::uint32_t> worn;
+		// What each hand holds (a weapon, a staff, a spell, a scroll, a torch; a shield is worn armor, and the left hand
+		// names it too), the ammunition, and the voice (the shout or power the player has ready); 0: none. A two-handed
+		// object (a greatsword, a bow, a ritual spell) is the right hand's alone.
+		std::uint32_t right = 0;
+		std::uint32_t left = 0;
+		std::uint32_t ammo = 0;
+		std::uint32_t voice = 0;
+		std::uint8_t  unnamed = 0;  // GearUnnamed bits, kAllLooksUnnamed at most
 
 		[[nodiscard]] bool IsFinite() const { return std::isfinite(weight); }
 		bool operator==(const PlayerLooks&) const = default;
@@ -374,16 +401,6 @@ namespace Protocol
 		std::uint32_t slots = 0;
 		bool operator==(const WornItem&) const = default;
 		auto operator<=>(const WornItem&) const = default;
-	};
-
-	// NpcGear::unnamed: a hand (or the quiver) holds something the runner's game could not name to this one (a form made
-	// as that game ran, or a mod's this game lacks), which is not the same as holding nothing: the copy keeps its own.
-	enum GearUnnamed : std::uint8_t
-	{
-		kRightUnnamed = 1 << 0,
-		kLeftUnnamed = 1 << 1,
-		kAmmoUnnamed = 1 << 2,
-		kAllUnnamed = kRightUnnamed | kLeftUnnamed | kAmmoUnnamed,
 	};
 
 	// What an NPC wears (armor, at most MAX_WORN) and holds: each hand's weapon, spell, shield or torch, and its
@@ -511,6 +528,35 @@ namespace Protocol
 		bool                  full = false;
 		std::vector<NpcDeath> deaths;
 		bool operator==(const NpcDeaths&) const = default;
+	};
+
+	// ---- a player's actions (docs/DESIGN.md, "Players") ----
+	// Each event a player's animation graph takes (an attack, a power attack, a block, a bash, a bow drawn and let go, a
+	// cast from either hand, a shout, a weapon drawn or put away), as its game sent it to the graph, for the others'
+	// stand-in of that player to play at the moment it is drawn at (StateBuffer). No form in them: names only. The walk's
+	// own events are not sent (each game works those out from the states, Gait.h).
+
+	// At most this many events in one message (a game sends what a tick heard; a burst waits for the next).
+	inline constexpr std::size_t MAX_PLAYER_ACTIONS = 32;
+
+	struct PlayerAction
+	{
+		std::uint32_t sentMs = 0;  // the sender's clock when its graph took it (PlayerState::sentMs's clock; 0: not known)
+		std::string   event;
+		bool operator==(const PlayerAction&) const = default;
+	};
+
+	struct PlayerActions
+	{
+		std::vector<PlayerAction> actions;
+		bool operator==(const PlayerActions&) const = default;
+	};
+
+	struct RemoteActions
+	{
+		std::uint32_t             playerId = 0;
+		std::vector<PlayerAction> actions;
+		bool operator==(const RemoteActions&) const = default;
 	};
 
 	// ---- serialization -------------------------------------------------------------
@@ -941,10 +987,15 @@ namespace Protocol
 		for (std::size_t i = 0; i < count; ++i) {
 			a_writer.U32(a_looks.worn[i]);
 		}
+		a_writer.U32(a_looks.right);
+		a_writer.U32(a_looks.left);
+		a_writer.U32(a_looks.ammo);
+		a_writer.U32(a_looks.voice);
+		a_writer.U8(a_looks.unnamed);
 	}
 
-	// None for more than MAX_WORN items, a sex byte other than 0 or 1, or a weight that is not 0 to 100 (another
-	// player's game sent it: it would go onto a stand-in's body as it is).
+	// None for more than MAX_WORN items, a sex byte other than 0 or 1, a weight that is not 0 to 100 (another player's
+	// game sent it: it would go onto a stand-in's body as it is), or an unnamed bit this version does not know.
 	inline std::optional<PlayerLooks> ReadLooks(Reader& a_reader)
 	{
 		PlayerLooks looks;
@@ -960,7 +1011,12 @@ namespace Protocol
 		for (std::uint8_t i = 0; i < count; ++i) {
 			looks.worn.push_back(a_reader.U32());
 		}
-		if (!a_reader.Ok()) {
+		looks.right = a_reader.U32();
+		looks.left = a_reader.U32();
+		looks.ammo = a_reader.U32();
+		looks.voice = a_reader.U32();
+		looks.unnamed = a_reader.U8();
+		if (!a_reader.Ok() || (looks.unnamed & ~kAllLooksUnnamed) != 0) {
 			return std::nullopt;
 		}
 		return looks;
@@ -1424,6 +1480,83 @@ namespace Protocol
 		}
 		return msg;
 	}
+
+	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
+	{
+		const auto count = (std::min)(a_actions.size(), MAX_PLAYER_ACTIONS);
+		a_writer.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			a_writer.U32(a_actions[i].sentMs);
+			a_writer.Str(a_actions[i].event, MAX_EVENT_NAME);
+		}
+	}
+
+	// None for more than MAX_PLAYER_ACTIONS, or an empty or too long event name.
+	inline std::optional<std::vector<PlayerAction>> ReadPlayerActions(Reader& a_reader)
+	{
+		const auto count = a_reader.U8();
+		if (!a_reader.Ok() || count > MAX_PLAYER_ACTIONS) {
+			return std::nullopt;
+		}
+		std::vector<PlayerAction> out;
+		out.reserve(count);
+		for (std::uint8_t i = 0; i < count && a_reader.Ok(); ++i) {
+			PlayerAction action;
+			action.sentMs = a_reader.U32();
+			action.event = a_reader.Str(MAX_EVENT_NAME);
+			if (a_reader.Ok() && action.event.empty()) {
+				return std::nullopt;
+			}
+			out.push_back(std::move(action));
+		}
+		if (!a_reader.Ok()) {
+			return std::nullopt;
+		}
+		return out;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const PlayerActions& a_msg)
+	{
+		Writer w{ MessageType::kPlayerActions };
+		WritePlayerActions(w, a_msg.actions);
+		return w.Data();
+	}
+
+	inline std::optional<PlayerActions> DecodePlayerActions(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		auto actions = ReadPlayerActions(r);
+		if (!actions || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		return PlayerActions{ std::move(*actions) };
+	}
+
+	inline std::vector<std::uint8_t> Encode(const RemoteActions& a_msg)
+	{
+		Writer w{ MessageType::kRemoteActions };
+		w.U32(a_msg.playerId);
+		WritePlayerActions(w, a_msg.actions);
+		return w.Data();
+	}
+
+	inline std::optional<RemoteActions> DecodeRemoteActions(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		RemoteActions msg;
+		msg.playerId = r.U32();
+		auto actions = ReadPlayerActions(r);
+		if (!actions || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		msg.actions = std::move(*actions);
+		return msg;
+	}
+
+	inline constexpr std::size_t MAX_PLAYER_ACTIONS_SIZE = 1 + 4 + 1 + MAX_PLAYER_ACTIONS * (4 + 1 + MAX_EVENT_NAME);
+	static_assert(MAX_PLAYER_ACTIONS_SIZE <= 2048, "a message of a player's actions stays small");
 
 	// The most bytes each NPC message can be, every list at its longest (the tests encode those): each fits one message.
 	inline constexpr std::size_t KEY_BYTES = 8;

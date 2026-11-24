@@ -87,6 +87,8 @@ namespace FormTranslate
 		case MT::kHeartbeat:
 		case MT::kHeartbeatAck:
 		case MT::kPluginTable:
+		case MT::kPlayerActions:  // a player's graph events: names, no form
+		case MT::kRemoteActions:
 			return false;
 		}
 		return false;  // a type this version does not know
@@ -223,10 +225,24 @@ namespace FormTranslate
 			}
 		}
 
+		// A race the other side lacks reads 0 (a Nord there), a worn item it lacks is left out, and a held object (each
+		// hand's, the ammunition, the voice) it lacks reads 0 with its unnamed bit set: the stand-in keeps what it has
+		// there rather than show an empty hand.
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
 			a_ctx.Ids(a_looks.worn);
+			const auto held = [&](std::uint32_t& a_id, std::uint8_t a_bit) {
+				const bool had = a_id != 0;
+				a_ctx.Detail(a_id);
+				if (had && a_id == 0) {
+					a_looks.unnamed = static_cast<std::uint8_t>(a_looks.unnamed | a_bit);
+				}
+			};
+			held(a_looks.right, Protocol::kRightUnnamed);
+			held(a_looks.left, Protocol::kLeftUnnamed);
+			held(a_looks.ammo, Protocol::kAmmoUnnamed);
+			held(a_looks.voice, Protocol::kVoiceUnnamed);
 		}
 	}
 

@@ -9,6 +9,7 @@
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
+#include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "net/Session.h"
@@ -145,6 +146,21 @@ namespace DevCommands
 			return RemotePlayers::Describe();
 		}
 
+		// actions [equip <right|left|ammo|voice> <hex form id>]: what our player's graph did and was sent (PlayerActions),
+		// and what each friend's stand-in played of theirs, holds, and did here (RemotePlayers::Actions); equip: the rig's
+		// set-up of our player's hands.
+		std::string ActionsCommand(std::string_view a_args)
+		{
+			const auto words = DevLine::Words(a_args);
+			if (!words.empty() && words[0] == "equip") {
+				return PlayerActions::Equip(a_args.substr(a_args.find("equip") + 5));
+			}
+			if (!words.empty()) {
+				return "error: usage: actions [equip <right|left|ammo|voice> <hex form id>]";
+			}
+			return PlayerActions::Describe() + " | " + RemotePlayers::Actions();
+		}
+
 		std::string Npcs(std::string_view a_args)
 		{
 			return NpcSync::Describe(a_args);
@@ -193,6 +209,7 @@ namespace DevCommands
 			{ "forms", Forms },
 			{ "where", Where },
 			{ "standins", StandIns },
+			{ "actions", ActionsCommand },
 			{ "strays", Strays },
 			{ "npcs", Npcs },
 			{ "graph", Graph },
@@ -214,7 +231,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

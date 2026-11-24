@@ -12,6 +12,7 @@
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
+#include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "net/Session.h"
@@ -176,6 +177,7 @@ namespace
 		if (!NpcSync::Install()) {
 			logs::warn("NPCs: copies of the NPCs this game runs show no actions in the others' games (the graph notify is not hooked)");
 		}
+		PlayerActions::Install();  // our player's attacks, casts and shouts, for the others' stand-in of us (says why if not)
 		LocalPlayer::NoteDefaultName();
 		NoFirstRunPrompts();
 		RunInBackground();  // before the first tick: the main menu must not stall either

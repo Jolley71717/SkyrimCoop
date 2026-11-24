@@ -34,8 +34,12 @@ namespace RemotePlayers
 
 	// A state of a player who has joined, as it came; one of a player who has not is dropped.
 	void Moved(std::uint32_t a_playerId, const Protocol::PlayerState& a_state);
-	// What a player's character looks like; a stand-in already there is made again if it changed.
+	// What a player's character looks like: a stand-in already there is made again for another body (race, sex,
+	// weight), or dressed again for other gear (what they wear, hold in each hand, shoot and have in their voice).
 	void Looked(std::uint32_t a_playerId, const Protocol::PlayerLooks& a_looks);
+	// What a player did (their graph's events: attacks, blocks, casts, shouts, draws), each played on their stand-in at
+	// the moment it is drawn at. Those of a player with no stand-in here are counted and dropped.
+	void Acted(std::uint32_t a_playerId, const std::vector<Protocol::PlayerAction>& a_actions);
 
 	// Once a tick: places, dresses and takes away stand-ins as the players and this game's world say.
 	void Frame();
@@ -77,13 +81,28 @@ namespace RemotePlayers
 	// What a copy's graph is given for Speed and Direction from now on (GaitDrive.h), and no more.
 	void DriveLegs(RE::Actor* a_actor, GaitDrive::Values a_values);
 	void StopLegs(RE::Actor* a_actor);
+	// What the game's own actor update does at its end and the no-AI update (a stand-in's, a copy's) does not: an actor
+	// that still wants to draw or put away is told again: its friend's wish (a_friendDrawn, a stand-in) or the wish it
+	// has (a copy; StandInRules::FinishWish). True when it was.
+	bool FinishDraw(RE::Actor* a_actor, std::optional<bool> a_friendDrawn = std::nullopt);
 	// An actor this game placed (a copy of a spawn) goes out of the world as a stand-in does: disabled, then deleted
 	// (Retire.h), its AI off meanwhile, taken out before a save and named in the co-save until it is gone.
+	// The rig's log of what moves a stand-in's weapon state: every graph event about weapons it is sent (by this plugin or the
+	// game) and every change of its state, capped.
+	void TraceEvent(RE::TESObjectREFR* a_ref, const char* a_event, bool a_taken);
+	void TraceState(RE::Actor* a_actor);
+	// True when the game's own event would put away the weapon, spells or fists of a stand-in whose friend has them out: the
+	// notify hook turns it away (StandInRules::HoldsOffSheathe).
+	bool HoldsOffSheathe(RE::TESObjectREFR* a_ref, const char* a_event);
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
 
 	// Developer channel: `standins` (one line each), `strays` (placed actors of a preset base in the loaded game:
-	// 0 outside a session means nothing of a session was saved), `graph <player> [event <name> | vars]`.
+	// 0 outside a session means nothing of a session was saved), `graph <player> [event <name> | vars | weapon | equip | active]`.
 	[[nodiscard]] std::string Describe();
+	// Developer channel `actions` (the stand-ins' part): per player, the actions that came and were played or turned
+	// away by kind, the weapon drawn against its friend's, what each hand holds against the looks, and what it did here
+	// (its spells' effects refused, blows, casts, health taken and given back).
+	[[nodiscard]] std::string Actions();
 	[[nodiscard]] std::string Strays();
 	[[nodiscard]] std::string Graph(std::string_view a_args);
 
