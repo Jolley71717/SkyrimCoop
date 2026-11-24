@@ -116,9 +116,9 @@ jobs:
           mod_id: ${{ env.NEXUS_MOD_ID }}
           filename: ${{ steps.zip.outputs.zip }}
           version: ${{ steps.zip.outputs.version }}
-          display_name: SkyrimCoop ${{ steps.zip.outputs.version }}
+          display_name: SkyrimCoop ${{ steps.zip.outputs.version }} (Pre-alpha)
           description: >-
-            The mod: SKSE plugin, settings file and install guide. Everyone in a session needs the same version. Dedicated server: GitHub.
+            PRE-ALPHA test build: expect bugs, back up your saves. SKSE plugin, settings file and install guide. Everyone in a session needs the same version.
           category: main
           archive_existing_version: true
           primary_mod_manager_download: true
