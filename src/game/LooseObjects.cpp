@@ -1391,12 +1391,12 @@ namespace LooseObjects
 			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} | letGos sent={} heard={} applied={} | "
 			"rests said={} sent={} heard={} applied={} left={} answers={} placesApplied={} catchUps={} waiting={} waitingRefused={} | gone sent={} heard={} | "
 			"scans={} started={} notOurs={} hushed={} followOns={} lost={} gaveUp={} watched={} seen={} causes={} paced={} pacedDropped={} echoStopped={} | "
-			"blasts={} hits={} pickups={} | flights watched={} heard={} dropped={} stretches={} stretchesDropped={} cones={} | bodyFalls={} ourPaths={} theirPaths={} | writes={} refWrites={} refUnwritten={} bodyOnly={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
+			"blasts={} hits={} pickups={} | flights watched={} heard={} dropped={} stretches={} stretchesDropped={} cones={} | bodyFalls={} ourPaths={} theirPaths={} causesJoined={} causesDropped={} | writes={} refWrites={} refUnwritten={} bodyOnly={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
 			active.load() ? 1 : 0, explosionHooked ? 1 : 0, c.holdsSent, c.holdsHeard, c.holdsDrawn, c.holdsRefused, c.grabsDropped, c.holdsEnded, c.keyframes, c.releases,
 			c.letGosSent, c.letGosHeard, c.letGosApplied, c.restsSaid, c.restsSent, c.restsHeard, c.restsApplied, c.restsLeft, c.answers, c.placesApplied, c.catchUps,
 			waiting.Size(), waiting.refused, c.goneSent, c.goneHeard, c.scans, c.started, c.notOurs, c.hushed, c.followOns, c.lost, c.gaveUp, watches.size(), seen.Size(),
 			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), Shots::AllHooked() ? 1 : 0,
-			flightsHeard.load(), flightsDropped.load(), stretchesHeard.load(), stretchesDropped.load(), conesHeard.load(), c.bodyFalls, c.ourPaths, c.theirPaths, c.writes, c.refWrites, c.refUnwritten, c.bodyOnly,
+			flightsHeard.load(), flightsDropped.load(), stretchesHeard.load(), stretchesDropped.load(), conesHeard.load(), c.bodyFalls, c.ourPaths, c.theirPaths, causes.joined, causes.dropped, c.writes, c.refWrites, c.refUnwritten, c.bodyOnly,
 			c.writeFails, c.badPoses, SenseName(bodySense.Settled()), bodySense.same, bodySense.transposed, SenseName(angleSense.Settled()), angleSense.same,
 			angleSense.transposed);
 	}

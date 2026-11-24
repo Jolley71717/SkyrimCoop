@@ -637,10 +637,44 @@ TEST("object causes: ours when our strongest cause that reached it is at least t
 	causes.Add({ { std::nanf(""), 0.0f, 0.0f }, {}, 100.0f, Strength::kBody, true, t + 1s });
 	CHECK(causes.Size() == 0u);
 	for (std::size_t i = 0; i < ObjectRules::Causes::MAX_CAUSES + 5; ++i) {
-		causes.Add({ {}, {}, 100.0f, Strength::kBody, true, t + 1s });
+		const Vec at{ 1000.0f * static_cast<float>(i), 0.0f, 0.0f };
+		causes.Add({ at, at, 100.0f, Strength::kBody, true, t + 1s + std::chrono::milliseconds(i) });
 	}
 	CHECK(causes.Size() == ObjectRules::Causes::MAX_CAUSES);
+	CHECK(causes.dropped == 5u);
+	// Full of our own: a friend's takes the place of ours that ends first (the first added here), and counts.
+	const Vec friendAt{ -3000.0f, 0.0f, 0.0f };
+	causes.Add({ friendAt, friendAt, 100.0f, Strength::kBody, false, t + 1s });
+	CHECK(causes.Size() == ObjectRules::Causes::MAX_CAUSES);
+	CHECK(causes.dropped == 6u);
+	CHECK(!causes.Judge(BUCKET, friendAt, friendAt, t).Ours());
+	CHECK(!causes.Judge(BUCKET, Vec{}, Vec{}, t).Ours());  // ours there made room
+	CHECK(causes.Judge(BUCKET, Vec{ 1000.0f, 0.0f, 0.0f }, Vec{ 1000.0f, 0.0f, 0.0f }, t).Ours());
+	CHECK(causes.Judge(BUCKET, friendAt, friendAt, t).theirs == Strength::kBody);
 	CHECK(Near(ObjectRules::DistanceToPath({ 0.0f, 5.0f, 0.0f }, { -1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }), 5.0f));
+
+	// A flight's stretches, one going on from the last, nearly straight: one cause, as long as all of them, lasting as
+	// long as the newest. A turn past JOIN_BEND of its reach, or another side's, starts another.
+	causes.Clear();
+	for (int i = 0; i < 20; ++i) {
+		const auto x = 100.0f * static_cast<float>(i);
+		causes.Add({ { x, 0.0f, 0.0f }, { x + 100.0f, 0.0f, -1.0f }, ObjectRules::SHOT_REACH, Strength::kStrike, true, t + std::chrono::milliseconds(100 * i) });
+	}
+	CHECK(causes.Size() == 1u);
+	CHECK(causes.joined == 19u);
+	CHECK(causes.Judge(TANKARD, { 1950.0f, 100.0f, 0.0f }, { 1950.0f, 100.0f, 0.0f }, t + 1800ms).Ours());
+	CHECK(causes.Judge(TANKARD, { 50.0f, 100.0f, 0.0f }, { 50.0f, 100.0f, 0.0f }, t + 1800ms).Ours());  // its start lasts with it
+	causes.Add({ { 2000.0f, 0.0f, -20.0f }, { 2000.0f, 1000.0f, -20.0f }, ObjectRules::SHOT_REACH, Strength::kStrike, true, t + 2s });  // a ricochet
+	CHECK(causes.Size() == 2u);
+	causes.Add({ { 2000.0f, 1000.0f, -20.0f }, { 2000.0f, 1100.0f, -20.0f }, ObjectRules::SHOT_REACH, Strength::kStrike, false, t + 2s });  // a friend's
+	CHECK(causes.Size() == 3u);
+	// A body standing where it stood: one cause, lasting on.
+	causes.Clear();
+	for (int i = 0; i < 8; ++i) {
+		causes.Add({ { 50.0f, 50.0f, 0.0f }, { 50.0f, 50.0f, 0.0f }, ObjectRules::NPC_REACH, Strength::kBody, false, t + 1s + std::chrono::milliseconds(250 * i) });
+	}
+	CHECK(causes.Size() == 1u);
+	CHECK(causes.Judge(TANKARD, here, here, t + 2500ms).theirs == Strength::kBody);
 	CHECK(Near(ObjectRules::DistanceToPath({ 4.0f, 3.0f, 0.0f }, { -1.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.0f }), std::sqrt(18.0f)));
 }
 

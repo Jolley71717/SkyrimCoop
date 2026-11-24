@@ -445,14 +445,47 @@ namespace ObjectRules
 		[[nodiscard]] bool Ours() const { return ours != Strength::kNone && ours >= theirs; }
 	};
 
+	// At most MAX_CAUSES. A cause that goes on from where one of the same side, strength and reach ends, nearly straight
+	// on (a flight's next stretch, a body standing where it stood), makes that one longer and last longer instead of
+	// adding one. When full, a friend's cause takes the place of our own that ends first (a friend's cause dropped
+	// could make their move ours, and our game would say it back to them); one that finds no room is dropped and counted.
 	class Causes
 	{
 	public:
+		static constexpr float JOIN_EPSILON = 1.0f;  // units: a stretch from within this of where another ends goes on from it
+		static constexpr float JOIN_BEND = 0.25f;    // of its reach: how far the joint may lie off the joined path
+
 		void Add(const Cause& a_cause)
 		{
-			if (a_cause.strength != Strength::kNone && Finite(a_cause.from) && Finite(a_cause.to) && causes.size() < MAX_CAUSES) {
-				causes.push_back(a_cause);
+			if (a_cause.strength == Strength::kNone || !Finite(a_cause.from) || !Finite(a_cause.to)) {
+				return;
 			}
+			if (a_cause.object == 0) {
+				for (auto it = causes.rbegin(); it != causes.rend(); ++it) {
+					if (it->object == 0 && it->ours == a_cause.ours && it->strength == a_cause.strength && it->reach == a_cause.reach &&
+						Distance(it->to, a_cause.from) <= JOIN_EPSILON && DistanceToPath(it->to, it->from, a_cause.to) <= a_cause.reach * JOIN_BEND) {
+						it->to = a_cause.to;
+						it->until = (std::max)(it->until, a_cause.until);
+						++joined;
+						return;
+					}
+				}
+			}
+			if (causes.size() < MAX_CAUSES) {
+				causes.push_back(a_cause);
+				return;
+			}
+			if (!a_cause.ours) {
+				const auto ours = std::min_element(causes.begin(), causes.end(), [](const Cause& a_a, const Cause& a_b) {
+					return a_a.ours != a_b.ours ? a_a.ours : a_a.until < a_b.until;  // our own first, the one ending first
+				});
+				if (ours != causes.end() && ours->ours) {
+					*ours = a_cause;
+					++dropped;
+					return;
+				}
+			}
+			++dropped;
 		}
 		void Prune(Clock::time_point a_now)
 		{
@@ -486,6 +519,9 @@ namespace ObjectRules
 		}
 
 		static constexpr std::size_t MAX_CAUSES = 1024;
+
+		std::uint64_t joined = 0;   // causes that went on from another
+		std::uint64_t dropped = 0;  // causes that found no room (or our own that made room for a friend's)
 
 	private:
 		std::vector<Cause> causes;
