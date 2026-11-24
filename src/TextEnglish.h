@@ -35,5 +35,8 @@ namespace Text
 		// --- A friend's name as their stand-in shows it, over its head and where the crosshair names it, with their
 		// health when hurt (src/game/Party.cpp, Tag) ---
 		{ "party.tag_hurt", "{name} ({health}%)" },
+
+		// --- A friend discovered a place: it is now on our map too, ready for fast travel (src/game/MapShare.cpp) ---
+		{ "map.found", "{player} discovered {place}" },
 	};
 }

@@ -87,6 +87,7 @@ namespace FormTranslate
 		case MT::kPairs:
 		case MT::kPlayerStatus:
 		case MT::kRemoteStatus:
+		case MT::kMapMarkers:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -450,6 +451,12 @@ namespace FormTranslate
 			break;
 		case MT::kRemoteStatus:
 			detail::Apply<Protocol::RemoteStatus>(a_packet, ctx, Protocol::DecodeRemoteStatus, [&](Protocol::RemoteStatus& a_msg) { detail::MapStatus(ctx, a_msg.status); });
+			break;
+		// Map markers: one the other side lacks (a mod's place) is left out.
+		case MT::kMapMarkers:
+			detail::Apply<Protocol::MapMarkers>(a_packet, ctx, Protocol::DecodeMapMarkers, [&](Protocol::MapMarkers& a_msg) {
+				ctx.Entries(a_msg.markers, [&](Protocol::MapMarker& a_marker) { return ctx.Key(a_marker.ref); });
+			});
 			break;
 		default:
 			break;

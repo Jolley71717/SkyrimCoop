@@ -11,6 +11,7 @@
 #include "game/Furniture.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
+#include "game/MapShare.h"
 #include "game/NpcSync.h"
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
@@ -214,6 +215,12 @@ namespace DevCommands
 			return FriendMarkers::Command(a_args);
 		}
 
+		// mapshare: the map markers shared: ours read, sent, heard, put on our map, the notices (MapShare::Command).
+		std::string MapShareCommand(std::string_view a_args)
+		{
+			return MapShare::Command(a_args);
+		}
+
 		// sit [find <kind> [radius] | off <id>]: who sits in what, ours and each actor another game says is in furniture
 		// (Furniture::Command).
 		std::string SitCommand(std::string_view a_args)
@@ -291,6 +298,7 @@ namespace DevCommands
 			{ "sit", SitCommand },
 			{ "party", PartyCommand },
 			{ "markers", MarkersCommand },
+			{ "mapshare", MapShareCommand },
 			{ "peace", PeaceCommand },
 			{ "shots", ShotsCommand },
 			{ "pairs", PairsCommand },
@@ -315,7 +323,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | pairs [last | list | find <kill|feed|any> | play <idle> <victim> [attacker]] | peace [targeting | find <base> [radius] | line <stand-in> [beyond] [width]] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | party | markers [span <deg>] | mapshare | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | pairs [last | list | find <kill|feed|any> | play <idle> <victim> [attacker]] | peace [targeting | find <base> [radius] | line <stand-in> [beyond] [width]] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

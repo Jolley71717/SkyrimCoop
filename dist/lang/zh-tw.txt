@@ -12,3 +12,5 @@ steam.status_hosting = 正在主持 Skyrim 連線合作
 steam.status_playing = 正在玩 Skyrim 連線合作
 
 party.tag_hurt = {name}（{health}%）
+
+map.found = {player}發現了{place}
