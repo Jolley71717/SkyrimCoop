@@ -85,6 +85,7 @@ namespace FormTranslate
 		case MT::kShots:
 		case MT::kSits:
 		case MT::kPairs:
+		case MT::kNpcMades:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -96,6 +97,7 @@ namespace FormTranslate
 		case MT::kPluginTable:
 		case MT::kPlayerActions:  // a player's graph events: names, no form
 		case MT::kRemoteActions:
+		case MT::kNpcMadeAnswers:  // spawns alone (a maker's own ids, never translated) and a verdict
 			return false;
 		}
 		return false;  // a type this version does not know
@@ -427,6 +429,21 @@ namespace FormTranslate
 				ctx.Entries(a_msg.pairs, [&](Protocol::Pair& a_pair) { return side(a_pair.attacker) && side(a_pair.victim); });
 				for (auto& pair : a_msg.pairs) {
 					ctx.Detail(pair.idle);
+				}
+			});
+			break;
+		// Run-time NPCs: each is a spawn (its maker's own id, never translated). What made it: a quest, a made form, a pick
+		// or a race the other side lacks reads 0 (a quest of 0 is no alias match: MadeBook::Twins; a pick of 0 can't be
+		// placed), and a place it lacks is nowhere (no match by place either).
+		case MT::kNpcMades:
+			detail::Apply<Protocol::NpcMades>(a_packet, ctx, Protocol::DecodeNpcMades, [&](Protocol::NpcMades& a_msg) {
+				for (auto& made : a_msg.mades) {
+					auto& s = made.source;
+					ctx.Detail(s.quest);
+					ctx.Detail(s.made);
+					ctx.Detail(s.pick);
+					ctx.Detail(s.body);
+					ctx.Place(s.cell, s.worldspace);
 				}
 			});
 			break;

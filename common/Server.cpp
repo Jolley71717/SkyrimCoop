@@ -3,6 +3,7 @@
 #include "EnetTransport.h"
 #include "FormIds.h"
 #include "Name.h"
+#include "MadeBook.h"
 #include "NpcBook.h"
 #include "NpcFates.h"
 #include "Redact.h"
@@ -185,6 +186,10 @@ void Server::Run()
 	RideBook::Book rides;
 	// Who is in what furniture (common/SitBook.h), for whoever joins after.
 	SitBook::Book sits;
+	// The NPCs the games made as they ran (common/MadeBook.h): what made each, for pairing a later game's own with it and
+	// for whoever joins after; two of one alias are looked at for a merge every MERGE_EVERY.
+	MadeBook::Book    made;
+	Clock::time_point nextMerge{};
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -261,6 +266,11 @@ void Server::Run()
 			broadcast(Protocol::Encode(told), true, &a_key);
 			log(std::format("server: the {} NPC(s) player {} ran are nobody's now", released.size(), a_peer.playerId));
 		}
+		// What their game made goes from the book: a friend's game that shows one keeps its copy as its own (their twin of it
+		// was its own all along) and says it again as its made NPC.
+		if (const auto gone = made.Leave(a_peer.playerId); !gone.empty()) {
+			log(std::format("server: the {} NPC(s) player {}'s game made are no longer shared from it", gone.size(), a_peer.playerId));
+		}
 		fates.Left(a_peer.playerId);
 		// Their ride, and those of the NPCs their game ran, end: the others get the riders off.
 		if (auto ended = rides.Leave(a_peer.playerId); !ended.empty()) {
@@ -269,6 +279,30 @@ void Server::Run()
 		// And whatever furniture they and their NPCs were in: the others stand them up.
 		if (auto ended = sits.Leave(a_peer.playerId); !ended.empty()) {
 			sendSits(nullptr, &a_key, std::move(ended), false);
+		}
+	};
+
+	// Two of one quest's alias, shared by two games, that came to stand as twins (MadeBook::Merges): the later one's maker
+	// lets it go (everyone hears it is nobody's: their copies of it go) and shows the earlier through it.
+	const auto mergeMade = [&](Clock::time_point a_now) {
+		if (a_now < nextMerge || made.Size() < 2) {
+			return;
+		}
+		nextMerge = a_now + MadeBook::MERGE_EVERY;
+		for (const auto& merge : made.Merges()) {
+			const auto maker = merge.later.spawner;
+			// The maker hears it first (so it never claims it back as its own on hearing it is nobody's), then everyone.
+			if (const auto to = peerOf(maker)) {
+				send(*to, Protocol::Encode(Protocol::NpcMadeAnswers{ .answers = { { merge.later, Protocol::MadeVerdict::kTwin, merge.earlier } } }), true);
+			}
+			if (npcs.Claim(maker, Protocol::NpcClaim{ merge.later, Protocol::ClaimWhy::kRelease }, a_now) == NpcBook::Outcome::kReleased) {
+				npcGear.erase(merge.later);
+				fates.Released(merge.later);
+				fates.HandedOver(merge.later, maker, a_now);
+				broadcast(Protocol::Encode(Protocol::NpcOwners{ .owners = { { merge.later, 0 } } }), true, nullptr);
+			}
+			log(std::format("server: player {}'s made NPC {:08X} stands as the twin of player {}'s {:08X}: it shows that one now", maker, merge.later.id, merge.earlier.spawner,
+				merge.earlier.id));
 		}
 	};
 
@@ -375,8 +409,17 @@ void Server::Run()
 				}
 			}
 		}
-		// Who runs each NPC (a full list; a game forgets what it knew at each welcome), and their gear. Nothing when no NPC
-		// is run: there is nothing to forget.
+		// What made each NPC the games made as they ran (a full list first, in the order heard, so the joiner's own made
+		// NPCs are told apart from them), then who runs each NPC (a full list; a game forgets what it knew at each
+		// welcome), and their gear. Nothing when there are none: there is nothing to forget.
+		if (auto all = made.All(); !all.empty()) {
+			for (std::size_t first = 0; first < all.size(); first += Protocol::MAX_NPC_MADES) {
+				Protocol::NpcMades msg{ .full = first == 0 };
+				const auto         end = (std::min)(all.size(), first + Protocol::MAX_NPC_MADES);
+				msg.mades.assign(all.begin() + static_cast<std::ptrdiff_t>(first), all.begin() + static_cast<std::ptrdiff_t>(end));
+				send(a_key, Protocol::Encode(msg), true);
+			}
+		}
 		if (auto all = npcs.All(); !all.empty()) {
 			send(a_key, Protocol::Encode(Protocol::NpcOwners{ .full = true, .owners = std::move(all) }), true);
 		}
@@ -484,6 +527,7 @@ void Server::Run()
 						npcGear.erase(claim.key);
 						fates.Released(claim.key);
 						fates.HandedOver(claim.key, was, now);
+						made.Erase(claim.key);  // its maker let go of it: said again if it loads there again
 						break;
 					case NpcBook::Outcome::kRefused:
 						refused.owners.push_back({ claim.key, npcs.Owner(claim.key) });
@@ -506,11 +550,58 @@ void Server::Run()
 			if (auto msg = Protocol::DecodeNpcStates(a_data)) {
 				std::erase_if(msg->npcs, [&](const Protocol::NpcState& a_npc) { return !npcs.Runs(a_peer.playerId, a_npc.key); });
 				if (!msg->npcs.empty()) {
+					for (const auto& npc : msg->npcs) {
+						if (npc.key.IsSpawn()) {
+							made.Moved(npc.key, npc.state);  // where a made NPC stands now, for its merges and twins
+						}
+					}
 					msg->runner = a_peer.playerId;
 					broadcast(Protocol::Encode(*msg), false, &a_key);
 				}
+				mergeMade(Clock::now());
 			}
 			break;
+		case MT::kNpcMades:
+			// Each made NPC as MadeBook rules (only the maker's own spawns): shared ones are granted to their maker at once
+			// (everyone hears who runs it before the maker hears its answer) and passed on to the others, the maker named; a
+			// twin's maker hears which NPC its own shows; each one is answered.
+			if (const auto msg = Protocol::DecodeNpcMades(a_data)) {
+				const auto               now = Clock::now();
+				Protocol::NpcMades       shared{ .sender = a_peer.playerId };
+				Protocol::NpcMadeAnswers answers;
+				Protocol::NpcOwners      granted;
+				for (const auto& said : msg->mades) {
+					if (said.source.Gone()) {
+						// gone from its maker's world: the others' copies go with it (passed on), nothing to answer
+						if (made.Gone(a_peer.playerId, said)) {
+							shared.mades.push_back(said);
+						}
+						continue;
+					}
+					const auto answer = made.Report(a_peer.playerId, said);
+					if (answer.verdict == Protocol::MadeVerdict::kShared) {
+						if (npcs.Claim(a_peer.playerId, Protocol::NpcClaim{ said.key, Protocol::ClaimWhy::kHave }, now) == NpcBook::Outcome::kGranted) {
+							granted.owners.push_back({ said.key, a_peer.playerId });
+						}
+						shared.mades.push_back(said);
+					} else if (answer.verdict == Protocol::MadeVerdict::kTwin) {
+						log(std::format("server: player {}'s made NPC {:08X} is the twin of player {}'s {:08X}", a_peer.playerId, said.key.id, answer.twin.spawner, answer.twin.id));
+					}
+					answers.answers.push_back({ said.key, answer.verdict, answer.twin });
+				}
+				if (!granted.owners.empty()) {
+					broadcast(Protocol::Encode(granted), true, nullptr);
+				}
+				if (!shared.mades.empty()) {
+					broadcast(Protocol::Encode(shared), true, &a_key);
+				}
+				if (!answers.answers.empty()) {
+					send(a_key, Protocol::Encode(answers), true);
+				}
+			}
+			break;
+		case MT::kNpcMadeAnswers:
+			break;  // the server's own word: never taken from a game
 		case MT::kNpcActions:
 			if (auto msg = Protocol::DecodeNpcActions(a_data)) {
 				std::erase_if(msg->actions, [&](const Protocol::NpcAction& a_action) { return !npcs.Runs(a_peer.playerId, a_action.key); });
@@ -608,6 +699,9 @@ void Server::Run()
 					const auto taken = fates.Died(a_peer.playerId, npcs.Owner(a_death.key), a_death, now);
 					if (taken == NpcFates::Death::kLate) {
 						late.deaths.push_back(a_death);
+					}
+					if (taken != NpcFates::Death::kRefused && a_death.key.IsSpawn()) {
+						made.Erase(a_death.key);  // a dead one is no twin of a later one made of the same
 					}
 					return taken != NpcFates::Death::kNew;
 				});

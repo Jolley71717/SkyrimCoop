@@ -9,6 +9,7 @@
 #include "game/Gait.h"
 #include "game/Gear.h"
 #include "game/LocalPlayer.h"
+#include "game/MadeRules.h"
 #include "game/NpcRules.h"
 #include "game/PeaceRules.h"
 #include "game/RemotePlayers.h"
@@ -103,6 +104,9 @@ namespace NpcSync
 			RE::FormID            actorId = 0;     // the actor that shows it here (0: none)
 			RE::ActorHandle       handle;
 			bool                  spawned = false;  // that actor is one this game placed (a spawn's copy)
+			// that actor is our own NPC, made here as the game ran, that shows a friend's made NPC (its twin: MadeRules.h);
+			// never placed, never taken out, only let go of
+			bool                  twin = false;
 			Clock::time_point     placedAt{};
 			Clock::time_point     placeAfter{};
 			std::optional<Protocol::NpcGear> gear;
@@ -209,6 +213,35 @@ namespace NpcSync
 		Clock::time_point                                                                               nextMagicka{};
 		// What `npcs spells arm` taught an NPC we run (its form id, the spell's), taken back by `arm ... 0`.
 		std::set<std::pair<RE::FormID, RE::FormID>>                                                    armTaught;
+
+		// ---- run-time NPCs (MadeRules.h, common/MadeBook.h; docs/DESIGN.md "Run-time NPCs"; main thread) ----
+		// The NPCs our game made as it ran that nobody commands, by their id: said to the server, shared as our spawn, or
+		// the twin of a friend's.
+		struct OurMade
+		{
+			RE::ActorHandle  handle;
+			MadeRules::Ours  rules;
+			bool             saidNoSource = false;  // logged once: it can't be said (no race, nowhere)
+		};
+		std::map<RE::FormID, OurMade> ourMade;
+		// What made each made NPC of a friend's (kNpcMades), and when nobody ran it and no copy stood here since.
+		struct TheirMade
+		{
+			Protocol::MadeSource             source;
+			std::optional<Clock::time_point> unusedSince;
+		};
+		std::map<Key, TheirMade> theirMade;
+		// Copies we placed of a friend's made NPC, ours since its maker let go of it while it stood here (MadeRules::
+		// LetGo::kAdopt): placed by this game, so taken out before every save, when it leaves our loaded world, and at the
+		// session's end, as a copy is.
+		std::map<RE::FormID, RE::ActorHandle> adopted;
+		std::vector<Protocol::NpcMade>        madeToSay;  // said with the next frame's messages
+		struct MadeCounts
+		{
+			std::uint64_t said = 0, shared = 0, twins = 0, waits = 0, paired = 0, unpaired = 0, copiesReplaced = 0, adopted = 0, adoptedOut = 0, gone = 0, theirsGone = 0,
+						  theirsHeard = 0, noSource = 0, staleAnswers = 0;
+		};
+		MadeCounts madeCounts;
 
 		// ---- the graph's names (a BSFixedString takes the game's string cache's lock) ----
 		const RE::BSFixedString& Name(std::string_view a_text)
@@ -662,6 +695,7 @@ namespace NpcSync
 			a_copy.handle = {};
 			a_copy.actorId = 0;
 			a_copy.spawned = false;
+			a_copy.twin = false;  // our own NPC that showed it: only let go of (above), never taken out
 			a_copy.mirror = false;
 			a_copy.geared = false;
 			a_copy.placeAfter = Clock::now() + RESPAWN_AFTER;
@@ -747,6 +781,80 @@ namespace NpcSync
 			}
 			const auto last = a_player ? a_player->QLastRiddenMount().get() : RE::NiPointer<RE::Actor>{};
 			return last && last.get() == a_actor;
+		}
+
+		// ---- what made a run-time NPC (MadeRules.h; main thread) ----
+
+		// The quest whose "create reference" alias holds it and that alias, and what the alias creates (none: no quest's
+		// created alias holds it; a script or the engine placed it).
+		struct AliasMade
+		{
+			RE::FormID    quest = 0;
+			std::uint32_t alias = 0;
+			RE::FormID    object = 0;
+		};
+
+		std::optional<AliasMade> CreatedAliasOf(RE::Actor* a_actor)
+		{
+			const auto aliases = a_actor->extraList.GetByType<RE::ExtraAliasInstanceArray>();
+			if (!aliases) {
+				return std::nullopt;
+			}
+			RE::BSReadLockGuard l{ aliases->lock };
+			for (const auto* instance : aliases->aliases) {
+				if (!instance || !instance->quest || !instance->alias || FormIds::IsRuntime(instance->quest->GetFormID())) {
+					continue;
+				}
+				const auto alias = instance->alias;
+				if (alias->GetVMTypeID() != RE::BGSRefAlias::VMTYPEID || alias->fillType != RE::BGSBaseAlias::FILL_TYPE::kCreated) {
+					continue;
+				}
+				AliasMade out{ instance->quest->GetFormID(), alias->aliasID, 0 };
+				const auto object = static_cast<const RE::BGSRefAlias*>(alias)->fillData.created.object;
+				out.object = object && !FormIds::IsRuntime(object->GetFormID()) ? object->GetFormID() : 0;
+				return out;
+			}
+			return std::nullopt;
+		}
+
+		// What made a_actor, and where it stands, as the server is told (Protocol::MadeSource); none when it has no race of
+		// a plugin, or stands nowhere a state can say.
+		std::optional<Protocol::MadeSource> SourceOf(RE::Actor* a_actor)
+		{
+			const auto at = Read(a_actor);
+			const auto race = a_actor->GetRace();
+			if (!at || !race) {
+				return std::nullopt;
+			}
+			Protocol::MadeSource source;
+			source.body = race->HasKeywordID(ACTOR_TYPE_NPC) ? Protocol::BODY_PERSON : FormIds::IsRuntime(race->GetFormID()) ? 0 : race->GetFormID();
+			if (source.body == 0) {
+				return std::nullopt;
+			}
+			if (const auto alias = CreatedAliasOf(a_actor)) {
+				source.flags = static_cast<std::uint8_t>(source.flags | Protocol::kMadeByAlias);
+				source.quest = alias->quest;
+				source.alias = alias->alias;
+				source.made = alias->object;
+			}
+			if (source.made == 0) {
+				// What a script placed it as: the leveled actor it was rolled from, else its own base (a plugin's).
+				const auto leveled = a_actor->extraList.GetByType<RE::ExtraLeveledCreature>();
+				const auto original = leveled ? leveled->originalBase : nullptr;
+				const auto base = a_actor->GetActorBase();
+				if (original && !FormIds::IsRuntime(original->GetFormID())) {
+					source.made = original->GetFormID();
+				} else if (base && !FormIds::IsRuntime(base->GetFormID())) {
+					source.made = base->GetFormID();
+				}
+			}
+			source.pick = BaseOf(a_actor);
+			source.cell = at->cell;
+			source.worldspace = at->worldspace;
+			source.x = at->x;
+			source.y = at->y;
+			source.z = at->z;
+			return source;
 		}
 
 		// ---- spells (SpellRules.h; main thread) ----
@@ -926,6 +1034,107 @@ namespace NpcSync
 			}
 		}
 
+		// One of our run-time NPCs that nobody commands, seen loaded by the scan: said to the server when it is time
+		// (MadeRules::SayNow; with what made it, where it stands now), and what the scan does with it.
+		MadeRules::Seen SeeMade(RE::Actor* a_actor, Clock::time_point a_now)
+		{
+			const auto id = a_actor->GetFormID();
+			auto       it = ourMade.find(id);
+			if (it == ourMade.end()) {
+				if (ourMade.size() >= MadeRules::MAX_OURS) {
+					// the ones no longer loaded make room (they are seen again, and said again, if they load)
+					std::erase_if(ourMade, [](const auto& a_entry) {
+						const auto actor = a_entry.second.handle.get();
+						return a_entry.second.rules.phase != MadeRules::Phase::kTwin && !adopted.contains(a_entry.first) && (!actor || !actor->Is3DLoaded());
+					});
+					if (ourMade.size() >= MadeRules::MAX_OURS) {
+						return MadeRules::Seen::kWait;
+					}
+				}
+				it = ourMade.emplace(id, OurMade{ .handle = a_actor->GetHandle() }).first;
+			}
+			auto& made = it->second;
+			if (MadeRules::SayNow(made.rules, !a_actor->IsDead(), a_now)) {
+				std::optional<Protocol::MadeSource> source;
+				if (made.rules.adopted) {
+					// said as its maker said it, where it stands here now
+					if (const auto at = Read(a_actor)) {
+						source = MadeRules::Adopted(made.rules.source, *at, BaseOf(a_actor));
+					}
+				} else {
+					source = SourceOf(a_actor);
+				}
+				if (!source) {
+					if (!made.saidNoSource) {
+						made.saidNoSource = true;
+						++madeCounts.noSource;
+						const auto race = a_actor->GetRace();
+						logs::info("NPCs: {:08X}, made here as the game ran, is not shared: its race {:08X} is no plugin's, or it stands nowhere a state can say", id,
+							race ? race->GetFormID() : 0);
+					}
+					return MadeRules::Seen::kWait;
+				}
+				MadeRules::Said(made.rules, *source, a_now);
+				madeToSay.push_back({ Key{ id, ourId }, *source });
+				++madeCounts.said;
+			}
+			return MadeRules::SeenAs(made.rules);
+		}
+
+		// Our made NPCs gone from our world (deleted or disabled: its quest or script done with it) are forgotten, and the
+		// end of a shared one is said, so the friends' copies go rather than stay as theirs; an adopted copy that left our
+		// loaded world (not seen by this scan) is taken out, as a copy is (a_seen: the run-time NPCs the scan saw).
+		void TendOurMade(const std::set<RE::FormID>& a_seen, Clock::time_point a_now)
+		{
+			for (auto it = ourMade.begin(); it != ourMade.end();) {
+				auto&      made = it->second;
+				const auto actor = made.handle.get();
+				const bool gone = !actor || actor->GetFormID() != it->first || actor->IsDeleted() || actor->IsDisabled();
+				if (gone && MadeRules::SayGone(made.rules)) {
+					made.rules.goneSaid = true;
+					auto source = made.rules.source;
+					source.flags = static_cast<std::uint8_t>(source.flags | Protocol::kMadeGone);
+					madeToSay.push_back({ Key{ it->first, ourId }, source });
+					++madeCounts.gone;
+					logs::info("NPCs: our made NPC {:08X} is gone from our world: its end is said", it->first);
+				}
+				if (const auto adoptedIt = adopted.find(it->first); adoptedIt != adopted.end() && made.rules.phase != MadeRules::Phase::kTwin &&
+																	(gone || !a_seen.contains(it->first))) {
+					if (actor && !gone) {
+						RemotePlayers::TakeOut(actor.get(), a_now);
+						logs::info("NPCs: {:08X}, a friend's made NPC kept here, left our loaded world: taken out", it->first);
+					}
+					++madeCounts.adoptedOut;
+					adopted.erase(adoptedIt);
+					if (made.rules.phase == MadeRules::Phase::kShared && !made.rules.goneSaid) {
+						made.rules.goneSaid = true;
+						auto source = made.rules.source;
+						source.flags = static_cast<std::uint8_t>(source.flags | Protocol::kMadeGone);
+						madeToSay.push_back({ Key{ it->first, ourId }, source });
+						++madeCounts.gone;
+					}
+					it = ourMade.erase(it);
+					continue;
+				}
+				if (gone) {
+					it = ourMade.erase(it);
+					continue;
+				}
+				++it;
+			}
+		}
+
+		void SendMades(const SendFn& a_send)
+		{
+			for (std::size_t first = 0; first < madeToSay.size(); first += Protocol::MAX_NPC_MADES) {
+				Protocol::NpcMades msg;
+				const auto         end = (std::min)(madeToSay.size(), first + Protocol::MAX_NPC_MADES);
+				msg.mades.assign(madeToSay.begin() + static_cast<std::ptrdiff_t>(first), madeToSay.begin() + static_cast<std::ptrdiff_t>(end));
+				a_send(Protocol::Encode(msg), true);
+			}
+			madeToSay.clear();
+		}
+
 		void Scan(Clock::time_point a_now)
 		{
 			const auto lists = RE::ProcessLists::GetSingleton();
@@ -937,11 +1146,12 @@ namespace NpcSync
 			{
 				std::scoped_lock l{ copyLock };
 				for (const auto& [key, copy] : copies) {
-					if (copy.spawned && copy.actorId != 0) {
-						spawnCopies.insert(copy.actorId);
+					if ((copy.spawned || copy.twin) && copy.actorId != 0) {
+						spawnCopies.insert(copy.actorId);  // a twin too: our own NPC, showing a friend's
 					}
 				}
 			}
+			std::set<RE::FormID> madeSeen;  // our run-time NPCs nobody commands, seen loaded (TendOurMade)
 			std::set<Key>     found;
 			std::vector<Made> made;  // ended after the loop (EndMades): nothing in it changes the lists it walks
 			// One a stand-in or another game's NPC's copy commands here (its own AI's conjuring, reanimating or commanding, a
@@ -976,15 +1186,27 @@ namespace NpcSync
 					Key key{ id, 0 };
 					if (FormIds::IsRuntime(id)) {
 						// Made as this game ran: shared as our spawn when our player or an NPC we run commands it (every
-						// summon, raised corpse and thrall, whoever cast it); any other (a quest's or an encounter's,
-						// which every game makes its own of) is not shared yet. A horse of ours is (NpcRules::SharedRuntime).
+						// summon, raised corpse and thrall, whoever cast it), or a horse of ours (NpcRules::SharedRuntime).
+						// One nobody commands (a quest's created alias, an encounter's, a script's) is said to the server
+						// with what made it first (SeeMade): shared as our spawn once it answers so, or left showing the
+						// friend's NPC it is the twin of (docs/DESIGN.md, "Run-time NPCs").
 						const auto commander = CommanderOf(actor.get(), player);
 						if (!loaded.contains(Key{ id, ourId }) && !NpcRules::SharedRuntime(commander, OurMount(actor.get(), player))) {
-							// One a stand-in or another game's NPC's copy made here: ended after the loop, never shared.
-							if (commander != NpcRules::Commander::kOther || !madeHere(actor.get())) {
-								++counts.unshared;
+							if (commander == NpcRules::Commander::kNobody) {
+								madeSeen.insert(id);
+								if (SeeMade(actor.get(), a_now) != MadeRules::Seen::kShare) {
+									continue;
+								}
+							} else {
+								// One a stand-in or another game's NPC's copy made here: ended after the loop, never shared.
+								if (commander != NpcRules::Commander::kOther || !madeHere(actor.get())) {
+									++counts.unshared;
+								}
+								continue;
 							}
-							continue;
+						} else if (commander == NpcRules::Commander::kNobody && ourMade.contains(id)) {
+							madeSeen.insert(id);
+							static_cast<void>(SeeMade(actor.get(), a_now));  // shared: kept, nothing to say
 						}
 						key.spawner = ourId;
 					} else {
@@ -1008,6 +1230,7 @@ namespace NpcSync
 			}
 			std::erase_if(madeEnding, [&](const auto& a_entry) { return std::ranges::none_of(made, [&](const Made& a_m) { return a_m.id == a_entry.first; }); });
 			EndMades(made, a_now);
+			TendOurMade(madeSeen, a_now);
 			// Gone from this game's loaded world: one we ran is let go of (the next scan of the others' games claims it).
 			for (auto it = loaded.begin(); it != loaded.end();) {
 				if (!found.contains(it->first)) {
@@ -1248,6 +1471,43 @@ namespace NpcSync
 					// Ours now, or nobody's for a while: forgotten (a spawn's copy goes with it). Nobody's a short while:
 					// kept (its own AI shows it) until another game takes it.
 					if (!othersRun) {
+						// A friend's made NPC nobody runs now (its maker's game let it go, or the maker left): our own NPC
+						// that showed it is ours again (said as our made NPC), and a copy we placed of it that stands here
+						// is kept as ours (docs/DESIGN.md, "Run-time NPCs"; MadeRules::OnLetGo).
+						if (key.IsSpawn() && nobody && (copy.twin || copy.spawned)) {
+							const auto held = copy.handle.get();
+							const bool there = held && held->GetFormID() == copy.actorId && !held->IsDeleted() && held->Is3DLoaded();
+							const auto their = theirMade.find(key);
+							const auto letGo = MadeRules::OnLetGo({ .placed = copy.spawned,
+								.twin = copy.twin,
+								.known = their != theirMade.end() && !their->second.source.Gone(),
+								.there = there });
+							if (letGo != MadeRules::LetGo::kTakeAway) {
+								if (held) {
+									copyByActor.erase(held.get());
+									LetCopyGo(held.get());
+								}
+								health.erase(key);
+								if (letGo == MadeRules::LetGo::kUnpair) {
+									if (const auto m = ourMade.find(copy.actorId); m != ourMade.end()) {
+										MadeRules::Again(m->second.rules);
+									}
+									++madeCounts.unpaired;
+									logs::info("NPCs: player {}'s made NPC {:08X} is nobody's now: our own {:08X} that showed it is ours again", key.spawner, key.id, copy.actorId);
+								} else {
+									OurMade adoptee{ .handle = held->GetHandle() };
+									adoptee.rules.source = their->second.source;
+									adoptee.rules.adopted = true;
+									ourMade[copy.actorId] = adoptee;
+									adopted[copy.actorId] = held->GetHandle();
+									++madeCounts.adopted;
+									logs::info("NPCs: player {}'s made NPC {:08X} is nobody's now and stands here: our copy {:08X} of it is kept as ours{}", key.spawner, key.id,
+										copy.actorId, held->IsDead() ? " (a body)" : "");
+								}
+								it = copies.erase(it);
+								continue;
+							}
+						}
 						const bool fresh = !copy.buffer.snapshots.empty() && a_now - copy.buffer.snapshots.back().stamp < FORGET_COPY;
 						if (!nobody || !fresh) {
 							const auto held = copy.handle.get();
@@ -1264,7 +1524,20 @@ namespace NpcSync
 					if (key.IsSpawn()) {
 						const auto held = copy.handle.get();
 						actor = held && held->GetFormID() == copy.actorId && !held->IsDeleted() ? held.get() : nullptr;
-						if (!actor && copy.actorId != 0) {
+						if (copy.twin) {
+							if (!actor) {
+								// our own NPC that showed it is gone (its quest done with it here): a copy may be placed now
+								++madeCounts.unpaired;
+								logs::info("NPCs: our own {:08X} that showed player {}'s made NPC {:08X} is gone from our world", copy.actorId, key.spawner, key.id);
+								copy.twin = false;
+								copy.handle = {};
+								copy.actorId = 0;
+								copy.mirror = false;
+								copy.geared = false;
+							} else if (!actor->Is3DLoaded() || actor->IsDisabled()) {
+								actor = nullptr;  // not drawn here now: neither moved nor stood in for
+							}
+						} else if (!actor && copy.actorId != 0) {
 							TakeAwaySpawn(key, copy, "gone from the world");
 						}
 					} else {
@@ -1290,13 +1563,15 @@ namespace NpcSync
 						counts.fallbackFar += mode == NpcRules::Mode::kFar ? 1 : 0;
 					}
 					copy.mode = mode;
-					if (key.IsSpawn()) {
+					if (key.IsSpawn() && !copy.twin) {
 						// A spawn's copy is there only while it is mirrored: left to its own AI, another game's summon
-						// would be nobody's here.
+						// would be nobody's here. A made NPC's body stays (its runner sends no states of a body) until its
+						// maker lets it go, then it is ours (MadeRules::OnLetGo).
 						const bool want = mode == NpcRules::Mode::kMirror && copy.base != 0;
+						const bool body = actor && actor->IsDead() && theirMade.contains(key);
 						if (want && !actor && a_now >= copy.placeAfter) {
 							work.push_back({ .key = key, .place = true, .base = copy.base, .at = sample->state });
-						} else if (!want && actor) {
+						} else if (!want && actor && !body) {
 							TakeAwaySpawn(key, copy, NpcRules::ModeName(mode));
 							actor = nullptr;
 						}
@@ -1744,6 +2019,45 @@ namespace NpcSync
 			}
 			return copy;
 		}
+
+		// Our made NPC a_id shows a friend's (a_theirs, its twin: the server heard theirs first). It is no NPC of ours to
+		// run from now (a shared one is let go of: the server took it back as it said so); a copy we placed of theirs
+		// goes, and ours is the copy, moved by their states, never placed nor taken out.
+		void PairTwin(RE::FormID a_id, OurMade& a_made, const Key& a_theirs)
+		{
+			const auto actor = a_made.handle.get();
+			if (!actor || actor->GetFormID() != a_id || actor->IsDeleted()) {
+				MadeRules::Again(a_made.rules);
+				return;
+			}
+			loaded.erase(Key{ a_id, ourId });
+			{
+				std::scoped_lock l{ copyLock };
+				auto&            copy = CopyOf(a_theirs, a_theirs.spawner);
+				if (copy.actorId != 0 && copy.actorId != a_id) {
+					if (copy.spawned) {
+						++madeCounts.copiesReplaced;
+						TakeAwaySpawn(a_theirs, copy, "our own made NPC shows it now");
+					} else if (const auto was = copy.handle.get()) {
+						copyByActor.erase(was.get());
+						LetCopyGo(was.get());
+					}
+				}
+				copy.handle = actor->GetHandle();
+				copy.actorId = a_id;
+				copy.twin = true;
+				copy.spawned = false;
+				copy.mirror = false;
+				copy.geared = false;
+				copyByActor[actor.get()] = a_theirs;
+				RemotePlayers::SetCopies(copyByActor.size());
+			}
+			++madeCounts.paired;
+			const auto& s = a_made.rules.source;
+			logs::info("NPCs: our made NPC {:08X} ({}{}) is the twin of player {}'s {:08X}: it shows that one", a_id,
+				s.ByAlias() ? std::format("quest {:08X} alias {}", s.quest, s.alias) : std::format("made of {:08X}", s.made), s.pick != 0 ? std::format(", rolled {:08X}", s.pick) : "",
+				a_theirs.spawner, a_theirs.id);
+		}
 	}
 
 	bool Install()
@@ -1795,10 +2109,22 @@ namespace NpcSync
 			ForgetOldFights(now);
 			Protocol::NpcClaims releases;
 			for (const auto& key : before) {
+				const auto made = key.spawner == ourId ? ourMade.find(key.id) : ourMade.end();
+				if (made != ourMade.end() && made->second.rules.phase == MadeRules::Phase::kAsked) {
+					continue;  // granted as it was said (kNpcOwners came before its answer): the answer comes next
+				}
 				if (!loaded.contains(key) && releases.claims.size() < Protocol::MAX_NPC_CLAIMS) {
 					releases.claims.push_back({ key, Protocol::ClaimWhy::kRelease });
+					// A made NPC of ours we let go of (unloaded here): the server forgets it, so it is said again as it
+					// loads again (a friend's game may show it by then: it is the twin of theirs then).
+					if (made != ourMade.end() && made->second.rules.phase == MadeRules::Phase::kShared) {
+						MadeRules::Again(made->second.rules);
+					}
 				}
 			}
+			// The ends of our made NPCs go before their releases (so the friends' copies of them go, not kept as theirs),
+			// and what we say of new ones before the claims.
+			SendMades(a_send);
 			if (!releases.claims.empty()) {
 				counts.claims += releases.claims.size();
 				a_send(Protocol::Encode(releases), true);
@@ -1824,6 +2150,18 @@ namespace NpcSync
 			othersCopyList.clear();
 		}
 		madeEnding.clear();
+		// Copies of friends' made NPCs kept as ours were placed by this game: they go as copies do. Our own made NPCs stay
+		// our world's (each its quest's or script's), never touched.
+		const auto now = Clock::now();
+		for (const auto& [id, handle] : adopted) {
+			if (const auto actor = handle.get(); actor && actor->GetFormID() == id && !actor->IsDeleted()) {
+				RemotePlayers::TakeOut(actor.get(), now);
+			}
+		}
+		adopted.clear();
+		ourMade.clear();
+		theirMade.clear();
+		madeToSay.clear();
 		ResetLetGo();
 		{
 			std::scoped_lock l{ eventLock };
@@ -2176,6 +2514,88 @@ namespace NpcSync
 		return true;
 	}
 
+	void Mades(const Protocol::NpcMades& a_msg)
+	{
+		if (!active || a_msg.sender == ourId) {
+			return;
+		}
+		const auto now = Clock::now();
+		if (a_msg.full) {
+			theirMade.clear();
+		}
+		for (const auto& made : a_msg.mades) {
+			if (!made.key.IsSpawn() || made.key.spawner == ourId) {
+				continue;
+			}
+			if (made.source.Gone()) {
+				// gone from its maker's world: the copy of it here goes when it is let go of (not kept as ours)
+				if (const auto it = theirMade.find(made.key); it != theirMade.end()) {
+					it->second.source.flags = static_cast<std::uint8_t>(it->second.source.flags | Protocol::kMadeGone);
+					++madeCounts.theirsGone;
+				}
+				continue;
+			}
+			if (theirMade.size() >= Protocol::MAX_NPCS && !theirMade.contains(made.key)) {
+				continue;
+			}
+			theirMade[made.key] = TheirMade{ .source = made.source };
+			++madeCounts.theirsHeard;
+		}
+		// What made a friend's NPC nobody runs and no copy shows is forgotten after a while.
+		std::scoped_lock l{ copyLock };
+		for (auto it = theirMade.begin(); it != theirMade.end();) {
+			if (owners.contains(it->first) || copies.contains(it->first)) {
+				it->second.unusedSince.reset();
+			} else if (!it->second.unusedSince) {
+				it->second.unusedSince = now;
+			} else if (now - *it->second.unusedSince >= MadeRules::THEIRS_KEPT) {
+				it = theirMade.erase(it);
+				continue;
+			}
+			++it;
+		}
+	}
+
+	void MadeAnswers(const Protocol::NpcMadeAnswers& a_msg)
+	{
+		if (!active) {
+			return;
+		}
+		const auto now = Clock::now();
+		for (const auto& answer : a_msg.answers) {
+			const auto it = answer.key.spawner == ourId ? ourMade.find(answer.key.id) : ourMade.end();
+			if (it == ourMade.end()) {
+				++madeCounts.staleAnswers;  // gone from our world meanwhile (a load, its quest done with it)
+				continue;
+			}
+			auto& made = it->second;
+			const auto was = made.rules.phase;
+			if (!MadeRules::Answered(made.rules, answer, now)) {
+				++madeCounts.staleAnswers;
+				continue;
+			}
+			switch (answer.verdict) {
+			case Protocol::MadeVerdict::kShared:
+				if (was != MadeRules::Phase::kShared) {
+					++madeCounts.shared;
+					const auto& s = made.rules.source;
+					logs::info("NPCs: our made NPC {:08X} ({}) is shared as our spawn", answer.key.id,
+						s.ByAlias() ? std::format("quest {:08X} alias {}", s.quest, s.alias) : std::format("made of {:08X}", s.made));
+				}
+				break;
+			case Protocol::MadeVerdict::kTwin:
+				++madeCounts.twins;
+				PairTwin(answer.key.id, made, answer.twin);
+				break;
+			case Protocol::MadeVerdict::kFull:
+			case Protocol::MadeVerdict::kRefused:
+				++madeCounts.waits;
+				break;
+			}
+		}
+		ResetLetGo();
+	}
+
 	void ForgetWorld()
 	{
 		if (!active) {
@@ -2188,6 +2608,7 @@ namespace NpcSync
 			copy.handle = {};
 			copy.actorId = 0;
 			copy.spawned = false;
+			copy.twin = false;
 			copy.mirror = false;
 			copy.geared = false;
 			copy.actions.Clear();
@@ -2198,6 +2619,10 @@ namespace NpcSync
 		othersCopyList.clear();
 		madeEnding.clear();
 		loaded.clear();
+		// Our made NPCs and the copies kept as ours were the old world's: the new one's are seen and said afresh.
+		ourMade.clear();
+		adopted.clear();
+		madeToSay.clear();
 		// The new world's actors are new ones: the session's dead are killed again as they load; our hits were on the old.
 		killedOnLoad.clear();
 		hitApplied.clear();
@@ -2207,23 +2632,155 @@ namespace NpcSync
 
 	void BeforeSave()
 	{
-		std::scoped_lock l{ copyLock };
-		std::size_t      taken = 0;
-		for (auto& [key, copy] : copies) {
-			if (copy.spawned && copy.actorId != 0) {
-				TakeAwaySpawn(key, copy, "a save is written");
-				++taken;
+		{
+			std::scoped_lock l{ copyLock };
+			std::size_t      taken = 0;
+			std::size_t      twins = 0;
+			for (auto& [key, copy] : copies) {
+				if (copy.spawned && copy.actorId != 0) {
+					TakeAwaySpawn(key, copy, "a save is written");
+					++taken;
+				} else if (copy.twin && copy.actorId != 0) {
+					// Our own made NPC showing a friend's stays in the save as its quest's, as its own: let go of (the flags the
+					// hook wrote cleared, its graph its AI's), shown again after the save. One we keep from a friend goes
+					// below, as a copy does.
+					if (adopted.contains(copy.actorId)) {
+						copyByActor.erase(copy.handle.get().get());
+						copy.twin = false;
+						copy.handle = {};
+						copy.actorId = 0;
+						copy.mirror = false;
+						copy.geared = false;
+						continue;
+					}
+					if (const auto actor = copy.handle.get()) {
+						LetCopyGo(actor.get());
+					}
+					copy.mirror = false;
+					copy.actions.Clear();
+					++twins;
+				}
+			}
+			RemotePlayers::SetCopies(copyByActor.size());
+			if (taken > 0 || twins > 0) {
+				logs::info("Save: {} copy(ies) of other players' spawns taken out of the world before the save; placed again after; {} of our own NPCs that show "
+						   "friends' let go of for it",
+					taken, twins);
 			}
 		}
-		RemotePlayers::SetCopies(copyByActor.size());
-		if (taken > 0) {
-			logs::info("Save: {} copy(ies) of other players' spawns taken out of the world before the save; placed again after", taken);
+		// Copies of friends' made NPCs kept as ours (MadeRules::LetGo::kAdopt) were placed by this game: taken out as copies
+		// are (the stand-ins' save guard names them), their ends said so the friends' copies of them go too.
+		const auto  now = Clock::now();
+		std::size_t out = 0;
+		for (const auto& [id, handle] : adopted) {
+			if (const auto actor = handle.get(); actor && actor->GetFormID() == id && !actor->IsDeleted()) {
+				RemotePlayers::TakeOut(actor.get(), now);
+				++out;
+			}
+			if (const auto made = ourMade.find(id); made != ourMade.end()) {
+				if (MadeRules::SayGone(made->second.rules)) {
+					auto source = made->second.rules.source;
+					source.flags = static_cast<std::uint8_t>(source.flags | Protocol::kMadeGone);
+					madeToSay.push_back({ Key{ id, ourId }, source });
+					++madeCounts.gone;
+				}
+				ourMade.erase(made);
+			}
+			++madeCounts.adoptedOut;
+		}
+		adopted.clear();
+		ResetLetGo();
+		if (out > 0) {
+			logs::info("Save: {} NPC(s) kept from friends who let them go taken out of the world before the save", out);
 		}
 	}
 
 	namespace
 	{
 		std::string Spells(const std::vector<std::string_view>& a_words);  // `npcs spells` (below)
+
+		std::string SourceText(const Protocol::MadeSource& a_s)
+		{
+			return std::format("{}made={:08X} pick={:08X} body={:08X} cell={:08X} ws={:08X} pos=({:.0f},{:.0f},{:.0f}){}",
+				a_s.ByAlias() ? std::format("quest={:08X} alias={} ", a_s.quest, a_s.alias) : std::string{}, a_s.made, a_s.pick, a_s.body, a_s.cell, a_s.worldspace,
+				a_s.x, a_s.y, a_s.z, a_s.Gone() ? " gone=1" : "");
+		}
+
+		// `npcs made`: the counts, then each NPC our game made that nobody commands (its local id, phase, the friend's it
+		// shows as a twin, whether we kept it from a friend, what made it) and each friend's we heard of.
+		// `npcs made quests [<from>]`: for the rig, quests that are not running, not done and do not start with the game,
+		// with an alias that creates an NPC (or a leveled one) at another alias: the quest, the alias, what it creates,
+		// the alias it is created at and that alias's fill type (forced=1: a fixed reference the rig can start it at).
+		std::string Made(const std::vector<std::string_view>& a_words)
+		{
+			if (a_words.size() >= 2 && a_words[1] == "quests") {
+				const auto handler = RE::TESDataHandler::GetSingleton();
+				if (!handler) {
+					return "error: no data";
+				}
+				std::size_t from = 0;
+				if (a_words.size() >= 3) {
+					static_cast<void>(std::from_chars(a_words[2].data(), a_words[2].data() + a_words[2].size(), from));
+				}
+				std::string out;
+				std::size_t found = 0;
+				std::size_t listed = 0;
+				for (const auto quest : handler->GetFormArray<RE::TESQuest>()) {
+					if (!quest || quest->IsRunning() || quest->IsCompleted() || quest->data.flags.any(RE::QuestFlag::kStartsEnabled)) {
+						continue;
+					}
+					for (const auto alias : quest->aliases) {
+						if (!alias || alias->GetVMTypeID() != RE::BGSRefAlias::VMTYPEID || alias->fillType != RE::BGSBaseAlias::FILL_TYPE::kCreated) {
+							continue;
+						}
+						const auto& created = static_cast<const RE::BGSRefAlias*>(alias)->fillData.created;
+						if (!created.object || (!created.object->Is(RE::FormType::NPC) && !created.object->Is(RE::FormType::LeveledNPC))) {
+							continue;
+						}
+						const RE::BGSBaseAlias* at = nullptr;
+						for (const auto other : quest->aliases) {
+							if (other && other->aliasID == created.alias.alias) {
+								at = other;
+							}
+						}
+						if (found++ < from || listed >= 40) {
+							continue;
+						}
+						++listed;
+						const bool forced = at && at->GetVMTypeID() == RE::BGSRefAlias::VMTYPEID && at->fillType == RE::BGSBaseAlias::FILL_TYPE::kForced;
+						const auto ref = forced ? static_cast<const RE::BGSRefAlias*>(at)->fillData.forced.forcedRef.get() : RE::NiPointer<RE::TESObjectREFR>{};
+						out += std::format(" | quest={:08X} edid={} alias={} creates={:08X} at={} atFill={} forced={} forcedRef={:08X}", quest->GetFormID(), quest->GetFormEditorID() ? quest->GetFormEditorID() : "",
+							alias->aliasID, created.object->GetFormID(), created.alias.alias, at ? static_cast<int>(at->fillType.get()) : -1, forced ? 1 : 0, ref ? ref->GetFormID() : 0);
+					}
+				}
+				return std::format("quests={}{}", found, out);
+			}
+			const auto& c = madeCounts;
+			std::string out = std::format(
+				"ours={} adopted={} theirs={} said={} shared={} twins={} waits={} paired={} unpaired={} copiesReplaced={} adoptedIn={} adoptedOut={} gone={} theirsGone={} theirsHeard={} "
+				"noSource={} staleAnswers={}",
+				ourMade.size(), adopted.size(), theirMade.size(), c.said, c.shared, c.twins, c.waits, c.paired, c.unpaired, c.copiesReplaced, c.adopted, c.adoptedOut, c.gone, c.theirsGone,
+				c.theirsHeard, c.noSource, c.staleAnswers);
+			std::size_t listed = 0;
+			for (const auto& [id, made] : ourMade) {
+				if (listed++ >= 40) {
+					out += " | ...";
+					break;
+				}
+				const auto& r = made.rules;
+				out += std::format(" | ours local={:08X} phase={} adopted={} twin={} {}", id, MadeRules::PhaseName(r.phase), r.adopted ? 1 : 0,
+					r.phase == MadeRules::Phase::kTwin ? std::format("{:08X}@{}", r.twin.id, r.twin.spawner) : std::string{ "none" }, SourceText(r.source));
+			}
+			listed = 0;
+			for (const auto& [key, theirs] : theirMade) {
+				if (listed++ >= 40) {
+					out += " | ...";
+					break;
+				}
+				out += std::format(" | theirs {:08X} spawner={} {}", key.id, key.spawner, SourceText(theirs.source));
+			}
+			return out;
+		}
 	}
 
 	std::string Describe(std::string_view a_args)
@@ -2231,6 +2788,9 @@ namespace NpcSync
 		const auto words = DevLine::Words(a_args);
 		if (!words.empty() && words[0] == "spells") {
 			return Spells(words);
+		}
+		if (!words.empty() && words[0] == "made") {
+			return Made(words);
 		}
 		std::array<std::size_t, static_cast<std::size_t>(NpcRules::Kind::kCount)> kinds{};
 		std::size_t run = 0;
@@ -2263,13 +2823,13 @@ namespace NpcSync
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
 				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
 				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={} "
-				"pairActionsSent={} heldActionsDropped={}",
+				"pairActionsSent={} heldActionsDropped={} made={} madeShared={} madeTwins={} madeAdopted={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
 				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
 				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad,
-				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size(), pairActionsSent, heldActionsDropped.load());
+				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size(), pairActionsSent, heldActionsDropped.load(), ourMade.size(), madeCounts.shared, madeCounts.twins, madeCounts.adopted);
 		}
 		// One line per NPC: `npcs list`, or `npcs <form id>` for one. Its local form id, who runs it, its kind, where its
 		// actor is here (at=) and, for a copy, where its runner's state puts it (target=) and how far apart they are.
@@ -2363,9 +2923,9 @@ namespace NpcSync
 						w.right && w.left ? std::string{ "ok" } : std::format("{}/{}", w.right ? "ok" : "differs", w.left ? "ok" : "differs"), w.ammo ? "ok" : "differs", c.gearLacks,
 						w.Complete(c.gearLacks) ? 1 : 0);
 				}
-				out += std::format(" runner={} mode={} target={} apart={} base={:08X} states={} drawn={} played={} refused={} walkRefused={}{} gear={} geared={}{} graphSpeed={}",
+				out += std::format(" runner={} mode={} target={} apart={} base={:08X} states={} drawn={} played={} refused={} walkRefused={}{} gear={} geared={}{} graphSpeed={} twin={} adopted={}",
 					c.feed.runner, NpcRules::ModeName(c.mode), target, apart, c.base, c.buffer.snapshots.size(), c.drawn, c.played, c.refused, c.walkRefused,
-					c.lastRefused.empty() ? "" : " last=" + c.lastRefused, c.gear ? 1 : 0, c.geared ? 1 : 0, wears, hasSpeed ? std::format("{:.0f}", graphSpeed) : "none");
+					c.lastRefused.empty() ? "" : " last=" + c.lastRefused, c.gear ? 1 : 0, c.geared ? 1 : 0, wears, hasSpeed ? std::format("{:.0f}", graphSpeed) : "none", c.twin ? 1 : 0, adopted.contains(c.actorId) ? 1 : 0);
 			}
 		}
 		return out;
