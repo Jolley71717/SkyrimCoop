@@ -211,7 +211,7 @@ namespace DevCommands
 			return Shots::Command(a_args);
 		}
 
-		// peace [targeting | find <base> [radius]]: the world leaving the stand-ins alone, what was turned away and told to stop, each stand-in's
+		// peace [targeting | find <base> [radius] | line <stand-in> [beyond] [width]]: the world leaving the stand-ins alone, what was turned away and told to stop, each stand-in's
 		// ghost flag and what landed on it, our player's bounty (StandInPeace::Command).
 		std::string PeaceCommand(std::string_view a_args)
 		{
@@ -289,7 +289,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | peace [targeting | find <base> [radius]] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | peace [targeting | find <base> [radius] | line <stand-in> [beyond] [width]] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

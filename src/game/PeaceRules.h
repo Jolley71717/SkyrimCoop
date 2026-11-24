@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -207,6 +208,38 @@ namespace PeaceRules
 		};
 		std::unordered_map<std::uint32_t, Entry> entries;
 	};
+
+	// ---- what a spell passing through a stand-in may hit (the rig's `peace line`) ----
+
+	// A place on the ground's plane (x, y: a cast line is judged from above).
+	struct Flat
+	{
+		float x = 0.0f;
+		float y = 0.0f;
+	};
+
+	// The rig casts at a stand-in, and weapons and spells pass through it (the ghost flag): whoever stands on the line
+	// beyond it is hit instead, and in a town that is an assault on a person of this game. Whether a_at stands within
+	// a_width of the line from a_from (the caster) through a_through (the stand-in), from a_width behind the caster out to
+	// a_beyond past the stand-in. A stand-in on the caster's own spot (closer than 1 u): anyone within a_beyond of it.
+	[[nodiscard]] inline bool OnLine(Flat a_from, Flat a_through, Flat a_at, float a_beyond, float a_width)
+	{
+		const float dx = a_through.x - a_from.x;
+		const float dy = a_through.y - a_from.y;
+		const float ax = a_at.x - a_from.x;
+		const float ay = a_at.y - a_from.y;
+		const float length = std::sqrt(dx * dx + dy * dy);
+		if (length < 1.0f) {
+			return ax * ax + ay * ay <= a_beyond * a_beyond;
+		}
+		const float along = (ax * dx + ay * dy) / length;  // how far along the line, from the caster
+		const float aside = std::abs(ax * dy - ay * dx) / length;  // how far off it
+		return along >= -a_width && along <= length + a_beyond && aside <= a_width;
+	}
+
+	// The rig's line: out to this past the stand-in (a Firebolt flies on far; a Flames cone reaches less) and this wide.
+	inline constexpr float LINE_BEYOND = 3000.0f;
+	inline constexpr float LINE_WIDTH = 200.0f;
 
 	// ---- effects put on an actor ----
 

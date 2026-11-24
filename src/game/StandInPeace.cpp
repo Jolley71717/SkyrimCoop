@@ -54,6 +54,8 @@ namespace StandInPeace
 		std::uint64_t        givenUp = 0;
 		std::size_t          targeting = 0;  // at the last sweep
 		std::size_t          standInsFighting = 0;  // stand-ins in combat at the last sweep (none expected)
+		std::uint64_t        standInsStopped = 0;   // stand-ins found in combat and taken out of it
+		RE::FormID           lastStandInStopped = 0;
 		RE::FormID           lastCalmed = 0;
 		RE::FormID           lastCalmedFrom = 0;
 
@@ -150,11 +152,11 @@ namespace StandInPeace
 		};
 
 		// Every actor in high and middle-high process whose combat target is a stand-in, and the stand-ins in combat.
-		std::vector<Fighter> FightersOfStandIns(std::size_t* a_standInsFighting)
+		std::vector<Fighter> FightersOfStandIns(std::vector<RE::NiPointer<RE::Actor>>* a_standInsFighting)
 		{
-			std::vector<Fighter> out;
-			std::size_t          fighting = 0;
-			const auto           lists = RE::ProcessLists::GetSingleton();
+			std::vector<Fighter>                  out;
+			std::vector<RE::NiPointer<RE::Actor>> fighting;
+			const auto                            lists = RE::ProcessLists::GetSingleton();
 			const auto           player = RE::PlayerCharacter::GetSingleton();
 			if (lists) {
 				for (const auto* handles : { &lists->highActorHandles, &lists->middleHighActorHandles }) {
@@ -164,7 +166,9 @@ namespace StandInPeace
 							continue;
 						}
 						if (IsStandIn(actor.get())) {
-							fighting += actor->IsInCombat() ? 1 : 0;
+							if (actor->IsInCombat()) {
+								fighting.push_back(actor);
+							}
 							continue;
 						}
 						const auto target = actor->GetActorRuntimeData().currentCombatTarget.get();
@@ -175,7 +179,40 @@ namespace StandInPeace
 				}
 			}
 			if (a_standInsFighting) {
-				*a_standInsFighting = fighting;
+				*a_standInsFighting = std::move(fighting);
+			}
+			return out;
+		}
+
+		// The actors on the cast line from our player through a stand-in (PeaceRules::OnLine), alive, never our player or a
+		// stand-in: whom a spell passing through it would hit.
+		struct Bystander
+		{
+			RE::FormID id = 0;
+			float      along = 0.0f;  // how far from our player
+		};
+
+		std::vector<Bystander> OnTheLine(const RE::NiPoint3& a_from, const RE::NiPoint3& a_through, float a_beyond, float a_width)
+		{
+			std::vector<Bystander> out;
+			const auto             player = RE::PlayerCharacter::GetSingleton();
+			const auto             lists = RE::ProcessLists::GetSingleton();
+			if (!player || !lists) {
+				return out;
+			}
+			const PeaceRules::Flat from{ a_from.x, a_from.y };
+			const PeaceRules::Flat through{ a_through.x, a_through.y };
+			for (const auto* handles : { &lists->highActorHandles, &lists->middleHighActorHandles }) {
+				for (const auto& handle : *handles) {
+					const auto actor = handle.get();
+					if (!actor || actor.get() == player || actor->IsDeleted() || actor->IsDisabled() || actor->IsDead() || IsStandIn(actor.get())) {
+						continue;
+					}
+					const auto at = actor->GetPosition();
+					if (PeaceRules::OnLine(from, through, { at.x, at.y }, a_beyond, a_width)) {
+						out.push_back({ actor->GetFormID(), at.GetDistance(a_from) });
+					}
+				}
 			}
 			return out;
 		}
@@ -231,8 +268,32 @@ namespace StandInPeace
 		}
 		++sweeps;
 		book.Age(now);
-		const auto fighters = FightersOfStandIns(&standInsFighting);
+		std::vector<RE::NiPointer<RE::Actor>> standInsInCombat;
+		const auto                            fighters = FightersOfStandIns(&standInsInCombat);
 		targeting = fighters.size();
+		standInsFighting = standInsInCombat.size();
+		// A stand-in in combat itself (its engine-run furniture update put it there, or a console's startcombat named it):
+		// its AI never runs, so it would never leave that state on its own. Taken out of it, by the same book.
+		for (const auto& standIn : standInsInCombat) {
+			switch (book.Seen(standIn->GetFormID(), now)) {
+			case PeaceRules::Calm::kStop:
+				standIn->StopCombat();
+				++standInsStopped;
+				lastStandInStopped = standIn->GetFormID();
+				if (standInsStopped == 1 || standInsStopped % 50 == 0) {
+					logs::info("Peace: stand-in {:08X} was in a fight here: taken out of it ({} so far)", lastStandInStopped, standInsStopped);
+				}
+				break;
+			case PeaceRules::Calm::kGiveUp:
+				++givenUp;
+				logs::warn("Peace: stand-in {:08X} is in a fight again each time it is taken out ({} times in {} s): left for {} s", standIn->GetFormID(), PeaceRules::CALM_TRIES,
+					std::chrono::duration_cast<std::chrono::seconds>(PeaceRules::CALM_WINDOW).count(),
+					std::chrono::duration_cast<std::chrono::seconds>(PeaceRules::CALM_REST).count());
+				break;
+			case PeaceRules::Calm::kWait:
+				break;
+			}
+		}
 		for (const auto& fighter : fighters) {
 			switch (book.Seen(fighter.actor->GetFormID(), now)) {
 			case PeaceRules::Calm::kStop:
@@ -266,9 +327,9 @@ namespace StandInPeace
 	std::string Command(std::string_view a_args)
 	{
 		if (a_args == "targeting") {
-			std::size_t fighting = 0;
-			const auto  fighters = FightersOfStandIns(&fighting);
-			std::string out = std::format("targeting={} standInsFighting={}", fighters.size(), fighting);
+			std::vector<RE::NiPointer<RE::Actor>> fighting;
+			const auto                            fighters = FightersOfStandIns(&fighting);
+			std::string                           out = std::format("targeting={} standInsFighting={}", fighters.size(), fighting.size());
 			for (const auto& fighter : fighters) {
 				const auto base = fighter.actor->GetActorBase();
 				out += std::format(" | {:08X} base={:08X} standIn={:08X} dead={}", fighter.actor->GetFormID(), base ? base->GetFormID() : 0u, fighter.standIn,
@@ -279,6 +340,27 @@ namespace StandInPeace
 		// peace find <base> [radius]: the nearest actor of that base to our player (the rig's creature, placed with the
 		// console), alive or dead, never a stand-in: its id, how far, whether it is dead or in combat, and its target.
 		const auto words = DevLine::Words(a_args);
+		// peace line <stand-in> [beyond] [width]: the actors on the line from our player through that stand-in (whom a
+		// spell passing through it would hit; the rig casts only on a clear line).
+		if (!words.empty() && words[0] == "line") {
+			const auto id = words.size() > 1 ? FormsCommand::ParseHex(words[1]) : std::nullopt;
+			const auto beyond = words.size() > 2 ? DevLine::Number(words[2]) : std::optional<std::uint64_t>{ static_cast<std::uint64_t>(PeaceRules::LINE_BEYOND) };
+			const auto width = words.size() > 3 ? DevLine::Number(words[3]) : std::optional<std::uint64_t>{ static_cast<std::uint64_t>(PeaceRules::LINE_WIDTH) };
+			if (!id || !beyond || !width || words.size() > 4) {
+				return "usage: peace line <stand-in hex> [beyond] [width]";
+			}
+			const auto player = RE::PlayerCharacter::GetSingleton();
+			const auto standIn = RE::TESForm::LookupByID<RE::Actor>(*id);
+			if (!player || !standIn || !IsStandIn(standIn)) {
+				return std::format("line none ({:08X} is no stand-in here)", *id);
+			}
+			const auto bystanders = OnTheLine(player->GetPosition(), standIn->GetPosition(), static_cast<float>(*beyond), static_cast<float>(*width));
+			std::string out = std::format("line clear={} n={} standIn={:08X} beyond={} width={}", bystanders.empty() ? 1 : 0, bystanders.size(), *id, *beyond, *width);
+			for (const auto& bystander : bystanders) {
+				out += std::format(" | {:08X} along={:.0f}", bystander.id, bystander.along);
+			}
+			return out;
+		}
 		if (!words.empty() && words[0] == "find") {
 			const auto base = words.size() > 1 ? FormsCommand::ParseHex(words[1]) : std::nullopt;
 			const auto radius = words.size() > 2 ? DevLine::Number(words[2]) : std::optional<std::uint64_t>{ 2000 };
@@ -318,7 +400,7 @@ namespace StandInPeace
 				best->IsDead() ? 1 : 0, best->IsInCombat() ? 1 : 0, target ? target->GetFormID() : 0u, target && IsStandIn(target.get()) ? 1 : 0);
 		}
 		if (!a_args.empty()) {
-			return "usage: peace [targeting | find <base hex> [radius]]";
+			return "usage: peace [targeting | find <base hex> [radius] | line <stand-in hex> [beyond] [width]]";
 		}
 		std::string hooks;
 		std::string asks;
@@ -328,9 +410,10 @@ namespace StandInPeace
 			asks += std::format(" {}Asked={} {}Refused={}", name, asked[i].load(std::memory_order_relaxed), name, refused[i].load(std::memory_order_relaxed));
 		}
 		const auto last = lastAsk.load(std::memory_order_relaxed);
-		return std::format("peace hooks={}{} sweeps={} calmed={} givenUp={} targeting={} standInsFighting={} book={} bookGivenUp={} lastAsker={:08X} lastAsk={} lastStandIn={:08X} "
-						   "lastCalmed={:08X} lastCalmedFrom={:08X} ghostSet={} noProcess={} bounty={}{}",
-			hooks, asks, sweeps, calmed, givenUp, targeting, standInsFighting, book.Size(), book.GivenUp(), lastAsker.load(std::memory_order_relaxed),
+		return std::format("peace hooks={}{} sweeps={} calmed={} givenUp={} targeting={} standInsFighting={} standInsStopped={} lastStandInStopped={:08X} book={} bookGivenUp={} "
+						   "lastAsker={:08X} lastAsk={} lastStandIn={:08X} lastCalmed={:08X} lastCalmedFrom={:08X} ghostSet={} noProcess={} bounty={}{}",
+			hooks, asks, sweeps, calmed, givenUp, targeting, standInsFighting, standInsStopped, lastStandInStopped, book.Size(), book.GivenUp(),
+			lastAsker.load(std::memory_order_relaxed),
 			last < ASKS ? PeaceRules::Name(static_cast<Ask>(last)) : std::string_view{ "none" }, lastStandIn.load(std::memory_order_relaxed), lastCalmed, lastCalmedFrom,
 			ghostSet.load(std::memory_order_relaxed), noProcess.load(std::memory_order_relaxed), Bounty(), RemotePlayers::Peace());
 	}

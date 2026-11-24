@@ -223,3 +223,47 @@ TEST("peace magic: what a stand-in casts is judged as before (StandInRules::Magi
 		}
 	}
 }
+
+TEST("peace calm: a stand-in found in a fight is taken out by the same book as the actors fighting one, apart from them")
+{
+	PeaceRules::CalmBook book;
+	const auto           t0 = Steady::time_point{} + 100s;
+	// The guard fighting it and the stand-in itself are told apart (their own entries), each at most once a cool-down.
+	CHECK(book.Seen(GUARD, t0) == Calm::kStop);
+	CHECK(book.Seen(HOSTS, t0) == Calm::kStop);
+	CHECK(book.Seen(HOSTS, t0 + 1s) == Calm::kWait);
+	CHECK(book.Seen(GUARD, t0 + 1s) == Calm::kWait);
+	CHECK(book.Size() == 2);
+	// Back in a fight after each stop (its furniture update, say): given up on for the rest, not stopped every sweep.
+	CHECK(book.Seen(HOSTS, t0 + 2s) == Calm::kStop);
+	CHECK(book.Seen(HOSTS, t0 + 4s) == Calm::kStop);
+	CHECK(book.Seen(HOSTS, t0 + 6s) == Calm::kStop);
+	CHECK(book.Seen(HOSTS, t0 + 8s) == Calm::kGiveUp);
+	CHECK(book.Seen(HOSTS, t0 + 10s) == Calm::kWait);
+	CHECK(book.Seen(HOSTS, t0 + 8s + PeaceRules::CALM_REST) == Calm::kStop);
+}
+
+TEST("peace line: whoever stands on the line through the stand-in, out past it, is on it; beside, behind the caster or far is not")
+{
+	using PeaceRules::Flat;
+	using PeaceRules::OnLine;
+	const Flat caster{ 0.0f, 0.0f };
+	const Flat standIn{ 100.0f, 0.0f };  // 100 u ahead, along x
+	// Behind the stand-in, on the line: hit by a spell passing through it.
+	CHECK(OnLine(caster, standIn, { 400.0f, 0.0f }, 3000.0f, 200.0f));
+	CHECK(OnLine(caster, standIn, { 3000.0f, 150.0f }, 3000.0f, 200.0f));
+	// Between the caster and the stand-in (a Flames cone reaches it too), and just behind the caster.
+	CHECK(OnLine(caster, standIn, { 50.0f, -50.0f }, 3000.0f, 200.0f));
+	CHECK(OnLine(caster, standIn, { -150.0f, 0.0f }, 3000.0f, 200.0f));
+	// Beside the line, beyond its reach, or well behind the caster: not on it.
+	CHECK(!OnLine(caster, standIn, { 400.0f, 250.0f }, 3000.0f, 200.0f));
+	CHECK(!OnLine(caster, standIn, { 3200.0f, 0.0f }, 3000.0f, 200.0f));
+	CHECK(!OnLine(caster, standIn, { -300.0f, 0.0f }, 3000.0f, 200.0f));
+	// Any direction: a diagonal line, a villager on it and one off it.
+	const Flat diagonal{ 100.0f, 100.0f };
+	CHECK(OnLine(caster, diagonal, { 1000.0f, 1000.0f }, 3000.0f, 200.0f));
+	CHECK(!OnLine(caster, diagonal, { 1000.0f, 0.0f }, 3000.0f, 200.0f));
+	// A stand-in on the caster's own spot: anyone within the reach is on it (no direction to judge by).
+	CHECK(OnLine(caster, { 0.5f, 0.0f }, { 0.0f, 2900.0f }, 3000.0f, 200.0f));
+	CHECK(!OnLine(caster, { 0.5f, 0.0f }, { 0.0f, 3100.0f }, 3000.0f, 200.0f));
+}
