@@ -878,3 +878,139 @@ TEST("drop offer: ours waiting is swapped while it lies where it came to rest, k
 	CHECK(HearPlaced(5, false, false, false) == Offer::kLies);
 	CHECK(HearPlaced(0, false, false, false) == Offer::kRefused);
 }
+
+namespace
+{
+	constexpr std::uint32_t GOLD = 0x0000000F;
+	constexpr std::uint32_t DAGGER = 0x0001397E;
+
+	Naming::Event Dropped(std::uint32_t a_base, std::uint32_t a_count, Clock::time_point a_at, std::uint32_t a_ref = 0, bool a_late = false)
+	{
+		return { .ref = a_ref, .base = a_base, .count = a_count, .byPlayer = true, .late = a_late, .at = a_at };
+	}
+}
+
+TEST("drop naming: an event that names its reference is named by it (in the sink, or late on the tick); a call of that reference goes to no other event")
+{
+	Naming naming;
+	CHECK(naming.AddEvent(Dropped(GOLD, 7, T0, 0xFF000900)));
+	CHECK(naming.AddEvent(Dropped(DAGGER, 1, T0, 0xFF000901, true)));
+	naming.AddCall(0xFF000900, GOLD, 7, T0);
+	auto out = naming.Take(T0);
+	REQUIRE(out.size() == 2);
+	CHECK(out[0].by == NamedBy::kEvent);
+	CHECK(out[0].event.ref == 0xFF000900);
+	CHECK(out[1].by == NamedBy::kLate);
+	CHECK(out[1].event.ref == 0xFF000901);
+	CHECK(naming.Calls() == 0);
+	// a second event of the same item, with none named: the first's reference is never its
+	naming.AddCall(0xFF000900, GOLD, 7, T0);
+	CHECK(naming.Calls() == 0);
+	CHECK(naming.AddEvent(Dropped(GOLD, 7, T0)));
+	out = naming.Take(T0 + Naming::CALL_WAIT);
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].by == NamedBy::kSearch);
+	CHECK(out[0].event.ref == 0);
+}
+
+TEST("drop naming: an event with no reference takes our drop call's, of its item and count first, else of its item; another item's call is not its")
+{
+	Naming naming;
+	naming.AddCall(0xFF000A00, DAGGER, 1, T0);
+	naming.AddCall(0xFF000A01, GOLD, 3, T0);
+	naming.AddCall(0xFF000A02, GOLD, 7, T0);
+	CHECK(naming.AddEvent(Dropped(GOLD, 7, T0)));
+	CHECK(naming.AddEvent(Dropped(GOLD, 5, T0)));  // a count no call has: the oldest call of gold
+	auto out = naming.Take(T0);
+	REQUIRE(out.size() == 2);
+	CHECK(out[0].by == NamedBy::kCall);
+	CHECK(out[0].event.ref == 0xFF000A02);
+	CHECK(out[0].event.byPlayer);
+	CHECK(out[1].by == NamedBy::kCall);
+	CHECK(out[1].event.ref == 0xFF000A01);
+	CHECK(naming.Calls() == 1);  // the dagger's, for no event of gold
+	// the event sent before its call (another order of the engine's): it waits CALL_WAIT for it
+	CHECK(naming.AddEvent(Dropped(DAGGER, 1, T0 + 1s)));
+	naming.AddCall(0xFF000A03, GOLD, 2, T0 + 1s);
+	out = naming.Take(T0 + 1s);
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].event.ref == 0xFF000A00);
+}
+
+TEST("drop naming: an event no call names waits CALL_WAIT, then is the caller's to search; a call no event takes is forgotten after CALL_KEEP")
+{
+	Naming naming;
+	CHECK(naming.AddEvent(Dropped(GOLD, 7, T0)));
+	CHECK(naming.Take(T0).empty());
+	CHECK(naming.Take(T0 + Naming::CALL_WAIT - 1ms).empty());
+	CHECK(naming.Waiting() == 1);
+	naming.AddCall(0xFF000B00, GOLD, 7, T0 + 100ms);  // its call came in time
+	auto out = naming.Take(T0 + 200ms);
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].by == NamedBy::kCall);
+	CHECK(naming.AddEvent(Dropped(GOLD, 7, T0 + 1s)));
+	out = naming.Take(T0 + 1s + Naming::CALL_WAIT);
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].by == NamedBy::kSearch);
+	CHECK(naming.Waiting() == 0);
+	// a call alone (a drop whose event never came): kept CALL_KEEP, then forgotten; a later event does not take it
+	naming.AddCall(0xFF000B01, DAGGER, 1, T0 + 2s);
+	CHECK(naming.Take(T0 + 2s + Naming::CALL_KEEP - 1ms).empty());
+	CHECK(naming.Calls() == 1);
+	CHECK(naming.Take(T0 + 2s + Naming::CALL_KEEP).empty());
+	CHECK(naming.Calls() == 0);
+	CHECK(naming.Forgotten() == 1);
+	CHECK(naming.AddEvent(Dropped(DAGGER, 1, T0 + 5s)));
+	out = naming.Take(T0 + 5s + Naming::CALL_WAIT);
+	REQUIRE(out.size() == 1);
+	CHECK(out[0].by == NamedBy::kSearch);
+	// none, or no item, is never kept
+	naming.AddCall(0, GOLD, 1, T0);
+	naming.AddCall(0xFF000B02, 0, 1, T0);
+	CHECK(naming.Calls() == 0);
+	CHECK(!naming.AddEvent(Dropped(0, 1, T0)));
+}
+
+TEST("drop naming: the search finds the newest reference made at run time of the item and count, in the world and in reach, that no one knows")
+{
+	Naming naming;
+	const std::unordered_set<std::uint32_t> known{ 0xFF000C05 };
+	std::vector<Naming::Found> around{
+		{ .ref = 0xFF000C01, .base = GOLD, .count = 7, .runtime = true, .inWorld = true, .distance = 90.0f },
+		{ .ref = 0xFF000C02, .base = GOLD, .count = 7, .runtime = true, .inWorld = true, .distance = 300.0f },  // newer, further: still it
+		{ .ref = 0x0003A100, .base = GOLD, .count = 7, .runtime = false, .inWorld = true, .distance = 10.0f },  // a plugin's
+		{ .ref = 0xFF000C03, .base = GOLD, .count = 6, .runtime = true, .inWorld = true, .distance = 10.0f },   // another count
+		{ .ref = 0xFF000C04, .base = GOLD, .count = 7, .runtime = true, .inWorld = false, .distance = 10.0f },  // disabled
+		{ .ref = 0xFF000C05, .base = GOLD, .count = 7, .runtime = true, .inWorld = true, .distance = 10.0f },   // known
+		{ .ref = 0xFF000C06, .base = GOLD, .count = 7, .runtime = true, .inWorld = true, .distance = Naming::SEARCH_RADIUS + 1.0f },
+		{ .ref = 0xFF000C07, .base = DAGGER, .count = 7, .runtime = true, .inWorld = true, .distance = 10.0f },
+	};
+	CHECK(naming.Search(around, GOLD, 7, known) == std::optional<std::uint32_t>{ 0xFF000C02 });
+	naming.Gave(0xFF000C02);  // named: never again
+	CHECK(naming.Search(around, GOLD, 7, known) == std::optional<std::uint32_t>{ 0xFF000C01 });
+	CHECK(naming.Search(around, GOLD, 6, known) == std::optional<std::uint32_t>{ 0xFF000C03 });
+	CHECK(naming.Search(around, GOLD, 0, known) == std::optional<std::uint32_t>{ 0xFF000C03 });  // no count known: any
+	CHECK(!naming.Search(around, GOLD, 8, known));
+	CHECK(!naming.Search(around, 0x0001359D, 1, known));
+	CHECK(!naming.Search({}, GOLD, 7, known));
+}
+
+TEST("drop naming: at most MAX_EVENTS wait; past MAX_CALLS the oldest call goes; a clear forgets both but not what was named")
+{
+	Naming naming;
+	for (std::size_t i = 0; i < Naming::MAX_EVENTS; ++i) {
+		CHECK(naming.AddEvent(Dropped(GOLD, 1, T0)));
+	}
+	CHECK(!naming.AddEvent(Dropped(GOLD, 1, T0)));
+	for (std::uint32_t i = 0; i <= Naming::MAX_CALLS; ++i) {
+		naming.AddCall(0xFF001000 + i, DAGGER, 1, T0);
+	}
+	CHECK(naming.Calls() == Naming::MAX_CALLS);
+	CHECK(naming.Forgotten() == 1);
+	naming.Gave(0xFF002000);
+	naming.Clear();
+	CHECK(naming.Waiting() == 0);
+	CHECK(naming.Calls() == 0);
+	naming.AddCall(0xFF002000, GOLD, 1, T0);
+	CHECK(naming.Calls() == 0);
+}
