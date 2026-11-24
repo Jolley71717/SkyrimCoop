@@ -146,7 +146,7 @@ Since protocol 5. Not tested in a game yet; the rig step `doors` is ready for it
 
 ## The world
 
-Not designed yet (phase 4), beyond doors, locks and mechanisms (above), and time and weather and containers and loot (below). The host's world is the world: items lying about, harvested and mined things. To settle: what a friend who joins late is told, respawning cells, what a friend's save keeps, houses and Hearthfire.
+Not designed yet (phase 4), beyond doors, locks and mechanisms (above), and time and weather, containers and loot, dropped items and what is taken from the world (below). The host's world is the world: items lying about, harvested and mined things. To settle: what a friend who joins late is told, respawning cells, what a friend's save keeps, houses and Hearthfire.
 
 ### Time and weather
 
@@ -207,7 +207,7 @@ Since protocol 11. Not tested in a game yet; the rig step `drops` is ready for i
 - keys and books, as in containers;
 - quest items (a quest alias holds the reference);
 - an item whose base, enchantment or poison was made at run time (a potion a player brewed, an enchantment a player made): no other game has that form;
-- an item a plugin placed in the world, picked up and dropped again: its pickup is not shared yet, so a friend's world still has it where the plugin put it.
+- an item a plugin placed in the world, picked up and dropped again: its pickup took it out of every world ("Taken from the world", below), and its drop lies in the dropper's world alone until a drop of a placed item is given too.
 - an item a script drops from our player (`DropObject` with no drop menu open: a weapon rack or a mannequin in a player home, a mod placing the player's gear): the script keeps that reference, and taking it out of the world for a copy would leave the script holding a deleted one. Only a drop made from a drop menu (the inventory, or the console's `player.drop`) or by the developer channel is given.
 
 **A drop.** The game's own event (`TESContainerChangedEvent`, from our player to nobody) names the reference the item became; it is our player's drop when a drop menu is open as it comes, or the developer channel made it (any other is a script's, above). It is watched until it comes to rest (still for half a second, no sooner than 1.5 s after the drop, or 5 s after it wherever it is), and reported where it lies (`kReportDrop`, with a random number of our game's own, its nonce). The server offers it back to its dropper alone (`kDropPlaced` with a drop ID): our game takes its own item out of its world (disabled at once, as the offer is heard, so our player can't pick it up after the copy is promised; deleted a second later: `src/game/Retire.h`), records that it did, says so (`kClaimDrop kPlaced`), and shows the session's copy in its place. Only then does the drop lie there for the others (`kDropPlaced` to every game), so nobody can take an item that is still in its dropper's world. An offer whose item our player picked up again first is answered `kKept`, and never lies anywhere. A report the server does not take (past the player's budget: 32 at once, then 4 a second; past the session's 1024 drops or a player's 256; an item or a place the session can't name) is answered with no drop ID: the item stays its dropper's own.
@@ -222,11 +222,37 @@ DropSync's state is under one lock, taken by the tick and by SKSE's callbacks on
 
 **Not yet:**
 - The rig drops through the developer channel; a drop from the inventory menu itself (the drop menu the rule above relies on) is not driven by the rig yet.
-- An item a plugin placed in the world, picked up: each game's own (above). Shared pickups of placed items need the pickup itself shared.
+- An item a plugin placed in the world, picked up and dropped again: its drop is its dropper's own (above). Its pickup is shared now ("Taken from the world"), so giving it is what is left.
 - A potion a player brewed, an enchantment a player made: runtime forms, not given.
 - The server keeps no file: drops do not outlive the session, and a record is keyed by the server's run, not by a character (the sister project keys it by character and keeps a session file).
 - A taker who leaves while a take is being finished: the server counts it as theirs.
 - In an exterior, a copy is placed in our player's cell and moved to where the item lies, which may be a neighbouring cell (no save holds it, so only its cell's unloading is concerned: it is placed again).
+
+### Taken from the world
+
+Since protocol 22 (renumbered when it merges). Not tested in a game yet; the rig step `pickups` is ready for it. The rules, free of the game, are `src/game/PickupRules.h` and the server's book `common/PickupBook.h`; the game side is `src/game/Pickups`.
+
+**The class.** What a player takes from the world is taken from every world, judged by what the engine keeps, never by a record's or a script's name, so a mod's item or plant is shared as the base game's are:
+- every loose item reference of the load order our player picks up (`TESContainerChangedEvent` from nobody to our player, naming a reference of the item gained; one naming another base, or none, is no pickup and is counted, `takesOtherBase`, `takesNoRef`): weapons and armor, ammo, potions and food, ingredients, misc items and gold, soul gems, scrolls, torches (a light that can be carried: a lantern on a post or a fire's light is part of the place), apparatus. In every other game that reference goes out of the world: disabled, never deleted (a load of a save brings back what its plugin placed);
+- every plant and tree our player harvests (a flora, or a tree with something to harvest): harvested in every other game (the reference's harvested flag, kept in a save), where it grows back on that game's own schedule. The server dates each harvest by the session's clock (the owner's `GameDaysPassed`) and a game that hears an old one ages it: one older than its own `iHoursToRespawnCell` has grown back there and is not made.
+
+What stays each player's own: keys and books (each player reads their own, as with loot), a reference a quest alias holds (judged by each game on its own reference), runtime references (a dropped item's copy, anything a game placed as it ran: no other game has it), and ore veins (their count is a script's: no script variable is written by name).
+
+**Reading a harvest.** The engine's harvest event (`TESHarvestedEvent::ItemHarvested`) names the produce and the harvester, not the plant. Our player's activation of a plant names the plant, with its harvested flag read as the event comes: a plant not harvested then is watched for 3 s and is ours once it reads harvested; a plant already harvested then (the event came after the harvest) is ours when a harvest of its produce comes within 2 s (a plant whose produce is a leveled list pairs with any), but only if it was seen growing since its last report (below): a plant harvested long ago that a mod activates along with the one it really harvests must never take that harvest's event (`oldActivations=` counts them). A harvest no activation explains (a mod that harvests by script) asks for a scan of the plants near our player of that produce that read harvested now, that were seen growing since they were last reported (ours, or the session's word on them): one told of that grew back since is news when it is harvested again. Seen growing: each plant is read as its cell attaches and in a look at the plants within about 20 m of our player every second. A plant seen growing that later reads harvested stays "harvested since, not reported" until a scan or our own report says it (the look every second runs inside the 2 s wait for an activation, so it must not erase that), and is done after; a reading of it growing again makes it growing. A plant first seen harvested (harvested in the save from before the session, or our own harvest from before the last load) is never reported by a scan: the scan cannot date a harvest, and an old one sent as news would harvest a plant that had grown back in the other worlds and start its regrowth again.
+
+**The wire.** A game sends its own (`kPickups`: reference, base, kind) in batches of up to 64, at most four a second; the server keeps the first picker of each loose item and the latest harvester of each plant (a harvest said again at least a game hour later by the session's clock is news), up to 32768 for a session, and passes each new one to the others (`kRemotePickups`), never back to its picker. A game that joins hears every kept one not its own as a catch-up, and a game that loads a save or starts a new game asks again (`kAskPickups`). Nobody is sent their own: their world has the item (in an inventory, or where they dropped it), and a save from before they took it has it where it lay, theirs to take again (the sister project's lesson). Each entry names its reference and base by plugin (`FormTranslate.h`); one a game lacks is left out, and a game checks its own reference is of the same base before it makes it.
+
+**Making it.** A reference not in memory (its cell not loaded) waits, by reference, and is made when its cell attaches (`TESCellAttachDetachEvent`) or by a sweep of a few every 2 s. A deleted reference or a harvested plant is counted, and one both players took before either heard of the other is logged. A persistent item picked up stays itself in an inventory: left there.
+
+A taken reference that reads disabled is not proof it was taken: its enable parent may be off, a quest or a script may have disabled it, and the worlds' enable states can differ for a moment (a mechanism's outcome enables a hidden item, the user takes it at once, and the take reaches a friend before the enable does). So it is parked, not forgotten, and a reference this game took out is watched too: either is taken out (again) the moment it reads enabled, by the sweep, as its cell attaches, and within half a second while its cell is loaded (counted as `reapplied`). Our player taking a watched reference makes it ours: never taken out of our world again. Whether an explicit disable of an enable parent's child outlives that parent being enabled again is not known yet; the watch takes it out again either way.
+
+Pickups' state is under one lock, taken by the tick and by SKSE's messages; the event sinks never take it.
+
+**Not yet:**
+- Not checked in a game: that the harvested flag set from outside shows the plant harvested (the 3D is made again by a disable and enable when loaded; the rig step compares the drawn geometry of the harvester's plant and the other's), and that the change flags used keep it in a save.
+- A cell that resets (its respawn time passed) brings back a loose item another player took in a game that keeps it disabled: the disable outlives the reset.
+- Fish, critters and butterflies (their own activators and scripts), and ore veins: each player's own.
+- The server keeps no file: what was taken does not outlive the session.
 
 ## Quests
 

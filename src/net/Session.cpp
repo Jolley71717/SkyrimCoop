@@ -11,6 +11,7 @@
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/LootSync.h"
+#include "game/Pickups.h"
 #include "game/QuestSync.h"
 #include "game/RemotePlayers.h"
 #include "game/WorldClock.h"
@@ -229,6 +230,7 @@ namespace Session
 					Conversations::Welcomed(playerId);  // ... and its conversations: a talk under way is said again
 					LootSync::Welcomed(playerId);    // ... and its loot: the moves this world lacks asked for
 					DropSync::Welcomed(playerId, msg->sessionId);  // ... and its dropped items: this world's record told
+					Pickups::Welcomed(playerId);  // ... and what players took from the world: the server sends what it holds
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -345,6 +347,11 @@ namespace Session
 			case Protocol::MessageType::kDropList:
 				if (const auto msg = Protocol::DecodeDropList(a_data); msg && welcomed) {
 					DropSync::Listed(*msg);
+				}
+				break;
+			case Protocol::MessageType::kRemotePickups:
+				if (const auto msg = Protocol::DecodePickupBatch(a_data); msg && welcomed) {
+					Pickups::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -487,6 +494,7 @@ namespace Session
 		Conversations::Clear();
 		LootSync::Clear();
 		DropSync::Clear();  // our items lying there go back to our world
+		Pickups::Clear();   // what was taken out of this world stays out: this world's now
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -529,6 +537,7 @@ namespace Session
 			Conversations::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			LootSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			DropSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
+			Pickups::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 		}
 		RemotePlayers::Frame();
 	}

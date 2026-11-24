@@ -69,7 +69,14 @@ namespace Protocol
 	//    the use did near the mechanism (the animations played on activators, the references enabled or disabled), and
 	//    each other game makes what its own stand-in's use did not. Written on top of 15 (conversations): the number is
 	//    above both lines' and is renumbered at merge; its messages (63, 64) clash with neither line's.
-	inline constexpr std::uint16_t VERSION = 16;
+	// 22: what a player takes from the world (Pickup; docs/DESIGN.md "Taken from the world"): a loose item of the load order
+	//    a player picks up is out of every world (disabled there), and a plant or tree a player harvests is harvested in
+	//    every world; the server keeps both for whoever joins or loads later, with who took it and, for a harvest, when by
+	//    the session's clock (a plant grows back on its own schedule), and never sends a player their own. Written on top
+	//    of 16 (what a use did) beside 17 to 21 (loose objects, quests ended, ragdolls, the quest reset, NPC spells: other
+	//    branches): the number is above every branch's and is renumbered at merge; its messages (71-73) clash with none of
+	//    theirs.
+	inline constexpr std::uint16_t VERSION = 22;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -152,6 +159,11 @@ namespace Protocol
 		kTalkAnswer = 62,  // server -> the asker alone: who talks with that NPC (the asker: it is theirs)
 		kUseEffects = 63,        // client -> server, reliable: what our player's use of a mechanism did near it (a batch)
 		kRemoteUseEffects = 64,  // server -> the others: what that player's use did, for them to make what theirs did not
+		// 65 to 70 are left for loose objects, ragdolls, and the quest snapshot's ends and reset, written at the same time on
+		// other branches.
+		kPickups = 71,        // client -> server, reliable: loose items our player picked up, plants and trees it harvested
+		kRemotePickups = 72,  // server -> the others: that player's (and every kept one not theirs, to a joiner and an asker)
+		kAskPickups = 73,     // client -> server, reliable: send me every kept pickup again (after a load)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -826,6 +838,48 @@ namespace Protocol
 		std::vector<DroppedItem> drops;
 
 		bool operator==(const DropList&) const = default;
+	};
+
+	// What a player took from the world (docs/DESIGN.md, "Taken from the world"): a loose item reference of the load order
+	// it picked up (kTaken: out of every world), or a plant or tree it harvested (kHarvested: harvested in every world, and
+	// growing back there on that world's own schedule). ref and base in the session's numbering (FormTranslate.h: an entry
+	// whose reference or base the reading game lacks is left out); base is the reference's base form, by which the reader
+	// checks its own reference is the same thing. playerId and ageHours are the server's (none in kPickups): who took it,
+	// and for a harvest how long ago in game hours by the session's clock (AGE_UNKNOWN when it can't say; 0 for one passed
+	// on as it comes).
+	struct Pickup
+	{
+		enum Kind : std::uint8_t
+		{
+			kTaken = 0,
+			kHarvested = 1,
+		};
+		static constexpr std::uint8_t KIND_MAX = kHarvested;
+		static constexpr float        AGE_UNKNOWN = -1.0f;
+
+		std::uint32_t ref = 0;
+		std::uint32_t base = 0;
+		std::uint8_t  kind = kTaken;
+		std::uint32_t playerId = 0;
+		float         ageHours = AGE_UNKNOWN;
+
+		bool operator==(const Pickup&) const = default;
+	};
+	// The most entries in one batch, and the most pickups the server keeps for a session (a long evening picks up a few
+	// hundred things; an auto-loot mod a few thousand). Past it a new one is not kept or passed on (said once).
+	inline constexpr std::size_t MAX_PICKUP_BATCH = 64;
+	inline constexpr std::size_t MAX_PICKUPS = 32768;
+	// The oldest age a harvest is said with: a million game days (a save of years of play is a few thousand).
+	inline constexpr float MAX_PICKUP_AGE_HOURS = 24.0e6f;
+
+	// kPickups (a game's own: playerId and ageHours none) and kRemotePickups (the server's; catchUp: kept ones sent to a
+	// joiner or an asker, not one just taken).
+	struct PickupBatch
+	{
+		bool                catchUp = false;
+		std::vector<Pickup> entries;
+
+		bool operator==(const PickupBatch&) const = default;
 	};
 
 	// ---- serialization -------------------------------------------------------------
@@ -2278,6 +2332,93 @@ namespace Protocol
 			out.push_back(Encode(list));
 			at = end;
 		} while (at < a_drops.size());
+		return out;
+	}
+
+	// kPickups: a count (1 to MAX_PICKUP_BATCH), then each entry: ref, base, kind. kRemotePickups: a flags byte (1: catchUp)
+	// first, and each entry with playerId and ageHours after its kind. None for no entry, an entry of no reference or no
+	// base, a kind not known, or an age that is no number, below 0 and not AGE_UNKNOWN, or past MAX_PICKUP_AGE_HOURS.
+	inline std::vector<std::uint8_t> Encode(const PickupBatch& a_msg, MessageType a_type)
+	{
+		Writer     w{ a_type };
+		const bool remote = a_type == MessageType::kRemotePickups;
+		if (remote) {
+			w.U8(a_msg.catchUp ? 1 : 0);
+		}
+		const auto count = (std::min)(a_msg.entries.size(), MAX_PICKUP_BATCH);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& entry = a_msg.entries[i];
+			w.U32(entry.ref);
+			w.U32(entry.base);
+			w.U8(entry.kind);
+			if (remote) {
+				w.U32(entry.playerId);
+				w.F32(entry.ageHours);
+			}
+		}
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const PickupBatch& a_msg) { return Encode(a_msg, MessageType::kPickups); }
+
+	[[nodiscard]] inline bool PickupAgeFits(float a_age)
+	{
+		return std::isfinite(a_age) && (a_age == Pickup::AGE_UNKNOWN || (a_age >= 0.0f && a_age <= MAX_PICKUP_AGE_HOURS));
+	}
+
+	inline std::optional<PickupBatch> DecodePickupBatch(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kPickups && type != MessageType::kRemotePickups) {
+			return std::nullopt;
+		}
+		const bool remote = type == MessageType::kRemotePickups;
+		Reader     r{ a_data };
+		r.U8();
+		PickupBatch msg;
+		if (remote) {
+			const auto flags = r.U8();
+			if (flags > 1) {
+				return std::nullopt;
+			}
+			msg.catchUp = flags == 1;
+		}
+		const auto count = r.U8();
+		if (!r.Ok() || count == 0 || count > MAX_PICKUP_BATCH) {
+			return std::nullopt;
+		}
+		msg.entries.reserve(count);
+		for (std::uint8_t i = 0; i < count; ++i) {
+			Pickup entry;
+			entry.ref = r.U32();
+			entry.base = r.U32();
+			entry.kind = r.U8();
+			if (remote) {
+				entry.playerId = r.U32();
+				entry.ageHours = r.F32();
+			}
+			if (!r.Ok() || entry.ref == 0 || entry.base == 0 || entry.kind > Pickup::KIND_MAX || !PickupAgeFits(entry.ageHours)) {
+				return std::nullopt;
+			}
+			msg.entries.push_back(entry);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// a_entries in batches of MAX_PICKUP_BATCH, each encoded as a_type (marked catchUp for kRemotePickups); none for none.
+	inline std::vector<std::vector<std::uint8_t>> PickupBatches(const std::vector<Pickup>& a_entries, MessageType a_type, bool a_catchUp = false)
+	{
+		std::vector<std::vector<std::uint8_t>> out;
+		for (std::size_t at = 0; at < a_entries.size(); at += MAX_PICKUP_BATCH) {
+			PickupBatch batch;
+			batch.catchUp = a_catchUp;
+			const auto end = (std::min)(a_entries.size(), at + MAX_PICKUP_BATCH);
+			batch.entries.assign(a_entries.begin() + static_cast<std::ptrdiff_t>(at), a_entries.begin() + static_cast<std::ptrdiff_t>(end));
+			out.push_back(Encode(batch, a_type));
+		}
 		return out;
 	}
 
