@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Protocol.h"
+#include "game/LootRules.h"
 
 #include <cstdint>
 #include <functional>
@@ -64,6 +65,11 @@ namespace LootSync
 	void WriteCoSave(SKSE::SerializationInterface* a_intf);
 	void ReadCoSave(SKSE::SerializationInterface* a_intf, std::uint32_t a_version, std::uint32_t a_length);
 	void RevertCoSave();
+
+	// The kind of an item as the loot rules judge it (kOther: nothing a player carries), and its name in the dev lines.
+	// Quest rewards (QuestRewards.cpp) judge items by it too.
+	[[nodiscard]] LootRules::ItemKind KindOf(const RE::TESForm* a_form);
+	[[nodiscard]] const char*         KindName(LootRules::ItemKind a_kind);
 
 	// Developer channel: `loot` (one line of counts), `loot near [radius]` (the holders near our player: containers and
 	// bodies, and living actors as kind=npc), `loot inv <hex>` (what a reference holds, each item's plain count and

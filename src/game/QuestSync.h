@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Protocol.h"
+#include "game/RewardRules.h"
 
 #include <cstdint>
 #include <functional>
@@ -58,6 +59,14 @@ namespace QuestSync
 	// near its doer was as its word came, and a stage held for a friend who left is given up (QuestRules::Maker).
 	void PlayerJoined(std::uint32_t a_playerId);
 	void PlayerLeft(std::uint32_t a_playerId);
+
+	// For quest rewards (src/game/QuestRewards.h): what this game is with a quest (shared here, started, the session's
+	// stages of it still to make, the last one made), whether the session shares a quest here, and whether this game
+	// makes other players' words now (not while the host's game waits for its reset to come back: they are the old
+	// world's).
+	[[nodiscard]] RewardRules::QuestHere QuestHere(std::uint32_t a_questId);
+	[[nodiscard]] bool SharesQuest(std::uint32_t a_questId);
+	[[nodiscard]] bool HearsOthers();
 
 	// A save is about to load: the alias records rewritten for a run's start are put back.
 	void BeforeLoad();

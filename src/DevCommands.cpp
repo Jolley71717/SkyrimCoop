@@ -11,6 +11,7 @@
 #include "game/Conversations.h"
 #include "game/DropSync.h"
 #include "game/LootSync.h"
+#include "game/QuestRewards.h"
 #include "game/QuestSync.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
@@ -233,6 +234,12 @@ namespace DevCommands
 			return QuestSync::One(a_args);
 		}
 
+		// rewards [list]: quest rewards for everyone (QuestRewards)
+		std::string RewardsCommand(std::string_view a_args)
+		{
+			return QuestRewards::Command(a_args);
+		}
+
 		// clock [status] | clock pick <clear|cloudy|rain|snow> [n] | clock weather <hex> | clock release: the session's time and weather (WorldClock)
 		std::string ClockCommand(std::string_view a_args)
 		{
@@ -282,6 +289,7 @@ namespace DevCommands
 			{ "script", Script },
 			{ "quests", Quests },
 			{ "quest", Quest },
+			{ "rewards", RewardsCommand },
 			{ "clock", ClockCommand },
 			{ "loot", LootCommand },
 			{ "drops", DropsCommand },

@@ -135,6 +135,11 @@ Since protocol 5. Not tested in a game yet; the rig step `doors` is ready for it
 
 **Threads.** The game writes (a lock, an open state, a stand-in's use) are made from the plugin's tick, which until the frame hook is written runs on SKSE's task queue, seen on the task pool's job threads in the world. Each write made off the main thread is counted (`refs`: `offmain=`) and said once in the log; the frame hook moves them to the main thread.
 
+**Rewards.** Since protocol 23. Not tested in a game yet. The rules, free of the game, are `src/game/RewardRules.h`; the game side is `src/game/QuestRewards`; tests in `tests/RewardTests.cpp`. A reward a stage's fragment gives (gold, the quest's item) is every game's already, as the stage is made in each. One a conversation gives (a topic info's own fragment: "here, take this") runs only in the game of the player who talks, so that game says it:
+- An item that comes to our player from nothing (no container gave it and no reference was picked up: a script's `AddItem`) while the Dialogue Menu is open, or shut less than 2 seconds ago, with no barter, gift, container or training menu open or shut less than a second ago, is a reward of the quest of the topic info our player or whom it talks with said last (10 seconds at most), when the session shares that quest here. A key is not (it is the door's), nor an item that came less than 2 seconds after a stage of that quest this game made from the session's word (another player's step: its fragment gave it in every game). Several of the same item within a second are one reward, said a second after the last (`kQuestReward`, so its stage's report goes first). Each item from nothing is counted by what it was judged (`rewards`: `why=`).
+- The server passes it on to the others with its player (`kRemoteQuestReward`) and keeps nothing: one who joins later gets none. A game says at most 32 at once and one a second after that; one said before its game heard the host's reset is of the old world, and dropped as its quest reports are. The host's game gives none heard between its load and its reset's answer.
+- Every other game gives it to its player (`player.additem`) once the quest's stages from the session are made there and 5 seconds have passed since the last (its fragments ran), less what its player got from nothing since a moment before that stage (a stage the conversation set may give part of it everywhere; the talker's game cannot tell the two apart). So a reward of the conversation alone is given whole, and one its stage gave everywhere is not given twice. A quest not shared there, or never started there within 10 seconds (its stages held far and given up, or its own), gets nothing; a reward whose stages do not come within 2 minutes is dropped. Each is logged. A game's own gives are matched as they come back and are never said again.
+
 **Not yet:**
 - A mechanism whose script checks the user's inventory (a claw door, a key-only activator) may refuse a friend's stand-in, which carries no claw. The friend's own game opened it; the others' don't follow.
 - The server does not judge whether a reporter could have reached what it reports.
@@ -228,7 +233,7 @@ DropSync's state is under one lock, taken by the tick and by SKSE's callbacks on
 
 Since protocol 7 (runs and aliases since protocol 12). Not tested in a game yet; the rig steps `quests` and `jobs` are ready for it. The rules, free of the game, are `src/game/QuestRules.h`; the game side is `src/game/QuestSync`; the server's book is `common/QuestBook.h`; tests in `tests/QuestTests.cpp`.
 
-The aim is that every quest is shared: a stage done is done for everyone, whoever did the step, and the host's save keeps it. This version shares a quest's stages, its objectives and its end (completed or failed); a conversation is seen and heard by the others near ("Conversations"). Scenes, quest items and rewards are each player's own for now (below).
+The aim is that every quest is shared: a stage done is done for everyone, whoever did the step, and the host's save keeps it. This version shares a quest's stages, its objectives and its end (completed or failed); a conversation is seen and heard by the others near ("Conversations"). A reward a conversation gives is given to everyone ("Rewards", since protocol 23); scenes and quest items are each player's own for now (below).
 
 **Which quests, by class.** Each quest is judged by its own record, never by a name list alone, so a mod's quest is shared as the base game's are and the load order does not matter:
 
@@ -278,7 +283,7 @@ Every game judges again by its own record before it makes anything, so a quest o
 
 **Not yet:**
 - A conversation is the talker's: the others near see and hear it ("Conversations") and see the stage it set. Scenes play in each game for itself.
-- Quest items and rewards go to the player who got them.
+- Quest items are the world's they are in: one the quest holds in an alias comes as a reference, not as a reward, so whoever holds it hands it in (the quest's stages then follow for everyone). A reward given here is not given back if a friend loads a save from before it: it was a conversation of the session, not of that save.
 - Misc quests are each game's own, and so is a radiant job a friend's game starts on its own (only the host's jobs are the session's).
 - An actor a quest creates for its alias is each game's own until NPCs are paired, and so is a quest's location alias in a game that cannot find where the engine keeps it (`locSlot=none` or `locMap` not verified). Such a location is not read there, so it is neither the same as the host's nor apart from it (`unread=` in `quests run`): it never restarts a radiant job, is never said apart, and the run's references are judged on their own (`refSame=`).
 - A choice a quest keeps in a script variable rather than a stage (which side a player took in a dialogue) is not shared.

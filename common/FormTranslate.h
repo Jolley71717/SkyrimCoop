@@ -43,6 +43,8 @@
 // - a conversation's line (kLine, kRemoteLine) whose speaker or info has no ID becomes 0 there (with the info its response
 //   number): the reader shows it by the speaker's name, as text; a talk with an NPC (kTalk) or its answer (kTalkAnswer)
 //   whose NPC has none is not sent (kDrop): that NPC is that game's own.
+// - a quest's reward (kQuestReward, kRemoteQuestReward) whose quest or item has none is not sent (kDrop): that game's
+//   players get nothing of it, never another item.
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -110,6 +112,8 @@ namespace FormTranslate
 		case MT::kRemoteLine:
 		case MT::kTalk:
 		case MT::kTalkAnswer:
+		case MT::kQuestReward:
+		case MT::kRemoteQuestReward:
 			return true;
 		case MT::kClaimDrop:  // drop numbers, no forms
 		case MT::kDropGone:
@@ -467,6 +471,24 @@ namespace FormTranslate
 			}
 		}
 
+		// A quest's reward, written back with its own type: kDrop when its quest or its item has no ID on the other side (a
+		// mod's quest or item that game lacks: its players get nothing of it, rather than another item).
+		inline void ApplyReward(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeQuestReward(a_packet);
+			if (!msg) {
+				return;
+			}
+			if (!a_ctx.Key(msg->questId) || !a_ctx.Key(msg->itemId)) {
+				a_ctx.out.kind = Result::Kind::kDrop;
+				return;
+			}
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
@@ -543,6 +565,10 @@ namespace FormTranslate
 		case MT::kTalk:
 		case MT::kTalkAnswer:
 			detail::ApplyTalk(a_packet, ctx, *type);
+			break;
+		case MT::kQuestReward:
+		case MT::kRemoteQuestReward:
+			detail::ApplyReward(a_packet, ctx, *type);
 			break;
 		default:
 			break;

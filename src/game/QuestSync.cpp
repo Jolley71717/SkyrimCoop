@@ -1351,6 +1351,28 @@ namespace QuestSync
 		}
 	}
 
+	RewardRules::QuestHere QuestHere(std::uint32_t a_questId)
+	{
+		RewardRules::QuestHere out;
+		const auto quest = QuestOf(a_questId);
+		if (!quest || !SharedHere(quest)) {
+			return out;
+		}
+		out.shared = true;
+		out.ran = Started(quest) || Current(quest) != 0;
+		out.stagesWaiting = maker.StagesPending(a_questId);
+		out.lastMade = maker.LastStageMade(a_questId);
+		return out;
+	}
+
+	bool SharesQuest(std::uint32_t a_questId)
+	{
+		const auto quest = QuestOf(a_questId);
+		return quest && SharedHere(quest);
+	}
+
+	bool HearsOthers() { return resetsOut == 0; }
+
 	bool Install()
 	{
 		if (installed) {

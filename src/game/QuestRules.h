@@ -790,6 +790,17 @@ namespace QuestRules
 		// The wants, in order (the dev command shows the first few).
 		[[nodiscard]] const std::deque<Want>& Wants() const { return wants; }
 
+		// Whether the session's word still has a stage of the quest to make here, waiting or in flight (one put aside for
+		// a quest not started here is not: it waits for that quest to start). For a quest's reward (RewardRules).
+		[[nodiscard]] bool StagesPending(std::uint32_t a_questId) const { return HasStageWaiting(a_questId) || flight.contains(a_questId); }
+
+		// When a stage of the quest made here from the session's word last read done (or was given up stuck), if one did.
+		[[nodiscard]] std::optional<Clock::time_point> LastStageMade(std::uint32_t a_questId) const
+		{
+			const auto it = lastStage.find(a_questId);
+			return it != lastStage.end() ? std::optional{ it->second } : std::nullopt;
+		}
+
 		[[nodiscard]] std::size_t Size() const { return wants.size(); }
 		[[nodiscard]] std::size_t InFlight() const { return flight.size(); }
 		[[nodiscard]] std::uint64_t Dropped() const { return dropped; }

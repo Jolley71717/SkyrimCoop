@@ -75,7 +75,11 @@ namespace Protocol
 	//    heard before it (the old world's); each other game says when it heard the reset, and the server drops its quest
 	//    reports until then (sent from the old world, in flight). Written on top of 18 (the host's world) beside 19
 	//    (ragdolls, another branch, type 69): the number is above both and is renumbered at merge.
-	inline constexpr std::uint16_t VERSION = 20;
+	// 23: quest rewards for everyone (kQuestReward, kRemoteQuestReward; docs/DESIGN.md "Quests", "Rewards"): an item our
+	//    player got from a shared quest's conversation goes to the others, who give their players what their own stages
+	//    did not. Written on top of 20 (the host's reset) beside 21 (NPC spells) and 22 (world pickups, types 71-73), each
+	//    on another branch: the number is above all of them and is renumbered at merge; its messages (74, 75) clash with none.
+	inline constexpr std::uint16_t VERSION = 23;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -160,6 +164,9 @@ namespace Protocol
 		kQuestWorld = 68,  // host -> server, reliable: its world's quests, as kQuests: passed on as the session's word (player 0)
 		// 69 is left for ragdolls, written at the same time on another branch.
 		kQuestResetSeen = 70,  // client -> server, reliable: our game heard the host's reset: its quest reports are of the new world now
+		// 71 to 73 are left for world pickups, written at the same time on another branch.
+		kQuestReward = 74,        // client -> server, reliable: our player got a shared quest's reward in a conversation
+		kRemoteQuestReward = 75,  // server -> the others: that player's reward (never kept: a joiner gets only what comes after)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -482,6 +489,19 @@ namespace Protocol
 		std::uint32_t playerId = 0;
 		bool operator==(const QuestReset&) const = default;
 	};
+
+	// A shared quest's reward (docs/DESIGN.md, "Quests", "Rewards"): an item our player got from nothing in a conversation
+	// for that quest, and how many. kQuestReward from the player who got it (playerId 0), kRemoteQuestReward from the
+	// server to the others (that player's id). Never kept: a game that joins later gets only rewards said after.
+	struct QuestReward
+	{
+		std::uint32_t playerId = 0;
+		std::uint32_t questId = 0;
+		std::uint32_t itemId = 0;
+		std::uint32_t count = 0;  // 1 to MAX_REWARD_COUNT
+		bool operator==(const QuestReward&) const = default;
+	};
+	inline constexpr std::uint32_t MAX_REWARD_COUNT = 1'000'000;
 
 	// One alias of a quest, a reference alias or a location alias, as the host's game holds it filled (docs/DESIGN.md,
 	// "Quests", "Runs and aliases"). aliasId is the quest's own numbering (the same in every game that has the quest);
@@ -1506,6 +1526,41 @@ namespace Protocol
 			msg.playerId = r.U32();
 		}
 		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kQuestReward (no player id: the server knows whose it is) or kRemoteQuestReward (that player's id first): questId,
+	// itemId, count. None for no quest or no item, a count of 0 or past MAX_REWARD_COUNT, or bytes after it.
+	inline std::vector<std::uint8_t> Encode(const QuestReward& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		if (a_type == MessageType::kRemoteQuestReward) {
+			w.U32(a_msg.playerId);
+		}
+		w.U32(a_msg.questId);
+		w.U32(a_msg.itemId);
+		w.U32(a_msg.count);
+		return w.Data();
+	}
+
+	inline std::optional<QuestReward> DecodeQuestReward(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kQuestReward && type != MessageType::kRemoteQuestReward) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		QuestReward msg;
+		if (type == MessageType::kRemoteQuestReward) {
+			msg.playerId = r.U32();
+		}
+		msg.questId = r.U32();
+		msg.itemId = r.U32();
+		msg.count = r.U32();
+		if (!r.Ok() || !r.AtEnd() || msg.questId == 0 || msg.itemId == 0 || msg.count == 0 || msg.count > MAX_REWARD_COUNT) {
 			return std::nullopt;
 		}
 		return msg;

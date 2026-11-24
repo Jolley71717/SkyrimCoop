@@ -78,6 +78,11 @@ namespace
 		// dropped (said once, counted): a game saying more is broken, not busy.
 		TokenBucket runBudget{ 512.0, 64.0 };
 		std::uint64_t runsDropped = 0;
+		// Quest rewards (docs/DESIGN.md, "Quests", "Rewards"): a conversation gives a few items at most; a burst of 32 then
+		// one a second, past it dropped (said once, counted): a game saying more is broken, not generous.
+		TokenBucket rewardBudget{ 32.0, 1.0 };
+		std::uint64_t rewardsDropped = 0;
+		std::uint64_t rewardsStale = 0;  // said before its game heard the host's reset
 		bool          toldNotRunHost = false;
 		// The clock (docs/DESIGN.md, "Time and weather"): every game says its own every 5 s and on a change; only the
 		// clock owner's is passed on, a burst of 4 then one a second. Past the budget the newest is kept and owed, as looks.
@@ -731,6 +736,27 @@ void Server::Run()
 				}
 				run->playerId = a_peer.playerId;
 				broadcast(Protocol::Encode(*run, MT::kRemoteQuestRun), true, &a_key);
+			}
+			break;
+		case MT::kQuestReward:
+			// A player got a shared quest's reward in a conversation: passed on to the others, who give it to their players
+			// (docs/DESIGN.md, "Quests", "Rewards"); never kept. One sent before its game heard the host's reset is of the
+			// old world (the host's game, loaded back, must not get it), and dropped as its quest reports are.
+			if (auto reward = Protocol::DecodeQuestReward(a_data)) {
+				if (a_peer.questResetsOwed != 0) {
+					if (a_peer.rewardsStale++ == 0) {
+						log(std::format("server: player {} said a quest reward of the world before the host's reset; dropped", a_peer.playerId));
+					}
+					break;
+				}
+				if (!a_peer.rewardBudget.Take(Clock::now())) {
+					if (a_peer.rewardsDropped++ == 0) {
+						log(std::format("server: player {} says quest rewards faster than a conversation gives them; the rest are dropped", a_peer.playerId));
+					}
+					break;
+				}
+				reward->playerId = a_peer.playerId;
+				broadcast(Protocol::Encode(*reward, MT::kRemoteQuestReward), true, &a_key);
 			}
 			break;
 		case MT::kClock:

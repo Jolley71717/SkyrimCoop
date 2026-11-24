@@ -113,77 +113,81 @@ namespace LootSync
 					a_what);
 			}
 		}
+	}
 
-		LootRules::ItemKind KindOf(const RE::TESForm* a_form)
-		{
-			using K = LootRules::ItemKind;
-			if (!a_form) {
-				return K::kOther;
-			}
-			switch (a_form->GetFormType()) {
-			case RE::FormType::Weapon:
-				return K::kWeapon;
-			case RE::FormType::Armor:
-				return K::kArmor;
-			case RE::FormType::Ammo:
-				return K::kAmmo;
-			case RE::FormType::AlchemyItem:
-				return K::kPotion;
-			case RE::FormType::Ingredient:
-				return K::kIngredient;
-			case RE::FormType::Misc:
-				return K::kMisc;
-			case RE::FormType::Book:
-				return K::kBook;
-			case RE::FormType::KeyMaster:
-				return K::kKey;
-			case RE::FormType::SoulGem:
-				return K::kSoulGem;
-			case RE::FormType::Scroll:
-				return K::kScroll;
-			case RE::FormType::Light:
-				return K::kLight;
-			case RE::FormType::Apparatus:
-				return K::kApparatus;
-			default:
-				return K::kOther;
-			}
+	// The kind of an item, as the loot rules and quest rewards (QuestRewards.cpp) judge it.
+	LootRules::ItemKind KindOf(const RE::TESForm* a_form)
+	{
+		using K = LootRules::ItemKind;
+		if (!a_form) {
+			return K::kOther;
 		}
-
-		const char* KindName(LootRules::ItemKind a_kind)
-		{
-			using K = LootRules::ItemKind;
-			switch (a_kind) {
-			case K::kWeapon:
-				return "weapon";
-			case K::kArmor:
-				return "armor";
-			case K::kAmmo:
-				return "ammo";
-			case K::kPotion:
-				return "potion";
-			case K::kIngredient:
-				return "ingredient";
-			case K::kMisc:
-				return "misc";
-			case K::kBook:
-				return "book";
-			case K::kKey:
-				return "key";
-			case K::kSoulGem:
-				return "soulgem";
-			case K::kScroll:
-				return "scroll";
-			case K::kLight:
-				return "light";
-			case K::kApparatus:
-				return "apparatus";
-			case K::kOther:
-				break;
-			}
-			return "other";
+		switch (a_form->GetFormType()) {
+		case RE::FormType::Weapon:
+			return K::kWeapon;
+		case RE::FormType::Armor:
+			return K::kArmor;
+		case RE::FormType::Ammo:
+			return K::kAmmo;
+		case RE::FormType::AlchemyItem:
+			return K::kPotion;
+		case RE::FormType::Ingredient:
+			return K::kIngredient;
+		case RE::FormType::Misc:
+			return K::kMisc;
+		case RE::FormType::Book:
+			return K::kBook;
+		case RE::FormType::KeyMaster:
+			return K::kKey;
+		case RE::FormType::SoulGem:
+			return K::kSoulGem;
+		case RE::FormType::Scroll:
+			return K::kScroll;
+		case RE::FormType::Light:
+			return K::kLight;
+		case RE::FormType::Apparatus:
+			return K::kApparatus;
+		default:
+			return K::kOther;
 		}
+	}
 
+	const char* KindName(LootRules::ItemKind a_kind)
+	{
+		using K = LootRules::ItemKind;
+		switch (a_kind) {
+		case K::kWeapon:
+			return "weapon";
+		case K::kArmor:
+			return "armor";
+		case K::kAmmo:
+			return "ammo";
+		case K::kPotion:
+			return "potion";
+		case K::kIngredient:
+			return "ingredient";
+		case K::kMisc:
+			return "misc";
+		case K::kBook:
+			return "book";
+		case K::kKey:
+			return "key";
+		case K::kSoulGem:
+			return "soulgem";
+		case K::kScroll:
+			return "scroll";
+		case K::kLight:
+			return "light";
+		case K::kApparatus:
+			return "apparatus";
+		case K::kOther:
+			break;
+		}
+		return "other";
+	}
+
+	namespace
+	{
 		// A stack with extras of its own: tempered, enchanted or poisoned by a player, renamed, a soul a player put in. A
 		// move carries the base form only, so such a stack is never shared, and never taken here for another game's
 		// plain one.
