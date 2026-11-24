@@ -60,11 +60,12 @@ declare -A STEP_INFO=(
 	[loot]="gold and a dagger one player puts into or takes from a container are so in the other's copy, both ways; a book stays its player's own; after the VM loads a save and joins again its copy is the session's; a Take All empties the other's copy of what was taken; a living creature's inventory is its own, a put into a body waits in the other game until it dies there too (steps/loot.sh)"
 	[drops]="gold and a dagger one player drops lie in the other's world as a copy blocked from activation, the dropper's own item swapped out of its world; the player who takes it (once with the pad, its crosshair on the copy) has it and it lies in neither, both ways; two taking at once give it to one; the dropper leaving takes what still lies there back to their world, and it does not lie there again once they are back; a save from before a drop, loaded, takes it back from the session; one from before a take gives it back (steps/drops.sh)"
 	[talk]="one player talks with an NPC (walks up, a) and the other, near, sees each line in its subtitle area or as a notice (the same line: a hash of its text) and hears the NPC's recording where its game has sound, the greeting, a topic picked (on counters of its own) and its answer, both ways; a talk's start never sends the line left up from before; one player at a time talks with an NPC: a friend using it is told no and its menu shut (steps/talk.sh)"
+	[claws]="a mechanism whose script checks its user's items (wants=) works for a friend: the VM, given the item, uses it and the host's stand-in makes the use holding the item lent, given back after; what the use did (its animations, the references it enabled or disabled) reads the same in both, nothing played twice; the reverse with the VM saving while it lends (taken back first); a pillar whose use the watcher refuses has what it did made there, both ways (steps/claws.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
-STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors quests jobs clock loot drops talk jobsreset final"
+STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors quests jobs clock loot drops talk claws jobsreset final"
 # Steps that need the two games in one session; the state guard puts them back in one first (smoke.sh run()).
-SESSION_STEPS="see move_vm move_host gait save_rejoin forms doors quests jobs clock loot drops talk jobsreset"
+SESSION_STEPS="see move_vm move_host gait save_rejoin forms doors quests jobs clock loot drops talk claws jobsreset"
 # Steps a run makes only when --only names them: they change a game's files for a while (each puts them back, and the
 # set-up heals what a run that died left), which the maintainer agrees to before they run by default.
 OPTIN_STEPS="forms"
@@ -493,6 +494,7 @@ declare -F step_clock >/dev/null || . "$RIG/steps/clock.sh"
 declare -F step_loot >/dev/null || . "$RIG/steps/loot.sh"
 declare -F step_drops >/dev/null || . "$RIG/steps/drops.sh"
 declare -F step_talk >/dev/null || . "$RIG/steps/talk.sh"
+declare -F step_claws >/dev/null || . "$RIG/steps/claws.sh"
 
 # --- self-test: the steps' reading of the games, both games faked ------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then

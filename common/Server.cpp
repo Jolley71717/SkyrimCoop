@@ -104,6 +104,11 @@ namespace
 		std::uint64_t linesDropped = 0;
 		std::uint64_t linesNotTheirs = 0;
 		std::uint64_t talksDropped = 0;
+		// What a mechanism's use did (docs/DESIGN.md, "Doors, locks and mechanisms", "What a use did"): batches, a burst
+		// of 16 then 4 a second (a use's go out every half second for 10 s, a few uses at once); past it dropped (said
+		// once, counted): the other games keep what their own stand-in's use did.
+		TokenBucket   effectBudget{ 16.0, 4.0 };
+		std::uint64_t effectsDropped = 0;
 		bool        toldNotHost = false;
 		bool        toldUnknown = false;
 	};
@@ -559,7 +564,23 @@ void Server::Run()
 					}
 					break;
 				}
-				broadcast(Protocol::Encode(Protocol::Activation{ use->refId, a_peer.playerId }, MT::kRemoteActivate), true, &a_key);
+				auto passed = *use;  // its number and the items it lends go with it
+				passed.playerId = a_peer.playerId;
+				broadcast(Protocol::Encode(passed, MT::kRemoteActivate), true, &a_key);
+			}
+			break;
+		case MT::kUseEffects:
+			// What a use did in its user's game: of the moment, passed on to the others, never kept (a joiner's world is
+			// the host's save's, and a door it moved is a door's state, kept as any other).
+			if (auto effects = Protocol::DecodeUseEffects(a_data)) {
+				if (!a_peer.effectBudget.Take(Clock::now())) {
+					if (a_peer.effectsDropped++ == 0) {
+						log(std::format("server: player {} says what its uses did faster than the server passes it on; dropped (counted after this)", a_peer.playerId));
+					}
+					break;
+				}
+				effects->playerId = a_peer.playerId;
+				broadcast(Protocol::Encode(*effects, MT::kRemoteUseEffects), true, &a_key);
 			}
 			break;
 		case MT::kAskRefStates:
