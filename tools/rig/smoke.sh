@@ -56,7 +56,7 @@ done
 for s in $only $skip; do case " $STEPS " in *" $s "*) ;; *) echo "no step '$s' (steps: $STEPS)"; exit 2 ;; esac; done
 [ "$JOIN" = url ] || [ "$JOIN" = dev ] || { echo "--join url or --join dev"; exit 2; }
 [[ $SMOKE_CELL =~ ^[A-Za-z0-9_]+$ ]] || { echo "--cell takes a cell's editor id (letters, digits and _ only)"; exit 2; }
-[ -z "$build" ] || [ -f "$build/SkyrimCoop.dll" ] || { echo "--build: no SkyrimCoop.dll in '$build'"; exit 2; }
+[ -z "$build" ] || { [ -f "$build/SkyrimCoop.dll" ] && [ -f "$build/SkyrimCoop.pdb" ]; } || { echo "--build: no SkyrimCoop.dll and SkyrimCoop.pdb in '$build'"; exit 2; }
 selected() { case " $skip " in *" $1 "*) return 1 ;; esac; [ -z "$only" ] && return 0; case " $only " in *" $1 "*) return 0 ;; esac; return 1; }
 
 if [ $mode = list ]; then
@@ -118,8 +118,10 @@ smoke_restore() {
 		echo "--keep: both games left running. Once they are closed: bash tools/rig/smoke.sh --restore $A_OUT"
 	else
 		bash "$RIG/start.sh" stop >/dev/null 2>&1
-		wait_until 30 games_down && pass "restore: both games closed" "" || fail "restore: both games closed" "a game still runs 30 s after start.sh stop"
-		restore_closed "$b"
+		# a game still up writes its ini as it quits and holds its DLL: the rest waits for --restore once it is closed
+		if wait_until 30 games_down; then pass "restore: both games closed" ""; restore_closed "$b"
+		else fail "restore: both games closed" "a game still runs 30 s after start.sh stop (or the VM gives no answer)"
+			echo "restore: the ini files, the install and the DLLs are not put back yet: close both games, then bash tools/rig/smoke.sh --restore $A_OUT"; fi
 	fi
 }
 # vm_tasks_gone <task name pattern> <check>: the VM's scheduled tasks of that name are removed (a join task names the
@@ -138,8 +140,9 @@ compare_saves() {
 	else warn "restore: the VM's Saves folder is as before" "it differs from $b/vm-saves.tsv (an autosave?): look before the next run"; fi
 }
 # restore_closed <backup folder>: the restore once both games are closed, at the end of a run or later by --restore after
-# --keep: both ini files byte for byte, the build's install undone (when the run installed one: the run folder's
-# "build" file says so) and both DLLs the ones from before, start.ps1's game tasks removed, the tunnel closed, both Saves
+# --keep: both ini files byte for byte, the build's install undone (when the run tried one: the run folder's
+# "build-record" file names its install record, written before the install began, so a half-done install is undone
+# too) and both DLLs the ones from before, start.ps1's game tasks removed, the tunnel closed, both Saves
 # folders compared. The run folder is then marked "restored", so it is never put back twice (a second install.sh undo
 # would take out an older install), but only when this restore had no FAIL: a failed undo or DLL check can be tried
 # again with --restore.
@@ -147,8 +150,8 @@ restore_closed() {
 	local b=$1 r run fails0; run=$(dirname "$b")
 	fails0=$(grep -c '^FAIL' "$A_RESULTS" 2>/dev/null); fails0=${fails0:-0}
 	restore_ini "$b"
-	if [ -s "$run/build" ]; then
-		bash "$RIG/install.sh" undo > "$A_OUT/install-undo.log" 2>&1 && pass "restore: the build's install undone" "" || fail "restore: the build's install undone" "install.sh undo failed: $A_OUT/install-undo.log"
+	if [ -s "$run/build-record" ]; then
+		bash "$RIG/install.sh" undo --record "$(cat "$run/build-record")" --missing-ok > "$A_OUT/install-undo.log" 2>&1 && pass "restore: the build's install undone" "" || fail "restore: the build's install undone" "install.sh undo failed: $A_OUT/install-undo.log"
 	fi
 	expect_eq "restore: the host's SkyrimCoop.dll is the one from before" "$(dll_md5 host)" "$(cat "$b/host-dll.md5")"
 	expect_eq "restore: the VM's SkyrimCoop.dll is the one from before" "$(dll_md5 vm)" "$(cat "$b/vm-dll.md5")"
@@ -185,11 +188,13 @@ if [ $mode = run ]; then
 	smoke_backup
 	if [ -n "$build" ]; then
 		games_down || bash "$RIG/start.sh" stop > "$A_OUT/stop-before-install.log" 2>&1
-		if bash "$RIG/install.sh" --build "$build" > "$A_OUT/install.log" 2>&1; then
-			echo "$build" > "$A_OUT/build"   # the restore (now, or --restore after --keep) undoes this install
-			pass "set-up: the build is installed on both" "$(md5sum "$build/SkyrimCoop.dll" | cut -d' ' -f1)"
+		# the run's own install record, named before the install begins: the restore (now, or --restore after --keep)
+		# undoes whatever of it was written, also when the install stopped half way, and puts back what was there before
+		rec=smoke-$(basename "$A_OUT" | tr -c 'A-Za-z0-9_\n-' _); echo "$rec" > "$A_OUT/build-record"; echo "$build" > "$A_OUT/build"
+		if bash "$RIG/install.sh" --build "$build" --record "$rec" > "$A_OUT/install.log" 2>&1; then
+			pass "set-up: the build is installed on both" "$(md5sum < "$build/SkyrimCoop.dll" | cut -d' ' -f1)"
 		else _rig_stop "install failed" "install.sh --build $build failed: $A_OUT/install.log"; fi
-		CHECK_DLL=${CHECK_DLL:-$(md5sum "$build/SkyrimCoop.dll" | cut -d' ' -f1)}
+		CHECK_DLL=${CHECK_DLL:-$(md5sum < "$build/SkyrimCoop.dll" | cut -d' ' -f1)}
 	fi
 	sides=""
 	running_host "$GAME_EXE" || sides="host"
@@ -218,6 +223,8 @@ if [ $mode = run ]; then
 		if [ -z "$A_RIG_STOPPED" ] && sig=$(a_attempt_rig); then
 			a_attempt_void
 			healed "$s: run again after a rig fault" "$sig"
+			# the second attempt starts from a checked state too (a walk that stuck is stopped, both in the world)
+			guard_world "$s" || return 0
 			A_AGAIN=1; a_attempt_mark; "step_$s"; A_AGAIN=""
 			if [ -z "$A_RIG_STOPPED" ] && sig=$(a_attempt_rig); then
 				a_attempt_void "$first"
@@ -282,9 +289,13 @@ if [ $mode = selftest ]; then
 		restore_closed "$rd/backup" ) >/dev/null 2>&1; }
 	rc 1 bbb; [ ! -e "$rd/restored" ] && echo "ok   restore_closed: a DLL check failed, the folder is not marked restored" || { echo "FAIL restore_closed marked a failed restore"; bad=1; }
 	rc 2 aaa; [ -e "$rd/restored" ] && echo "ok   restore_closed: a whole restore marks the folder (a FAIL from before the restore does not count)" || { echo "FAIL restore_closed did not mark a whole restore"; bad=1; }
+	# restore_closed undoes the run's own install record when one was named, also after an install that stopped half way
+	mkdir -p "$rd/fake"; printf '%s\n' 'echo "$*" >> "$(dirname "$0")/args"' > "$rd/fake/install.sh"; rm -f "$rd/restored"
+	echo smoke-x > "$rd/build-record"; ( RIG=$rd/fake; rc 3 aaa ); r=$(cat "$rd/fake/args" 2>/dev/null)
+	t "restore_closed: the run's install record is undone, missing machines allowed" "$r" "undo --record smoke-x --missing-ok"
 	rm -rf "$rd"
 	grep -q 'a_log_to "$A_OUT/run.log"' "$me" && ! grep -qE '^[^#]*exec > >\(tee ' "$me" && echo "ok   the run's log goes through a_log_to (a tee Ctrl-C does not kill)" || { echo "FAIL the run's log does not go through a_log_to"; bad=1; }
-	o=$(SKYRIMCOOP_RIG_OWNER=someone bash "$me" --only see 2>&1); r=$?
+	o=$(env -u SKYRIMCOOP_SKIP_LOCK_CHECK SKYRIMCOOP_RIG_OWNER=someone bash "$me" --only see 2>&1); r=$?   # never a real run
 	t "a run without the rig's lock is refused" "$r" 2; case "$o" in *"nobody holds the rig"*) echo "ok   ... saying why";; *) echo "FAIL ... saying why: [$o]"; bad=1;; esac
 	for s in $STEPS; do grep -q "\`$s\`" "$RIG/README.md" || { echo "FAIL README.md does not describe step $s"; bad=1; }; done
 	echo "ok   README.md names every step"

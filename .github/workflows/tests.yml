@@ -112,16 +112,18 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q --no-install-recommends g++-14 gcovr
 
-      # The rig harness's own tests (tools/rig/selftest.sh): its checks, verdicts, crash-log reading and its steps'
-      # reading of the games' replies, with both games faked. Seconds; no game, no rig, nothing downloaded.
-      - name: Rig harness self-test
-        run: bash tools/rig/selftest.sh
-
       # Builds the tests, the server and the bot with coverage, runs the tests and writes the reports; its exit code
       # is the number of failed tests.
       - name: tools/coverage.sh
         timeout-minutes: 40
         run: bash tools/coverage.sh
+
+      # The rig harness's own tests (tools/rig/selftest.sh): its checks, verdicts, crash-log reading and its steps'
+      # reading of the games' replies, with both games faked. Seconds; no game, no rig, nothing downloaded. After the
+      # unit tests, and run whether they passed or not, so a failure of one never hides the other.
+      - name: Rig harness self-test
+        if: success() || failure()
+        run: bash tools/rig/selftest.sh
 
       - name: Summary
         if: always()

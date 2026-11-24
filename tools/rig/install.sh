@@ -1,7 +1,12 @@
 #!/bin/bash
-# install.sh [--build <folder>] [--host-only | --vm-only]   puts SKSE64, the Address Library file, Crash Logger and
-#                                                            the plugin into both machines' Skyrim folders
-# install.sh undo [--host-only | --vm-only]                  takes out exactly what the last install put in
+# install.sh [--build <folder>] [--record <name>] [--host-only | --vm-only]
+#                         puts SKSE64, the Address Library file, Crash Logger and the plugin into both machines' Skyrim folders
+# install.sh undo [--record <name>] [--missing-ok] [--host-only | --vm-only]
+#                         takes out exactly what that install put in
+#
+# --record <name> keeps an install's record apart from the usual one (host-record-<name>.tsv, vm-record-<name>.tsv), so
+# it can go over an install that is still in, and its undo puts back exactly what was there (smoke.sh --build does
+# this). --missing-ok: a machine with no such record has nothing to undo (an install that stopped before writing there).
 #
 # Steps: check the three downloads' hashes; unpack them with 7-Zip into a new folder of their own under
 # $STAGE/skyrim-install (nothing from them is run); pick the files the game needs into a payload laid out like the game
@@ -27,20 +32,23 @@ CRASH_SHA=eb112aa69b4e4f595a0230e43f7f080dbdc533647d4986fc042692f461baaad3      
 SKSE_DIR=skse64_2_03_01
 ADDR_FILE=versionlib-1-7-104-0.bin
 WORK=$STAGE/skyrim-install
-HOST_RECORD=$WORK/host-record.tsv
-VM_RECORD=$VM_DIR/vm-record.tsv
 
-mode=install; build=$REPO/build/windows/x64/releasedbg; host=1; vmside=1
+mode=install; build=$REPO/build/windows/x64/releasedbg; host=1; vmside=1; record=""; missing_ok=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 	undo) mode=undo ;;
 	--build) build=$2; shift ;;
+	--record) record=$2; shift ;;
+	--missing-ok) missing_ok=1 ;;
 	--host-only) vmside=0 ;;
 	--vm-only) host=0 ;;
-	*) sed -n '2,4p' "$0"; exit 2 ;;
+	*) sed -n '2,5p' "$0"; exit 2 ;;
 	esac
 	shift
 done
+[ -z "$record" ] || [[ $record =~ ^[A-Za-z0-9_-]+$ ]] || { say "--record takes letters, digits, - and _ only"; exit 2; }
+HOST_RECORD=$WORK/host-record${record:+-$record}.tsv
+VM_RECORD=$VM_DIR/vm-record${record:+-$record}.tsv
 
 rig_guard || exit 1
 no_fallout || exit 1
@@ -50,12 +58,15 @@ winpath() { cygpath -w "$1"; }
 
 if [ $mode = undo ]; then
 	rc=0
-	if [ $host = 1 ]; then
+	if [ $host = 1 ] && [ -n "$missing_ok" ] && [ ! -e "$HOST_RECORD" ]; then say "host: no record $HOST_RECORD, nothing to undo"
+	elif [ $host = 1 ]; then
 		powershell -NoProfile -ExecutionPolicy Bypass -File "$(winpath "$RIG/install.ps1")" -Game "$(winpath "$HOST_GAME")" -Undo -Record "$(winpath "$HOST_RECORD")" || rc=1
 		[ $rc = 0 ] && mv -f "$HOST_RECORD" "$HOST_RECORD.undone-$(date +%Y%m%d-%H%M%S)"
 	fi
 	if [ $vmside = 1 ]; then
-		vmssh "powershell -NoProfile -ExecutionPolicy Bypass -File $VM_DIR/install.ps1 -Game '$VM_GAME' -Undo -Record $VM_RECORD; if (\$LASTEXITCODE -eq 0) { Move-Item $VM_RECORD ('$VM_RECORD.undone-' + (Get-Date -Format yyyyMMdd-HHmmss)); 'vm undo ok' } else { 'vm undo FAILED' }" | tee /dev/stderr | grep -q 'vm undo ok' || rc=1
+		# no record on the VM: an error, or with --missing-ok nothing to undo; a VM that gives no answer is a failed undo
+		none="'vm: no record $VM_RECORD'; 'vm undo FAILED'"; [ -n "$missing_ok" ] && none="'vm: no record, nothing to undo'; 'vm undo ok'"
+		vmssh "if (-not (Test-Path $VM_RECORD)) { $none } else { powershell -NoProfile -ExecutionPolicy Bypass -File $VM_DIR/install.ps1 -Game '$VM_GAME' -Undo -Record $VM_RECORD; if (\$LASTEXITCODE -eq 0) { Move-Item $VM_RECORD ('$VM_RECORD.undone-' + (Get-Date -Format yyyyMMdd-HHmmss)); 'vm undo ok' } else { 'vm undo FAILED' } }" | tee /dev/stderr | grep -q 'vm undo ok' || rc=1
 	fi
 	exit $rc
 fi
@@ -113,5 +124,5 @@ if [ $vmside = 1 ] && [ $rc = 0 ]; then
 		| tee "$WORK/vm-install-$stamp.log" | grep -q '^exit 0' || { say "vm install FAILED: $WORK/vm-install-$stamp.log"; rc=1; }
 	cat "$WORK/vm-install-$stamp.log"
 fi
-[ $rc = 0 ] && say "installed. Undo: bash tools/rig/install.sh undo" || say "install did not finish; what was written is in the records, and undo takes it out"
+[ $rc = 0 ] && say "installed. Undo: bash tools/rig/install.sh undo${record:+ --record $record}" || say "install did not finish; what was written is in the records, and undo takes it out"
 exit $rc

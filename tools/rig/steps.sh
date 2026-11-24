@@ -389,6 +389,8 @@ gait_sneak() {
 	for ((k = 0; k < 15; k++)); do shown_has s "$(dc "$watcher" standins)" && { seen=1; break; }; sleep 0.2; done
 	[ -n "$seen" ] && pass "$mover sneaks: the $watcher's stand-in sneaks" "shown=$(field shown "$(dc "$watcher" standins)")" || fail "$mover sneaks: the $watcher's stand-in sneaks" "shown=$(field shown "$(dc "$watcher" standins)") for 3 s"
 	dc "$mover" 'pad button ls 150' >/dev/null; sleep 1.5; seen=""
+	# the press to stand up must have reached the mover's game, or a stand-in still sneaking is right, not the mod's FAIL
+	if [ "$(field graphSneak "$(dc "$mover" where)")" = 1 ]; then rig_fault input "$mover stands up: the press" "the left stick press left the $mover's player sneaking"; still "$mover"; dc "$mover" 'pad button ls 150' >/dev/null; sleep 1; return; fi
 	for ((k = 0; k < 15; k++)); do shown_has s "$(dc "$watcher" standins)" || { seen=1; break; }; sleep 0.2; done
 	[ -n "$seen" ] && pass "$mover stands up: the $watcher's stand-in stands up" "shown=$(field shown "$(dc "$watcher" standins)")" || fail "$mover stands up: the $watcher's stand-in stands up" "still sneaking 3 s after"
 }

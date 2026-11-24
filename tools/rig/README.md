@@ -4,7 +4,7 @@ Scripts that drive two games of Skyrim on the rig: a host PC and a virtual machi
 
 | Script | What it does |
 |---|---|
-| `install.sh` | puts SKSE64, the Address Library, Crash Logger and a build of the plugin into both games (`install.sh undo` takes it out again) |
+| `install.sh` | puts SKSE64, the Address Library, Crash Logger and a build of the plugin into both games (`install.sh undo` takes it out again; `--record <name>` keeps an install's record apart) |
 | `firststart.sh` | the ini files the launcher would write on a first run, a window instead of the full screen (`check`, `undo`) |
 | `start.sh` | starts both games through SKSE and waits for the plugin; `--cell <cell>` puts each player there with `coc`; `start.sh stop` closes them |
 | `lobbytest.sh` | the first test: a Steam lobby and pings over Steam's relay, at the main menu |
@@ -26,7 +26,7 @@ bash tools/rig/smoke.sh --list                                      # the steps,
 bash $STAGE/rigq.sh free <name>
 ```
 
-`--build` installs that build on both machines first (a CI build: `gh run download`), and takes it out again at the end. Without it the run tests what is installed. The games are started if they are not running, with `coc` from the main menu (`--cell`, default Riverwood): a run never uses Continue or Load on the host, whose Saves folder may hold the maintainer's own saves. Every run, whatever steps it picks, stops in its set-up if the host's game has loaded a save since it started.
+`--build` installs that build on both machines first (a CI build: `gh run download`), under an install record of the run's own (`install.sh --record`), so it can go over a build that is installed already, and takes it out again at the end, putting back what was there (also when the install stopped half way). Without it the run tests what is installed. The games are started if they are not running, with `coc` from the main menu (`--cell`, default Riverwood): a run never uses Continue or Load on the host, whose Saves folder may hold the maintainer's own saves. Every run, whatever steps it picks, stops in its set-up if the host's game has loaded a save since it started.
 
 A run's folder is `$STAGE/checks/skyrim-smoke-<time>/`: `run.log` (everything it printed), `results.tsv` (one line per check), `summary.txt`, the movement samples, the plugin log lines of the run, and copies of any crash log. It holds the two machines' ini files as they were before the run, and the listings of both Saves folders, so it stays in the rig's folder: never attach it as it is.
 
@@ -37,9 +37,9 @@ Every check is one line: `PASS`, `FAIL` or `WARN`, with what was read. Four more
 - `RIG`: a check the rig could not make this time (a scripted walk that stuck before it got anywhere, a button press the game never saw). A step that meets one runs once more; the lines of the first attempt from the fault on are set aside (`VOID`), and a check that fails in both attempts stays a `FAIL`.
 - `HEAL`: the rig was found in a wrong state and put right before a step (a player at the main menu put in the world with `coc`, a walk left going stopped, the two games put in one session again). No verdict either way; listed.
 - `RIGFAULT`: a wrong state that could not be put right; that step's checks were not made. A game drawing fewer than 20 frames a second (ticks a second, read twice 3 s apart before each step that times something: a display asleep, a starved machine) is one: its stand-ins and walks would lag, and the step would measure the rig. The harness says so and never changes a machine's power settings.
-- `rig broken` (inside a `FAIL`): a game not answering, ssh to the VM down, the pad moving nobody. Two of them end the run at once: the rest would measure the rig.
+- `rig broken` (inside a `FAIL`): a game not answering, ssh to the VM down, the pad moving nobody. Two of them end the run at once, and a `RIGFAULT` counts toward those two as well (two steps skipped for a slow game end the run): the rest would measure the rig.
 
-The last line is `VERDICT: PASS` (every check made and passed), `VERDICT: FAIL` (a check failed: the mod's), or `VERDICT: RIG` (nothing failed, but the rig kept some checks from being made: fix the rig and run again). The exit code is the number of failed checks, and a run that made no check never passes.
+The last line is `VERDICT: PASS` (every check made and passed), `VERDICT: FAIL` (a check failed: the mod's), or `VERDICT: RIG` (nothing failed, but the rig kept some checks from being made: fix the rig and run again). The exit code is the number of failed checks, plus the checks the rig kept from being made and the rig faults it could not put right (so it is 0 only for `PASS`), at most 125; a run that made no check never passes.
 
 ### The steps
 
@@ -55,7 +55,7 @@ The last line is `VERDICT: PASS` (every check made and passed), `VERDICT: FAIL` 
 | `save_rejoin` | the VM saves mid-session (no stand-in written into the save, the game lives through it), leaves (its stand-in goes on the host, nothing stray), joins again, loads its own save in the session (no stand-in comes back from it); then the host ends the session (the VM's stand-in of it goes) and hosts again |
 | `final` | both games still up, no stray stand-ins; each plugin log since the start (no error or assertion line; warnings counted per prefix; no Steam id, IP address or private name); the host never saved or loaded; no new crash log on either machine |
 
-After the steps, always (also after the breaker or Ctrl-C: the run's log goes through a tee that Ctrl-C does not kill), the restore: virtual pads off, sessions left, the VM's test save moved aside into the project's folder on the VM (never deleted), any join task left on the VM removed; then both games closed, both machines' `Skyrim.ini` and `SkyrimPrefs.ini` put back byte for byte, `--build`'s install undone and both DLLs checked to be the ones from before, `start.ps1`'s game tasks removed from the VM, and both Saves folders compared with their listings from before (the host's must not have changed). `--keep` leaves the games running; once both are closed, `smoke.sh --restore <run folder>` does the rest of the restore (the ini files, the install undone and both DLLs checked, the game tasks, the Saves listings). A run folder is marked put back once its restore passes, and is not put back twice; a restore with a failed check (an undo that failed, a DLL that differs) is left unmarked, so `--restore` can try it again.
+After the steps, always (also after the breaker or Ctrl-C: the run's log goes through a tee that Ctrl-C does not kill), the restore: virtual pads off, sessions left, the VM's test save moved aside into the project's folder on the VM (never deleted), any join task left on the VM removed; then both games closed (when one will not close, the rest waits for `--restore`), both machines' `Skyrim.ini` and `SkyrimPrefs.ini` put back byte for byte, `--build`'s install undone and both DLLs checked to be the ones from before, `start.ps1`'s game tasks removed from the VM, and both Saves folders compared with their listings from before (the host's must not have changed). `--keep` leaves the games running; once both are closed, `smoke.sh --restore <run folder>` does the rest of the restore (the ini files, the install undone and both DLLs checked, the game tasks, the Saves listings). A run folder is marked put back once its restore passes, and is not put back twice; a restore with a failed check (an undo that failed, a DLL that differs) is left unmarked, so `--restore` can try it again.
 
 ## Adding a step for a new feature
 
