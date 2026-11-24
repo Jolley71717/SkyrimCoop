@@ -589,6 +589,39 @@ TEST("quest view: what the session would not take stays this game's own and is n
 	CHECK(view.Offer(Completed(0x10)));
 }
 
+TEST("quest view: at the host's reset a friend's reports out are dropped, so none takes the answer to a report of the new world")
+{
+	// A friend reported objective 1 and stage 20 of 0x10; the host loaded a save before the server took them, so the
+	// server drops both unanswered (heard before the friend said it heard the reset).
+	QuestRules::View view;
+	REQUIRE(view.Offer(Objective(0x10, 1, 1, 10)));
+	REQUIRE(view.Offer(Stage(0x10, 20)));
+	CHECK(view.Outstanding() == 2);
+
+	// Kept out (what the reset did before): the same objective in the new world is never offered, a completed one never
+	// moves on, so it is lost.
+	auto kept = view;
+	kept.Clear();
+	CHECK(!kept.Offer(Objective(0x10, 1, 1, 10)));
+
+	// Dropped at the reset: the new world's reports go, and each answer is its own report's.
+	view.Clear();
+	CHECK(view.DropOut() == 2);
+	CHECK(view.Outstanding() == 0);
+	REQUIRE(view.Offer(Objective(0x10, 1, 1, 10)));
+	REQUIRE(view.Offer(Stage(0x10, 20)));
+	const auto busy = view.Answered({ 0x10, QuestEntry::kObjective, 1, QuestEntry::kBusy });
+	REQUIRE(busy);
+	CHECK(*busy == Objective(0x10, 1, 1, 10));
+	CHECK(view.Offer(Objective(0x10, 1, 1, 10)));  // busy: sent again, not refused as still out
+	const auto same = view.Answered({ 0x10, QuestEntry::kStage, 20, QuestEntry::kSame });
+	REQUIRE(same);
+	CHECK(*same == Stage(0x10, 20));
+	CHECK(view.Outstanding() == 1);
+	CHECK(view.DropOut() == 1);
+	CHECK(view.DropOut() == 0);
+}
+
 TEST("quest view: what this game held when the session's word was new to it (a welcome, the host's reset, a load) is its base, never reported")
 {
 	// Both players reached stage 20 of 0x10: objective 10 completed, 20 shown, and this friend finished quest 0x11. The
@@ -1722,7 +1755,7 @@ TEST("server: a game's quest report sent before it heard the host's reset is dro
 	CHECK(news[0].first == host->playerId);
 }
 
-TEST("quest judge: a quest stopped here without ending keeps its stages passed: the ones below where it stopped are never set again")
+TEST("quest judge: a quest stopped here without ending is not started again: its stages below the stop are passed, the rest stopped")
 {
 	using V = QuestRules::Verdict;
 	QuestRules::Here here;
@@ -1731,8 +1764,19 @@ TEST("quest judge: a quest stopped here without ending keeps its stages passed: 
 	here.current = 30;  // stopped at 30: not running, not ended
 	CHECK(QuestRules::Judge(Stage(0x10, 10), 0, here) == V::kPassed);
 	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kPassed);
+	CHECK(QuestRules::Judge(Stage(0x10, 40), 2, here) == V::kStopped);  // setstage would start it again (another branch)
+	CHECK(QuestRules::Judge(Stage(0x10, 30), 0, here) == V::kStopped);
+	CHECK(QuestRules::Judge(Completed(0x10), 2, here) == V::kStopped);
+	here.sessionEnded = true;  // ran here: not put aside as never started
+	CHECK(QuestRules::Judge(Stage(0x10, 40), 0, here) == V::kStopped);
+	CHECK(QuestRules::Judge(Completed(0x10), 0, here) == V::kStopped);
+	here.sessionEnded = false;
+	CHECK(QuestRules::Judge(Objective(0x10, 1, 1, 10), 2, here) == V::kStopped);
+	CHECK(QuestRules::VerdictName(V::kStopped) == "stopped");
+	here.started = true;  // running at 30: made as ever
 	CHECK(QuestRules::Judge(Stage(0x10, 40), 2, here) == V::kMake);
-	CHECK(QuestRules::Judge(Objective(0x10, 1, 1, 10), 2, here) == V::kNotStarted);
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kPassed);
+	here.started = false;
 	here.current = 0;  // never run here
 	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kMake);
 }

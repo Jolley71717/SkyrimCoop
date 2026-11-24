@@ -331,6 +331,11 @@ namespace QuestRules
 			out.clear();
 		}
 
+		// Every report of ours out forgotten, unanswered (a friend's game at the host's reset): the server drops what it
+		// hears of the world before the reset without an answer, and the answers to the reports it handled before arrived
+		// ahead of the reset; an entry left out would take the answer to a later report on the same thing. How many.
+		std::size_t DropOut() { return std::exchange(out, {}).size(); }
+
 		// Everything of one quest forgotten (a radiant job begun again or stopped: its earlier run's word is not this
 		// run's): the session's word on it, this game's base and own, and its reports out (their answers, when they come,
 		// answer nothing).
@@ -491,7 +496,7 @@ namespace QuestRules
 		bool                        sessionEnded = false;
 
 		// This game ran the quest: it runs, has ended, or was stopped part way (it has a current stage). The one notion of
-		// "started here" the rules use (kParked, PAST_SETTLE, kPassed).
+		// "started here" the rules use (kParked, PAST_SETTLE, kPassed, kStopped).
 		[[nodiscard]] bool Ran() const { return started || current != 0; }
 	};
 
@@ -533,6 +538,8 @@ namespace QuestRules
 		kHold,        // the quest's run is heard and not started here yet (its fills, its start): held, its later wants too
 		kParked,      // the session's past (a join, a load) on a quest it has ended that this game never started: put aside,
 		              // not made and not dropped, until the quest starts here (its own play, or a quest made here starts it)
+		kStopped,     // a quest this game stopped part way without ending it (another branch, its own stop): its stages from
+		              // there on, objectives and end are not made (setstage would start it again): dropped
 	};
 
 	[[nodiscard]] constexpr std::string_view VerdictName(Verdict a_verdict)
@@ -560,6 +567,8 @@ namespace QuestRules
 			return "hold";
 		case Verdict::kParked:
 			return "parked";
+		case Verdict::kStopped:
+			return "stopped";
 		}
 		return "?";
 	}
@@ -585,6 +594,11 @@ namespace QuestRules
 		// stage or end said live, are made as ever.
 		if (!a_here.Ran() && a_reporter == 0 && a_here.sessionEnded) {
 			return Verdict::kParked;
+		}
+		// Stopped here part way (ran, not running, not ended): the session's word does not start it again. Its stages below
+		// where it stopped are passed (below), the rest dropped.
+		if (a_here.Ran() && !a_here.started && !(a_entry.kind == Entry::kStage && a_entry.index < a_here.current)) {
+			return Verdict::kStopped;
 		}
 		if (a_entry.kind != Entry::kStage) {
 			return a_here.started ? Verdict::kMake : Verdict::kNotStarted;
