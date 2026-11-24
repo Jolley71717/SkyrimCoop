@@ -1612,6 +1612,12 @@ namespace RemotePlayers
 		return byActor.contains(actor) || retiring.contains(actor);
 	}
 
+	bool MadeAsStandIn(const RE::Actor* a_actor)
+	{
+		return a_actor && a_actor->GetFormID() >= 0xFF000000 && a_actor != RE::PlayerCharacter::GetSingleton() &&
+		       IsStandInBase(a_actor->GetObjectReference());
+	}
+
 	RE::NiPointer<RE::Actor> StandInOf(std::uint32_t a_playerId)
 	{
 		RE::ActorHandle handle;
@@ -1640,6 +1646,16 @@ namespace RemotePlayers
 		std::scoped_lock l{ lock };
 		const auto       it = byActor.find(const_cast<RE::Actor*>(a_actor));
 		return it == byActor.end() ? 0 : it->second;
+	}
+
+	std::optional<Clock::time_point> SenderTime(std::uint32_t a_playerId, std::uint32_t a_sentMs)
+	{
+		if (a_sentMs == 0) {
+			return std::nullopt;
+		}
+		std::scoped_lock l{ lock };
+		const auto       it = players.find(a_playerId);
+		return it != players.end() ? it->second.buffer.sender.At(a_sentMs) : std::nullopt;
 	}
 
 	std::vector<Protocol::PlayerState> FriendStates()

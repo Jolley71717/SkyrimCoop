@@ -62,6 +62,11 @@ namespace
 		// Ride changes passed on (common/RideBook.h): a burst of 64, then 16 a second (a player gets on or off a horse now
 		// and then, the NPCs a game runs a few at a time). Past it a change is kept and owed, never dropped.
 		TokenBucket rideBudget{ 64.0, 16.0 };
+		// Projectiles passed on (kShots): a burst of 96, then 48 a second (a player's bow or spell sends one a second or
+		// two, a concentration spell about ten while held, and the NPCs a game runs a few more in a fight). Past it a shot
+		// is dropped, never kept: its flight is over by the time a budget would let it go.
+		TokenBucket shotBudget{ 96.0, 48.0 };
+		bool        toldShotsDropped = false;
 		bool        toldUnknown = false;
 	};
 
@@ -614,6 +619,26 @@ void Server::Run()
 				}
 				if (!pass.empty()) {
 					sendRides(nullptr, &a_key, std::move(pass), false, a_peer.playerId);
+				}
+			}
+			break;
+		case MT::kShots:
+			// To the others, the sender named: a player's own shots and those of the NPCs its game runs, each within the
+			// sender's budget (past it dropped, said once).
+			if (auto msg = Protocol::DecodeShots(a_data)) {
+				const auto now = Clock::now();
+				std::erase_if(msg->shots, [&](const Protocol::Shot& a_shot) {
+					return a_shot.player != 0 ? a_shot.player != a_peer.playerId : !npcs.Runs(a_peer.playerId, a_shot.npc);
+				});
+				const auto believed = msg->shots.size();
+				std::erase_if(msg->shots, [&](const Protocol::Shot&) { return !a_peer.shotBudget.Take(now); });
+				if (msg->shots.size() < believed && !a_peer.toldShotsDropped) {
+					a_peer.toldShotsDropped = true;
+					log(std::format("server: player {} sends shots faster than they are passed on: the rest are dropped (said once)", a_peer.playerId));
+				}
+				if (!msg->shots.empty()) {
+					msg->sender = a_peer.playerId;
+					broadcast(Protocol::Encode(*msg), true, &a_key);
 				}
 			}
 			break;

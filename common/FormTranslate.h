@@ -82,6 +82,7 @@ namespace FormTranslate
 		case MT::kPlayerFace:
 		case MT::kRemoteFace:
 		case MT::kRides:
+		case MT::kShots:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -387,6 +388,18 @@ namespace FormTranslate
 						ride.mount = {};
 						++ctx.out.fields;
 						ctx.changed = true;
+					}
+				}
+			});
+			break;
+		// Shots: one whose record or NPC the other side lacks is left out (nothing to launch, or no copy to launch it
+		// from); a source it lacks (a mod's bow, a player-made poison) becomes none, and the shot still flies.
+		case MT::kShots:
+			detail::Apply<Protocol::Shots>(a_packet, ctx, Protocol::DecodeShots, [&](Protocol::Shots& a_msg) {
+				ctx.Entries(a_msg.shots, [&](Protocol::Shot& a_shot) { return (a_shot.player != 0 || ctx.Npc(a_shot.npc)) && ctx.Key(a_shot.projectile); });
+				for (auto& shot : a_msg.shots) {
+					for (auto* id : { &shot.weapon, &shot.ammo, &shot.spell, &shot.enchant, &shot.poison }) {
+						ctx.Detail(*id);
 					}
 				}
 			});

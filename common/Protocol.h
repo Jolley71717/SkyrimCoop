@@ -47,7 +47,10 @@ namespace Protocol
 	//    its stand-in or copy shows. (As with 9: whichever change lands later renumbers.)
 	// 12: who rides what (kRides, message type 55): a player's horse, and the mounts of the NPCs a game runs, so the others
 	//    show the rider in its saddle. (As with 9: whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 12;
+	// 13: every projectile an actor launches (kShots, message type 57): a player's arrows, bolts, spells and shouts, and
+	//    those of the NPCs a game runs, so the others launch the same from the actor that shows the shooter, at the
+	//    shooter's origin and aim. (As with 9: whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 13;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -113,6 +116,8 @@ namespace Protocol
 		kRemoteFace = 42,     // server -> the others (and to a joiner, each one there): that player's face
 		// 43: free; 44-48: the shared loot's, 49-54: the dropped items' (each in its own change).
 		kRides = 55,  // both ways, reliable: who rides what (a player, the NPCs a game runs); the server names the sender
+		// 56: the quest runs' (in its own change).
+		kShots = 57,  // both ways, reliable: projectiles our player and the NPCs a game runs launched; the server names the sender
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -668,6 +673,87 @@ namespace Protocol
 		std::vector<Ride> rides;
 		bool operator==(const Rides&) const = default;
 	};
+
+	// ---- projectiles (docs/DESIGN.md, "Projectiles") ----
+	// Every projectile a player or an NPC launches in its own game (an arrow, a bolt, a spell's of any type, a shout's, a
+	// staff's), said as it leaves: what it is, from where, which way and how strong. Every other game launches the same
+	// from the actor that shows the shooter there (a friend's stand-in, an NPC's copy), at the moment that actor is drawn
+	// at. Only the shooter's game deals what its shot hits: a stand-in's launch deals nothing, as its blows do not, and a
+	// copy's deals what its game runs, as its blows do.
+
+	// At most this many shots in one message (a game sends what a tick saw; a burst waits for the next).
+	inline constexpr std::size_t MAX_SHOTS = 32;
+
+	// What kind of projectile it is, by its record's type (BGSProjectile's): the developer channel and the rig count them
+	// by kind, and a game ends the ones it launched by it (an arrow that stuck, a rune that lies).
+	enum class ShotKind : std::uint8_t
+	{
+		kOther = 0,
+		kArrow = 1,    // arrows and crossbow bolts
+		kMissile = 2,  // a fire-and-forget spell's bolt or ball
+		kLobber = 3,   // lobbed: a rune
+		kBeam = 4,     // lightning
+		kFlame = 5,    // a flame stream (Flames, a dragon's breath)
+		kCone = 6,     // a cone (Unrelenting Force)
+		kBarrier = 7,  // a wall
+	};
+	inline constexpr std::uint8_t SHOT_KIND_COUNT = 8;
+
+	enum ShotFlags : std::uint8_t
+	{
+		kShotDual = 1 << 0,  // dual cast: its model's scale and its power are the dual cast's
+		kShotHeld = 1 << 1,  // a concentration spell's: one of a stream while the cast is held
+	};
+	inline constexpr std::uint8_t kShotAllFlags = kShotDual | kShotHeld;
+
+	// A magic caster's hand (MagicSystem::CastingSource's numbers): left, right, other (the voice), instant.
+	inline constexpr std::uint8_t SHOT_SOURCE_COUNT = 4;
+
+	// One projectile. player != 0: that player's (from a game: its own id, which the server checks); else npc, the NPC that
+	// launched it (its runner's word). projectile: its record (a form the reader lacks leaves the shot out). weapon, ammo,
+	// spell (a spell, a scroll, a staff's enchantment, a shout's spell), enchant and poison (an arrow's): its sources, 0
+	// when none or one the reader lacks. pitch and heading: the angles it left at (radians, the game's angle x and z).
+	// power: a bow's draw (1: full) or a spell's power; scale: its model's (a dual cast's is larger).
+	struct Shot
+	{
+		std::uint32_t player = 0;
+		NpcKey        npc;
+		std::uint32_t sentMs = 0;
+		std::uint32_t projectile = 0;
+		std::uint32_t weapon = 0;
+		std::uint32_t ammo = 0;
+		std::uint32_t spell = 0;
+		std::uint32_t enchant = 0;
+		std::uint32_t poison = 0;
+		ShotKind      kind = ShotKind::kOther;
+		std::uint8_t  source = 0;
+		std::uint8_t  flags = 0;
+		float         x = 0, y = 0, z = 0;
+		float         pitch = 0, heading = 0;
+		float         power = 1.0f;
+		float         scale = 1.0f;
+		bool operator==(const Shot&) const = default;
+	};
+
+	// sender: 0 from a game; the server names the game that sent them.
+	struct Shots
+	{
+		std::uint32_t     sender = 0;
+		std::vector<Shot> shots;
+		bool operator==(const Shots&) const = default;
+	};
+
+	// Whether a shot can be: one shooter (a player and no NPC, or an NPC of id != 0), a record, a known kind, hand and
+	// flags, an origin a game can hold, angles within a turn either way, and a power and scale from 0 to 10.
+	[[nodiscard]] inline bool ShotHolds(const Shot& a_shot)
+	{
+		const bool shooter = a_shot.player != 0 ? a_shot.npc == NpcKey{} : a_shot.npc.id != 0;
+		const auto angle = [](float a_v) { return std::isfinite(a_v) && std::fabs(a_v) <= 7.0f; };
+		const auto amount = [](float a_v) { return std::isfinite(a_v) && a_v >= 0.0f && a_v <= 10.0f; };
+		return shooter && a_shot.projectile != 0 && static_cast<std::uint8_t>(a_shot.kind) < SHOT_KIND_COUNT && a_shot.source < SHOT_SOURCE_COUNT &&
+		       (a_shot.flags & ~kShotAllFlags) == 0 && InWorld(a_shot.x) && InWorld(a_shot.y) && InWorld(a_shot.z) && angle(a_shot.pitch) &&
+		       angle(a_shot.heading) && amount(a_shot.power) && amount(a_shot.scale);
+	}
 
 	// ---- serialization -------------------------------------------------------------
 
@@ -1786,6 +1872,71 @@ namespace Protocol
 
 	inline constexpr std::size_t MAX_RIDES_SIZE = 1 + 4 + 1 + 1 + MAX_RIDES * (4 + 8 + 8 + 1);
 	static_assert(MAX_RIDES <= 0xFF && MAX_RIDES_SIZE <= 2048, "a message of rides stays small");
+
+	inline std::vector<std::uint8_t> Encode(const Shots& a_msg)
+	{
+		Writer     w{ MessageType::kShots };
+		const auto count = (std::min)(a_msg.shots.size(), MAX_SHOTS);
+		w.U32(a_msg.sender);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& shot = a_msg.shots[i];
+			w.U32(shot.player);
+			WriteKey(w, shot.player != 0 ? NpcKey{} : shot.npc);
+			w.U32(shot.sentMs);
+			for (const auto id : { shot.projectile, shot.weapon, shot.ammo, shot.spell, shot.enchant, shot.poison }) {
+				w.U32(id);
+			}
+			w.U8(static_cast<std::uint8_t>(shot.kind));
+			w.U8(shot.source);
+			w.U8(shot.flags);
+			for (const auto v : { shot.x, shot.y, shot.z, shot.pitch, shot.heading, shot.power, shot.scale }) {
+				w.F32(v);
+			}
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_SHOTS, or a shot that does not hold (ShotHolds).
+	inline std::optional<Shots> DecodeShots(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Shots msg;
+		msg.sender = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_SHOTS) {
+			return std::nullopt;
+		}
+		msg.shots.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			Shot shot;
+			shot.player = r.U32();
+			shot.npc = ReadKey(r);
+			shot.sentMs = r.U32();
+			for (auto* id : { &shot.projectile, &shot.weapon, &shot.ammo, &shot.spell, &shot.enchant, &shot.poison }) {
+				*id = r.U32();
+			}
+			shot.kind = static_cast<ShotKind>(r.U8());
+			shot.source = r.U8();
+			shot.flags = r.U8();
+			for (auto* v : { &shot.x, &shot.y, &shot.z, &shot.pitch, &shot.heading, &shot.power, &shot.scale }) {
+				*v = r.F32();
+			}
+			if (r.Ok() && !ShotHolds(shot)) {
+				return std::nullopt;
+			}
+			msg.shots.push_back(shot);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t SHOT_BYTES = 4 + 8 + 4 + 6 * 4 + 3 + 7 * 4;
+	inline constexpr std::size_t MAX_SHOTS_SIZE = 1 + 4 + 1 + MAX_SHOTS * SHOT_BYTES;
+	static_assert(MAX_SHOTS <= 0xFF && MAX_SHOTS_SIZE <= 4096, "a message of shots stays small");
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

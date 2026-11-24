@@ -74,10 +74,15 @@ namespace RemotePlayers
 	// For the copies of other games' NPCs (NpcSync), which go through the same hooks:
 	// Whether an actor is one of this game's stand-ins, or an actor of ours on its way out of the world.
 	[[nodiscard]] bool IsOurs(const RE::Actor* a_actor);
+	// Whether an actor was made as a stand-in is (made as the game ran, of a preset base), this game's now or one a save
+	// kept: what the rig's `shots strays` asks of a projectile's shooter after a load. Main thread.
+	[[nodiscard]] bool MadeAsStandIn(const RE::Actor* a_actor);
 	// The stand-in that shows a_playerId here (none: not placed), and the player a stand-in shows (0: it is none). Main
 	// thread.
 	[[nodiscard]] RE::NiPointer<RE::Actor> StandInOf(std::uint32_t a_playerId);
 	[[nodiscard]] std::uint32_t            PlayerOf(const RE::Actor* a_actor);
+	// The moment on this game's clock a friend's a_sentMs was (none: not known yet), for their shots (src/game/Shots.h).
+	[[nodiscard]] std::optional<std::chrono::steady_clock::time_point> SenderTime(std::uint32_t a_playerId, std::uint32_t a_sentMs);
 	// Each friend's newest state, as it came (their place, for who is nearest an NPC).
 	[[nodiscard]] std::vector<Protocol::PlayerState> FriendStates();
 	// How many copies NpcSync moves: while any, the actor update hook asks NpcSync::UpdateCopy about every Character

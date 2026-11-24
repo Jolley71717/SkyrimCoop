@@ -15,6 +15,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Shots.h"
 #include "game/VirtualPad.h"
 #include "net/Session.h"
 #include "steam/Steam.h"
@@ -178,6 +179,7 @@ namespace
 		if (!NpcSync::Install()) {
 			logs::warn("NPCs: copies of the NPCs this game runs show no actions in the others' games (the graph notify is not hooked)");
 		}
+		Shots::Install();  // every projectile an actor launches, said and shown (says why if not)
 		PlayerActions::Install();  // our player's attacks, casts and shouts, for the others' stand-in of us (says why if not)
 		LocalPlayer::NoteDefaultName();
 		NoFirstRunPrompts();
@@ -211,6 +213,7 @@ namespace
 			// Which save is loaded: the line a report of "an old save" is read by.
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
 			Riding::ForgetWorld();
+			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
 			break;
@@ -223,6 +226,7 @@ namespace
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
 			Riding::ForgetWorld();
+			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
 			CheckSteam();
@@ -230,6 +234,7 @@ namespace
 		case SKSE::MessagingInterface::kSaveGame:
 			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
+			Shots::BeforeSave();    // our launches ended first: none is in the save
 			NpcSync::BeforeSave();  // copies of spawns first: the stand-ins' save guard names them
 			RemotePlayers::BeforeSave();
 			break;
@@ -265,6 +270,7 @@ namespace
 	void OnRevert(SKSE::SerializationInterface*)
 	{
 		Riding::ForgetWorld();
+		Shots::ForgetWorld();
 		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();
 	}
