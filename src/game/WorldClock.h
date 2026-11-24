@@ -30,6 +30,14 @@ namespace WorldClock
 	// The owner's clock, from the session (kRemoteClock).
 	void Heard(const Protocol::ClockState& a_clock);
 
+	// A friend's weather magic, asked of this game as the clock owner (kRemoteWeatherAsk): set under our sky (held until
+	// that friend says it ended, leaves, or ClockRules::MAGIC_HOLD_MAX), or let go.
+	void HeardAsk(const Protocol::WeatherAsk& a_ask);
+
+	// Watches our player's magic (TESMagicEffectApplyEvent): a weather it makes while this game follows the owner's sky
+	// is asked of the owner. Once, when the game's data is loaded; false when the event source is missing.
+	bool Install();
+
 	// A player left: if they kept the clock, this game stops following it until the next owner speaks.
 	void Left(std::uint32_t a_playerId);
 

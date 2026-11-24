@@ -1,10 +1,11 @@
 #!/bin/bash
-# steps/clock.sh: the rig step `clock` (protocol 9, docs/DESIGN.md "Time and weather"), sourced by steps.sh. The host's
+# steps/clock.sh: the rig step `clock` (protocols 9 and 32, docs/DESIGN.md "Time and weather"), sourced by steps.sh. The host's
 # clock is the session's: a wait of the host's is followed in the VM's game, through midnight, the day count moving with
 # the hours; a wait of the VM's is undone after it ends (never under it) and never moves the host; the host's timescale
 # is the VM's while in the session and the VM's own goes into its save and comes back when it leaves; after a load and a
-# rejoin the VM lines up again; outside, the host's weather is the VM's, a weather of the VM's own is undone, and a
-# player inside a walled city's walls shares the sky of one outside them. Not run in a game yet.
+# rejoin the VM lines up again; outside, the host's weather is the VM's (held against its climate), a weather of the VM's
+# own is undone, the VM's weather spell is the host's sky until it ends, and a player inside a walled city's walls shares
+# the sky of one outside them. Not run in a game yet.
 #
 #   step_clock                                  the step (in the default run, after quests, before final)
 #   bash tools/rig/steps/clock.sh selftest      the step's reading and its checks with both games faked (CI runs it)
@@ -37,7 +38,14 @@
 #      names the same weather in both; the host's weather changes to it (`clock weather`: as its climate changes it, no
 #      override); the VM's sky reads it within CLOCK_SKY_WAIT (eased in or forced: eased= or forced= up, and its log). The
 #      VM's own weather changes to a snowy one the same way; it is undone within CLOCK_SKY_WAIT and the host's sky stays.
-#   7. The walled city, both ways: one player is put inside CLOCK_CITY's walls (console coc: the scene, said), a child
+#      Following, the VM holds the host's weather against its own climate (pinned=1; protocol 32).
+#   7. Weather magic (protocol 32), outside as 6: the VM's player casts CLOCK_SKY_SPELL (Clear Skies, the shout's third word,
+#      as a spell: console `player.cast`, the input, said) on itself. Within CLOCK_MAGIC_WAIT the VM asks the host for the
+#      weather its spell holds (asks= up, magicAsked= that weather); the host holds it (asked= the same, askSets= up) and
+#      its sky turns to it within CLOCK_SKY_WAIT, the VM's too. The VM's effects are dispelled (console
+#      `player.dispelallspells`): the VM says so (askReleases= up), the host lets the weather go (asked=00000000, askLetGo=
+#      up), and the VM follows the host's sky again, pinned.
+#   8. The walled city, both ways: one player is put inside CLOCK_CITY's walls (console coc: the scene, said), a child
 #      worldspace on Tamriel's climate, the other outside; both read one sky (world=), and a weather the host changes to is
 #      the VM's. The player goes back to SMOKE_CELL (coc). Any weather override left is let go in both games (`clock
 #      release`), so nothing forced outlives the step.
@@ -58,6 +66,8 @@ CLOCK_BACK_SLACK=${CLOCK_BACK_SLACK:-1.0}  # game hours the VM's move back may f
 CLOCK_SCALE=${CLOCK_SCALE:-40}          # the host's timescale for the timescale legs
 CLOCK_VM_SCALE=${CLOCK_VM_SCALE:-7}     # the timescale the VM's console sets for itself
 CLOCK_CITY=${CLOCK_CITY:-Whiterun}      # a cell inside a walled city's walls (a child worldspace on Tamriel's climate), for coc
+CLOCK_SKY_SPELL=${CLOCK_SKY_SPELL:-00078BA4}  # VoiceClearSkiesSelf3 (Skyrim.esm): its script holds a clear weather as an override until the effect ends
+CLOCK_MAGIC_WAIT=${CLOCK_MAGIC_WAIT:-20}      # s: a weather magic's ask to reach the host (its script runs a few frames after the effect starts), or its end
 CLOCK_HOW=; CLOCK_RAN_PEAK=0.000; CLOCK_MENUS=
 
 # ---- the reading, free of the rig (selftest) ----------------------------------------------------------------------
@@ -294,6 +304,8 @@ clock_sky_leg() {
 	else fail "vm: its sky is the host's ($rain)" "vm weather=$(clock_key vm weather) override=$(clock_key vm override) held=$(clock_count vm held)"; fi
 	expect_ge "vm: eased in or forced the host's weather (eased + forced)" $(( $(clock_count vm forced) + $(clock_count vm eased) )) $((forced0 + eased0 + 1))
 	expect_ge "vm: its log says the weather changed to the host's" "$(clock_said vm "Clock: weather .* -> $rain")" $((lines0 + 1))
+	if wait_until "$CLOCK_WAIT" _clock_key_is vm pinned 1; then pass "vm: holds the host's weather against its own climate (pinned=1)" "pins=$(clock_count vm pins)"
+	else fail "vm: holds the host's weather against its own climate (pinned=1)" "pinned=$(clock_key vm pinned) override=$(clock_key vm override) weather=$(clock_key vm weather)"; fi
 
 	snow=$(clock_hex "$(dc vm 'clock pick snow')" weather)
 	[ -n "$snow" ] || { rig_fault state "vm: a snowy weather of the base game" "$(dc vm 'clock pick snow' | cut -c1-120)"; return 1; }
@@ -308,6 +320,39 @@ clock_sky_leg() {
 		fail "vm: its own weather undone, the host's again" "vm weather=$(clock_key vm weather), want $rain"
 	fi
 	expect_eq "host: its sky stays its own" "$(clock_key host weather)" "$rain"
+}
+
+_clock_key_is() { [ "$(clock_key "$1" "$2")" = "$3" ]; }
+_clock_above() { [ "$(clock_count "$1" "$2")" -gt "$3" ]; }
+_clock_let_go() { _clock_key_is host asked 00000000 && _clock_above host askLetGo "$1"; }
+
+# clock_magic_leg: the VM's weather spell is the host's sky until it ends (the step's 7). Run after clock_sky_leg (both
+# outside, under one sky).
+clock_magic_leg() {
+	local asks0 rel0 lets0 mine
+	asks0=$(clock_count vm asks); rel0=$(clock_count vm askReleases); lets0=$(clock_count host askLetGo)
+	clock_console "vm: casts $CLOCK_SKY_SPELL on itself (console player.cast: the input)" vm "player.cast $CLOCK_SKY_SPELL player" || return 1
+	if wait_until "$CLOCK_MAGIC_WAIT" _clock_above vm asks "$asks0"; then pass "vm: its weather magic asked of the host" "asks=$(clock_count vm asks) magicAsked=$(clock_key vm magicAsked) magicWindows=$(clock_count vm magicWindows)"
+	else fail "vm: its weather magic asked of the host" "asks=$(clock_count vm asks) magicWindows=$(clock_count vm magicWindows) magic=$(clock_key vm magic) weather=$(clock_key vm weather) override=$(clock_key vm override)"; return 1; fi
+	mine=$(clock_hex "$(clock_of vm)" magicAsked)
+	if [ -z "$mine" ] || [ "$mine" = 00000000 ]; then
+		fail "vm: its spell holds its weather (magicAsked=)" "magicAsked=$(clock_key vm magicAsked) magic=$(clock_key vm magic) override=$(clock_key vm override): asked as not held, so the host never lets it go"
+		return 1
+	fi
+	if wait_until "$CLOCK_WAIT" _clock_key_is host asked "$mine"; then pass "host: holds the VM's weather magic ($mine)" "askSets=$(clock_count host askSets) askedBy=$(clock_key host askedBy)"
+	else fail "host: holds the VM's weather magic ($mine)" "asked=$(clock_key host asked) askSets=$(clock_count host askSets) askIgnored=$(clock_count host askIgnored) host world=$(clock_key host world)"; fi
+	if wait_until "$CLOCK_SKY_WAIT" _clock_weather_is host "$mine"; then pass "host: its sky is the VM's spell's ($mine)" "askLetGo=$(clock_count host askLetGo)"
+	else fail "host: its sky is the VM's spell's ($mine)" "host weather=$(clock_key host weather) asked=$(clock_key host asked) askLetGo=$(clock_count host askLetGo)"; fi
+	if wait_until "$CLOCK_SKY_WAIT" _clock_weather_is vm "$mine"; then pass "vm: its sky is its spell's ($mine)" "magic=$(clock_key vm magic)"
+	else fail "vm: its sky is its spell's ($mine)" "vm weather=$(clock_key vm weather) override=$(clock_key vm override) magic=$(clock_key vm magic)"; fi
+
+	clock_console "vm: its effects dispelled (console player.dispelallspells: the input)" vm "player.dispelallspells" || return 1
+	if wait_until "$CLOCK_MAGIC_WAIT" _clock_above vm askReleases "$rel0"; then pass "vm: tells the host its weather magic ended" "askReleases=$(clock_count vm askReleases)"
+	else fail "vm: tells the host its weather magic ended" "askReleases=$(clock_count vm askReleases) magicAsked=$(clock_key vm magicAsked) override=$(clock_key vm override)"; fi
+	if wait_until "$CLOCK_WAIT" _clock_let_go "$lets0"; then pass "host: let the VM's weather go" "askLetGo=$(clock_count host askLetGo)"
+	else fail "host: let the VM's weather go" "asked=$(clock_key host asked) askLetGo=$(clock_count host askLetGo), was $lets0"; fi
+	if wait_until "$CLOCK_SKY_WAIT" _clock_key_is vm pinned 1; then pass "vm: follows the host's sky again, pinned" "vm weather=$(clock_key vm weather) host weather=$(clock_key host weather)"
+	else fail "vm: follows the host's sky again, pinned" "pinned=$(clock_key vm pinned) magic=$(clock_key vm magic) override=$(clock_key vm override) vm weather=$(clock_key vm weather) host weather=$(clock_key host weather)"; fi
 }
 
 # clock_back <who>: that player back in SMOKE_CELL (console coc: the scene, said)
@@ -369,6 +414,8 @@ step_clock() {
 	clock_scale_leg "$own"
 	section "clock: outside, the host's weather is the VM's"
 	if clock_sky_leg; then
+		section "clock: the VM's weather spell is the host's sky until it ends"
+		clock_magic_leg
 		section "clock: a walled city and the land round it are one sky, both ways"
 		clock_city_leg host vm && clock_city_leg vm host
 	fi
@@ -414,15 +461,18 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	# city's walls), none (nothing reaches the VM), nodays (the hours follow, the day count does not), friendmoves (the VM's
 	# wait moves the host instead of being undone), nosky (the weather does not follow), underwait (the VM's own wait is
 	# pulled back while it runs, then once more), savesession (the VM's save holds the session's timescale), rawsky (a
-	# walled city is its own sky: the VM never follows across the walls).
+	# walled city is its own sky: the VM never follows across the walls), nopin (the VM never holds the host's weather),
+	# nomagic (the VM's weather spell is never asked of the host), norelease (the host never lets the VM's spell's weather go).
 	# MENU: 1 the Wait menu takes the pad; 0 it never opens (the console stands in); noright its slider ignores right (a
 	# wait of one hour); noa it opens but a does nothing; stuck the wait runs and the menu never shuts.
 	fake() {  # fake <mode> [menu]
 		FK=$d/fake; rm -rf "$FK"; mkdir -p "$FK"; MODE=$1; MENU=${2:-1}
 		for w in host vm; do
-			for k in lineUps hourSets backSets midnightSteps forced eased held scaleBacks heard menu away rights; do echo 0 > "$FK/$w.$k"; done
+			for k in lineUps hourSets backSets midnightSteps forced eased held scaleBacks heard menu away rights pinned magicWindows asks askReleases askSets askLetGo; do echo 0 > "$FK/$w.$k"; done
 			echo 20.00 > "$FK/$w.scale"; echo - > "$FK/$w.own"; echo - > "$FK/$w.saved"; : > "$FK/$w.log"; echo 0010A242 > "$FK/$w.weather"; echo 0000003C > "$FK/$w.place"
+			echo 00000000 > "$FK/$w.asked"; echo 00000000 > "$FK/$w.magicAsked"
 		done
+		[ "$1" = nopin ] || echo 1 > "$FK/vm.pinned"
 		echo 9.000 > "$FK/host.hour"; echo 10.3750 > "$FK/host.days"; echo 17 > "$FK/host.day"
 		echo 9.000 > "$FK/vm.hour"; echo 3.3750 > "$FK/vm.days"; echo 4 > "$FK/vm.day"
 		[ "$1" = none ] || echo 1 > "$FK/vm.heard"
@@ -476,6 +526,20 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		fi
 		fsync
 	}
+	# fcast <who>: that game's player cast Clear Skies on itself: asked of the host, held there, both skies its (nomagic:
+	# nothing asked); fdispel <who>: its effects dispelled: the host told, let go (norelease: never), the VM pinned again
+	# (nopin: never)
+	fcast() {
+		[ "$MODE" = nomagic ] && return 0
+		inc $1 magicWindows; inc $1 asks; s $1 magicAsked 0010D4FE; s $1 pinned 0
+		s host asked 0010D4FE; inc host askSets; s host weather 0010D4FE; s $1 weather 0010D4FE
+	}
+	fdispel() {
+		[ "$(g $1 magicAsked)" = 00000000 ] && return 0
+		inc $1 askReleases; s $1 magicAsked 00000000
+		[ "$MODE" = norelease ] || { s host asked 00000000; inc host askLetGo; }
+		[ "$MODE" = nopin ] || s $1 pinned 1
+	}
 	# fwait <who>: the a of that game's Wait menu, as MENU and MODE say
 	fwait() {
 		local w=$1 v
@@ -491,7 +555,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		local w=$1 c=$2 v
 		case "$c" in
 			ping) echo pong ;;
-			clock) echo "ready=1 opening=0 hour=$(g $w hour) days=$(g $w days) raw=$(g $w days) midnights=3 day=$(g $w day) month=8 scale=$(g $w scale) own=$(g $w own) outside=1 world=$(fworld $w) weather=$(g $w weather) override=0 owner=$([ $w = vm ] && [ "$(g vm heard)" -gt 0 ] && echo 1 || echo 0) heard=$(g $w heard) heardAge=1.0 ownerHour=- ownerWeather=00000000 offset=- moving=0.000 reports=9 lineUps=$(g $w lineUps) hourSets=$(g $w hourSets) backSets=$(g $w backSets) midnightSteps=$(g $w midnightSteps) forced=$(g $w forced) eased=$(g $w eased) held=$(g $w held) scaleSets=0 scaleBacks=$(g $w scaleBacks) place=$(g $w place) waiting=$(g $w menu) waits=0 mq101=stopped/completed/1000 canMove=1" ;;
+			clock) echo "ready=1 opening=0 hour=$(g $w hour) days=$(g $w days) raw=$(g $w days) midnights=3 day=$(g $w day) month=8 scale=$(g $w scale) own=$(g $w own) outside=1 world=$(fworld $w) weather=$(g $w weather) override=0 owner=$([ $w = vm ] && [ "$(g vm heard)" -gt 0 ] && echo 1 || echo 0) heard=$(g $w heard) heardAge=1.0 ownerHour=- ownerWeather=00000000 offset=- moving=0.000 reports=9 lineUps=$(g $w lineUps) hourSets=$(g $w hourSets) backSets=$(g $w backSets) midnightSteps=$(g $w midnightSteps) forced=$(g $w forced) eased=$(g $w eased) held=$(g $w held) scaleSets=0 scaleBacks=$(g $w scaleBacks) place=$(g $w place) waiting=$(g $w menu) waits=0 mq101=stopped/completed/1000 canMove=1 pinned=$(g $w pinned) pins=1 pinReleases=0 saveUnpins=0 magic=0 magicWindows=$(g $w magicWindows) asks=$(g $w asks) askReleases=$(g $w askReleases) magicAsked=$(g $w magicAsked) asked=$(g $w asked) askedBy=$([ "$(g $w asked)" = 00000000 ] && echo 0 || echo 2) askSets=$(g $w askSets) askIgnored=0 askLetGo=$(g $w askLetGo) joinedDays=3.375" ;;
 			"clock pick rain") echo "weather=0010A23F kind=rain of=12" ;;
 			"clock pick snow") echo "weather=0010E1F2 kind=snow of=9" ;;
 			"clock pick cloudy "*) if [ "$(g $w weather)" = 0010C001 ]; then echo "weather=0010C002 kind=cloudy of=10"; else echo "weather=0010C001 kind=cloudy of=10"; fi ;;
@@ -506,6 +570,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 			"pad button b") s $w menu 0; s $w rights 0; echo "button b" ;;
 			"console set gamehour to "*) v=${c##* }; s $w hour "$v"; fchange $w; echo ran ;;
 			"console set timescale to "*) v=$(awk -v v="${c##* }" 'BEGIN{printf "%.2f\n", v}'); s $w scale "$v"; fchange $w; echo ran ;;
+			"console player.cast "*) fcast $w; echo ran ;;
+			"console player.dispelallspells") fdispel $w; echo ran ;;
 			"console coc Whiterun") s $w place 0001A26F; fsync; echo ran ;;
 			"console coc "*) s $w place 0000003C; fsync; echo ran ;;
 			"console save "*)
@@ -557,9 +623,27 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "scale: a save that held the session's timescale fails, though its counter and log line passed" "$(count "$o" '^FAIL vm: its save held its own timescale'),$(count "$o" '^PASS vm: put its own timescale back for the save')" 1,1
 
 	fake good; o=$(run 15 clock_sky_leg)
-	t "sky: the host's weather is the VM's, the VM's own undone" "$(verdicts "$o")" "PASS=5 "
+	t "sky: the host's weather is the VM's, held against its climate, the VM's own undone" "$(verdicts "$o")" "PASS=6 "
 	fake nosky; o=$(run 16 clock_sky_leg)
 	t "sky: a weather not followed fails" "$(count "$o" '^FAIL vm: its sky is the host.s')" 1
+	fake nopin; o=$(run 16b clock_sky_leg)
+	t "sky: a weather followed but not held against the VM's climate fails" "$(count "$o" '^FAIL vm: holds the host.s weather against its own climate'),$(count "$o" '^FAIL ')" 1,1
+
+	fake good; o=$(run 27 clock_magic_leg)
+	t "magic: the VM's spell asked, held by the host, both skies its, let go when dispelled, the VM pinned again" "$(verdicts "$o")" "PASS=7 "
+	t "magic: ... the cast and the dispel are the console's, in the report" "$(count "$o" '^PASS vm: (its weather magic asked|tells the host)')" 2
+	fake nomagic; o=$(run 28 clock_magic_leg)
+	t "magic: a spell never asked of the host fails at once" "$(count "$o" '^FAIL vm: its weather magic asked of the host'),$(count "$o" '^FAIL ')" 1,1
+	fake norelease; o=$(run 29 clock_magic_leg)
+	t "magic: a host that never lets the VM's weather go fails" "$(count "$o" '^FAIL host: let the VM.s weather go'),$(count "$o" '^FAIL ')" 1,1
+	fake nopin; o=$(run 30 clock_magic_leg)
+	t "magic: a VM that never follows the host's sky again fails" "$(count "$o" '^FAIL vm: follows the host.s sky again, pinned'),$(count "$o" '^FAIL ')" 1,1
+	fake good; dcfake=$(declare -f dc)
+	dc() { case "$2" in "console player.cast "*) echo "error: console not ready" ;; *) _dc_fake "$@" ;; esac; }
+	eval "_dc_fake ${dcfake#dc }"
+	o=$(run 31 clock_magic_leg)
+	t "magic: a cast the console refused is the rig broken, not a FAIL of the mod" "$(count "$o" '^FAIL .*rig broken \(input\)'),$(count "$o" '^PASS ')" 1,0
+	eval "$dcfake"
 	fake good; o=$(run 17 clock_city_leg host vm)
 	t "city: the host inside the walls, the VM outside: one sky, the weather followed, the host back" "$(verdicts "$o")" "PASS=4 "
 	fake good; o=$(run 18 clock_city_leg vm host)
@@ -580,6 +664,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "step: ... the host followed nobody" "$(count "$o" '^PASS host: (lineUps|hourSets|backSets|midnightSteps)')" 4
 	t "step: ... both city legs made, and no override left in either game" "$(count "$o" '^PASS (host|vm): inside Whiterun'),$(count "$o" '^PASS (host|vm): no weather override left')" 2,2
 	t "step: ... what MQ101 reads is in the report" "$(count "$o" '^PASS (host|vm): its clock is ready: mq101=')" 2
+	t "step: ... the weather magic leg made" "$(count "$o" '^PASS (host: let the VM.s weather go|vm: follows the host.s sky again, pinned)')" 2
 	fake none; o=$(run 23 step_clock)
 	t "step: with no clock sync it fails at once" "$(count "$o" '^FAIL vm: follows the host.s clock')" 1
 	fake friendmoves; o=$(run 24 step_clock)

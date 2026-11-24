@@ -84,6 +84,8 @@ namespace FormTranslate
 		case MT::kQuestAnswer:
 		case MT::kClock:
 		case MT::kRemoteClock:
+		case MT::kWeatherAsk:
+		case MT::kRemoteWeatherAsk:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -262,6 +264,26 @@ namespace FormTranslate
 			}
 		}
 
+		// A weather ask, written back with its own type: a release names no forms; an ask to set a weather needs both its
+		// worldspace and its weather on the other side, else it is kDrop (nothing could be set from it).
+		inline void ApplyWeatherAsk(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeWeatherAsk(a_packet);
+			if (!msg || msg->release) {
+				return;
+			}
+			a_ctx.Detail(msg->worldspace);
+			a_ctx.Detail(msg->weather);
+			if (msg->worldspace == 0 || msg->weather == 0) {
+				a_ctx.out.kind = Result::Kind::kDrop;
+				return;
+			}
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
@@ -313,6 +335,10 @@ namespace FormTranslate
 		case MT::kClock:
 		case MT::kRemoteClock:
 			detail::ApplyClock(a_packet, ctx, *type);
+			break;
+		case MT::kWeatherAsk:
+		case MT::kRemoteWeatherAsk:
+			detail::ApplyWeatherAsk(a_packet, ctx, *type);
 			break;
 		default:
 			break;

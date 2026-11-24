@@ -43,7 +43,11 @@ namespace Protocol
 	//    day count, timescale and outdoor weather; the server passes on the clock owner's alone (the host's game, else
 	//    the player there longest) and keeps it for whoever joins. Written on top of 7 (quests) beside 8 (NPC health,
 	//    another branch): whichever is merged later renumbers; the message numbers (39, 40) do not clash.
-	inline constexpr std::uint16_t VERSION = 9;
+	// 32: a friend's weather magic asked of the clock owner (WeatherAsk, docs/DESIGN.md "Time and weather"): Clear Skies,
+	//    Storm Call, the sun arrow or a mod's weather spell cast in a friend's game is set in the owner's game, and let
+	//    go there when the magic ends. The number is above every other branch's in the stack (31 at the time of
+	//    writing); it is renumbered when it merges, as are its message numbers (85, 86).
+	inline constexpr std::uint16_t VERSION = 32;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -106,6 +110,8 @@ namespace Protocol
 		kQuestReset = 34,      // host -> server: my world is new (a welcome, a load): its quests follow; server -> the others
 		kClock = 39,           // client -> server, reliable: our time of day, day count, timescale and weather (every 5 s, and on a change)
 		kRemoteClock = 40,     // server -> the others: the clock owner's (and the kept one, to a joiner)
+		kWeatherAsk = 85,        // client -> server, reliable: our player's weather magic, for the clock owner to set (or let go)
+		kRemoteWeatherAsk = 86,  // server -> the clock owner alone: a friend's ask, with its player id
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -445,6 +451,19 @@ namespace Protocol
 	// few hundred at most): a number past either is no game's.
 	inline constexpr float MAX_DAYS_PASSED = 1.0e6f;
 	inline constexpr float MAX_TIME_SCALE = 100000.0f;
+
+	// A friend's weather magic (kWeatherAsk, playerId 0; kRemoteWeatherAsk to the clock owner, the asker's player id):
+	// set this weather under the sky of this worldspace (held: as an override, until a release), or let go of the one
+	// this player asked before (release: no forms).
+	struct WeatherAsk
+	{
+		std::uint32_t playerId = 0;
+		std::uint32_t worldspace = 0;  // the sky the asker stands under (ClockRules::SkyWorld)
+		std::uint32_t weather = 0;
+		bool          held = false;
+		bool          release = false;
+		bool operator==(const WeatherAsk&) const = default;
+	};
 
 	// The most entries in one batch (a few hundred bytes: one reliable packet).
 	inline constexpr std::size_t MAX_QUEST_BATCH = 64;
@@ -1216,6 +1235,48 @@ namespace Protocol
 		if (!r.AtEnd() || !std::isfinite(msg.gameHour) || msg.gameHour < 0.0f || msg.gameHour >= 24.0f || !std::isfinite(msg.daysPassed) ||
 			msg.daysPassed < 0.0f || msg.daysPassed > MAX_DAYS_PASSED || !std::isfinite(msg.timeScale) || msg.timeScale < 0.0f ||
 			msg.timeScale > MAX_TIME_SCALE) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kWeatherAsk (no player id: the server knows whose it is) or kRemoteWeatherAsk (the asker's player id first). Flags:
+	// bit 0 held, bit 1 release.
+	inline std::vector<std::uint8_t> Encode(const WeatherAsk& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		if (a_type == MessageType::kRemoteWeatherAsk) {
+			w.U32(a_msg.playerId);
+		}
+		w.U32(a_msg.release ? 0 : a_msg.worldspace);
+		w.U32(a_msg.release ? 0 : a_msg.weather);
+		w.U8(static_cast<std::uint8_t>(a_msg.release ? 2 : (a_msg.held ? 1 : 0)));  // a release is never held
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const WeatherAsk& a_msg) { return Encode(a_msg, MessageType::kWeatherAsk); }
+
+	// An ask to set nothing (no worldspace or weather), a release naming forms, or unknown flags is no message.
+	inline std::optional<WeatherAsk> DecodeWeatherAsk(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kWeatherAsk && type != MessageType::kRemoteWeatherAsk) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		WeatherAsk msg;
+		if (type == MessageType::kRemoteWeatherAsk) {
+			msg.playerId = r.U32();
+		}
+		msg.worldspace = r.U32();
+		msg.weather = r.U32();
+		const auto flags = r.U8();
+		msg.held = (flags & 1) != 0;
+		msg.release = (flags & 2) != 0;
+		if (!r.AtEnd() || (flags & ~3) != 0) {
+			return std::nullopt;
+		}
+		if (msg.release ? (msg.worldspace != 0 || msg.weather != 0 || msg.held) : (msg.worldspace == 0 || msg.weather == 0)) {
 			return std::nullopt;
 		}
 		return msg;
