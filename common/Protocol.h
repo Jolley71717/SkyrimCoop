@@ -70,7 +70,12 @@ namespace Protocol
 	//    there. Written on top of 15 (conversations) beside 16 (mechanism outcomes, types 63-64) and 17 (loose objects,
 	//    types 65-67), each on another branch: the number is above all three and is renumbered at merge; its message (68)
 	//    clashes with none.
-	inline constexpr std::uint16_t VERSION = 18;
+	// 19: the host's reset is a line no quest word crosses (kQuestResetSeen; docs/DESIGN.md "Quests"): the server comes
+	//    back to the host with its reset (kQuestReset with its own id), and the host's game makes no other player's word
+	//    heard before it (the old world's); each other game says when it heard the reset, and the server drops its quest
+	//    reports until then (sent from the old world, in flight). Written on top of 18 (the host's world); renumbered at
+	//    merge.
+	inline constexpr std::uint16_t VERSION = 19;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -130,7 +135,7 @@ namespace Protocol
 		kRemoteQuests = 31,    // server -> everyone, the reporter too: what is new to the session (and all of it, to a joiner)
 		kQuestAnswer = 32,     // server -> the reporter alone, reliable: its entries that were not new, each with why
 		kAskQuests = 33,       // client -> server, reliable: send me every kept quest entry again (after a load)
-		kQuestReset = 34,      // host -> server: my world is new (a welcome, a load): its quests follow; server -> the others
+		kQuestReset = 34,      // host -> server: my world is new (a welcome, a load): its quests follow; server -> the others, and back to the host
 		kClock = 39,           // client -> server, reliable: our time of day, day count, timescale and weather (every 5 s, and on a change)
 		kRemoteClock = 40,     // server -> the others: the clock owner's (and the kept one, to a joiner)
 		kLoot = 44,            // client -> server, reliable: what our player took from or put into containers and bodies
@@ -153,6 +158,7 @@ namespace Protocol
 		kTalkAnswer = 62,  // server -> the asker alone: who talks with that NPC (the asker: it is theirs)
 		// 63 and 64 are left for mechanism outcomes and 65 to 67 for loose objects, written at the same time on other branches.
 		kQuestWorld = 68,  // host -> server, reliable: its world's quests, as kQuests: passed on as the session's word (player 0)
+		kQuestResetSeen = 69,  // client -> server, reliable: our game heard the host's reset: its quest reports are of the new world now
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -469,7 +475,7 @@ namespace Protocol
 		bool operator==(const QuestBatch&) const = default;
 	};
 
-	// The host's world is new (kQuestReset): from the host, empty; from the server, to the others, the host's player id.
+	// The host's world is new (kQuestReset): from the host, empty; from the server, to the others and back to the host, the host's player id.
 	struct QuestReset
 	{
 		std::uint32_t playerId = 0;

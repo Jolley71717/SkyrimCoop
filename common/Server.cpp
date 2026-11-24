@@ -67,6 +67,9 @@ namespace
 		// The host's world (kQuestWorld) goes at once: up to 1024 batches (65536 entries: a long game's world, its ended
 		// quests too, is a few thousand), then 8 a second; past it, busy as ever. Only the host's game says it.
 		TokenBucket questWorldBudget{ 1024.0, 8.0 };
+		// The host's resets this game has not said it heard (kQuestResetSeen): its quest reports are dropped until then.
+		std::uint32_t questResetsOwed = 0;
+		std::uint64_t questsStale = 0;
 		TokenBucket questAskBudget{ 2.0, 0.2 };
 		bool        questAsksOwed = false;
 		std::uint64_t questsDropped = 0;
@@ -592,6 +595,16 @@ void Server::Run()
 					}
 					break;
 				}
+				if (!world && a_peer.questResetsOwed != 0) {
+					// sent before its game heard the host's reset: the old world's word, not taken into the new one (its
+					// game's view was cleared with the reset: nothing waits for an answer)
+					if (a_peer.questsStale == 0) {
+						log(std::format("server: player {} reported quests of the world before the host's reset; dropped until its game hears the reset",
+							a_peer.playerId));
+					}
+					a_peer.questsStale += batch->entries.size();
+					break;
+				}
 				std::vector<E> news;
 				std::vector<E> answers;
 				if (!(world ? a_peer.questWorldBudget : a_peer.questBudget).Take(Clock::now())) {
@@ -673,7 +686,21 @@ void Server::Run()
 				questsFullSaid = false;
 				questRuns.Clear();
 				questRunsFullSaid = false;
+				// The reset is a line no quest word crosses: each other game's reports are dropped until it says it heard
+				// the reset (kQuestResetSeen; the ones in flight were of the old world), and the host hears its reset back
+				// after every word the server passed on before it (its game makes none of those in its new world).
+				for (auto& [key, peer] : peers) {
+					if (peer.joined && key != a_key) {
+						++peer.questResetsOwed;
+					}
+				}
 				broadcast(Protocol::Encode(Protocol::QuestReset{ a_peer.playerId }, true), true, &a_key);
+				send(a_key, Protocol::Encode(Protocol::QuestReset{ a_peer.playerId }, true), true);
+			}
+			break;
+		case MT::kQuestResetSeen:
+			if (a_data.size() == 1 && a_peer.questResetsOwed > 0) {
+				--a_peer.questResetsOwed;
 			}
 			break;
 		case MT::kQuestRun:

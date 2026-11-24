@@ -49,6 +49,9 @@ namespace QuestSync
 	void Heard(const Protocol::QuestBatch& a_batch);
 	void Answered(const Protocol::QuestBatch& a_batch);
 	void HostReset(std::uint32_t a_hostId);
+	// The host's game: its own reset back from the server (kQuestReset with our id), after every word the server passed
+	// on before it; other players' words are made again from here.
+	void ResetEchoed();
 	void HeardRun(const Protocol::QuestRun& a_run);
 
 	// A friend joined or left the session (kPlayerJoined, kPlayerLeft): a stage that moves the player is judged by how

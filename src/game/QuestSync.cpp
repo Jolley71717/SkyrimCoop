@@ -81,6 +81,11 @@ namespace QuestSync
 		constexpr std::size_t MAX_CHECKS = 256;
 		bool                 askAgain = false;
 		bool                 sayWorld = false;  // the host's game: kQuestReset and its snapshot are due
+		// The host's game: its resets the server has not come back with yet (kQuestReset with our id); no other player's word
+		// heard before then is made (it is of the world before the reset). A friend's game: the host's reset heard, to say so
+		// (kQuestResetSeen) before any report of the new world.
+		std::uint32_t        resetsOut = 0;
+		bool                 resetSeen = false;
 		bool                 rebase = false;    // this game's quests as they are now are its base (QuestRules::View)
 		Clock::time_point    nextPoll{};
 		constexpr auto       POLL_EVERY = std::chrono::seconds{ 1 };
@@ -111,6 +116,8 @@ namespace QuestSync
 			std::uint64_t asks = 0;        // the session's word asked for again (a load)
 			std::uint64_t resets = 0;      // the host's world new (heard)
 			std::uint64_t rebases = 0;     // this game's quests taken as its base (a welcome, a reset, a load)
+			std::uint64_t beforeReset = 0; // the host's game: other players' words heard between its reset and the server's answer: not made
+			std::uint64_t resetsSeen = 0;  // a friend's game: the host's resets it said it heard
 			std::uint64_t snapshots = 0;   // our world said, as the host
 			std::uint64_t snapshotEntries = 0;
 			std::uint64_t snapshotEnded = 0;  // ... of its quests, ended ones (EachEnded), in the last snapshot
@@ -1367,6 +1374,8 @@ namespace QuestSync
 		}
 		askAgain = false;
 		sayWorld = a_host;
+		resetsOut = 0;
+		resetSeen = false;
 		rebase = true;
 	}
 
@@ -1385,6 +1394,11 @@ namespace QuestSync
 		if (std::exchange(rebase, false)) {
 			Rebase(now);
 		}
+		if (std::exchange(resetSeen, false)) {
+			// before any report of the new world: the server drops ours until it hears this
+			a_send(Protocol::Writer{ Protocol::MessageType::kQuestResetSeen }.Data());
+			++counts.resetsSeen;
+		}
 		if (std::exchange(askAgain, false)) {
 			a_send(Protocol::Writer{ Protocol::MessageType::kAskQuests }.Data());
 			++counts.asks;
@@ -1392,6 +1406,7 @@ namespace QuestSync
 		}
 		if (std::exchange(sayWorld, false)) {
 			a_send(Protocol::Encode(Protocol::QuestReset{}, false));
+			++resetsOut;
 			// the runs first (each shared quest and radiant job that runs, with its aliases' references), then the stages
 			std::vector<Entry> none;
 			std::size_t        runs = 0;
@@ -1648,6 +1663,16 @@ namespace QuestSync
 	{
 		const auto now = Clock::now();
 		const bool ours = a_batch.playerId != 0 && a_batch.playerId == ourId;
+		if (host && !ours && (resetsOut != 0 || sayWorld)) {
+			// the host's game, between its new world (a load) and the server's answer to its reset: a word of the world
+			// before, passed on before the server had the reset; the new world is the session's, the word is not made
+			if (counts.beforeReset == 0) {
+				logs::info("Quests: a word of the world before this game's load came after it ({} entries from player {}): not made; the loaded world is the session's",
+					a_batch.entries.size(), a_batch.playerId);
+			}
+			counts.beforeReset += a_batch.entries.size();
+			return;
+		}
 		// near as the word came, for a stage that moves the player (QuestRules::NEAR_LATELY)
 		const bool nearAtStep = !ours && a_batch.playerId != 0 && NearLately(a_batch.playerId, now);
 		for (const auto& entry : a_batch.entries) {
@@ -1714,9 +1739,17 @@ namespace QuestSync
 		}
 	}
 
+	void ResetEchoed()
+	{
+		if (resetsOut != 0) {
+			--resetsOut;
+		}
+	}
+
 	void HostReset(std::uint32_t a_hostId)
 	{
 		++counts.resets;
+		resetSeen = true;  // said in the next frame, before any report of the new world
 		view.Clear();
 		maker.Clear();
 		checks.clear();
@@ -2037,7 +2070,7 @@ namespace QuestSync
 			return std::format("installed={} host={} quests={} shared={} own={} radiant={} misc={} untyped={} noname={} doneBit={} session={}/{} outstanding={} "
 							   "based={} kept={} wants={} inflight={} held={} events={} sent={} heard={} made={} has={} missing={} nothere={} ownStages={} farPast={} farHeld={} farLeft={} farWaited={} "
 							   "passed={} notStarted={} parked={}/{} parkedNow={}/{} unparked={} failedKept={} answered={} busy={} refused={} stuck={} lastStuck={} asks={} "
-							   "resets={} rebases={} snapshots={}/{} snapshotEnded={} "
+							   "resets={} resetsSeen={} rebases={} beforeReset={} resetsOut={} snapshots={}/{} snapshotEnded={} "
 							   "apart={} lastApart={} apartStages={} apartHeld={} moved={} lastMoved={} lastMade={} unmade={} lastUnmade={} wantsDropped={} "
 							   "eventsDropped={} offmain={} norun={} runs={} runsSent={} runsHeard={} runsStarted={} runsAdopted={} runsGaveUp={} forced={} "
 							   "forcedAtStart={} locsAtStart={} ownAtStart={} startFailed={} cannotStart={} runsRetried={} stopsMade={} restarts={} rewanted={} "
@@ -2049,7 +2082,7 @@ namespace QuestSync
 				Counted(counts.missing), Counted(counts.notHere), Counted(counts.own), Counted(counts.farPast), Counted(counts.farHeld), Counted(counts.farLeft), Counted(counts.farWaited), Counted(counts.passed), Counted(counts.notStarted),
 				Counted(counts.parked), Counted(counts.parkedQuests), maker.Parked(), maker.ParkedQuests(), Counted(maker.Unparked()), Counted(counts.failedKept), Counted(counts.answered), Counted(counts.busy), Counted(counts.refused), Counted(maker.Stuck()),
 				maker.LastStuck() ? std::format("{:08X}:{}", maker.LastStuck()->questId, maker.LastStuck()->index) : "none"s, Counted(counts.asks),
-				Counted(counts.resets), Counted(counts.rebases), Counted(counts.snapshots), Counted(counts.snapshotEntries), Counted(counts.snapshotEnded),
+				Counted(counts.resets), Counted(counts.resetsSeen), Counted(counts.rebases), Counted(counts.beforeReset), resetsOut, Counted(counts.snapshots), Counted(counts.snapshotEntries), Counted(counts.snapshotEnded),
 				Counted(apart.Quests()),
 				apart.Quests() ? QuestName(apart.LastQuest()) : "none"s, Counted(counts.apartStages), heldStages.size(), Counted(guard.Moves()), lastMoved, lastMade,
 				Counted(counts.unmade), lastUnmade, Counted(maker.Dropped()), Counted(dropped), Counted(counts.offMain), Counted(counts.noRun),

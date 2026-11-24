@@ -295,8 +295,12 @@ namespace Session
 				}
 				break;
 			case Protocol::MessageType::kQuestReset:
-				if (const auto msg = Protocol::DecodeQuestReset(a_data, true); msg && welcomed && msg->playerId != playerId) {
-					QuestSync::HostReset(msg->playerId);
+				if (const auto msg = Protocol::DecodeQuestReset(a_data, true); msg && welcomed) {
+					if (msg->playerId != playerId) {
+						QuestSync::HostReset(msg->playerId);
+					} else {
+						QuestSync::ResetEchoed();  // our own reset, back from the server after every word it passed on before it
+					}
 				}
 				break;
 			case Protocol::MessageType::kRemoteClock:
