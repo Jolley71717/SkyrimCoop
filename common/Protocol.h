@@ -59,14 +59,15 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	// 27: a player's magic on an NPC another game runs is dealt by that game (kNpcEffects, message type 77): every effect
-	//    of a spell, a shout, an enchantment or a poison but the health it takes (which kNpcHits carries); and a player's
-	//    Slow Time slows the world for every player near (kSlowTimes, type 78). (As with 21: renumbered when it lands.)
 	// 26: an NPC's state carries its graph's flight values (NpcGraph: TurnDelta, PitchDelta, TargetSpeed), which the
 	//    engine feeds a graph from the actor's movement and a copy has none of, so a copied dragon banks, climbs and
 	//    dives as its runner's does; and whether it is a body that died flying and still crashes (NpcGraph::crash).
 	//    (As with 21: renumbered when it lands; 25 is another change's.)
-	inline constexpr std::uint16_t VERSION = 27;
+	// 29: a player's magic on an NPC another game runs is dealt by that game (kNpcEffects, message type 81): every effect
+	//    of a spell, a shout, an enchantment or a poison but the health it takes (which kNpcHits carries); and a player's
+	//    Slow Time slows the world for every player near (kSlowTimes, type 82). (As with 21: renumbered when it lands; 27
+	//    and 28, and types 77-80, are other changes'.)
+	inline constexpr std::uint16_t VERSION = 29;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -137,8 +138,9 @@ namespace Protocol
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
 		// 59-75: the other changes' messages (each in its own change).
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
-		kNpcEffects = 77,  // client -> server -> the NPC's runner alone, reliable: our player's magic effects on copies (but health)
-		kSlowTimes = 78,   // client -> server -> the others, reliable: our player's Slow Time, for every player near to share
+		// 77-80: other changes' messages (each in its own change).
+		kNpcEffects = 81,  // client -> server -> the NPC's runner alone, reliable: our player's magic effects on copies (but health)
+		kSlowTimes = 82,   // client -> server -> the others, reliable: our player's Slow Time, for every player near to share
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2273,7 +2275,7 @@ namespace Protocol
 	inline constexpr std::size_t MAX_PAIRS_SIZE = 1 + 4 + 1 + MAX_PAIRS * PAIR_BYTES;
 	static_assert(MAX_PAIRS <= 0xFF && MAX_PAIRS_SIZE <= 2048, "a message of pairs stays small");
 
-	// ---- magic on NPCs another game runs, and Slow Time (protocol 27) ----
+	// ---- magic on NPCs another game runs, and Slow Time (protocol 29) ----
 	// A player's spell, shout, enchantment or poison on a copy of an NPC another game runs takes hold in that game, on the
 	// real NPC, effect by effect (docs/DESIGN.md, "Magic on NPCs"): the copy here only shows what its runner's game makes
 	// of it. What an effect takes from health is not in it: the copy's own health share goes as a hit (kNpcHits).

@@ -100,11 +100,11 @@ namespace
 
 // ---- the messages ----
 
-TEST("effect protocol: effects and Slow Times read back as written, as messages 77 and 78 of protocol 27, and carry forms")
+TEST("effect protocol: effects and Slow Times read back as written, as messages 81 and 82 of protocol 29, and carry forms")
 {
-	static_assert(Protocol::VERSION >= 27);
-	static_assert(static_cast<std::uint8_t>(MT::kNpcEffects) == 77);
-	static_assert(static_cast<std::uint8_t>(MT::kSlowTimes) == 78);
+	static_assert(Protocol::VERSION >= 29);
+	static_assert(static_cast<std::uint8_t>(MT::kNpcEffects) == 81);
+	static_assert(static_cast<std::uint8_t>(MT::kSlowTimes) == 82);
 	Protocol::NpcEffect poison{ .key = WOLF_OF_1, .item = 0x0003A5A4, .index = 0, .source = 0x00012EB7, .magnitude = 25.0f, .power = 1.0f, .castingSource = 1 };
 	Protocol::NpcEffect dual = Push(DRAGON);
 	dual.flags = Protocol::kEffectDual;
