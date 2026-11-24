@@ -1791,3 +1791,90 @@ TEST("quest judge: a quest stopped here without ending is not started again: its
 	here.current = 0;  // never run here
 	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kMake);
 }
+
+// ---- the audit: every quest of the base game, shared or not, with the reason -----------------------------------------
+
+TEST("quest audit: every row says what the rules say of its record, its stage rows are counted right, and none is unknown")
+{
+	const auto& audit = QuestRules::QUEST_AUDIT;
+	REQUIRE(audit.size() > 2000);  // Skyrim.esm, Update.esm and the three add-ons: every quest, typed or not
+	std::size_t typed = 0;
+	for (const auto& row : audit) {
+		const auto cls = QuestRules::Classify(QuestRules::FactsOf(row));
+		const auto nearRows = QuestRules::NearStagesOf(QuestRules::STAGE_RULES, row.editorId);
+		const auto judged = QuestRules::AuditOfClass(cls, nearRows);
+		if (judged.verdict != row.verdict || judged.why != row.why || nearRows != row.nearStages) {
+			Test::Fail(__FILE__, __LINE__, std::format("{} ({:08X}): the rules say {}/{} with {} stage rows, the audit {}/{} with {}", row.editorId, row.formId,
+				QuestRules::AuditVerdictName(judged.verdict), QuestRules::AuditWhyName(judged.why), nearRows, QuestRules::AuditVerdictName(row.verdict),
+				QuestRules::AuditWhyName(row.why), row.nearStages));
+		}
+		CHECK(QuestRules::ClassOfAudit(row) == cls);
+		CHECK(QuestRules::OfAuditedMaster(row.formId));
+		typed += row.type != 0 ? 1 : 0;
+	}
+	CHECK(typed > 600);
+	CHECK(std::ranges::is_sorted(audit, [](const auto& a_a, const auto& a_b) { return a_a.formId < a_b.formId; }));
+	CHECK(std::ranges::adjacent_find(audit, [](const auto& a_a, const auto& a_b) { return a_a.formId == a_b.formId; }) == audit.end());
+}
+
+TEST("quest audit: the hand list of each player's own quests and the stage rows name quests the audit has")
+{
+	const auto& audit = QuestRules::QUEST_AUDIT;
+	const auto  byName = [&](std::string_view a_edid) {
+		return std::ranges::find_if(audit, [&](const QuestRules::AuditRow& a_row) { return QuestRules::SameName(a_row.editorId, a_edid); });
+	};
+	for (const auto& own : QuestRules::OWN_QUESTS) {
+		const auto it = byName(own.editorId);
+		REQUIRE(it != audit.end());
+		// A typed one is each player's own by the list; an untyped one is not shared anyway.
+		CHECK((it->why == QuestRules::AuditWhy::kOwnList) == (it->type != 0));
+	}
+	for (const auto& row : audit) {
+		if (row.why == QuestRules::AuditWhy::kOwnList) {
+			CHECK(QuestRules::OwnQuestOf(row.editorId));
+		}
+	}
+	for (const auto& rule : QuestRules::STAGE_RULES) {
+		if (byName(rule.editorId) == audit.end()) {
+			Test::Fail(__FILE__, __LINE__, std::format("stage row {} {}: no such quest in the audit", rule.editorId, rule.stage));
+		}
+	}
+	// A few known: the main quest's first steps whole, Helgen each player's own, the Civil War's siege the host's run.
+	const auto mq102 = byName("MQ102");
+	REQUIRE(mq102 != audit.end());
+	CHECK(mq102->verdict == QuestRules::AuditVerdict::kShared);
+	CHECK(QuestRules::AuditOf(mq102->formId) == &*mq102);
+	const auto mq101 = byName("MQ101");
+	REQUIRE(mq101 != audit.end());
+	CHECK(mq101->why == QuestRules::AuditWhy::kOwnList);
+	const auto siege = byName("CWSiege");
+	REQUIRE(siege != audit.end());
+	CHECK(siege->why == QuestRules::AuditWhy::kHostRun);
+	const auto mq206 = byName("MQ206");
+	REQUIRE(mq206 != audit.end());
+	CHECK(mq206->why == QuestRules::AuditWhy::kNearStages);
+	CHECK(mq206->nearStages > 0);
+}
+
+TEST("quest audit: a game's own judgement against the audit is the same, apart, missing, or not the base game's")
+{
+	using QuestRules::AuditCheck;
+	using QuestRules::AuditVerdict;
+	using QuestRules::AuditWhy;
+	using QuestRules::Class;
+	const std::array<QuestRules::AuditRow, 3> audit{ {
+		{ 0x00000100, "A", 8, false, 0, AuditVerdict::kShared, AuditWhy::kWhole },
+		{ 0x00000200, "B", 8, false, 2, AuditVerdict::kLimited, AuditWhy::kNearStages },
+		{ 0x02000300, "C", 6, false, 0, AuditVerdict::kNotShared, AuditWhy::kMisc },
+	} };
+	CHECK(QuestRules::AuditOf(audit, 0x00000200) == &audit[1]);
+	CHECK(!QuestRules::AuditOf(audit, 0x00000201));
+	CHECK(!QuestRules::AuditOf(audit, 0x03000000));
+	CHECK(QuestRules::CheckAudit(audit, 0x00000100, Class::kShared, 0) == AuditCheck::kSame);
+	CHECK(QuestRules::CheckAudit(audit, 0x00000100, Class::kShared, 1) == AuditCheck::kApart);  // the rows changed, not the audit
+	CHECK(QuestRules::CheckAudit(audit, 0x00000200, Class::kShared, 2) == AuditCheck::kSame);
+	CHECK(QuestRules::CheckAudit(audit, 0x02000300, Class::kShared, 0) == AuditCheck::kApart);  // a mod gave the misc quest a tab
+	CHECK(QuestRules::CheckAudit(audit, 0x04000999, Class::kShared, 0) == AuditCheck::kMissing);
+	CHECK(QuestRules::CheckAudit(audit, 0x05000100, Class::kShared, 0) == AuditCheck::kNotAudited);  // a mod's or the Creation Club's
+	CHECK(QuestRules::CheckAudit(audit, 0xFE000100, Class::kShared, 0) == AuditCheck::kNotAudited);
+}

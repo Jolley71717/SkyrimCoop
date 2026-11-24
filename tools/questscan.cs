@@ -895,6 +895,103 @@ public static class MoveScan
         return sb.ToString();
     }
 
+    // ---- the audit (src/game/QuestAudit.h, docs/QUEST-AUDIT.md) ----------------------------------------------------
+
+    // QuestRules::OWN_QUESTS (src/game/QuestRules.h): tests/QuestTests.cpp checks the two agree, through the audit.
+    static readonly string[] OWN_QUESTS = { "MQ101", "RelationshipMarriage", "BYOHRelationshipAdoption" };
+
+    static readonly string[] TABS = { "none", "main", "College", "Thieves Guild", "Dark Brotherhood", "Companions", "misc", "Daedric", "side", "Civil War", "Dawnguard", "Dragonborn" };
+
+    public class Audited { public SkyrimFiles.Quest Quest; public int Near; public string Verdict; public string Why; }
+
+    // Every quest of the masters, judged as QuestRules::Classify judges it and AuditOfClass sums it up, sorted by form ID.
+    public static List<Audited> Audit(string a_data)
+    {
+        var near = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in Rows(a_data))
+        {
+            int n;
+            near.TryGetValue(r.Quest.Edid, out n);
+            near[r.Quest.Edid] = n + 1;
+        }
+        var all = new List<Audited>();
+        foreach (var q in Game.quests.Values.OrderBy(x => x.Id))
+        {
+            var a = new Audited { Quest = q };
+            near.TryGetValue(q.Edid, out a.Near);
+            if (q.Type <= 0 || q.Type > 11) { a.Verdict = "kNotShared"; a.Why = "kUntyped"; }
+            else if (q.Type == 6) { a.Verdict = "kNotShared"; a.Why = "kMisc"; }
+            else if (q.Edid.Length == 0) { a.Verdict = "kNotShared"; a.Why = "kNoName"; }
+            else if (OWN_QUESTS.Any(o => string.Equals(o, q.Edid, StringComparison.OrdinalIgnoreCase))) { a.Verdict = "kNotShared"; a.Why = "kOwnList"; }
+            else if (Game.Radiant(q)) { a.Verdict = "kLimited"; a.Why = "kHostRun"; }
+            else if (a.Near > 0) { a.Verdict = "kLimited"; a.Why = "kNearStages"; }
+            else { a.Verdict = "kShared"; a.Why = "kWhole"; }
+            all.Add(a);
+        }
+        return all;
+    }
+
+    // src/game/QuestAudit.h (ASCII, CRLF).
+    public static string AuditHeader(List<Audited> a_all)
+    {
+        var sb = new StringBuilder();
+        sb.Append("#pragma once\r\n\r\n#include \"AuditRule.h\"\r\n\r\n#include <array>\r\n\r\n");
+        sb.Append("// Written by tools/questscan.ps1 -Audit from the game's own files (Skyrim.esm, Update.esm, Dawnguard.esm,\r\n");
+        sb.Append("// HearthFires.esm, Dragonborn.esm and the scripts in Skyrim - Misc.bsa); do not edit by hand, run it again. Every quest\r\n");
+        sb.Append("// of the base game as the game loads it, sorted by form ID: its journal tab, whether it is a radiant job, its stages\r\n");
+        sb.Append("// in STAGE_RULES, and whether a session shares it, with the reason (AuditRule.h). docs/QUEST-AUDIT.md is the same\r\n");
+        sb.Append("// list for reading.\r\n");
+        sb.Append("namespace QuestRules\r\n{\r\n");
+        sb.Append("\tinline constexpr std::array<AuditRow, " + a_all.Count + "> QUEST_AUDIT{ {\r\n");
+        foreach (var a in a_all)
+            sb.Append(string.Format("\t\t{{ 0x{0:X8}, \"{1}\", {2}, {3}, {4}, AuditVerdict::{5}, AuditWhy::{6} }},\r\n", a.Quest.Id, a.Quest.Edid, Math.Max(0, a.Quest.Type),
+                Game.Radiant(a.Quest) ? "true" : "false", a.Near, a.Verdict, a.Why));
+        sb.Append("\t} };\r\n}\r\n");
+        return sb.ToString();
+    }
+
+    static string WhyText(Audited a_a)
+    {
+        switch (a_a.Why)
+        {
+            case "kWhole": return "every stage as it is";
+            case "kNearStages": return a_a.Near + (a_a.Near == 1 ? " stage" : " stages") + " made only with the friend who did it near";
+            case "kHostRun": return "a radiant job: shared while it runs as the host's, with the host's targets" + (a_a.Near > 0 ? "; " + a_a.Near + " near-only " + (a_a.Near == 1 ? "stage" : "stages") : "");
+            case "kOwnList": return "each player plays it for themselves";
+            case "kMisc": return "the misc tab: each player's own in this version";
+            case "kUntyped": return "the game's machinery (no journal tab)";
+            case "kNoName": return "no editor ID";
+        }
+        return "?";
+    }
+
+    // docs/QUEST-AUDIT.md: the counts, then every quest with a journal tab, by verdict and tab (CRLF).
+    public static string AuditDoc(List<Audited> a_all)
+    {
+        var sb = new StringBuilder();
+        sb.Append("# Quest audit\r\n\r\n");
+        sb.Append("Written by `tools/questscan.ps1 -Audit` from the game's own files; do not edit by hand, run it again. The code reads the same list (`src/game/QuestAudit.h`): each game checks its records against it at load, and the unit tests check every row against the rules, so nothing here is left unknown. How each kind is shared is in docs/DESIGN.md, \"Quests\". Not tested in a game yet.\r\n\r\n");
+        sb.Append("| Verdict | Why | Quests |\r\n| --- | --- | --- |\r\n");
+        foreach (var g in a_all.GroupBy(a => a.Verdict + "|" + a.Why).OrderBy(g => g.Key))
+        {
+            var first = g.First();
+            sb.Append(string.Format("| {0} | {1} | {2} |\r\n", Plain(first.Verdict), Plain(first.Why), g.Count()));
+        }
+        sb.Append(string.Format("| | all | {0} |\r\n", a_all.Count));
+        foreach (var section in new[] { new[] { "kShared", "Shared" }, new[] { "kLimited", "Shared, with limits" }, new[] { "kNotShared", "Not shared (quests with a journal tab; the game's untyped machinery is only counted above)" } })
+        {
+            var rows = a_all.Where(a => a.Verdict == section[0] && a.Why != "kUntyped").OrderBy(a => a.Quest.Type).ThenBy(a => a.Quest.Edid, StringComparer.OrdinalIgnoreCase).ToList();
+            sb.Append("\r\n## " + section[1] + "\r\n\r\n");
+            if (rows.Count == 0) { sb.Append("None.\r\n"); continue; }
+            sb.Append("| Quest | Form ID | Tab | Why |\r\n| --- | --- | --- | --- |\r\n");
+            foreach (var a in rows)
+                sb.Append(string.Format("| {0} | {1:X8} | {2} | {3} |\r\n", a.Quest.Edid, a.Quest.Id, TABS[Math.Max(0, Math.Min(11, a.Quest.Type))], WhyText(a)));
+        }
+        return sb.ToString();
+    }
+
+    static string Plain(string a_name) { return a_name.Length > 1 && a_name[0] == 'k' ? char.ToLowerInvariant(a_name[1]) + a_name.Substring(2) : a_name; }
+
     // src/game/StageRows.h: the rows, each with what was found (ASCII, CRLF).
     public static string Header(string a_data)
     {

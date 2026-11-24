@@ -48,6 +48,11 @@ namespace QuestSync
 		std::unordered_map<RE::FormID, std::size_t>      byId;
 		std::array<std::size_t, 6>                       classCounts{};
 		std::optional<QuestRules::BitVerdict>            bit;  // judged once, with the catalog
+		// The base game's quests checked against the audit (QuestRules::QUEST_AUDIT) as the catalog is built: the same, apart
+		// (a mod changed the record: the record wins), or not in it.
+		std::size_t auditSame = 0;
+		std::size_t auditApart = 0;
+		std::size_t auditMissing = 0;
 
 		std::uint32_t                  ourId = 0;
 		bool                           host = false;
@@ -792,6 +797,36 @@ namespace QuestSync
 			std::erase_if(checks, [&](const Check& a_c) { return a_c.entry.questId == a_questId; });
 		}
 
+		// One quest of the catalog against the audit: the first few apart or missing are said in the log.
+		void CheckAudit(RE::TESQuest* a_quest, Class a_class)
+		{
+			const auto id = a_quest->GetFormID();
+			const auto name = EditorId(a_quest);
+			const auto nearStages = QuestRules::NearStagesOf(QuestRules::STAGE_RULES, name);
+			constexpr std::size_t SAY = 5;
+			switch (QuestRules::CheckAudit(QuestRules::QUEST_AUDIT, id, a_class, nearStages)) {
+			case QuestRules::AuditCheck::kSame:
+				++auditSame;
+				break;
+			case QuestRules::AuditCheck::kApart:
+				if (auditApart++ < SAY) {
+					const auto row = QuestRules::AuditOf(id);
+					const auto here = QuestRules::AuditOfClass(a_class, nearStages);
+					logs::info("Quests: {} ({:08X}) is {}/{} here and {}/{} in the audit (its record changed by a mod?): judged by the record here", name, id,
+						QuestRules::AuditVerdictName(here.verdict), QuestRules::AuditWhyName(here.why), QuestRules::AuditVerdictName(row->verdict),
+						QuestRules::AuditWhyName(row->why));
+				}
+				break;
+			case QuestRules::AuditCheck::kMissing:
+				if (auditMissing++ < SAY) {
+					logs::info("Quests: {} ({:08X}) of the base game is not in the audit: judged by its record", name, id);
+				}
+				break;
+			case QuestRules::AuditCheck::kNotAudited:
+				break;
+			}
+		}
+
 		void Catalog()
 		{
 			if (!catalog.empty()) {
@@ -810,6 +845,7 @@ namespace QuestSync
 				byId[quest->GetFormID()] = catalog.size();
 				catalog.push_back({ quest, cls });
 				++classCounts[static_cast<std::size_t>(cls)];
+				CheckAudit(quest, cls);
 				if (quest->data.questType.underlying() != 0) {
 					const auto stages = Stages(quest);
 					QuestRules::BitSample sample;
@@ -822,6 +858,8 @@ namespace QuestSync
 				}
 			}
 			bit = QuestRules::JudgeBit(samples);
+			logs::info("Quests: the audit says the same of {} base game quests here; {} apart, {} not in it ({} in the audit)", auditSame, auditApart, auditMissing,
+				QuestRules::QUEST_AUDIT.size());
 			logs::info("Quests: {} quests ({} shared, {} each player's own, {} radiant, {} misc, {} untyped, {} without an editor ID); "
 					   "the stages' done bit is {} ({} of {} running quests read their current stage done, {} never run read a stage done)",
 				catalog.size(), classCounts[0], classCounts[1], classCounts[2], classCounts[3], classCounts[4], classCounts[5],
@@ -2178,7 +2216,7 @@ namespace QuestSync
 				dropped = queueDropped;
 			}
 			const auto look = [](const Entry& a_e, std::uint32_t a_r) { return Look(a_e, a_r); };
-			return std::format("installed={} host={} quests={} shared={} own={} radiant={} misc={} untyped={} noname={} doneBit={} session={}/{} outstanding={} "
+			return std::format("installed={} host={} quests={} shared={} own={} radiant={} misc={} untyped={} noname={} audit={}/{}/{} doneBit={} session={}/{} outstanding={} "
 							   "based={} kept={} wants={} inflight={} held={} events={} sent={} heard={} made={} has={} missing={} nothere={} ownStages={} farPast={} farHeld={} farLeft={} farWaited={} "
 							   "passed={} notStarted={} stopped={} parked={}/{} parkedNow={}/{} unparked={} failedKept={} failedMade={} failObjective={} answered={} busy={} refused={} stuck={} lastStuck={} asks={} "
 							   "resets={} resetsSeen={} reportsDropped={} rebases={} beforeReset={} resetsOut={} echoMissed={} snapshots={}/{} snapshotEnded={} "
@@ -2188,7 +2226,7 @@ namespace QuestSync
 							   "notLoaded={} locApart={} rewritten={} locSlot={} locMap={} locChecked={}/{} locUnread={} stopsHeld={} endsSaid={} endedHere={} "
 							   "stopsOld={} orphansStopped={} candidates={} lastOrphan={} startsOffMain={} lastStartThread={} lastRun={}",
 				installed ? 1 : 0, host ? 1 : 0, catalog.size(), classCounts[0], classCounts[1], classCounts[2], classCounts[3], classCounts[4], classCounts[5],
-				!bit ? "unread" : bit->trusted ? "trusted" : "untrusted", view.Quests(), view.Entries(), view.Outstanding(), view.Based(), view.Kept(), maker.Size(),
+				auditSame, auditApart, auditMissing, !bit ? "unread" : bit->trusted ? "trusted" : "untrusted", view.Quests(), view.Entries(), view.Outstanding(), view.Based(), view.Kept(), maker.Size(),
 				maker.InFlight(), maker.Held(look, Clock::now()), Counted(counts.events), Counted(counts.sent), Counted(counts.heard), Counted(counts.made), Counted(counts.has),
 				Counted(counts.missing), Counted(counts.notHere), Counted(counts.own), Counted(counts.farPast), Counted(counts.farHeld), Counted(counts.farLeft), Counted(counts.farWaited), Counted(counts.passed), Counted(counts.notStarted), Counted(counts.stopped),
 				Counted(counts.parked), Counted(counts.parkedQuests), maker.Parked(), maker.ParkedQuests(), Counted(maker.Unparked()), Counted(counts.failedKept), Counted(counts.failedMade), canFailObjective ? 1 : 0, Counted(counts.answered), Counted(counts.busy), Counted(counts.refused), Counted(maker.Stuck()),
@@ -2320,10 +2358,12 @@ namespace QuestSync
 			}
 		}
 		std::ranges::sort(session, {}, [](const std::string& a_s) { return std::stoi(a_s); });
+		const auto  row = QuestRules::AuditOf(id);
+		const auto  audit = row ? std::format("{}/{}", QuestRules::AuditVerdictName(row->verdict), QuestRules::AuditWhyName(row->why)) : std::string{ "-" };
 		return std::format("quest={} id={:08X} type={} class={} enabled={} completed={} failed={} current={} stages={} done={} seen={} objectives={} "
-						   "session={} sessionObjectives={} sessionEnd={} apart={}",
+						   "session={} sessionObjectives={} sessionEnd={} apart={} audit={}",
 			EditorId(quest).empty() ? "-" : EditorId(quest), id, quest->data.questType.underlying(), QuestRules::ClassName(ClassOf(quest)),
 			quest->IsEnabled() ? 1 : 0, quest->IsCompleted() ? 1 : 0, Failed(quest) ? 1 : 0, quest->GetCurrentStageID(), Joined(all), Joined(done),
-			Joined(seenHere), Joined(objectives), Joined(session), Joined(sessionObjectives), sessionEnd, apart.StageOf(id));
+			Joined(seenHere), Joined(objectives), Joined(session), Joined(sessionObjectives), sessionEnd, apart.StageOf(id), audit);
 	}
 }
