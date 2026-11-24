@@ -480,8 +480,8 @@ namespace TrapRules
 		if (a_word.phase == Trap::kDisarmed) {
 			return Verdict::kDisarm;
 		}
-		const bool near = a_facts.playerDistance >= 0.0f && a_facts.playerDistance <= LIVE_REACH;
-		return !a_facts.catchUp && a_facts.fresh && near ? Verdict::kFireLive : Verdict::kFireQuiet;
+		const bool inReach = a_facts.playerDistance >= 0.0f && a_facts.playerDistance <= LIVE_REACH;
+		return !a_facts.catchUp && a_facts.fresh && inReach ? Verdict::kFireLive : Verdict::kFireQuiet;
 	}
 
 	// One step of making a word: a Papyrus call on the trap's own script (its state), an animation, the trap's own
