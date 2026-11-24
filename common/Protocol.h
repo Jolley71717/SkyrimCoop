@@ -2377,7 +2377,7 @@ namespace Protocol
 	{
 		Writer w{ MessageType::kMapMarkers };
 		w.U32(a_msg.finder);
-		const auto count = std::min(a_msg.markers.size(), MAX_MARKERS);
+		const auto count = (std::min)(a_msg.markers.size(), MAX_MARKERS);
 		w.U16(static_cast<std::uint16_t>(count));
 		for (std::size_t i = 0; i < count; ++i) {
 			w.U32(a_msg.markers[i].ref);
