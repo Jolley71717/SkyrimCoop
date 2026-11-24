@@ -35,7 +35,10 @@ namespace Protocol
 	// 6: NPCs are shared: one game runs each (kNpcClaims, kNpcOwners) and the others show a copy of it (kNpcStates,
 	//    kNpcActions, kNpcGear: message types 18-22); a state's kFlying. Of the doors' change and this one, whichever
 	//    lands second takes the number after the other's.
-	inline constexpr std::uint16_t VERSION = 6;
+	// 8: NPC health and deaths agree in every game: a player's hits on a copy go to the NPC's runner as numbered requests
+	//    it answers (kNpcHits, kNpcHitAnswers); the runner says each NPC's health (kNpcHealths) and its death
+	//    (kNpcDeaths): message types 35-38. (7 is the shared quests' change; whichever lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 8;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -90,6 +93,11 @@ namespace Protocol
 		kNpcStates = 20,    // both ways, on the state channel: where the NPCs a game runs are (the server names the runner)
 		kNpcActions = 21,   // both ways, reliable: the graph events of the NPCs a game runs, for their copies to play
 		kNpcGear = 22,      // both ways, reliable: what an NPC wears and holds, from the game that runs it
+		// 24-29: the doors' messages; 30-34: the shared quests' (each in its own change).
+		kNpcHits = 35,        // client -> server -> the NPC's runner alone, reliable: our player's hits on copies, numbered
+		kNpcHitAnswers = 36,  // runner (or the server) -> server -> the hitter, reliable: each hit applied, or refused and why
+		kNpcHealths = 37,     // runner -> server -> everyone, reliable: the health of NPCs it runs (to a joiner: the hurt ones)
+		kNpcDeaths = 38,      // runner -> server -> everyone, reliable: NPCs it runs that died (to a joiner: every one dead)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -392,6 +400,117 @@ namespace Protocol
 		std::uint8_t          unnamed = 0;  // GearUnnamed
 		std::uint32_t         unnamedSlots = 0;
 		bool operator==(const NpcGear&) const = default;
+	};
+
+	// ---- NPC health and deaths (docs/DESIGN.md, "NPC health and deaths") ----
+	// The game that runs an NPC is the truth of its health. A player's hit on a copy goes to that game as a numbered
+	// request, the share of the copy's most health it took (so the hits to kill are as many in every game, however each
+	// game rolled the NPC's level), and ends in exactly one answer: applied, or refused and why. The runner says the
+	// NPC's health as a share of its most, and its death; only the runner's death counts, once.
+
+	// At most this many hits, answers, healths and deaths in one message (a full list of deaths to a joiner: MAX_NPCS).
+	inline constexpr std::size_t MAX_NPC_HITS = 64;
+	inline constexpr std::size_t MAX_NPC_HEALTHS = 128;
+
+	// A share of an NPC's most health, as one is sent: a number from 0 to 1.
+	[[nodiscard]] inline bool IsShare(float a_value)
+	{
+		return std::isfinite(a_value) && a_value >= 0.0f && a_value <= 1.0f;
+	}
+
+	enum NpcHitFlags : std::uint8_t
+	{
+		kHitPower = 1 << 0,     // a power attack
+		kHitSneak = 1 << 1,     // a sneak attack
+		kHitBash = 1 << 2,      // a bash (shield or weapon)
+		kHitSpell = 1 << 3,     // a spell, a staff, a scroll or an enchantment's effect
+		kHitKilling = 1 << 4,   // it brought the copy to nothing: the NPC dies of it
+		kHitKillMove = 1 << 5,  // a kill move (the copy died in our player's paired animation)
+		kHitAllFlags = kHitPower | kHitSneak | kHitBash | kHitSpell | kHitKilling | kHitKillMove,
+	};
+
+	// seq counts the hitter's hits for the session (from 1), so each answer names the one it answers.
+	struct NpcHit
+	{
+		NpcKey        key;
+		std::uint32_t seq = 0;
+		float         share = 0;  // of the copy's most health
+		std::uint8_t  flags = 0;  // NpcHitFlags
+		bool operator==(const NpcHit&) const = default;
+	};
+
+	// hitter: 0 from a game; the server names the player who hit.
+	struct NpcHits
+	{
+		std::uint32_t       hitter = 0;
+		std::vector<NpcHit> hits;
+		bool operator==(const NpcHits&) const = default;
+	};
+
+	enum class HitVerdict : std::uint8_t
+	{
+		kApplied = 0,  // the runner took it off its NPC (share: the NPC's health after)
+		kNobody = 1,   // nobody runs it (the server's answer)
+		kYours = 2,    // the hitter runs it now: what its copy took stands (the server's answer)
+		kDead = 3,     // dead for the session (the server's answer), or dead in the runner's game
+		kNotHere = 4,  // the runner has no such NPC loaded, or no longer runs it
+		kBusy = 5,     // past the hitter's budget (the server's answer)
+	};
+	inline constexpr std::uint8_t HIT_VERDICT_COUNT = 6;
+
+	struct NpcHitAnswer
+	{
+		NpcKey        key;
+		std::uint32_t hitter = 0;
+		std::uint32_t seq = 0;
+		HitVerdict    verdict = HitVerdict::kApplied;
+		float         share = 0;  // kApplied: the NPC's health after it, as a share of its most; else 0
+		bool operator==(const NpcHitAnswer&) const = default;
+	};
+
+	struct NpcHitAnswers
+	{
+		std::vector<NpcHitAnswer> answers;
+		bool operator==(const NpcHitAnswers&) const = default;
+	};
+
+	struct NpcHealth
+	{
+		NpcKey key;
+		float  share = 1;  // of its most health, more than 0: a dead NPC's is its death
+		bool operator==(const NpcHealth&) const = default;
+	};
+
+	// runner: 0 from a game, and on the list the server sends a joiner; the server names the runner.
+	struct NpcHealths
+	{
+		std::uint32_t          runner = 0;
+		std::vector<NpcHealth> npcs;
+		bool operator==(const NpcHealths&) const = default;
+	};
+
+	enum NpcDeathFlags : std::uint8_t
+	{
+		kDeathKillMove = 1 << 0,  // it died in a kill move
+		kDeathAllFlags = kDeathKillMove,
+	};
+
+	// killer: the player whose hit killed it (0: no player's, or not known).
+	struct NpcDeath
+	{
+		NpcKey        key;
+		std::uint32_t killer = 0;
+		std::uint8_t  flags = 0;  // NpcDeathFlags
+		bool operator==(const NpcDeath&) const = default;
+	};
+
+	// full: the session's every dead NPC (a joiner's first). runner: as NpcHealths'.
+	struct NpcDeaths
+	{
+		std::uint32_t         runner = 0;
+		bool                  full = false;
+		std::vector<NpcDeath> deaths;
+		bool operator==(const NpcDeaths&) const = default;
 	};
 
 	// ---- serialization -------------------------------------------------------------
@@ -1130,6 +1249,182 @@ namespace Protocol
 		return msg;
 	}
 
+	inline std::vector<std::uint8_t> Encode(const NpcHits& a_msg)
+	{
+		Writer     w{ MessageType::kNpcHits };
+		const auto count = (std::min)(a_msg.hits.size(), MAX_NPC_HITS);
+		w.U32(a_msg.hitter);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.hits[i].key);
+			w.U32(a_msg.hits[i].seq);
+			w.F32(a_msg.hits[i].share);
+			w.U8(a_msg.hits[i].flags);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_HITS, a hit of no NPC or numbered 0, a share that is no share, or an unknown flag. An
+	// empty list reads (the translation may leave every hit out).
+	inline std::optional<NpcHits> DecodeNpcHits(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcHits msg;
+		msg.hitter = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_NPC_HITS) {
+			return std::nullopt;
+		}
+		msg.hits.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			NpcHit hit;
+			hit.key = ReadKey(r);
+			hit.seq = r.U32();
+			hit.share = r.F32();
+			hit.flags = r.U8();
+			if (r.Ok() && (hit.key.id == 0 || hit.seq == 0 || !IsShare(hit.share) || (hit.flags & ~kHitAllFlags) != 0)) {
+				return std::nullopt;
+			}
+			msg.hits.push_back(hit);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcHitAnswers& a_msg)
+	{
+		Writer     w{ MessageType::kNpcHitAnswers };
+		const auto count = (std::min)(a_msg.answers.size(), MAX_NPC_HITS);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.answers[i].key);
+			w.U32(a_msg.answers[i].hitter);
+			w.U32(a_msg.answers[i].seq);
+			w.U8(static_cast<std::uint8_t>(a_msg.answers[i].verdict));
+			w.F32(a_msg.answers[i].share);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_HITS, an answer of no NPC, no hitter or no hit, an unknown verdict, or a share that is
+	// no share.
+	inline std::optional<NpcHitAnswers> DecodeNpcHitAnswers(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_NPC_HITS) {
+			return std::nullopt;
+		}
+		NpcHitAnswers msg;
+		msg.answers.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			NpcHitAnswer answer;
+			answer.key = ReadKey(r);
+			answer.hitter = r.U32();
+			answer.seq = r.U32();
+			const auto verdict = r.U8();
+			answer.share = r.F32();
+			if (r.Ok() && (answer.key.id == 0 || answer.hitter == 0 || answer.seq == 0 || verdict >= HIT_VERDICT_COUNT || !IsShare(answer.share))) {
+				return std::nullopt;
+			}
+			answer.verdict = static_cast<HitVerdict>(verdict);
+			msg.answers.push_back(answer);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcHealths& a_msg)
+	{
+		Writer     w{ MessageType::kNpcHealths };
+		const auto count = (std::min)(a_msg.npcs.size(), MAX_NPCS);
+		w.U32(a_msg.runner);
+		w.U16(static_cast<std::uint16_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.npcs[i].key);
+			w.F32(a_msg.npcs[i].share);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPCS, an NPC of id 0, or a share that is no share (or 0: a death is said as one).
+	inline std::optional<NpcHealths> DecodeNpcHealths(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcHealths msg;
+		msg.runner = r.U32();
+		const auto count = r.U16();
+		if (!r.Ok() || count > MAX_NPCS) {
+			return std::nullopt;
+		}
+		msg.npcs.reserve(count);
+		for (std::uint16_t i = 0; i < count && r.Ok(); ++i) {
+			NpcHealth npc;
+			npc.key = ReadKey(r);
+			npc.share = r.F32();
+			if (r.Ok() && (npc.key.id == 0 || !IsShare(npc.share) || npc.share <= 0.0f)) {
+				return std::nullopt;
+			}
+			msg.npcs.push_back(npc);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcDeaths& a_msg)
+	{
+		Writer     w{ MessageType::kNpcDeaths };
+		const auto count = (std::min)(a_msg.deaths.size(), MAX_NPCS);
+		w.U32(a_msg.runner);
+		w.U8(a_msg.full ? 1 : 0);
+		w.U16(static_cast<std::uint16_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.deaths[i].key);
+			w.U32(a_msg.deaths[i].killer);
+			w.U8(a_msg.deaths[i].flags);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPCS, an NPC of id 0, or an unknown flag.
+	inline std::optional<NpcDeaths> DecodeNpcDeaths(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcDeaths msg;
+		msg.runner = r.U32();
+		const auto full = r.U8();
+		const auto count = r.U16();
+		if (!r.Ok() || full > 1 || count > MAX_NPCS) {
+			return std::nullopt;
+		}
+		msg.full = full == 1;
+		msg.deaths.reserve(count);
+		for (std::uint16_t i = 0; i < count && r.Ok(); ++i) {
+			NpcDeath death;
+			death.key = ReadKey(r);
+			death.killer = r.U32();
+			death.flags = r.U8();
+			if (r.Ok() && (death.key.id == 0 || (death.flags & ~kDeathAllFlags) != 0)) {
+				return std::nullopt;
+			}
+			msg.deaths.push_back(death);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
 	// The most bytes each NPC message can be, every list at its longest (the tests encode those): each fits one message.
 	inline constexpr std::size_t KEY_BYTES = 8;
 	inline constexpr std::size_t STATE_BYTES = 4 + 4 + 4 + 4 * 5 + 1 + 4 + 1 + 1;
@@ -1139,6 +1434,12 @@ namespace Protocol
 	static_assert(MAX_NPC_OWNERS_SIZE <= MAX_MESSAGE_SIZE && MAX_NPC_ACTIONS_SIZE <= MAX_MESSAGE_SIZE);
 	static_assert(MAX_NPC_STATES_SIZE <= 1200, "a batch of NPC states stays about one datagram");
 	static_assert(MAX_NPCS <= 0xFFFF && MAX_NPC_CLAIMS <= 0xFFFF && MAX_NPC_STATES <= 0xFF && MAX_NPC_ACTIONS <= 0xFF);
+	inline constexpr std::size_t MAX_NPC_HITS_SIZE = 1 + 4 + 1 + MAX_NPC_HITS * (KEY_BYTES + 4 + 4 + 1);
+	inline constexpr std::size_t MAX_NPC_HIT_ANSWERS_SIZE = 1 + 1 + MAX_NPC_HITS * (KEY_BYTES + 4 + 4 + 1 + 4);
+	inline constexpr std::size_t MAX_NPC_HEALTHS_SIZE = 1 + 4 + 2 + MAX_NPCS * (KEY_BYTES + 4);
+	inline constexpr std::size_t MAX_NPC_DEATHS_SIZE = 1 + 4 + 1 + 2 + MAX_NPCS * (KEY_BYTES + 4 + 1);
+	static_assert(MAX_NPC_HEALTHS_SIZE <= MAX_MESSAGE_SIZE && MAX_NPC_DEATHS_SIZE <= MAX_MESSAGE_SIZE);
+	static_assert(MAX_NPC_HITS <= 0xFF && MAX_NPC_HEALTHS <= MAX_NPCS);
 
 	// ---- load orders ---------------------------------------------------------------
 

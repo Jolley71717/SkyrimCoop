@@ -20,6 +20,12 @@
 // (the stand-ins' leg channels, GaitDrive), its walk's events come from Gait as a stand-in's do, and the runner's other
 // graph events are played at the same point of its walk (NpcRules::ActionQueue). Otherwise it is left to its own AI.
 //
+// Health and deaths (docs/DESIGN.md, "NPC health and deaths"): the runner's game is the truth of both. Our player's hit
+// on a copy goes to the runner as a numbered request (kNpcHits) and ends in one answer (kNpcHitAnswers); the copy shows
+// the runner's word (kNpcHealths) less our hits not answered yet, and anything else that changed it is set back
+// (CopyHealth.h). The runner says each death once (kNpcDeaths); every copy dies with it, and an NPC the session has dead
+// is killed as it loads in any game but the host's (whose save is the truth of its own dead).
+//
 // Main thread, except UpdateCopy (the actor update hook, on the game's job threads), the graph event hook and the hit event
 // sink (whatever thread sends the event).
 namespace NpcSync
@@ -30,8 +36,8 @@ namespace NpcSync
 	// the hit events that tell a fight. False when the hook could not go in (copies then show no actions).
 	bool Install();
 
-	// Welcomed into a session as a_ourId.
-	void Started(std::uint32_t a_ourId);
+	// Welcomed into a session as a_ourId; a_hostId is the host's player (0: none in).
+	void Started(std::uint32_t a_ourId, std::uint32_t a_hostId);
 	// Once a tick in a session after the welcome: claims, states, actions and gear out; copies placed, moved and
 	// dressed. a_send sends a packet (reliable or not) the way every packet goes (in the session's numbering of forms).
 	void Frame(const SendFn& a_send);
@@ -42,6 +48,12 @@ namespace NpcSync
 	void States(const Protocol::NpcStates& a_msg);
 	void Actions(const Protocol::NpcActions& a_msg);
 	void Gear(const Protocol::NpcGear& a_msg);
+	// Health and deaths (docs/DESIGN.md, "NPC health and deaths"): a friend's hits on NPCs this game runs, the answers
+	// to ours on copies, the runners' word of their NPCs' health, and their deaths.
+	void Hits(const Protocol::NpcHits& a_msg);
+	void HitAnswers(const Protocol::NpcHitAnswers& a_msg);
+	void Healths(const Protocol::NpcHealths& a_msg);
+	void Deaths(const Protocol::NpcDeaths& a_msg);
 
 	// From the Character update hook, for an actor that is no stand-in: true when it is a copy this game moves now (its
 	// AI is not run); false: the game's own update runs.

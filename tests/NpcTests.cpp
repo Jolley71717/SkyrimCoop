@@ -183,12 +183,11 @@ TEST("npc protocol: a claim of no NPC or of an unknown reason, a state of no NPC
 	CHECK(Protocol::DecodeNpcGear(unknownBit));
 }
 
-TEST("npc protocol: every NPC message carries forms, and this protocol is version 6")
+TEST("npc protocol: every NPC message carries forms")
 {
 	for (const auto type : { MT::kNpcClaims, MT::kNpcOwners, MT::kNpcStates, MT::kNpcActions, MT::kNpcGear }) {
 		CHECK(FormTranslate::CarriesForms(type));
 	}
-	static_assert(Protocol::VERSION == 6);
 }
 
 // ---- each game's edge ----

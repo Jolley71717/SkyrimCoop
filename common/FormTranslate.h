@@ -74,6 +74,10 @@ namespace FormTranslate
 		case MT::kNpcStates:
 		case MT::kNpcActions:
 		case MT::kNpcGear:
+		case MT::kNpcHits:
+		case MT::kNpcHitAnswers:
+		case MT::kNpcHealths:
+		case MT::kNpcDeaths:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -311,6 +315,27 @@ namespace FormTranslate
 				held(a_msg.right, Protocol::kRightUnnamed);
 				held(a_msg.left, Protocol::kLeftUnnamed);
 				held(a_msg.ammo, Protocol::kAmmoUnnamed);
+			});
+			break;
+		// NPC health and deaths: an NPC the other side lacks is left out of each list (it has no copy to hurt or kill).
+		case MT::kNpcHits:
+			detail::Apply<Protocol::NpcHits>(a_packet, ctx, Protocol::DecodeNpcHits, [&](Protocol::NpcHits& a_msg) {
+				ctx.Entries(a_msg.hits, [&](Protocol::NpcHit& a_hit) { return ctx.Npc(a_hit.key); });
+			});
+			break;
+		case MT::kNpcHitAnswers:
+			detail::Apply<Protocol::NpcHitAnswers>(a_packet, ctx, Protocol::DecodeNpcHitAnswers, [&](Protocol::NpcHitAnswers& a_msg) {
+				ctx.Entries(a_msg.answers, [&](Protocol::NpcHitAnswer& a_answer) { return ctx.Npc(a_answer.key); });
+			});
+			break;
+		case MT::kNpcHealths:
+			detail::Apply<Protocol::NpcHealths>(a_packet, ctx, Protocol::DecodeNpcHealths, [&](Protocol::NpcHealths& a_msg) {
+				ctx.Entries(a_msg.npcs, [&](Protocol::NpcHealth& a_npc) { return ctx.Npc(a_npc.key); });
+			});
+			break;
+		case MT::kNpcDeaths:
+			detail::Apply<Protocol::NpcDeaths>(a_packet, ctx, Protocol::DecodeNpcDeaths, [&](Protocol::NpcDeaths& a_msg) {
+				ctx.Entries(a_msg.deaths, [&](Protocol::NpcDeath& a_death) { return ctx.Npc(a_death.key); });
 			});
 			break;
 		default:
