@@ -63,6 +63,16 @@ namespace Furniture
 		std::mutex                     setLock;
 		std::unordered_set<RE::FormID> heldIds;
 		std::unordered_set<RE::FormID> assistedIds;
+		// Whether either set holds any actor: the update hooks ask for every actor every frame, and skip the lock when none.
+		std::atomic<bool> anyHeld{ false };
+		std::atomic<bool> anyAssisted{ false };
+
+		// After a change to the sets (setLock held).
+		void Published()
+		{
+			anyHeld.store(!heldIds.empty(), std::memory_order_release);
+			anyAssisted.store(!assistedIds.empty(), std::memory_order_release);
+		}
 
 		struct Counts
 		{
@@ -100,6 +110,7 @@ namespace Furniture
 			} else {
 				a_set.erase(a_id);
 			}
+			Published();
 		}
 
 		bool GettingOnOrOffMount(const RE::Actor* a_actor)
@@ -597,6 +608,7 @@ namespace Furniture
 			std::scoped_lock l{ setLock };
 			heldIds.clear();
 			assistedIds.clear();
+			Published();
 		}
 		active = false;
 		ourId = 0;
@@ -612,6 +624,7 @@ namespace Furniture
 		std::scoped_lock l{ setLock };
 		heldIds.clear();
 		assistedIds.clear();
+		Published();
 	}
 
 	void Release(RE::Actor* a_actor)
@@ -626,26 +639,27 @@ namespace Furniture
 		std::scoped_lock l{ setLock };
 		heldIds.erase(a_actor->GetFormID());
 		assistedIds.erase(a_actor->GetFormID());
+		Published();
 	}
 
 	bool Held(const RE::Actor* a_actor)
 	{
-		if (!a_actor) {
+		if (!a_actor || !anyHeld.load(std::memory_order_acquire)) {
 			return false;
 		}
 		std::scoped_lock l{ setLock };
-		return !heldIds.empty() && heldIds.contains(a_actor->GetFormID());
+		return heldIds.contains(a_actor->GetFormID());
 	}
 
 	bool Assisted(const RE::Actor* a_actor)
 	{
-		if (!a_actor) {
+		if (!a_actor || !anyAssisted.load(std::memory_order_acquire)) {
 			return false;
 		}
 		bool in = false;
 		{
 			std::scoped_lock l{ setLock };
-			in = !assistedIds.empty() && assistedIds.contains(a_actor->GetFormID());
+			in = assistedIds.contains(a_actor->GetFormID());
 		}
 		if (in) {
 			assistFrames.fetch_add(1, std::memory_order_relaxed);
