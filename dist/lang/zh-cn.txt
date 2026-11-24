@@ -10,3 +10,7 @@ reject.mods = 你的 MOD 与房主的不同。
 
 steam.status_hosting = 正在主持 Skyrim 联机
 steam.status_playing = 正在玩 Skyrim 联机
+
+talk.line = {speaker}：{line}
+talk.busy = {name}正在与{player}交谈。
+talk.another = 另一名玩家

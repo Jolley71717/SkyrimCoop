@@ -31,5 +31,12 @@ namespace Text
 		// language of the player who sets it ---
 		{ "steam.status_hosting", "Hosting Skyrim co-op" },
 		{ "steam.status_playing", "Playing Skyrim co-op" },
+
+		// --- Conversations (src/game/Conversations.cpp): a friend's conversation line as a notice (the speaker's name,
+		// then the line), and our own talk with an NPC ended because another player talks with it (the NPC's name, then
+		// that player's, or talk.another when this game has no name for them) ---
+		{ "talk.line", "{speaker}: {line}" },
+		{ "talk.busy", "{name} is talking with {player}." },
+		{ "talk.another", "another player" },
 	};
 }

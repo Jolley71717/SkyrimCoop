@@ -14,6 +14,7 @@
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "game/WorldClock.h"
+#include "game/Conversations.h"
 #include "game/DropSync.h"
 #include "game/LootSync.h"
 #include "game/QuestSync.h"
@@ -186,6 +187,9 @@ namespace
 		if (!DropSync::Install()) {
 			logs::warn("Drops: dropped items are not given in this game; a session still runs");
 		}
+		if (!Conversations::Install()) {
+			logs::warn("Talk: conversations are not shared in this game; a session still runs");
+		}
 		if (!RemotePlayers::Install()) {
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
 		}
@@ -222,6 +226,7 @@ namespace
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
 			QuestSync::BeforeLoad();          // no quest alias record is left rewritten for a run into the load
+			Conversations::BeforeLoad();      // friends' lines' sounds and subtitles go with the world
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 			// data is not a pointer here: it is whether the load worked.
@@ -230,6 +235,7 @@ namespace
 			WorldObjects::AfterLoad();   // the loaded world's doors are the save's: the session's words are asked for again
 			QuestSync::AfterLoad();      // ... and its quests: the host says them again, a friend asks for the session's
 			WorldClock::AfterLoad();     // ... and its clock: the save's day count and timescale, lined up with the owner's again
+			Conversations::AfterLoad();  // ... and our conversation, read afresh
 			LootSync::AfterLoad();       // ... and its loot: the save's ledger, the session's moves it lacks asked for
 			DropSync::AfterLoad();       // ... and its dropped items: the save's record, told to the session
 			CheckSteam();
@@ -237,9 +243,11 @@ namespace
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
 			RemotePlayers::ForgetStandIns();
+			Conversations::BeforeLoad();
 			WorldObjects::AfterLoad();
 			QuestSync::AfterLoad();
 			WorldClock::AfterLoad();
+			Conversations::AfterLoad();
 			LootSync::AfterLoad();
 			DropSync::NewGame();
 			CheckSteam();

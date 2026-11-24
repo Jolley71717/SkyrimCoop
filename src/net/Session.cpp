@@ -6,6 +6,7 @@
 #include "Protocol.h"
 #include "Redact.h"
 #include "Server.h"
+#include "game/Conversations.h"
 #include "game/DropSync.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
@@ -225,6 +226,7 @@ namespace Session
 					WorldObjects::Welcomed(playerId);  // the session's doors follow the welcome
 					QuestSync::Welcomed(playerId, playerId == hostId);  // ... and its quests (the host's game says its own)
 					WorldClock::Welcomed(playerId);  // ... and its clock: lined up afresh with the owner's
+					Conversations::Welcomed(playerId);  // ... and its conversations: a talk under way is said again
 					LootSync::Welcomed(playerId);    // ... and its loot: the moves this world lacks asked for
 					DropSync::Welcomed(playerId, msg->sessionId);  // ... and its dropped items: this world's record told
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
@@ -246,6 +248,7 @@ namespace Session
 				if (const auto msg = Protocol::DecodePlayerLeft(a_data)) {
 					RemotePlayers::Left(msg->playerId);
 					WorldClock::Left(msg->playerId);
+					Conversations::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -297,6 +300,16 @@ namespace Session
 			case Protocol::MessageType::kRemoteClock:
 				if (const auto msg = Protocol::DecodeClockState(a_data); msg && welcomed) {
 					WorldClock::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kRemoteLine:
+				if (const auto msg = Protocol::DecodeLine(a_data); msg && welcomed && msg->playerId != playerId) {
+					Conversations::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kTalkAnswer:
+				if (const auto msg = Protocol::DecodeTalkAnswer(a_data); msg && welcomed) {
+					Conversations::Answered(*msg);
 				}
 				break;
 			case Protocol::MessageType::kRemoteLoot:
@@ -466,6 +479,7 @@ namespace Session
 		WorldObjects::Clear();
 		QuestSync::Clear();
 		WorldClock::Clear();
+		Conversations::Clear();
 		LootSync::Clear();
 		DropSync::Clear();  // our items lying there go back to our world
 		Reset();
@@ -507,6 +521,7 @@ namespace Session
 			WorldObjects::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			QuestSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			WorldClock::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
+			Conversations::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			LootSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			DropSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 		}

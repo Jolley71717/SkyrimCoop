@@ -10,3 +10,7 @@ reject.mods = Ваші моди відрізняються від модів х�
 
 steam.status_hosting = Проводить кооперативну гру в Skyrim
 steam.status_playing = Грає в Skyrim у кооперативі
+
+talk.line = {speaker}: «{line}»
+talk.busy = {name} розмовляє з: {player}.
+talk.another = інший гравець
