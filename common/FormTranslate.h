@@ -29,7 +29,11 @@
 // - the reference a door's state or a mechanism's use is about becomes 0, which no game applies and the server keeps
 //   nothing of: a door of a plugin some game lacks is that game's own;
 // - an entry of a quest batch whose quest has no ID is left out (a mod's quest some game lacks is that game's own); a
-//   batch left with no entry is not sent at all (kDrop), as it could not be read.
+//   batch left with no entry is not sent at all (kDrop), as it could not be read;
+// - a move of loot the session passes on (kRemoteLoot) whose holder or item has no ID is left out (a mod's chest or
+//   item some game lacks is that game's own), a batch left with none dropped; in a game's own moves going out (kLoot) and
+//   in the answers to them (kLootAnswer) each becomes 0 instead, so every move is still answered once (the server
+//   refuses a move of no holder).
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -84,7 +88,12 @@ namespace FormTranslate
 		case MT::kQuestAnswer:
 		case MT::kClock:
 		case MT::kRemoteClock:
+		case MT::kLoot:
+		case MT::kRemoteLoot:
+		case MT::kLootAnswer:
 			return true;
+		case MT::kAskLoot:  // a ledger: numbers, no forms
+		case MT::kLootCaughtUp:
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
 		case MT::kReject:
@@ -262,6 +271,46 @@ namespace FormTranslate
 			}
 		}
 
+		// A batch of loot moves, written back with its own type. kRemoteLoot: the moves whose holder and item (an emptied
+		// marker has none) have IDs on the other side; none left is kDrop. kLoot and kLootAnswer: every move kept, a form
+		// with no ID made 0, so each of a game's moves is answered once.
+		inline void ApplyLoot(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeLootBatch(a_packet);
+			if (!msg) {
+				return;
+			}
+			if (a_type == Protocol::MessageType::kRemoteLoot) {
+				std::vector<Protocol::LootEntry> kept;
+				kept.reserve(msg->entries.size());
+				for (auto entry : msg->entries) {
+					if (a_ctx.Key(entry.holderId) && a_ctx.Key(entry.itemId)) {
+						kept.push_back(entry);
+					}
+				}
+				const auto left = msg->entries.size() - kept.size();
+				a_ctx.out.entries += static_cast<std::uint32_t>(left);
+				if (kept.empty()) {
+					a_ctx.out.kind = Result::Kind::kDrop;
+					return;
+				}
+				if (a_ctx.changed || left != 0) {
+					msg->entries = std::move(kept);
+					a_ctx.out.kind = Result::Kind::kChanged;
+					a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+				}
+				return;
+			}
+			for (auto& entry : msg->entries) {
+				a_ctx.Detail(entry.holderId);
+				a_ctx.Detail(entry.itemId);
+			}
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
@@ -313,6 +362,11 @@ namespace FormTranslate
 		case MT::kClock:
 		case MT::kRemoteClock:
 			detail::ApplyClock(a_packet, ctx, *type);
+			break;
+		case MT::kLoot:
+		case MT::kRemoteLoot:
+		case MT::kLootAnswer:
+			detail::ApplyLoot(a_packet, ctx, *type);
 			break;
 		default:
 			break;

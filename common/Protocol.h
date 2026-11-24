@@ -43,7 +43,11 @@ namespace Protocol
 	//    day count, timescale and outdoor weather; the server passes on the clock owner's alone (the host's game, else
 	//    the player there longest) and keeps it for whoever joins. Written on top of 7 (quests) beside 8 (NPC health,
 	//    another branch): whichever is merged later renumbers; the message numbers (39, 40) do not clash.
-	inline constexpr std::uint16_t VERSION = 9;
+	// 10: containers and loot (LootEntry, docs/DESIGN.md "Containers and loot"): what a player takes from or puts into a
+	//    container or a body is numbered by the server, kept for whoever joins or loads later, and made in every game;
+	//    a holder a player empties is said empty (its other games' own rolls go too). Written on top of 9 (the clock)
+	//    beside 9 (player actions, another branch): whichever is merged later renumbers; the messages (44-48) do not clash.
+	inline constexpr std::uint16_t VERSION = 10;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -106,6 +110,11 @@ namespace Protocol
 		kQuestReset = 34,      // host -> server: my world is new (a welcome, a load): its quests follow; server -> the others
 		kClock = 39,           // client -> server, reliable: our time of day, day count, timescale and weather (every 5 s, and on a change)
 		kRemoteClock = 40,     // server -> the others: the clock owner's (and the kept one, to a joiner)
+		kLoot = 44,            // client -> server, reliable: what our player took from or put into containers and bodies
+		kRemoteLoot = 45,      // server -> everyone, the reporter too: each move numbered, with who made it (a catch-up's too)
+		kAskLoot = 46,         // client -> server, reliable: send me the moves from this number of this log (a welcome, a load)
+		kLootCaughtUp = 47,    // server -> the asker alone: the catch-up is done; the log's id and its next number
+		kLootAnswer = 48,      // server -> the reporter alone, reliable: its moves that were not taken, each with why
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -453,6 +462,82 @@ namespace Protocol
 	// Past either, a new one is refused (kFull), never the oldest dropped.
 	inline constexpr std::size_t MAX_QUESTS = 4096;
 	inline constexpr std::size_t MAX_QUEST_ENTRIES = 512;
+
+	// One move of loot (docs/DESIGN.md, "Containers and loot"): a player took `count` of the item `itemId` from the
+	// container or body `holderId`, or put them into it; or the holder was emptied. Forms in the session's numbering; an
+	// entry whose holder or item the reading game lacks is left out of its batch (FormTranslate.h).
+	struct LootEntry
+	{
+		enum Kind : std::uint8_t
+		{
+			kTake = 0,     // `count` of the item went from the holder to the player who made the move
+			kPut = 1,      // `count` of the item went from that player into the holder
+			kEmptied = 2,  // the holder holds nothing the session shares in the sender's game (itemId 0); `count` is the
+			               // sender's ledger as of then (the first number it had not made), so a later put stays
+		};
+		static constexpr std::uint8_t KIND_MAX = kEmptied;
+
+		// In a kLootAnswer, why the session did not take it.
+		enum Answer : std::uint8_t
+		{
+			kBusy = 0,     // past that player's budget: report it again a little later
+			kFull = 1,     // the session's log holds MAX_LOOT_LOG moves already: it stays the reporter's game's own
+			kRefused = 2,  // no holder, no item, a runtime form, a count out of range: never taken
+		};
+		static constexpr std::uint8_t ANSWER_MAX = kRefused;
+
+		std::uint32_t number = 0;    // kRemoteLoot: the session's number for it (1 up); 0 otherwise
+		std::uint32_t playerId = 0;  // kRemoteLoot: who made it; 0 otherwise
+		std::uint32_t tag = 0;       // the reporting game's own name for the move, carried back as it was in its echo and
+		                             // its answer: the reporter knows its moves by it (a form may come back as 0)
+		std::uint32_t holderId = 0;
+		std::uint32_t itemId = 0;
+		std::uint32_t count = 0;
+		std::uint8_t  kind = kTake;
+		std::uint8_t  answer = kBusy;  // kLootAnswer only
+
+		bool operator==(const LootEntry&) const = default;
+	};
+
+	// A batch of loot moves: kLoot (a game's own, in the order made), kRemoteLoot (the session's, numbered; `ask` is the
+	// kAskLoot it answers as a catch-up, 0 for a move passed on as it came), kLootAnswer (to the reporter alone, each with
+	// its answer).
+	struct LootBatch
+	{
+		std::uint32_t          ask = 0;
+		std::vector<LootEntry> entries;
+		bool operator==(const LootBatch&) const = default;
+	};
+
+	// kAskLoot: the moves of the log `logId` from `from` on (a game's ledger: what its world holds already). A log id that
+	// is not the server's (0: none; another session's) is answered from the first move. `ask` names it (never 0): its
+	// catch-up and its end carry it, so a game tells the answer to its newest ask from the answers to the asks it made
+	// before (the server owes a game one ask at most, the newest: an older one it replaced is never answered).
+	struct LootAsk
+	{
+		std::uint32_t ask = 1;
+		std::uint64_t logId = 0;
+		std::uint32_t from = 1;
+		bool operator==(const LootAsk&) const = default;
+	};
+
+	// kLootCaughtUp: every move from `from` on has been sent for the ask `ask`; the log is `logId`, its next number `next`.
+	struct LootCaughtUp
+	{
+		std::uint32_t ask = 1;
+		std::uint64_t logId = 0;
+		std::uint32_t from = 1;
+		std::uint32_t next = 1;
+		bool operator==(const LootCaughtUp&) const = default;
+	};
+
+	// The most moves in one batch (a container's Take All is a few dozen: one or two batches).
+	inline constexpr std::size_t MAX_LOOT_BATCH = 64;
+	// The most of one item one move carries (a heap of gold is a few thousand; mods sell in the hundreds of thousands).
+	inline constexpr std::uint32_t MAX_LOOT_COUNT = 1000000;
+	// The most moves the server keeps for a session (an evening loots a few thousand); past it a new move is refused
+	// (kFull) and stays its game's own, never the oldest dropped: a game that loads asks for them by number.
+	inline constexpr std::size_t MAX_LOOT_LOG = 30000;
 
 	// ---- serialization -------------------------------------------------------------
 
@@ -1216,6 +1301,173 @@ namespace Protocol
 		if (!r.AtEnd() || !std::isfinite(msg.gameHour) || msg.gameHour < 0.0f || msg.gameHour >= 24.0f || !std::isfinite(msg.daysPassed) ||
 			msg.daysPassed < 0.0f || msg.daysPassed > MAX_DAYS_PASSED || !std::isfinite(msg.timeScale) || msg.timeScale < 0.0f ||
 			msg.timeScale > MAX_TIME_SCALE) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kLoot: a count (1 to MAX_LOOT_BATCH), then each move: tag, holderId, itemId, count, kind. kRemoteLoot: the ask it
+	// answers (0: none, moves passed on as they came), the count, then each: number, playerId, tag, holderId, itemId,
+	// count, kind. kLootAnswer: the count, then each move as kLoot has it and its answer. None for an empty batch, a kind not known, an answer past ANSWER_MAX, a take or
+	// put of a count out of 1 to MAX_LOOT_COUNT (or of no item, in kRemoteLoot), an emptied marker that names an item,
+	// or a kRemoteLoot move with no number. Encode writes at most MAX_LOOT_BATCH moves (LootBatches splits).
+	inline std::vector<std::uint8_t> Encode(const LootBatch& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		if (a_type == MessageType::kRemoteLoot) {
+			w.U32(a_msg.ask);
+		}
+		const auto count = (std::min)(a_msg.entries.size(), MAX_LOOT_BATCH);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& e = a_msg.entries[i];
+			if (a_type == MessageType::kRemoteLoot) {
+				w.U32(e.number);
+				w.U32(e.playerId);
+			}
+			w.U32(e.tag);
+			w.U32(e.holderId);
+			w.U32(e.itemId);
+			w.U32(e.count);
+			w.U8(e.kind);
+			if (a_type == MessageType::kLootAnswer) {
+				w.U8(e.answer);
+			}
+		}
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const LootBatch& a_msg) { return Encode(a_msg, MessageType::kLoot); }
+
+	// a_entries in batches of MAX_LOOT_BATCH, in order, each encoded as a_type (none for no entries); a_ask: the ask a
+	// kRemoteLoot catch-up answers (0: moves passed on as they came).
+	inline std::vector<std::vector<std::uint8_t>> LootBatches(const std::vector<LootEntry>& a_entries, MessageType a_type, std::uint32_t a_ask = 0)
+	{
+		std::vector<std::vector<std::uint8_t>> out;
+		for (std::size_t at = 0; at < a_entries.size(); at += MAX_LOOT_BATCH) {
+			LootBatch  batch{ a_ask, {} };
+			const auto end = (std::min)(a_entries.size(), at + MAX_LOOT_BATCH);
+			batch.entries.assign(a_entries.begin() + static_cast<std::ptrdiff_t>(at), a_entries.begin() + static_cast<std::ptrdiff_t>(end));
+			out.push_back(Encode(batch, a_type));
+		}
+		return out;
+	}
+
+	// Whether a move says something a game could make: a take or a put of an item, 1 to MAX_LOOT_COUNT of it; an emptied
+	// marker of no item. The holder is not judged here (FormTranslate may have made it 0: the server refuses that).
+	[[nodiscard]] inline bool LootMoveReadable(const LootEntry& a_e)
+	{
+		if (a_e.kind > LootEntry::KIND_MAX) {
+			return false;
+		}
+		if (a_e.kind == LootEntry::kEmptied) {
+			return a_e.itemId == 0;
+		}
+		return a_e.itemId != 0 && a_e.count != 0 && a_e.count <= MAX_LOOT_COUNT;
+	}
+
+	inline std::optional<LootBatch> DecodeLootBatch(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kLoot && type != MessageType::kRemoteLoot && type != MessageType::kLootAnswer) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		LootBatch msg;
+		if (type == MessageType::kRemoteLoot) {
+			msg.ask = r.U32();
+		}
+		const auto count = r.U8();
+		if (count == 0 || count > MAX_LOOT_BATCH) {
+			return std::nullopt;
+		}
+		msg.entries.reserve(count);
+		for (std::uint8_t i = 0; i < count; ++i) {
+			LootEntry e;
+			if (type == MessageType::kRemoteLoot) {
+				e.number = r.U32();
+				e.playerId = r.U32();
+			}
+			e.tag = r.U32();
+			e.holderId = r.U32();
+			e.itemId = r.U32();
+			e.count = r.U32();
+			e.kind = r.U8();
+			if (type == MessageType::kLootAnswer) {
+				e.answer = r.U8();
+				if (e.answer > LootEntry::ANSWER_MAX) {
+					return std::nullopt;
+				}
+			}
+			// A game's move and its answer are read even for an item no form names (0: FormTranslate found none on the
+			// other side): the server refuses it, and every move a game sends is answered once.
+			auto judged = e;
+			if (type != MessageType::kRemoteLoot && judged.kind != LootEntry::kEmptied && judged.itemId == 0) {
+				judged.itemId = 1;
+			}
+			if (!LootMoveReadable(judged) || (type == MessageType::kRemoteLoot && e.number == 0)) {
+				return std::nullopt;
+			}
+			msg.entries.push_back(e);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const LootAsk& a_msg)
+	{
+		Writer w{ MessageType::kAskLoot };
+		w.U32(a_msg.ask);
+		w.U64(a_msg.logId);
+		w.U32(a_msg.from);
+		return w.Data();
+	}
+
+	// None for an ask of 0 or a from of 0 (the log's numbers start at 1).
+	inline std::optional<LootAsk> DecodeLootAsk(std::span<const std::uint8_t> a_data)
+	{
+		if (PeekType(a_data) != MessageType::kAskLoot) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		LootAsk msg;
+		msg.ask = r.U32();
+		msg.logId = r.U64();
+		msg.from = r.U32();
+		if (!r.AtEnd() || msg.ask == 0 || msg.from == 0) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const LootCaughtUp& a_msg)
+	{
+		Writer w{ MessageType::kLootCaughtUp };
+		w.U32(a_msg.ask);
+		w.U64(a_msg.logId);
+		w.U32(a_msg.from);
+		w.U32(a_msg.next);
+		return w.Data();
+	}
+
+	// None for an ask of 0, a number of 0 (the log's numbers start at 1) or a from past next.
+	inline std::optional<LootCaughtUp> DecodeLootCaughtUp(std::span<const std::uint8_t> a_data)
+	{
+		if (PeekType(a_data) != MessageType::kLootCaughtUp) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		LootCaughtUp msg;
+		msg.ask = r.U32();
+		msg.logId = r.U64();
+		msg.from = r.U32();
+		msg.next = r.U32();
+		if (!r.AtEnd() || msg.ask == 0 || msg.next == 0 || msg.from == 0 || msg.from > msg.next) {
+
 			return std::nullopt;
 		}
 		return msg;

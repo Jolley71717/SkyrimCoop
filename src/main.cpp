@@ -14,6 +14,7 @@
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "game/WorldClock.h"
+#include "game/LootSync.h"
 #include "game/QuestSync.h"
 #include "game/WorldObjects.h"
 #include "net/Session.h"
@@ -178,6 +179,9 @@ namespace
 		if (!WorldObjects::Install()) {
 			logs::warn("World: doors, locks and mechanisms are not shared in this game; a session still runs");
 		}
+		if (!LootSync::Install()) {
+			logs::warn("Loot: containers and loot are not shared in this game; a session still runs");
+		}
 		if (!RemotePlayers::Install()) {
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
 		}
@@ -221,6 +225,7 @@ namespace
 			WorldObjects::AfterLoad();   // the loaded world's doors are the save's: the session's words are asked for again
 			QuestSync::AfterLoad();      // ... and its quests: the host says them again, a friend asks for the session's
 			WorldClock::AfterLoad();     // ... and its clock: the save's day count and timescale, lined up with the owner's again
+			LootSync::AfterLoad();       // ... and its loot: the save's ledger, the session's moves it lacks asked for
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
@@ -229,6 +234,7 @@ namespace
 			WorldObjects::AfterLoad();
 			QuestSync::AfterLoad();
 			WorldClock::AfterLoad();
+			LootSync::AfterLoad();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:
@@ -245,11 +251,13 @@ namespace
 		}
 	}
 
-	// The co-save: the only record is the list of stand-ins taken out of the world for the save (RemotePlayers), so a
-	// load can remove any that the save brought back. Nothing else of a session is kept.
+	// The co-save: the list of stand-ins taken out of the world for the save (RemotePlayers), so a load can remove any
+	// that the save brought back, and the loot ledger (LootSync): which of the session's moves of loot this world holds,
+	// and the ones still waiting for their holder. Nothing else of a session is kept.
 	void OnSave(SKSE::SerializationInterface* a_intf)
 	{
 		RemotePlayers::WriteCoSave(a_intf);
+		LootSync::WriteCoSave(a_intf);
 	}
 
 	void OnLoad(SKSE::SerializationInterface* a_intf)
@@ -260,6 +268,8 @@ namespace
 		while (a_intf->GetNextRecordInfo(type, version, length)) {
 			if (type == RemotePlayers::COSAVE_STANDINS) {
 				RemotePlayers::ReadCoSave(a_intf, version, length);
+			} else if (type == LootSync::COSAVE_LOOT) {
+				LootSync::ReadCoSave(a_intf, version, length);
 			} else {
 				logs::warn("Co-save: a record of a type this version does not know ({:08X}); skipped", type);
 			}
@@ -269,6 +279,7 @@ namespace
 	void OnRevert(SKSE::SerializationInterface*)
 	{
 		RemotePlayers::ForgetStandIns();
+		LootSync::RevertCoSave();
 	}
 
 	// False when the plugin must not load into this game.

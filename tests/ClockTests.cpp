@@ -88,7 +88,7 @@ TEST("clock: a game's clock goes as it is said, the owner named only from the se
 	const auto passed = Protocol::DecodeClockState(Protocol::Encode(ours, MT::kRemoteClock));
 	REQUIRE(passed);
 	CHECK(*passed == ours);
-	CHECK(Protocol::VERSION == 9);
+	CHECK(Protocol::VERSION >= 9);
 }
 
 TEST("clock: a clock no game could have is no message")
