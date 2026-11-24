@@ -279,8 +279,11 @@ TEST("talk book: one player at a time talks with an NPC; a new talk ends their l
 	CHECK(book.Holds(1, HULDA, t0 + 30s));
 	CHECK(!book.Claim(2, HULDA, t0 + 30s).granted);
 
-	// Player 1 talks with another NPC: the first is free.
+	// Player 1 talks with another NPC: the first is kept until their game says it off (its goodbye), then free.
 	CHECK(book.Claim(1, 0x00013BBD, t0 + 31s).granted);
+	CHECK(book.Holds(1, HULDA, t0 + 31s));
+	CHECK(!book.Claim(2, HULDA, t0 + 31s).granted);
+	CHECK(book.Release(1, HULDA));
 	CHECK(!book.Holds(1, HULDA, t0 + 31s));
 	CHECK(book.Claim(2, HULDA, t0 + 31s).granted);
 	CHECK(book.Size() == 2u);
@@ -300,6 +303,34 @@ TEST("talk book: one player at a time talks with an NPC; a new talk ends their l
 	REQUIRE(freed.size() == 1u);
 	CHECK(freed[0] == HULDA);
 	CHECK(book.Claim(1, HULDA, late).granted);
+}
+
+TEST("talk book: the NPC a player left for another is kept until said off (its goodbye passes), the last one only")
+{
+	TalkBook                book;
+	const auto              t0 = std::chrono::steady_clock::now();
+	constexpr std::uint32_t B = 0x00013BBD;
+	constexpr std::uint32_t C = 0x00013BBE;
+	CHECK(book.Claim(1, HULDA, t0).granted);
+	CHECK(book.Claim(1, B, t0 + 1s).granted);
+	CHECK(book.Holds(1, HULDA, t0 + 1s));  // left 1 s ago: its goodbye is still said
+	CHECK(book.Holds(1, B, t0 + 1s));
+	// A third: the one before it (B) is kept, the older one (Hulda) is over.
+	CHECK(book.Claim(1, C, t0 + 2s).granted);
+	CHECK(!book.Holds(1, HULDA, t0 + 2s));
+	CHECK(book.Holds(1, B, t0 + 2s));
+	CHECK(book.Holds(1, C, t0 + 2s));
+	CHECK(book.Size() == 2u);
+	// Said again: the one lingering stays until said off.
+	CHECK(book.Claim(1, C, t0 + 3s).granted);
+	CHECK(book.Holds(1, B, t0 + 3s));
+	CHECK(!book.Claim(2, B, t0 + 3s).granted);
+	CHECK(book.Release(1, B));
+	CHECK(book.Claim(2, B, t0 + 3s).granted);
+	CHECK(book.Claim(2, HULDA, t0 + 3s).granted);
+	// Never said off (the word lost): over HOLD after it was last said, as any talk.
+	CHECK(book.HolderOf(C, t0 + 3s + TalkBook::HOLD) == 0u);
+	CHECK(book.Claim(2, C, t0 + 3s + TalkBook::HOLD).granted);
 }
 
 TEST("talk book: an NPC the session can't name (a runtime one) or none is nobody's: granted to all, and never kept")
@@ -409,6 +440,30 @@ TEST("talk server: lines go to the others with whose they are; an NPC's only fro
 	CHECK(std::ranges::count_if(f.LogLines(), [](const std::string& a_line) { return a_line.find("whom they do not talk with") != std::string::npos; }) == 1);
 }
 
+TEST("talk server: a player who leaves an NPC for another still passes its goodbye, until their game says it off")
+{
+	Fixture    f;
+	const auto a = f.Join(1, Fixture::MakeHello("A", 0x1111));
+	REQUIRE(a);
+	REQUIRE(f.Join(2, Fixture::MakeHello("B", 0x2222)));
+	f.fake->Deliver(1, Protocol::Encode(Talk{ HULDA, true }));
+	REQUIRE(AnswerTo(f, 1));
+	f.fake->Deliver(1, Protocol::Encode(Talk{ 0x00013BBD, true }));  // within the linger, another NPC
+	REQUIRE(AnswerTo(f, 1));
+	f.fake->Deliver(1, Protocol::Encode(Said(HULDA, "Come back soon.", 3)));
+	REQUIRE(f.fake->Settle());
+	auto toB = LinesIn(f.fake->Take(2));
+	REQUIRE(toB.size() == 1u);
+	CHECK(toB[0].text == "Come back soon.");
+
+	// Said off: a line of it now is not theirs.
+	f.fake->Deliver(1, Protocol::Encode(Talk{ HULDA, false }));
+	f.fake->Deliver(1, Protocol::Encode(Said(HULDA, "Too late.", 4)));
+	REQUIRE(f.LoggedSoon(std::format("player {} sent a line of {:08X}, whom they do not talk with", a->playerId, HULDA)));
+	REQUIRE(f.fake->Settle());
+	CHECK(LinesIn(f.fake->Take(2)).empty());
+}
+
 TEST("talk server: lines past the budget are dropped (a line is of the moment), said once")
 {
 	Fixture    f;
@@ -469,6 +524,75 @@ TEST("talk rules: a subtitle is a new line when it changes, or when the same wor
 
 	watch.Clear();  // another speaker
 	CHECK(watch.Read("Farewell.", t0 + 14s));
+}
+
+TEST("talk rules: a talk's start never sends the subtitle left up from before (a goodbye, an ambient line); its greeting goes")
+{
+	LineWatch  watch;
+	const auto t0 = std::chrono::steady_clock::now();
+
+	// The NPC's goodbye of the talk before is still its subtitle: primed, not sent, however long it stays up.
+	watch.Prime("Come back soon.", std::nullopt);
+	CHECK(!watch.Read("Come back soon.", t0));
+	CHECK(!watch.Read("Come back soon.", t0 + 10s));
+	// The greeting begins: a new text is a new line at once.
+	watch.Begin(t0 + 11s);
+	CHECK(watch.Read("Welcome to the Bannered Mare.", t0 + 11s + 20ms));
+
+	// A greeting with the same words as the line left up: its begin arms the watch; sent once SAME_AGAIN has passed.
+	watch.Prime("What do you need?", std::nullopt);
+	CHECK(!watch.Read("What do you need?", t0 + 20s));
+	watch.Begin(t0 + 21s);
+	CHECK(!watch.Read("What do you need?", t0 + 21s + 100ms));
+	CHECK(watch.Read("What do you need?", t0 + 21s + LineWatch::SAME_AGAIN));
+	CHECK(!watch.Read("What do you need?", t0 + 23s));
+
+	// The greeting began a moment before the watch turned to its speaker (the menu opened a frame or two after):
+	// read SAME_AGAIN after that begin, it goes at once; read sooner, it waits.
+	watch.Prime("Hm?", t0 + 30s);
+	CHECK(watch.Read("Hm?", t0 + 30s + 400ms));
+	watch.Prime("Hm?", t0 + 40s);
+	CHECK(!watch.Read("Hm?", t0 + 40s + 50ms));
+	CHECK(watch.Read("Hm?", t0 + 40s + LineWatch::SAME_AGAIN));
+
+	// Nothing up (or a blank idle line): the first line is new, as after Clear.
+	watch.Prime(" ", std::nullopt);
+	CHECK(watch.Read("Hello.", t0 + 50s));
+	watch.Prime("", std::nullopt);
+	CHECK(watch.Read("Hello.", t0 + 51s));
+}
+
+TEST("talk rules: each speaker's last begun line is kept a while; a line ends only by its own info's end")
+{
+	Begins     begins;
+	const auto t0 = std::chrono::steady_clock::now();
+	CHECK(!begins.Of(HULDA, t0, Begins::BEGUN_RECENT));
+	begins.Note(HULDA, INFO, t0);
+	begins.Note(0, INFO, t0);  // no speaker: not kept
+	auto begun = begins.Of(HULDA, t0 + 500ms, Begins::BEGUN_RECENT);
+	REQUIRE(begun);
+	CHECK(begun->info == INFO);
+	CHECK(begun->at == t0);
+	CHECK(!begins.Of(HULDA, t0 + 2s, Begins::BEGUN_RECENT));
+	CHECK(begins.Of(HULDA, t0 + 2s, 60s));
+	CHECK(!begins.Of(0x1234, t0, 60s));
+	begins.Note(HULDA, INFO + 1, t0 + 3s);  // its next line replaces it
+	begun = begins.Of(HULDA, t0 + 3s, 60s);
+	REQUIRE(begun);
+	CHECK(begun->info == INFO + 1);
+	for (std::uint32_t i = 1; i <= Begins::MAX + 4; ++i) {
+		begins.Note(0x00010000 + i, i, t0 + 4s);
+	}
+	CHECK(!begins.Of(HULDA, t0 + 4s, 60s));  // the oldest went
+	CHECK(begins.Of(0x00010000 + Begins::MAX + 4, t0 + 4s, 60s));
+	begins.Clear();
+	CHECK(!begins.Of(0x00010000 + Begins::MAX + 4, t0 + 4s, 60s));
+
+	// A line's end: its own info's, or one not known; the greeting's end fired after the answer is up is not the answer's.
+	CHECK(EndsLine(INFO, INFO));
+	CHECK(!EndsLine(INFO, INFO + 1));
+	CHECK(EndsLine(0, INFO));
+	CHECK(EndsLine(INFO, 0));
 }
 
 TEST("talk rules: the talk is said on start, every REFRESH, off LINGER after; busy ends ours once and keeps its lines home")
@@ -539,7 +663,7 @@ TEST("talk rules: the talk is said on start, every REFRESH, off LINGER after; bu
 	CHECK(!claimer.Talking());
 }
 
-TEST("talk rules: a heard line is shown once (a repeat within 5 s is skipped) and at most 3 in 3 s")
+TEST("talk rules: a heard line is shown once (a repeat within 5 s is skipped) and at most 3 of one speaker in 3 s")
 {
 	Hearing    hearing;
 	const auto t0 = std::chrono::steady_clock::now();
@@ -550,11 +674,35 @@ TEST("talk rules: a heard line is shown once (a repeat within 5 s is skipped) an
 	CHECK(hearing.Judge(key, "Hello.", t0 + 1s) == Hearing::Verdict::kRepeat);
 	CHECK(hearing.Judge(KeyOf(3, HULDA), "Hello.", t0 + 1s) == Hearing::Verdict::kShow);  // another talker's
 	CHECK(hearing.Judge(key, "Anything else?", t0 + 1500ms) == Hearing::Verdict::kShow);
-	CHECK(hearing.Judge(key, "And more?", t0 + 2s) == Hearing::Verdict::kTooMany);
-	CHECK(hearing.Judge(key, "And more?", t0 + 3s + 1ms) == Hearing::Verdict::kShow);  // the first out of the window
-	CHECK(hearing.Judge(key, "Hello.", t0 + Hearing::REPEAT_WINDOW) == Hearing::Verdict::kShow);
+	CHECK(hearing.Judge(key, "And more?", t0 + 2s) == Hearing::Verdict::kShow);
+	CHECK(hearing.Judge(key, "Still more?", t0 + 2500ms) == Hearing::Verdict::kTooMany);
+	CHECK(hearing.Judge(key, "Still more?", t0 + 3s + 1ms) == Hearing::Verdict::kShow);  // the first out of the window
+	CHECK(hearing.Judge(key, "Hello.", t0 + Hearing::REPEAT_WINDOW) == Hearing::Verdict::kShow);  // its repeat window is over
 	hearing.Clear();
 	CHECK(hearing.Judge(key, "Hello.", t0 + 6s) == Hearing::Verdict::kShow);
+}
+
+TEST("talk rules: two conversations near us, and a talker's own topics, each have their own budget of lines")
+{
+	Hearing    hearing;
+	const auto t0 = std::chrono::steady_clock::now();
+	const auto first = KeyOf(2, HULDA);        // player 2 talks with Hulda
+	const auto second = KeyOf(3, 0x00013BBD);  // player 3, at the same time, with another NPC
+	const auto own = KeyOf(2, 0);              // player 2's own topics
+	for (int i = 0; i < 3; ++i) {
+		CHECK(hearing.Judge(first, std::format("Hulda {}.", i), t0 + i * 200ms) == Hearing::Verdict::kShow);
+		CHECK(hearing.Judge(second, std::format("Other {}.", i), t0 + i * 200ms + 100ms) == Hearing::Verdict::kShow);
+		CHECK(hearing.Judge(own, std::format("Topic {}.", i), t0 + i * 200ms + 150ms) == Hearing::Verdict::kShow);
+	}
+	CHECK(hearing.Judge(first, "Hulda 3.", t0 + 1s) == Hearing::Verdict::kTooMany);
+	CHECK(hearing.Judge(second, "Other 3.", t0 + 1s) == Hearing::Verdict::kTooMany);
+	CHECK(hearing.Judge(own, "Topic 3.", t0 + 1s) == Hearing::Verdict::kTooMany);
+
+	// Never more than MAX_KEPT kept, the oldest first.
+	for (std::size_t i = 0; i < Hearing::MAX_KEPT + 8; ++i) {
+		CHECK(hearing.Judge(KeyOf(10, static_cast<std::uint32_t>(0x00020000 + i)), "Hi.", t0 + 2s) == Hearing::Verdict::kShow);
+	}
+	CHECK(hearing.Judge(first, "Hulda 0.", t0 + 2s) == Hearing::Verdict::kShow);  // its line at 0 is gone: not a repeat
 }
 
 TEST("talk rules: a line near us shows over its speaker as the game's own settings allow, as a notice otherwise, and not at all far away")

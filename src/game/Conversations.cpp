@@ -10,6 +10,8 @@
 #include "game/SubtitleTime.h"
 #include "game/TalkRules.h"
 
+#include <Windows.h>  // TryEnterCriticalSection: the menu's own lock (ReadTopic)
+
 // windows.h names GetObject a macro (GetObjectA); BGSDefaultObjectManager::GetObject is the engine's own.
 #ifdef GetObject
 #	undef GetObject
@@ -33,6 +35,7 @@ namespace Conversations
 		constexpr auto          PICK_AGAIN = 1s;         // the same topic picked again, at the earliest
 		constexpr std::size_t   MAX_QUEUED = 256;
 		constexpr float         PICK_RANGE = 1500.0f;    // `talk pick`: NPCs this near our player
+		constexpr auto          BEGUN_FOR_END = 60s;     // a line's info, when its response is not found: the one begun this lately
 
 		// ---- the topic events (the sink only queues; the tick reads them) -----------------------------------------------
 
@@ -90,8 +93,13 @@ namespace Conversations
 			std::uint64_t talks = 0;        // talk words said to the session
 			std::uint64_t busyRefused = 0;  // a greeting of an NPC another player talks with: left to run, kept home
 			std::uint64_t busyClosed = 0;   // our talk with an NPC another player talks with, ended
+			std::uint64_t primed = 0;       // a subtitle already up when the watch turned to its speaker: not sent
+			std::uint64_t endsOther = 0;    // an end of another topic info than the line's: not its end
+			std::uint64_t topicUnlisted = 0;  // a picked topic not found in the menu's lists: not read
+			std::uint64_t topicBusy = 0;      // the menu's lock held elsewhere: the topic read next tick
 			// friends' lines
-			std::uint64_t heard = 0;
+			std::uint64_t heard = 0;        // an NPC's lines
+			std::uint64_t heardTalker = 0;  // the talker's own (the topics they pick)
 			std::uint64_t subtitled = 0;  // shown in the subtitle area (still listed CHECK_LISTED after)
 			std::uint64_t noticed = 0;
 			std::uint64_t dropped = 0;    // added to the subtitle area and gone at once: shown as a notice instead
@@ -116,21 +124,36 @@ namespace Conversations
 		{
 			std::uint32_t seq = 0;  // 0: none
 			std::uint32_t speaker = 0;
+			std::uint32_t info = 0;  // its topic info (0: not known): only that info's end is its end
 		};
 
-		std::uint32_t        ourId = 0;
-		TalkRules::Claimer   claimer;
-		TalkRules::LineWatch watch;
-		std::uint32_t        watched = 0;  // whose subtitle the watch reads
-		std::uint32_t        seq = 0;      // our lines' numbers, rising for the plugin's life
-		OpenLine             openLine;     // our NPC's last line, until its end is said
-		bool                 wasOpen = false;
-		bool                 startedByPlayer = false;
-		const void*          pickedDialogue = nullptr;  // the topic last picked (or there when the menu opened)
-		std::string          pickedText;
-		Clock::time_point    pickedAt{};
-		bool                 pickAgain = false;
-		std::uint32_t        lastSaid = 0;  // the text's hash, for the rig
+		// The topic our player picked last (MenuTopicManager::lastSelectedDialogue), copied: ReadTopic.
+		struct Topic
+		{
+			const void*                                      at = nullptr;  // the engine's dialogue: compared, never read
+			bool                                             listed = false;  // found in the menu's lists, and copied
+			std::string                                      text;
+			std::uint32_t                                    info = 0;
+			std::vector<std::pair<std::string, std::string>> responses;  // each one's text and recording
+		};
+
+		std::uint32_t              ourId = 0;
+		TalkRules::Claimer         claimer;
+		TalkRules::LineWatch       watch;
+		TalkRules::Begins          begins;       // the lines the engine began, each speaker's last
+		std::uint32_t              watched = 0;  // whose subtitle the watch reads
+		std::uint32_t              seq = 0;      // our lines' numbers, rising for the plugin's life
+		OpenLine                   openLine;     // our NPC's last line, until its end is said
+		bool                       wasOpen = false;
+		bool                       startedByPlayer = false;
+		const void*                pickedDialogue = nullptr;  // the topic last picked (or there when the menu opened): compared only
+		std::optional<std::string> pickedText;                // its text (none: not read when the menu opened)
+		Topic                      picked;                    // its copy, read while the menu was open (the linger's goodbye uses it)
+		const void*                unlistedAt = nullptr;      // the last picked topic not found in the menu's lists (counted once)
+		Clock::time_point          pickedAt{};
+		bool                       pickAgain = false;
+		std::uint32_t              lastSaid = 0;    // the NPC's last line sent: its text's hash, for the rig
+		std::uint32_t              lastPicked = 0;  // our player's last topic sent: its text's hash, for the rig
 
 		// ---- friends' lines ----------------------------------------------------------------------------------------------
 
@@ -159,7 +182,8 @@ namespace Conversations
 		bool                                        subtitlesOff = false;  // the engine drops ours: notices only, this session
 		std::optional<Clock::time_point>            cutLoggedAt;
 		std::uint64_t                               cutUnlogged = 0;
-		std::uint32_t                               lastHeard = 0;  // the text's hash, for the rig
+		std::uint32_t                               lastHeard = 0;        // an NPC's last line shown: its text's hash, for the rig
+		std::uint32_t                               lastHeardTalker = 0;  // a talker's own last line shown: the same
 		std::uint32_t                               lastFrom = 0;
 
 		std::uint32_t Hash(std::string_view a_text)
@@ -309,20 +333,108 @@ namespace Conversations
 			return std::nullopt;
 		}
 
-		// Where a line our NPC says comes from: what it greets with (its process's greeting), or the topic our player
-		// picked. None: a line the engine said some other way (its recording is not known, the text still goes).
-		std::optional<Response> FindResponse(RE::Actor* a_actor, std::string_view a_text)
+		// The most nodes walked in the menu's lists, and responses copied of a topic: a list longer than any menu shows is
+		// not one (walked no further).
+		constexpr std::size_t MAX_LIST_WALK = 1024;
+		constexpr std::size_t MAX_RESPONSES = 64;
+		constexpr std::uint32_t LOCK_BUSY_SAY = 120;  // ticks in a row the menu's lock is not free: said once (about 2 s)
+
+		// Whether a_dialogue is one of the topics the open menu holds: the ones shown (dialogueList), and the ones above
+		// them, a topic's choices having replaced its list (dialogueListStack). Under the manager's lock; pointers compared
+		// only, a_dialogue never read.
+		bool InLists(RE::MenuTopicManager* a_topics, const RE::MenuTopicManager::Dialogue* a_dialogue)
 		{
-			if (const auto high = a_actor->GetHighProcess(); high && high->greetTopic) {
-				auto& greeting = *high->greetTopic;  // not const: CommonLib's list has no const iteration
-				if (auto found = InList(greeting.responses, greeting.info, a_text)) {
-					return found;
+			std::size_t walked = 0;
+			const auto  inList = [&](RE::BSSimpleList<RE::MenuTopicManager::Dialogue*>* a_list) {
+				if (!a_list) {
+					return false;
+				}
+				for (const auto entry : *a_list) {
+					if (entry == a_dialogue) {
+						return true;
+					}
+					if (++walked >= MAX_LIST_WALK) {
+						return false;
+					}
+				}
+				return false;
+			};
+			if (inList(a_topics->dialogueList)) {
+				return true;
+			}
+			for (auto node = a_topics->dialogueListStack; node && walked < MAX_LIST_WALK; node = node->next) {
+				++walked;
+				if (inList(node->item)) {
+					return true;
 				}
 			}
-			const auto topics = Topics();
-			if (const auto dialogue = topics ? topics->lastSelectedDialogue : nullptr) {
-				if (auto found = InList(dialogue->responses, dialogue->parentTopicInfo, a_text)) {
-					return found;
+			return false;
+		}
+
+		// The topic our player picked last, copied (its text, its info, each response's text and recording), read only
+		// while the menu is open (the caller's to check), under the manager's own lock, and only once the engine's pointer
+		// (lastSelectedDialogue) is found in the lists the menu holds: one left from a menu closed before may name a list
+		// the engine freed, and is never read (listed false). None when the lock is held elsewhere: read again next tick.
+		std::optional<Topic> ReadTopic(RE::MenuTopicManager* a_topics)
+		{
+			static_assert(sizeof(REX::W32::CRITICAL_SECTION) == sizeof(::CRITICAL_SECTION));
+			const auto section = reinterpret_cast<::CRITICAL_SECTION*>(&a_topics->criticalSection);
+			static std::uint32_t busyStreak = 0;
+			static bool          busySaid = false;
+			if (!::TryEnterCriticalSection(section)) {
+				++counts.topicBusy;
+				if (++busyStreak >= LOCK_BUSY_SAY && !busySaid) {
+					busySaid = true;  // never free in that many ticks: the topics picked are not read (an engine assumption)
+					logs::warn("Talk: the dialogue menu's lock was held elsewhere for {} ticks in a row; the topics our player picks are not read while it is", busyStreak);
+				}
+				return std::nullopt;
+			}
+			busyStreak = 0;
+			Topic topic;
+			const auto dialogue = a_topics->lastSelectedDialogue;
+			topic.at = dialogue;
+			if (dialogue && InLists(a_topics, dialogue)) {
+				topic.listed = true;
+				const auto text = dialogue->topicText.c_str();
+				topic.text = text ? text : "";
+				topic.info = dialogue->parentTopicInfo ? dialogue->parentTopicInfo->GetFormID() : 0;
+				for (const auto response : dialogue->responses) {
+					if (topic.responses.size() >= MAX_RESPONSES) {
+						break;
+					}
+					const auto said = response ? response->text.c_str() : nullptr;
+					const auto voice = response ? response->voice.c_str() : nullptr;
+					topic.responses.emplace_back(said ? said : "", voice ? voice : "");
+				}
+			}
+			::LeaveCriticalSection(section);
+			return topic;
+		}
+
+		// Where a line our NPC says comes from: what it greets with (its process's greeting, held by a reference of our
+		// own while it is read), or the topic our player picked (its copy, made while the menu was open: never the
+		// engine's pointer, which may be gone once the menu closed). None: a line the engine said some other way (its
+		// recording is not known, the text still goes).
+		std::optional<Response> FindResponse(RE::Actor* a_actor, std::string_view a_text)
+		{
+			if (const auto high = a_actor->GetHighProcess()) {
+				if (auto greeting = high->greetTopic) {
+					if (auto found = InList(greeting->responses, greeting->info, a_text)) {
+						return found;
+					}
+				}
+			}
+			if (picked.listed) {
+				std::uint32_t number = 0;
+				for (const auto& [text, voice] : picked.responses) {
+					++number;
+					if (text == a_text) {
+						Response found;
+						found.info = picked.info;
+						found.number = found.info != 0 && number <= 255 ? static_cast<std::uint8_t>(number) : 0;
+						found.voice = voice;
+						return found;
+					}
 				}
 			}
 			return std::nullopt;
@@ -343,7 +455,7 @@ namespace Conversations
 			openLine = {};
 		}
 
-		void SayNpcLine(RE::Actor* a_actor, const std::string& a_text, const SendFn& a_send)
+		void SayNpcLine(RE::Actor* a_actor, const std::string& a_text, const SendFn& a_send, Clock::time_point a_now)
 		{
 			Line line;
 			line.kind = Line::kSay;
@@ -360,7 +472,14 @@ namespace Conversations
 			a_send(Protocol::Encode(line));
 			++counts.said;
 			lastSaid = Hash(a_text);
-			openLine = { line.seq, line.speaker };
+			// Its info, for its end: the response's, or else the one its speaker began last (the line on its subtitle now).
+			auto info = line.info;
+			if (info == 0) {
+				if (const auto begun = begins.Of(line.speaker, a_now, BEGUN_FOR_END)) {
+					info = begun->info;
+				}
+			}
+			openLine = { line.seq, line.speaker, info };
 		}
 
 		void SayPlayerLine(const std::string& a_text, const SendFn& a_send)
@@ -372,6 +491,33 @@ namespace Conversations
 			line.text = a_text;
 			a_send(Protocol::Encode(line));
 			++counts.playerLines;
+			lastPicked = Hash(a_text);
+		}
+
+		RE::Actor* ActorOf(std::uint32_t a_ref)
+		{
+			const auto ref = a_ref != 0 ? RE::TESForm::LookupByID<RE::TESObjectREFR>(a_ref) : nullptr;
+			return ref ? ref->As<RE::Actor>() : nullptr;
+		}
+
+		// The watch turns to a_who (a talk begins, the NPC before is left for this one, or the session or the world is
+		// new): the subtitle up now is not a line of this talk (the engine keeps a speaker's last one: a goodbye, an
+		// ambient line), unless the engine began a line of it just before (BEGUN_RECENT), which is then sent once it reads
+		// the same SAME_AGAIN after its begin (LineWatch::Prime).
+		void TurnWatch(std::uint32_t a_who, Clock::time_point a_now)
+		{
+			watched = a_who;
+			const auto actor = ActorOf(a_who);
+			if (!actor) {
+				watch.Clear();
+				return;
+			}
+			const auto text = SubtitleOf(actor);
+			const auto begun = begins.Of(a_who, a_now, TalkRules::Begins::BEGUN_RECENT);
+			watch.Prime(text, begun ? std::optional{ begun->at } : std::nullopt);
+			if (!SubtitleTime::Blank(text)) {
+				++counts.primed;
+			}
 		}
 
 		void FrameTalk(const SendFn& a_send, Clock::time_point a_now)
@@ -380,16 +526,30 @@ namespace Conversations
 			const bool open = DialogueOpen();
 			const auto partner = open ? Partner() : nullptr;
 			const auto partnerId = partner ? partner->GetFormID() : 0;
-			const auto dialogue = topics && open ? topics->lastSelectedDialogue : nullptr;
+			// The topic picked, read while the menu is open only (ReadTopic); none when its lock is held elsewhere.
+			std::optional<Topic> read;
+			if (open) {
+				read = ReadTopic(topics);
+				if (read && read->at && !read->listed && read->at != unlistedAt) {
+					unlistedAt = read->at;
+					if (counts.topicUnlisted++ == 0) {
+						logs::info("Talk: the topic last picked is in none of the dialogue menu's lists; not read (counted in `talk` as topicUnlisted)");
+					}
+				}
+			}
 			if (open && !wasOpen) {
 				// A talk begins: our player's (a greeting of the NPC's is not; Answered leaves that one running), and the
-				// topic picked before it is no line of this talk.
+				// topic there when the menu opened is no line of this talk (its pointer compared only; its text when read).
 				startedByPlayer = !topics->isGreetingPlayer;
-				pickedDialogue = dialogue;
-				pickedText = dialogue && dialogue->topicText.c_str() ? dialogue->topicText.c_str() : "";
+				pickedDialogue = read ? read->at : topics->lastSelectedDialogue;
+				pickedText = read && read->listed ? std::optional{ read->text } : std::nullopt;
+				picked = {};
 				pickAgain = false;
 			}
 			wasOpen = open;
+			if (read && read->listed) {
+				picked = *read;  // kept for the linger: the goodbye's recording is found in the copy
+			}
 
 			for (const auto& say : claimer.Frame(partnerId, a_now)) {
 				a_send(Protocol::Encode(Protocol::Talk{ say.ref, say.on }));
@@ -398,28 +558,34 @@ namespace Conversations
 
 			for (const auto& event : TakeQueue()) {
 				if (event.begin) {
+					begins.Note(event.speaker, event.info, a_now);
 					if (event.speaker != 0 && event.speaker == watched) {
 						watch.Begin(a_now);
 					}
 					// The NPC begins its answer to the topic picked: picked again, when that topic's text is unchanged.
-					const auto info = dialogue ? dialogue->parentTopicInfo : nullptr;
-					if (info && info->GetFormID() == event.info && event.speaker == partnerId && a_now - pickedAt >= PICK_AGAIN) {
+					if (open && picked.listed && picked.info != 0 && picked.info == event.info && event.speaker == partnerId && a_now - pickedAt >= PICK_AGAIN) {
 						pickAgain = true;
 					}
 				} else if (openLine.seq != 0 && event.speaker == openLine.speaker) {
-					SayEnd(a_send);
+					// The end of the line we sent last, when it is that line's info: an earlier info's end fired late (a
+					// greeting cut short by a topic) is not the answer's.
+					if (TalkRules::EndsLine(openLine.info, event.info)) {
+						SayEnd(a_send);
+					} else {
+						++counts.endsOther;
+					}
 				}
 			}
 
 			// Our player's own line first: it is said before the NPC answers it.
-			if (open && dialogue && claimer.Talking()) {
-				std::string text = dialogue->topicText.c_str() ? dialogue->topicText.c_str() : "";
-				if ((dialogue != pickedDialogue || text != pickedText || pickAgain) && !SubtitleTime::Blank(text)) {
-					SayPlayerLine(text, a_send);
+			if (open && read && read->listed && claimer.Talking()) {
+				const bool changed = read->at != pickedDialogue || (pickedText && read->text != *pickedText) || pickAgain;
+				if (changed && !SubtitleTime::Blank(read->text)) {
+					SayPlayerLine(read->text, a_send);
 					pickedAt = a_now;
 				}
-				pickedDialogue = dialogue;
-				pickedText = std::move(text);
+				pickedDialogue = read->at;
+				pickedText = read->text;
 				pickAgain = false;
 			}
 
@@ -429,20 +595,18 @@ namespace Conversations
 				if (openLine.seq != 0 && openLine.speaker == watched) {
 					SayEnd(a_send);  // the conversation was left: a line still said ends here
 				}
-				watch.Clear();
-				watched = who;
+				TurnWatch(who, a_now);
 			}
 			if (who == 0 || !claimer.Shares(who)) {
 				return;
 			}
-			const auto ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(who);
-			const auto actor = ref ? ref->As<RE::Actor>() : nullptr;
+			const auto actor = ActorOf(who);
 			if (!actor) {
 				return;  // a talking activator, a thing: no process, no subtitle to read (docs/DESIGN.md, "Not yet")
 			}
 			const auto text = SubtitleOf(actor);
 			if (watch.Read(text, a_now)) {
-				SayNpcLine(actor, text, a_send);
+				SayNpcLine(actor, text, a_send, a_now);
 			}
 		}
 
@@ -741,12 +905,13 @@ namespace Conversations
 				"installed={} us={} menu={} partner={:08X} current={:08X} lingering={:08X} granted={} busy={} holder={} started={} said={} playerLines={} ends={} "
 				"talks={} lastSaid={:08X} heard={} subtitled={} noticed={} dropped={} voiced={} missing={} unplayed={} silent={} far={} noSpeaker={} repeats={} "
 				"tooMany={} busyRefused={} busyClosed={} sounds={} cutLong={} cutCrowded={} cutEnded={} subUp={} subsOff={} lastHeard={:08X} lastFrom={} audio={} "
-				"offmain={} events={} eventsDropped={}",
+				"offmain={} events={} eventsDropped={} lastPicked={:08X} heardTalker={} lastHeardTalker={:08X} primed={} endsOther={} topicUnlisted={} topicBusy={}",
 				installed ? 1 : 0, ourId, DialogueOpen() ? 1 : 0, partner ? partner->GetFormID() : 0, claimer.Current(), claimer.Lingering(), claimer.Granted() ? 1 : 0,
 				claimer.Busy() ? 1 : 0, claimer.Holder(), startedByPlayer ? 1 : 0, counts.said, counts.playerLines, counts.ends, counts.talks, lastSaid, counts.heard,
 				counts.subtitled, counts.noticed, counts.dropped, counts.voiced, counts.missing, counts.unplayed, counts.silent, counts.farAway, counts.noSpeaker,
 				counts.repeats, counts.tooMany, counts.busyRefused, counts.busyClosed, sounds.Kept(), counts.cutLong, counts.cutCrowded, counts.cutEnded, up.size(),
-				subtitlesOff ? 1 : 0, lastHeard, lastFrom, AudioOn() ? 1 : 0, counts.offMain, eventsSeen.load(), dropped);
+				subtitlesOff ? 1 : 0, lastHeard, lastFrom, AudioOn() ? 1 : 0, counts.offMain, eventsSeen.load(), dropped, lastPicked, counts.heardTalker, lastHeardTalker,
+				counts.primed, counts.endsOther, counts.topicUnlisted, counts.topicBusy);
 		}
 	}
 
@@ -771,7 +936,7 @@ namespace Conversations
 		ourId = a_playerId;
 		claimer.Clear();  // a talk under way is said again on the next tick
 		watch.Clear();
-		watched = 0;
+		watched = 0;  // the watch turns again next tick, primed: the line up now is not sent again (TurnWatch)
 		openLine = {};
 		hearing.Clear();
 		lastOf.clear();
@@ -810,7 +975,8 @@ namespace Conversations
 			}
 			return;
 		}
-		++counts.heard;
+		const bool own = a_line.speakerKind == Line::kTalker;  // the talker's own line (a topic they picked)
+		++(own ? counts.heardTalker : counts.heard);
 		const auto talker = static_cast<RE::TESObjectREFR*>(RemotePlayers::StandInOf(a_line.playerId));
 		RE::TESObjectREFR* speaker = talker;
 		if (a_line.speakerKind == Line::kRef) {
@@ -838,7 +1004,7 @@ namespace Conversations
 		case TalkRules::Hearing::Verdict::kShow:
 			break;
 		}
-		lastHeard = Hash(a_line.text);
+		(own ? lastHeardTalker : lastHeard) = Hash(a_line.text);
 		lastFrom = a_line.playerId;
 		lastOf[a_line.playerId] = { a_line.seq, key };
 
@@ -905,6 +1071,8 @@ namespace Conversations
 		watched = 0;
 		wasOpen = false;
 		openLine = {};
+		begins.Clear();
+		picked = {};
 		(void)TakeQueue();
 	}
 
@@ -916,6 +1084,8 @@ namespace Conversations
 		watch.Clear();
 		watched = 0;
 		openLine = {};
+		begins.Clear();
+		picked = {};
 		wasOpen = false;
 		ourId = 0;
 		(void)TakeQueue();

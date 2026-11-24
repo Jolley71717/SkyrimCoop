@@ -135,11 +135,80 @@ namespace TalkRules
 			armed = false;
 		}
 
+		// The watch turns to a speaker (a talk begins, or the session is new): what its subtitle says now is not sent, since
+		// the engine keeps a speaker's last subtitle after the line ends (its goodbye, or an ambient line, from before this
+		// talk). A line it began at a_begunAt (its topic event, heard before the watch turned to it) arms the watch as Begin
+		// does: the same text read SAME_AGAIN after that begin is that line, and a changed text is a new line as ever.
+		void Prime(std::string_view a_text, std::optional<Clock::time_point> a_begunAt)
+		{
+			last = SubtitleTime::Blank(a_text) ? std::string{} : std::string{ a_text };
+			armed = a_begunAt.has_value();
+			armedAt = a_begunAt.value_or(Clock::time_point{});
+		}
+
 	private:
 		std::string       last;
 		bool              armed = false;
 		Clock::time_point armedAt{};
 	};
+
+	// The lines the engine began (its topic events, TESTopicInfoEvent's begin), each speaker's last: when it began and
+	// which topic info it is. A watch that turns to a speaker is armed by a line begun just before (BEGUN_RECENT: the
+	// NPC's greeting may begin a frame or two before the menu is open), and a line whose response was not found is
+	// matched to its end by the info its speaker last began.
+	class Begins
+	{
+	public:
+		static constexpr auto        BEGUN_RECENT = 1s;
+		static constexpr std::size_t MAX = 32;
+
+		struct Begun
+		{
+			Clock::time_point at{};
+			std::uint32_t     info = 0;
+		};
+
+		void Note(std::uint32_t a_speaker, std::uint32_t a_info, Clock::time_point a_now)
+		{
+			if (a_speaker == 0) {
+				return;
+			}
+			std::erase_if(last, [&](const Entry& a_e) { return a_e.speaker == a_speaker; });
+			if (last.size() >= MAX) {
+				last.erase(last.begin());  // the oldest
+			}
+			last.push_back({ a_speaker, { a_now, a_info } });
+		}
+
+		// The line a_speaker began last, at most a_within before a_now.
+		[[nodiscard]] std::optional<Begun> Of(std::uint32_t a_speaker, Clock::time_point a_now, Clock::duration a_within) const
+		{
+			for (const auto& entry : last) {
+				if (entry.speaker == a_speaker && a_now - entry.begun.at <= a_within) {
+					return entry.begun;
+				}
+			}
+			return std::nullopt;
+		}
+
+		void Clear() { last.clear(); }
+
+	private:
+		struct Entry
+		{
+			std::uint32_t speaker = 0;
+			Begun         begun;
+		};
+		std::vector<Entry> last;
+	};
+
+	// Whether the engine's end of a line (its topic event's end, of info a_ended) ends the line we sent last of that
+	// speaker (of info a_open): the same topic info, or one of them not known. The end of the info before (a greeting the
+	// player cut short by picking a topic, its end fired once the answer's subtitle is up) is not the answer's end.
+	[[nodiscard]] constexpr bool EndsLine(std::uint32_t a_open, std::uint32_t a_ended)
+	{
+		return a_open == 0 || a_ended == 0 || a_open == a_ended;
+	}
 
 	// ---- the talker's side: the talk as the session hears of it ------------------------------------------------------
 
@@ -253,20 +322,22 @@ namespace TalkRules
 	// ---- the hearer's side ---------------------------------------------------------------------------------------------
 
 	// Which heard lines are shown: the same speaker saying the same thing again within REPEAT_WINDOW is skipped, and at
-	// most MAX_SHOWN lines in SHOW_WINDOW (a talker skipping through an NPC's lines says them faster than anyone reads).
-	// The key names the talker and the speaker (KeyOf).
+	// most MAX_SHOWN lines of one key in SHOW_WINDOW (a talker skipping through an NPC's lines says them faster than
+	// anyone reads). The key names the talker and the speaker (KeyOf): two conversations near us, or an NPC and its
+	// talker's own topics, each have a window of their own. At most MAX_KEPT lines are kept (the oldest go first).
 	class Hearing
 	{
 	public:
 		static constexpr auto        REPEAT_WINDOW = 5s;
 		static constexpr auto        SHOW_WINDOW = 3s;
 		static constexpr std::size_t MAX_SHOWN = 3;
+		static constexpr std::size_t MAX_KEPT = 256;
 
 		enum class Verdict
 		{
 			kShow,
 			kRepeat,   // said just now by the same speaker
-			kTooMany,  // MAX_SHOWN in SHOW_WINDOW already
+			kTooMany,  // MAX_SHOWN of this key in SHOW_WINDOW already
 		};
 
 		Verdict Judge(std::uint64_t a_key, std::string_view a_text, Clock::time_point a_now)
@@ -277,9 +348,12 @@ namespace TalkRules
 			if (std::ranges::any_of(shown, [&](const Shown& a_s) { return a_s.key == a_key && a_s.text == a_text; })) {
 				return Verdict::kRepeat;
 			}
-			const auto recent = std::ranges::count_if(shown, [&](const Shown& a_s) { return a_now - a_s.at < SHOW_WINDOW; });
+			const auto recent = std::ranges::count_if(shown, [&](const Shown& a_s) { return a_s.key == a_key && a_now - a_s.at < SHOW_WINDOW; });
 			if (static_cast<std::size_t>(recent) >= MAX_SHOWN) {
 				return Verdict::kTooMany;
+			}
+			if (shown.size() >= MAX_KEPT) {
+				shown.pop_front();
 			}
 			shown.push_back({ a_key, std::string{ a_text }, a_now });
 			return Verdict::kShow;
