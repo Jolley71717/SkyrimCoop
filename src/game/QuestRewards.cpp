@@ -17,14 +17,17 @@ namespace QuestRewards
 		using namespace std::chrono_literals;
 
 		constexpr RE::FormID PLAYER_REF = 0x14;
+		constexpr RE::FormID GOLD = 0xF;  // Gold001
 
 		// An item that came to our player from nothing (no container, no reference picked up: a script's AddItem), as the
-		// sink saw it.
+		// sink saw it; or gold that left our player (paid: to nothing, or to a container or someone, `to`).
 		struct Got
 		{
 			RE::FormID        item = 0;
 			std::uint32_t     count = 0;
 			Clock::time_point at;
+			bool              paid = false;
+			RE::FormID        to = 0;
 		};
 
 		// A topic info the game said: who said it, which, when.
@@ -38,6 +41,7 @@ namespace QuestRewards
 		std::mutex            queueLock;
 		std::vector<Got>      gots;   // under queueLock
 		std::vector<Said>     saids;  // under queueLock
+		std::vector<Clock::time_point> stages;  // under queueLock: a stage of any quest made in this game
 		constexpr std::size_t MAX_QUEUED = 1024;  // past this a new event is dropped and counted
 		std::uint64_t         queueDropped = 0;   // under queueLock
 
@@ -84,6 +88,9 @@ namespace QuestRewards
 			std::uint64_t badItem = 0;      // ... an item this game lacks or a reward does not share
 			std::uint64_t noRun = 0;        // ... the console made no script to run it in
 			std::uint64_t offMain = 0;      // gives made off the game's main thread
+			std::uint64_t paid = 0;         // gold our player paid in a talk (for nothing or to whom it talks with)
+			std::uint64_t stages = 0;       // stages made in this game seen
+			std::uint64_t oldWorld = 0;     // rewards heard dropped: the host loaded, or its world is new (a reset)
 			std::array<std::uint64_t, RewardRules::WHY_COUNT> why{};  // items from nothing, by what they were judged
 		};
 		Counts counts;
@@ -122,11 +129,34 @@ namespace QuestRewards
 				if (a_event && a_event->itemCount > 0 && a_event->baseObj != 0 && a_event->newContainer == PLAYER_REF && a_event->oldContainer == 0 &&
 					a_event->reference.native_handle() == 0) {
 					PushGot({ a_event->baseObj, static_cast<std::uint32_t>(a_event->itemCount), Clock::now() });
+				} else if (a_event && a_event->itemCount > 0 && a_event->baseObj == GOLD && a_event->oldContainer == PLAYER_REF) {
+					// gold our player paid: what comes from nothing near it in a talk is bought (RewardRules::Why::kBought)
+					PushGot({ GOLD, static_cast<std::uint32_t>(a_event->itemCount), Clock::now(), true, a_event->newContainer });
 				}
 				return RE::BSEventNotifyControl::kContinue;
 			}
 		};
 		ItemSink itemSink;
+
+		// A stage of any quest made in this game: by the game (our player's step, a conversation's line) or from the
+		// session's word. What comes from nothing after it in a talk is its fragment's, every game's own.
+		class StageSink : public RE::BSTEventSink<RE::TESQuestStageEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(const RE::TESQuestStageEvent* a_event, RE::BSTEventSource<RE::TESQuestStageEvent>*) override
+			{
+				if (a_event && a_event->formID != 0) {
+					std::lock_guard guard{ queueLock };
+					if (stages.size() < MAX_QUEUED) {
+						stages.push_back(Clock::now());
+					} else {
+						++queueDropped;
+					}
+				}
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
+		StageSink stageSink;
 
 		class InfoSink : public RE::BSTEventSink<RE::TESTopicInfoEvent>
 		{
@@ -147,12 +177,24 @@ namespace QuestRewards
 				std::lock_guard guard{ queueLock };
 				gots.clear();
 				saids.clear();
+				stages.clear();
 			}
 			talk = {};
 			partner = 0;
 			outbox.Clear();
 			ledger.Clear();
 			expected.clear();
+		}
+
+		// The rewards heard and not given yet are of a world the host left: dropped, never given.
+		void DropWaiting(std::string_view a_why)
+		{
+			if (waiting.empty()) {
+				return;
+			}
+			counts.oldWorld += waiting.size();
+			logs::info("Rewards: {} reward(s) heard and not given yet dropped ({}): their conversations were of the world before", waiting.size(), a_why);
+			waiting.clear();
 		}
 
 		// The quest a topic info belongs to (its topic's), when the session shares it here; 0 otherwise.
@@ -177,7 +219,7 @@ namespace QuestRewards
 			}
 			const auto topics = RE::MenuTopicManager::GetSingleton();
 			if (topics && topics->menuOpen && ui->IsMenuOpen(RE::DialogueMenu::MENU_NAME)) {
-				talk.dialogue = a_now;
+				talk.Open(a_now);
 				const auto speaker = topics->speaker.get();
 				partner = speaker ? speaker->GetFormID() : 0;
 			}
@@ -204,6 +246,13 @@ namespace QuestRewards
 
 		void Judge(const Got& a_got)
 		{
+			if (a_got.paid) {
+				if (a_got.to == 0 || a_got.to == partner) {
+					talk.paid.Add(a_got.at);  // for nothing (a script's RemoveItem) or to whom we talk with
+					++counts.paid;
+				}
+				return;
+			}
 			++counts.got;
 			if (OwnGive(a_got)) {
 				++counts.own;
@@ -247,13 +296,14 @@ namespace QuestRewards
 
 		void GiveWaiting(Clock::time_point a_now)
 		{
-			int made = 0;
+			int        made = 0;
+			const bool weTalk = RewardRules::Talking(talk, a_now);
 			std::erase_if(waiting, [&](const RewardRules::Heard& a_heard) {
 				if (made >= GIVES_PER_FRAME) {
 					return false;
 				}
 				const auto quest = QuestSync::QuestHere(a_heard.reward.quest);
-				const auto decision = RewardRules::Judge(a_heard, quest, ledger, a_now);
+				const auto decision = RewardRules::Judge(a_heard, quest, ledger, a_now, weTalk);
 				switch (decision.verdict) {
 				case RewardRules::Verdict::kWait:
 					return false;
@@ -302,8 +352,9 @@ namespace QuestRewards
 		}
 		events->AddEventSink<RE::TESContainerChangedEvent>(&itemSink);
 		events->AddEventSink<RE::TESTopicInfoEvent>(&infoSink);
+		events->AddEventSink<RE::TESQuestStageEvent>(&stageSink);
 		installed = true;
-		logs::info("Rewards: watching our player's items from nothing and the topic infos said");
+		logs::info("Rewards: watching our player's items from nothing, the gold it pays, the topic infos said and the stages made");
 		return true;
 	}
 
@@ -324,12 +375,20 @@ namespace QuestRewards
 				return;  // a loading screen, the main menu: the events wait in the queue
 			}
 			const auto now = Clock::now();
-			std::vector<Got>  gotNow;
-			std::vector<Said> saidNow;
+			std::vector<Got>               gotNow;
+			std::vector<Said>              saidNow;
+			std::vector<Clock::time_point> stagedNow;
 			{
 				std::lock_guard queueGuard{ queueLock };
 				gotNow = std::exchange(gots, {});
 				saidNow = std::exchange(saids, {});
+				stagedNow = std::exchange(stages, {});
+			}
+			// The stages made and the gold paid first: an item is judged by those before it and near it, whichever event
+			// came first this tick.
+			for (const auto at : stagedNow) {
+				talk.staged.Add(at);
+				++counts.stages;
 			}
 			// The topic info said last in our talk (by our player or whom it talks with; not a friend's talk played here)
 			// names the quest. Read before the items: an info's fragment gives as its line ends.
@@ -341,10 +400,16 @@ namespace QuestRewards
 				talk.infoQuest = QuestOfInfo(said.info);
 				talk.infoAt = said.at;
 			}
-			talk.madeAt = talk.infoQuest != 0 ? QuestSync::QuestHere(talk.infoQuest).lastMade : std::nullopt;
 			// Judged by the menus as they were up to now; read after.
 			for (const auto& got : gotNow) {
-				Judge(got);
+				if (got.paid) {
+					Judge(got);
+				}
+			}
+			for (const auto& got : gotNow) {
+				if (!got.paid) {
+					Judge(got);
+				}
 			}
 			ReadMenus(now);
 			for (const auto& reward : outbox.Due(now)) {
@@ -385,7 +450,19 @@ namespace QuestRewards
 	void AfterLoad()
 	{
 		std::lock_guard guard{ stateLock };
-		Forget();  // the rewards heard still wait: the session's stages are made again in the loaded world, then they are given
+		Forget();
+		// A friend's load: the rewards heard still wait (the session's stages are made again in the loaded world, then they
+		// are given). The host's: its world is the session's and is from before them; given now, each would come again
+		// when its step is done again in this world.
+		if (QuestSync::HostsWorld()) {
+			DropWaiting("this game is the host's and loaded a save");
+		}
+	}
+
+	void HostReset(std::uint32_t a_hostId)
+	{
+		std::lock_guard guard{ stateLock };
+		DropWaiting(std::format("the host (player {}) loaded a save or came in: its world is new", a_hostId));
 	}
 
 	void Clear()
@@ -412,11 +489,11 @@ namespace QuestRewards
 			}
 			return std::format("installed={} got={} own={} why={} infos={} infoQuest={:08X} partner={:08X} out={} sent={} outboxFull={} heard={} beforeReset={} "
 							   "waiting={} waitFull={} given={} covered={} had={} notShared={} notHere={} stale={} badItem={} norun={} ledger={} expected={} "
-							   "eventsDropped={} offmain={}",
+							   "eventsDropped={} offmain={} paid={} stages={} oldWorld={}",
 				installed ? 1 : 0, Counted(counts.got), Counted(counts.own), why, Counted(counts.infos), talk.infoQuest, partner, outbox.Size(), Counted(counts.sent),
 				Counted(counts.outboxFull), Counted(counts.heard), Counted(counts.beforeReset), waiting.size(), Counted(counts.waitFull), Counted(counts.given),
 				Counted(counts.covered), Counted(counts.had), Counted(counts.notShared), Counted(counts.notHere), Counted(counts.stale), Counted(counts.badItem),
-				Counted(counts.noRun), ledger.Size(), expected.size(), Counted(dropped), Counted(counts.offMain));
+				Counted(counts.noRun), ledger.Size(), expected.size(), Counted(dropped), Counted(counts.offMain), Counted(counts.paid), Counted(counts.stages), Counted(counts.oldWorld));
 		}
 		if (words[0] == "list") {
 			const auto  now = Clock::now();
