@@ -1105,3 +1105,39 @@ TEST("object causes: an object of ours in flight, or a friend's, claims what it 
 	theirs.Add({ Vec{ 180, 100, 0 }, Vec{ 180, 100, 0 }, PLAYER_REACH, Strength::kBody, true, t + BODY_HOLD, 0 });
 	CHECK(!theirs.Judge(BUCKET, { 190, 20, 0 }, { 260, 40, 0 }, t + 250ms).Ours());
 }
+
+TEST("object holds: a held copy is carried into its holder's cell through a door, or two exterior cells or more apart; not nearer, or with no grid")
+{
+	using ObjectRules::CarryDue;
+	CHECK(CarryDue(false, std::nullopt));  // another interior or worldspace: a door
+	CHECK(CarryDue(false, 0));
+	CHECK(!CarryDue(true, std::nullopt));
+	CHECK(!CarryDue(true, 0));
+	CHECK(!CarryDue(true, 1));  // telekinesis holds it up to a cell from its holder: drawn where it lies
+	CHECK(CarryDue(true, ObjectRules::CARRY_CELLS));
+	CHECK(CarryDue(true, ObjectRules::CARRY_CELLS + 3));
+	static_assert(ObjectRules::CARRY_OVER_NEAR <= ObjectRules::APPLY_RANGE);
+}
+
+TEST("object holds: a holder's hold heard just after its let-go or rest of the object is late; another holder's, or one later, is not")
+{
+	using namespace ObjectRules;
+	const auto t = Steady::now();
+	HoldEnds   ends;
+	CHECK(!ends.Late(TANKARD, 2, t));
+	ends.Ended(TANKARD, 2, t);
+	CHECK(ends.Late(TANKARD, 2, t + 10ms));
+	CHECK(ends.Late(TANKARD, 2, t + LATE_HOLD - 1ms));
+	CHECK(!ends.Late(TANKARD, 2, t + LATE_HOLD));     // a new grab of it
+	CHECK(!ends.Late(TANKARD, 3, t + 10ms));          // another holder's
+	CHECK(!ends.Late(BUCKET, 2, t + 10ms));
+	// Bounded: past MAX_ENDS the ones no longer late go first (the tankard's), then the oldest.
+	for (std::uint32_t i = 0; i < HoldEnds::MAX_ENDS + 10; ++i) {
+		ends.Ended(0x00700000 + i, 2, t + 1s);
+	}
+	CHECK(ends.Size() == HoldEnds::MAX_ENDS);
+	CHECK(!ends.Late(TANKARD, 2, t + 1s));
+	CHECK(ends.Late(0x00700000 + HoldEnds::MAX_ENDS + 9, 2, t + 1s + 10ms));
+	ends.Clear();
+	CHECK(ends.Size() == 0u);
+}

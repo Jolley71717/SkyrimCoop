@@ -906,6 +906,58 @@ namespace ObjectRules
 		return Distance(a_here.at, a_rest.at) > PUT_EPSILON || Angle(a_here.rot, a_rest.rot) > TURN_EPSILON;
 	}
 
+	// A hold is late when its holder's rest or let-go of the object was heard less than LATE_HOLD before it (holds go on
+	// the state channel, rests on the reliable one: one sent before the let-go may come after it). A late hold is not
+	// drawn, or our copy would be taken out of its flight. At most MAX_ENDS kept (the oldest forgotten).
+	inline constexpr auto LATE_HOLD = 500ms;
+
+	// A friend's held copy is carried into its holder's cell (moved to their stand-in) when the two are in another
+	// interior or worldspace (a door both went through), or outside CARRY_CELLS or more cells apart (before the copy's
+	// own cell is left unloaded behind). Nearer it is drawn where it lies: telekinesis holds an object up to a cell from
+	// its holder, and a carry each time would pop it to the holder's feet. a_cellsApart: the exterior cells' grid
+	// distance, none when either is not an exterior.
+	inline constexpr std::int32_t CARRY_CELLS = 2;
+	[[nodiscard]] constexpr bool CarryDue(bool a_sameSpace, std::optional<std::int32_t> a_cellsApart)
+	{
+		return !a_sameSpace || (a_cellsApart && *a_cellsApart >= CARRY_CELLS);
+	}
+	// A friend's rest of an object that lies in an exterior cell not loaded here, within this of our player: our copy
+	// is brought to it (its cell is far: a carry outside, or a door into the same worldspace). The rest's own cell is
+	// then loaded (a cell's width), so a copy that lay there would be loaded.
+	inline constexpr float CARRY_OVER_NEAR = 4096.0f;
+
+	class HoldEnds
+	{
+	public:
+		static constexpr std::size_t MAX_ENDS = 1024;
+
+		void Ended(std::uint32_t a_id, std::uint32_t a_holder, Clock::time_point a_now)
+		{
+			if (ends.size() >= MAX_ENDS && !ends.contains(a_id)) {
+				std::erase_if(ends, [&](const auto& a_end) { return a_now - a_end.second.at >= LATE_HOLD; });
+				if (ends.size() >= MAX_ENDS) {
+					ends.erase(std::min_element(ends.begin(), ends.end(), [](const auto& a_a, const auto& a_b) { return a_a.second.at < a_b.second.at; }));
+				}
+			}
+			ends[a_id] = End{ a_holder, a_now };
+		}
+		[[nodiscard]] bool Late(std::uint32_t a_id, std::uint32_t a_holder, Clock::time_point a_now) const
+		{
+			const auto it = ends.find(a_id);
+			return it != ends.end() && it->second.holder == a_holder && a_now - it->second.at < LATE_HOLD;
+		}
+		void                      Clear() { ends.clear(); }
+		[[nodiscard]] std::size_t Size() const { return ends.size(); }
+
+	private:
+		struct End
+		{
+			std::uint32_t     holder = 0;
+			Clock::time_point at{};
+		};
+		std::map<std::uint32_t, End> ends;
+	};
+
 	// Objects a friend's move put somewhere: not ours to report until the time given.
 	class Quiet
 	{
