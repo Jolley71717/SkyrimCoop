@@ -32,7 +32,10 @@ namespace WorldClock
 		// Our player's magic (TESMagicEffectApplyEvent, caster our player), counted on whatever thread sends the event
 		// and read on the tick; and what it does to our sky (ClockRules::MagicWatch).
 		std::atomic<std::uint64_t>          casts{ 0 };
+		std::atomic<std::uint64_t>          castsSkipped{ 0 };  // our player's magic on others, or a drink: no window
 		std::uint64_t                       castsSeen = 0;
+		// Which magic opens the watch, read from the game's data once before the event sink is added (read only after).
+		ClockRules::MagicKinds              kinds;
 		ClockRules::MagicWatch              magic;
 		// The owner's side: friends' weather magic asked of us (ClockRules::AskKeeper), and a kept one taken off for a
 		// save, to put back on the next tick (its form ID, 0 none).
@@ -353,8 +356,15 @@ namespace WorldClock
 			RE::BSEventNotifyControl ProcessEvent(const RE::TESMagicEffectApplyEvent* a_event, RE::BSTEventSource<RE::TESMagicEffectApplyEvent>*) override
 			{
 				const auto player = RE::PlayerCharacter::GetSingleton();
-				if (a_event && player && a_event->caster && a_event->caster.get() == player) {
+				if (!a_event || !player || !a_event->caster || a_event->caster.get() != player) {
+					return RE::BSEventNotifyControl::kContinue;
+				}
+				// Only magic our player cast on itself, and not a drink (ClockRules::MagicKinds): a fight's enchanted hits
+				// and potions leave our sky followed.
+				if (kinds.Opens(true, a_event->target && a_event->target.get() == player, a_event->magicEffect)) {
 					casts.fetch_add(1, std::memory_order_relaxed);
+				} else {
+					castsSkipped.fetch_add(1, std::memory_order_relaxed);
 				}
 				return RE::BSEventNotifyControl::kContinue;
 			}
@@ -472,7 +482,7 @@ namespace WorldClock
 				"ready={} opening={} hour={:.3f} days={:.4f} raw={:.4f} midnights={} day={} month={} scale={:.2f} own={} outside={} world={:08X} weather={:08X} "
 				"override={} owner={} heard={} heardAge={:.1f} ownerHour={} ownerWeather={:08X} offset={} moving={:.3f} reports={} lineUps={} hourSets={} "
 				"backSets={} midnightSteps={} forced={} eased={} held={} scaleSets={} scaleBacks={} place={:08X} waiting={} waits={} mq101={} canMove={} "
-				"pinned={} pins={} pinReleases={} saveUnpins={} magic={} magicWindows={} asks={} askReleases={} magicAsked={:08X} asked={:08X} askedBy={} askSets={} askIgnored={} "
+				"pinned={} pins={} pinReleases={} saveUnpins={} magic={} magicWindows={} magicSkipped={} asks={} askReleases={} magicAsked={:08X} asked={:08X} askedBy={} askSets={} askIgnored={} "
 				"askLetGo={} joinedDays={}",
 				Ready() ? 1 : 0, opening.holds ? 1 : 0, c->gameHour->value, c->gameDaysPassed->value, c->rawDaysPassed, c->midnightsPassed,
 				c->gameDay ? c->gameDay->value : 0.0f, c->gameMonth ? c->gameMonth->value + 1.0f : 0.0f, c->timeScale->value,
@@ -482,7 +492,7 @@ namespace WorldClock
 				follower.backSets, follower.midnightSteps, weather.forced, weather.eased, weather.held, scale.sets, scaleBacks, HerePlace(), waitGate.Open() ? 1 : 0,
 				waitGate.waits,
 				opening.found ? std::format("{}/{}/{}", opening.running ? "running" : "stopped", opening.completed ? "completed" : "open", opening.stage) : std::string{ "-" },
-				opening.canMove ? 1 : 0, here.pinned ? 1 : 0, weather.pins, weather.releases, saveUnpins, magic.Holds() ? 1 : 0, magic.windows, magic.asks, magic.releases, magic.Asked().value_or(0),
+				opening.canMove ? 1 : 0, here.pinned ? 1 : 0, weather.pins, weather.releases, saveUnpins, magic.Holds() ? 1 : 0, magic.windows, castsSkipped.load(std::memory_order_relaxed), magic.asks, magic.releases, magic.Asked().value_or(0),
 				keeper.Weather(), keeper.By(), keeper.sets, keeper.ignored, keeper.releases,
 				saveDays.joined ? std::format("{:.3f}", *saveDays.joined) : std::string{ "-" });
 		}
@@ -705,9 +715,39 @@ namespace WorldClock
 			logs::warn("Clock: the game's event source is not there; a friend's weather magic stays in their own game");
 			return false;
 		}
+		// The effects only alchemy carries (ClockRules::MagicKinds), before the sink reads them.
+		if (const auto data = RE::TESDataHandler::GetSingleton()) {
+			const auto add = [&](RE::MagicItem* a_item, bool a_alchemy) {
+				if (!a_item) {
+					return;
+				}
+				for (const auto effect : a_item->effects) {
+					const auto base = effect ? effect->baseEffect : nullptr;
+					if (base) {
+						a_alchemy ? kinds.Alchemy(base->GetFormID()) : kinds.Other(base->GetFormID());
+					}
+				}
+			};
+			for (const auto item : data->GetFormArray<RE::SpellItem>()) {
+				add(item, false);
+			}
+			for (const auto item : data->GetFormArray<RE::ScrollItem>()) {
+				add(item, false);
+			}
+			for (const auto item : data->GetFormArray<RE::EnchantmentItem>()) {
+				add(item, false);
+			}
+			for (const auto item : data->GetFormArray<RE::AlchemyItem>()) {
+				add(item, true);
+			}
+			for (const auto item : data->GetFormArray<RE::IngredientItem>()) {
+				add(item, true);
+			}
+		}
 		events->AddEventSink<RE::TESMagicEffectApplyEvent>(&magicSink);
 		magicInstalled = true;
-		logs::info("Clock: watching our player's magic (a weather it makes is asked of the session's clock owner)");
+		logs::info("Clock: watching our player's magic on itself (a weather it makes is asked of the session's clock owner); {} effects only drinks carry are not watched",
+			kinds.AlchemyOnly());
 		return true;
 	}
 

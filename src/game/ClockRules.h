@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <unordered_set>
 
 // The rules of the session's clock and weather (docs/DESIGN.md, "Time and weather"), free of the game so they are unit
 // tested (tests/ClockTests.cpp); src/game/WorldClock.cpp reads and sets the game by them. Carried from the sister
@@ -446,9 +447,47 @@ namespace ClockRules
 	// an override until the effect ends or not (bHoldWeatherUntilEnd); Dawnguard's sun arrow lets any override go, then
 	// sets its own the same way (a scan of every script of the base game for Weather.SetActive, ForceActive and
 	// ReleaseOverride: the magic ones are these three, all on an ActiveMagicEffect of the caster). The class is told by
-	// what it does, never by a name: a weather change in this game soon after our player's own magic took hold (any
-	// effect our player cast), while we follow the owner's sky. Such a weather is asked of the owner, whose game sets it
-	// (and lets it go when ours does), so it is every game's sky; meanwhile this game leaves its own sky to the magic.
+	// what it does, never by a name: a weather change in this game soon after our player's own magic took hold on our
+	// player (MagicKinds), while we follow the owner's sky. Such a weather is asked of the owner, whose game sets it (and
+	// lets it go when ours does), so it is every game's sky; meanwhile this game leaves its own sky to the magic.
+
+	// Which magic opens the watch. A weather spell's script runs on an effect its caster cast on itself (Clear Skies, Storm
+	// Call, the sun arrow, a mod's), so only an effect our player cast on our player opens it: never one on someone else
+	// (an enchanted weapon's hit, a spell at an enemy: a fight would keep the window open and our sky unfollowed), and
+	// never one that only potions, food, poisons and ingredients carry (a drink in a fight). An effect that a spell, a
+	// shout, a power, a scroll or an enchantment also carries opens it, whatever its kind, so no weather spell of any mod
+	// is missed.
+	class MagicKinds
+	{
+	public:
+		// While the game's data is read (once, before any event): the effects an alchemy item carries, and those anything
+		// else carries.
+		void Alchemy(std::uint32_t a_effect)
+		{
+			if (a_effect != 0 && !other.contains(a_effect)) {
+				alchemy.insert(a_effect);
+			}
+		}
+		void Other(std::uint32_t a_effect)
+		{
+			if (a_effect != 0) {
+				other.insert(a_effect);
+				alchemy.erase(a_effect);
+			}
+		}
+
+		// A magic effect took hold (TESMagicEffectApplyEvent): whether it opens the watch.
+		[[nodiscard]] bool Opens(bool a_casterIsUs, bool a_targetIsUs, std::uint32_t a_effect) const
+		{
+			return a_casterIsUs && a_targetIsUs && !alchemy.contains(a_effect);
+		}
+
+		[[nodiscard]] std::size_t AlchemyOnly() const { return alchemy.size(); }
+
+	private:
+		std::unordered_set<std::uint32_t> alchemy;  // carried by alchemy items only
+		std::unordered_set<std::uint32_t> other;
+	};
 
 	// After our player's magic takes hold, a weather change here within this long is its (a script runs a few frames,
 	// or under load a few seconds, after its effect starts).

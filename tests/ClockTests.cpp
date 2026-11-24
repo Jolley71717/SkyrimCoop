@@ -1159,3 +1159,48 @@ TEST("weather magic, the save: a friend's save keeps the session's day count, sa
 	days.Joined(30.0);
 	CHECK(Near(*days.Since(30.5), 0.5));
 }
+
+TEST("weather magic: only magic our player cast on itself opens the watch: never an enchanted hit, a spell at an enemy, or a drink")
+{
+	// The game's data: Clear Skies' effect is a shout's; restore health is a potion's and a healing spell's; fortify
+	// health is a potion's only; an enchanted sword's fire damage is an enchantment's.
+	constexpr std::uint32_t clearSkies = 0x00078BA0, restoreHealth = 0x0003EB15, fortifyPotion = 0x0003EAF3, fireEnchant = 0x0004605A;
+	MagicKinds kinds;
+	kinds.Alchemy(restoreHealth);
+	kinds.Alchemy(fortifyPotion);
+	kinds.Other(clearSkies);
+	kinds.Other(restoreHealth);  // also a spell's: read in either order, it is not a drink's alone
+	kinds.Other(fireEnchant);
+	kinds.Alchemy(fireEnchant);  // a poison with the same effect: still an enchantment's too
+	kinds.Alchemy(0);
+	CHECK(kinds.AlchemyOnly() == 1u);
+
+	CHECK(kinds.Opens(true, true, clearSkies));       // Clear Skies on ourselves
+	CHECK(kinds.Opens(true, true, restoreHealth));    // a healing spell on ourselves
+	CHECK(kinds.Opens(true, true, 0x0A000801));       // a mod's weather spell's effect, in no list we read: watched
+	CHECK(!kinds.Opens(true, false, fireEnchant));    // our enchanted sword hitting an enemy
+	CHECK(!kinds.Opens(true, false, clearSkies));     // a spell of ours on someone else
+	CHECK(!kinds.Opens(true, true, fortifyPotion));   // a potion we drank
+	CHECK(!kinds.Opens(false, true, clearSkies));     // someone else's magic on us
+
+	// A fight: hits and a potion never open a window, so the owner's sky stays followed; the shout after them does.
+	using Clock = std::chrono::steady_clock;
+	const auto t0 = Clock::time_point{} + 1000s;
+	MagicWatch magic;
+	magic.Seen(Pinned(0xAAAA));
+	for (int i = 0; i < 10; ++i) {
+		if (kinds.Opens(true, false, fireEnchant)) {
+			magic.Cast(t0, 0x3C);
+		}
+	}
+	if (kinds.Opens(true, true, fortifyPotion)) {
+		magic.Cast(t0, 0x3C);
+	}
+	CHECK(!magic.Holds());
+	CHECK(magic.windows == 0u);
+	if (kinds.Opens(true, true, clearSkies)) {
+		magic.Cast(t0 + 1s, 0x3C);
+	}
+	CHECK(magic.Holds());
+	CHECK(magic.windows == 1u);
+}
