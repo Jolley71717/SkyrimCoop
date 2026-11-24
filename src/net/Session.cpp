@@ -16,6 +16,7 @@
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
 #include "game/Shots.h"
+#include "game/StandInPeace.h"
 #include "game/Water.h"
 #include "net/FormsCommand.h"
 #include "net/Identity.h"
@@ -510,6 +511,7 @@ namespace Session
 		Furniture::Clear();  // and sitters out of their furniture
 		NpcSync::Clear();
 		RemotePlayers::Clear();
+		StandInPeace::Clear();
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -553,6 +555,7 @@ namespace Session
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
+		StandInPeace::Frame();  // after the stand-ins are placed: actors fighting one told to stop
 	}
 
 	bool Active()

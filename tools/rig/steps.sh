@@ -59,12 +59,13 @@ declare -A STEP_INFO=(
 	[ride]="each way, outside: the mover's console places a plain horse by it (set-up), it aims at it and presses A to get on; at rest the watcher's stand-in of it is seated by the engine on its copy of that horse (the same mount key); it rides forward and, read each second, the stand-in stays seated in its saddle and the engine carries it (never put back by the plugin); the VM saves with a seated stand-in and leaves and joins again while the mover rides, and it is seated again; it gets off with the mover; a person the mover runs is set on a load-order horse with the console, its copy is seated on the copy of that horse and the horse goes to its rider's game, and gets off with it (steps/ride.sh)"
 	[shots]="each way, the mover looses an arrow and a bolt, casts a spell of each projectile kind the load order has (missile, flame, beam, rune), dual casts and shouts with its virtual pad (console and dev set-up); its game says each shot and the watcher launches the same kind from its stand-in of it; an arrow at the watcher harms no one there; each game's launches fly on their shooter's aim, none fails and all are ended once their flight is over; the VM saves with a launch of its own lying (all ended for the save); a person each game runs casts at a stand-in (console set-up) and the other game launches it from its copy (steps/shots.sh)"
 	[sit]="each way, the mover sits in a seat and works at a crafting station by its virtual pad (aimed, A); the watcher's stand-in of it is put in its copy of the same furniture by the engine's own way in, and the engine's furniture play is not sent; the VM saves with a stand-in in furniture, and the watcher goes to an interior and back while one is at the station (console placement), and it is in it again; it gets up with the mover (left stick, or B from the menu); a person the mover runs is put in a seat, a bed, a lean spot and a work spot with the console, its copy is put in the same one and gets up with it (steps/sit.sh)"
+	[peace]="in each game, its stand-in of the other player is a ghost in no fight with the four hooks in; that game's player walks up to it with its virtual pad and swings a sword, casts Flames and Firebolt (console) at it: nothing lands, no bounty, no fight, no actor turns on it; a wolf placed at it (console) never picks it in 15 s, and made to fight it with the console is turned away or told to stop (steps/peace.sh)"
 	[forms]="(only when named) the VM's plugins in another order: it joins, and an armor each puts on is on the other's stand-in as that game's own form (steps/forms.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
-STEPS="preflight world join see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots sit forms final"
+STEPS="preflight world join see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots sit peace forms final"
 # Steps that need the two games in one session; the state guard puts them back in one first (smoke.sh run()).
-SESSION_STEPS="see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots sit forms"
+SESSION_STEPS="see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots sit peace forms"
 # Steps a run makes only when --only names them: they change a game's files for a while (each puts them back, and the
 # set-up heals what a run that died left), which the maintainer agrees to before they run by default.
 OPTIN_STEPS="forms"
@@ -494,6 +495,7 @@ declare -F step_swim >/dev/null || . "$RIG/steps/swim.sh"
 declare -F step_ride >/dev/null || . "$RIG/steps/ride.sh"
 declare -F step_shots >/dev/null || . "$RIG/steps/shots.sh"
 declare -F step_sit >/dev/null || . "$RIG/steps/sit.sh"
+declare -F step_peace >/dev/null || . "$RIG/steps/peace.sh"
 
 # --- self-test: the steps' reading of the games, both games faked ------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then

@@ -11,8 +11,10 @@
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
 #include "game/Furniture.h"
+#include "game/PeaceRules.h"
 #include "game/Retire.h"
 #include "game/Riding.h"
+#include "game/StandInPeace.h"
 #include "game/StandInRules.h"
 #include "game/StateBuffer.h"
 #include "game/VtableHook.h"
@@ -101,6 +103,13 @@ namespace RemotePlayers
 			// here (none expected: its damage is nothing) and gave back.
 			std::uint64_t magicRefused = 0;
 			std::uint64_t magicKept = 0;
+			// What the world did to it here (StandInPeace.h): effects anyone put on it, refused, hits that still landed on
+			// it (none expected: weapons and spells pass through it, PeaceRules.h), and the health anyone or anything took
+			// from it (a blade, an arrow, a trap, a fall), given back at once in the health damage hook (wounds, how much).
+			std::uint64_t magicOnRefused = 0;
+			std::uint64_t hitsOn = 0;
+			std::uint64_t woundsOn = 0;
+			float         healthBack = 0.0f;
 			std::uint64_t blows = 0;
 			std::uint64_t casts = 0;
 			std::uint64_t damaged = 0;
@@ -155,10 +164,28 @@ namespace RemotePlayers
 			return watched.load(std::memory_order_relaxed) != 0 || copies.load(std::memory_order_relaxed) != 0;
 		}
 
+		// The form ids of byActor and retiring, for the hooks that ask with no lock (IsStandInId; PeaceRules::IdSet).
+		PeaceRules::IdSet<PeaceRules::MAX_WATCHED> watchedIds;
+		bool                                       watchedOverflowTold = false;
+
 		void CountWatched()  // under lock
 		{
 			standIns = byActor.size();
 			watched = byActor.size() + retiring.size();
+			std::vector<std::uint32_t> ids;
+			ids.reserve(byActor.size() + retiring.size());
+			for (const auto& [actor, playerId] : byActor) {
+				if (const auto player = players.find(playerId); player != players.end() && player->second.standInId != 0) {
+					ids.push_back(player->second.standInId);
+				}
+			}
+			for (const auto& [actor, id] : retiring) {
+				ids.push_back(id);
+			}
+			if (!watchedIds.Assign(ids) && !watchedOverflowTold) {
+				watchedOverflowTold = true;
+				logs::warn("Players: more than {} stand-ins at once: the world's AI may treat the rest as people of this game", PeaceRules::MAX_WATCHED);
+			}
 		}
 
 		// The player whose stand-in a_ref is, if it is one now (under lock).
@@ -436,28 +463,58 @@ namespace RemotePlayers
 		std::atomic<bool>     characterMagicHooked{ false };
 		std::atomic<bool>     playerMagicHooked{ false };
 
-		// Whether an effect may take hold on a_this: any caster's but a stand-in's; a stand-in's on itself, of a kind
-		// MagicKept keeps. Counted on its stand-in. On whatever thread the game adds effects.
+		// Whether an effect may take hold on a_this (PeaceRules::JudgeMagic): a stand-in's on anyone else is refused (its
+		// friend's game deals it), and so is anyone's on a stand-in (a spell, a shout, a trap's, a hazard's, our player's
+		// heal: its friend is not here, and their own game gives them what lands on them); a stand-in's own on itself, of
+		// a kind MagicKept keeps, holds. Counted on its stand-in. On whatever thread the game adds effects; the lock is
+		// taken only when one of the two is a stand-in or on its way out (watchedIds, read with no lock).
 		bool LetMagic(RE::MagicTarget* a_this, const RE::MagicTarget::AddTargetData& a_data)
 		{
-			if (!Watching() || !a_data.caster || !a_data.caster->IsActor()) {
+			if (!Watching() || !a_this) {
 				return true;
 			}
-			const auto caster = static_cast<RE::Actor*>(a_data.caster);
-			const bool onItself = caster->AsMagicTarget() == a_this;
+			// The caster when it is an actor (a trap or a hazard casts too: never a stand-in).
+			const auto casterRef = a_data.caster;
+			const auto caster = casterRef && casterRef->IsActor() ? static_cast<RE::Actor*>(casterRef) : nullptr;
+			const auto targetRef = a_this->MagicTargetIsActor() ? a_this->GetTargetStatsObject() : nullptr;
+			const auto target = targetRef && targetRef->IsActor() ? static_cast<RE::Actor*>(targetRef) : nullptr;
+			const bool onItself = caster && caster->AsMagicTarget() == a_this;
+			const bool casterWatched = caster && watchedIds.Contains(caster->GetFormID());
+			const bool targetWatched = !onItself && target && watchedIds.Contains(target->GetFormID());
+			if (!casterWatched && !targetWatched) {
+				return true;
+			}
 			const auto base = a_data.effect ? a_data.effect->baseEffect : nullptr;
 			const auto archetype = base ? static_cast<std::int32_t>(std::to_underlying(base->GetArchetype())) : StandInRules::kArchNone;
 			std::scoped_lock l{ lock };
-			if (const auto gone = retiring.find(caster); gone != retiring.end() && gone->second == caster->GetFormID()) {
-				return false;  // on its way out: nothing of it takes hold anywhere
+			const auto       leaving = [](RE::Actor* a_actor) {
+				const auto gone = a_actor ? retiring.find(a_actor) : retiring.end();
+				return gone != retiring.end() && gone->second == a_actor->GetFormID();
+			};
+			if (leaving(caster) || (!onItself && leaving(target))) {
+				return false;  // on its way out: nothing of it takes hold anywhere, and nothing takes hold on it
 			}
-			const auto remote = RemoteOf(caster);
-			if (!remote) {
+			const auto casterRemote = caster ? RemoteOf(caster) : nullptr;
+			const auto targetRemote = !onItself && target ? RemoteOf(target) : nullptr;
+			switch (PeaceRules::JudgeMagic(casterRemote != nullptr, targetRemote != nullptr, onItself, StandInRules::MagicKept(onItself, archetype))) {
+			case PeaceRules::Magic::kKept:
+				++casterRemote->magicKept;
 				return true;
+			case PeaceRules::Magic::kRefused:
+				++casterRemote->magicRefused;
+				return false;
+			case PeaceRules::Magic::kRefusedOn:
+				if (++targetRemote->magicOnRefused == 1) {
+					logs::info("Players: stand-in {:08X}: an effect put on it here was refused, the first (its friend is not here; counted in `peace`)", targetRemote->standInId);
+				}
+				if (casterRemote) {
+					++casterRemote->magicRefused;  // one stand-in's on another: its friend's game deals it, too
+				}
+				return false;
+			case PeaceRules::Magic::kLet:
+				break;
 			}
-			const bool kept = StandInRules::MagicKept(onItself, archetype);
-			++(kept ? remote->magicKept : remote->magicRefused);
-			return kept;
+			return true;
 		}
 
 		bool CharacterAddTarget(RE::MagicTarget* a_this, RE::MagicTarget::AddTargetData& a_data)
@@ -545,9 +602,54 @@ namespace RemotePlayers
 			}
 		}
 
+		// Our player's hits that landed on an actor that is no stand-in while stand-ins are here (TESHitEvent; under lock):
+		// the rig tells a bystander its spell passed through a stand-in into from a crime of the stand-in's (`peace`).
+		std::uint64_t ourHitsElsewhere = 0;
+		RE::FormID    lastHitElsewhere = 0;
+
+		// All the health a stand-in has lost here, given back (its damage modifier to 0): how much. Its friend's game is the
+		// one that is hurt; here it never weakens, kneels or falls. Any thread (the engine's hit and damage jobs).
+		float GiveBackHealth(RE::Actor* a_standIn)
+		{
+			const auto values = a_standIn->AsActorValueOwner();
+			if (!values || a_standIn->IsDead()) {
+				return 0.0f;
+			}
+			const float lost = -a_standIn->GetActorValueModifier(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kHealth);
+			if (lost <= 0.0f) {
+				return 0.0f;
+			}
+			values->RestoreActorValue(RE::ActorValue::kHealth, lost);
+			return lost;
+		}
+
+		// A wound on a stand-in (any attacker, none included: a trap, a hazard, a fall), its health given back: counted on it.
+		void CountWound(RE::Actor* a_standIn, RE::Actor* a_attacker, float a_damage, float a_back)
+		{
+			std::scoped_lock l{ lock };
+			const auto       remote = RemoteOf(a_standIn);
+			if (!remote) {
+				return;  // on its way out: given back all the same
+			}
+			remote->healthBack += a_back;
+			if (++remote->woundsOn == 1) {
+				logs::warn("Players: stand-in {:08X} lost {:.1f} health here to {:08X}; given back (weapons should pass through it; counted in `peace`)", remote->standInId,
+					std::abs(a_damage), a_attacker ? a_attacker->GetFormID() : 0u);
+			}
+		}
+
 		void CharacterHealthDamage(RE::Actor* a_this, RE::Actor* a_attacker, float a_damage)
 		{
+			// A stand-in hurt here by anyone or anything (the ghost flag should let no weapon reach it; this holds when it
+			// does not): its health given back before the engine's own handling, which then sees it whole (no kneeling, no
+			// fall, no kill move), and again after, for anything that handling took. Its friend's game is the one hurt.
+			const bool standIn = a_this && a_damage != 0.0f && watched.load(std::memory_order_relaxed) != 0 && watchedIds.Contains(a_this->GetFormID());
+			float      back = standIn ? GiveBackHealth(a_this) : 0.0f;
 			originalCharacterHealthDamage(a_this, a_attacker, a_damage);
+			if (standIn) {
+				back += GiveBackHealth(a_this);
+				CountWound(a_this, a_attacker, a_damage, back);
+			}
 			AfterHealthDamage(a_this, a_attacker, a_damage);
 		}
 
@@ -567,6 +669,19 @@ namespace RemotePlayers
 					std::scoped_lock l{ lock };
 					if (const auto remote = RemoteOf(a_event->cause.get())) {
 						++remote->blows;
+					}
+					// A hit that landed on a stand-in (anyone's: none should, PeaceRules.h), for `peace`.
+					const auto target = a_event->target.get();
+					const auto cause = a_event->cause.get();
+					if (const auto remote = RemoteOf(target)) {
+						if (++remote->hitsOn == 1) {
+							logs::warn("Players: stand-in {:08X} was hit here by {:08X} (weapons and spells should pass through it; counted in `peace`)", remote->standInId,
+								cause ? cause->GetFormID() : 0u);
+						}
+					} else if (target && cause && target != cause && target->IsActor() && cause == RE::PlayerCharacter::GetSingleton() &&
+							   !watchedIds.Contains(target->GetFormID())) {
+						++ourHitsElsewhere;  // someone else: a bystander behind a stand-in, say (the rig's)
+						lastHitElsewhere = target->GetFormID();
 					}
 				}
 				return RE::BSEventNotifyControl::kContinue;
@@ -665,6 +780,8 @@ namespace RemotePlayers
 			} else {
 				a_this->UpdateNoAI(a_delta);
 			}
+			// Weapons and spells pass through it, after whatever its update did (StandInPeace.h).
+			StandInPeace::AfterUpdate(a_this);
 			// In water, at its friend's depth: the water's pull to the surface does not lift it (Gait::Refloat).
 			if (sample) {
 				float      drift = 0.0f;
@@ -1624,6 +1741,57 @@ namespace RemotePlayers
 		std::scoped_lock l{ lock };
 		const auto       actor = const_cast<RE::Actor*>(a_actor);
 		return byActor.contains(actor) || retiring.contains(actor);
+	}
+
+	bool IsStandInId(RE::FormID a_id)
+	{
+		return watched.load(std::memory_order_relaxed) != 0 && watchedIds.Contains(a_id);
+	}
+
+	bool AnyStandIn()
+	{
+		return watched.load(std::memory_order_relaxed) != 0;
+	}
+
+	std::string Peace()
+	{
+		// What each stand-in's game objects say, read before the lock (the engine's own reads).
+		struct Read
+		{
+			int        ghost = -1;         // the engine's Actor::IsGhost
+			int        processGhost = -1;  // the flag StandInPeace keeps on, in its process's cached values (-1: no process)
+			int        inCombat = -1;
+			RE::FormID target = 0;  // its own combat target (none expected: it picks none)
+			RE::FormID crime = 0;   // its crime faction (its preset's)
+			float      health = -1.0f;  // its health now and at most (kept full: KeepFull, the health damage hook)
+			float      healthMax = -1.0f;
+			int        dead = -1;
+			int        bleedout = -1;  // kneeling (an essential actor brought down)
+		};
+		std::unordered_map<std::uint32_t, Read> reads;
+		for (const auto& [id, remote] : players) {
+			if (const auto actor = remote.standIn.get(); actor && actor->GetFormID() == remote.standInId) {
+				const auto process = actor->GetActorRuntimeData().currentProcess;
+				const auto cached = process ? process->cachedValues : nullptr;
+				const auto target = actor->GetActorRuntimeData().currentCombatTarget.get();
+				const auto crime = actor->GetCrimeFaction();
+				const auto values = actor->AsActorValueOwner();
+				const auto state = actor->AsActorState();
+				reads[id] = { actor->IsGhost() ? 1 : 0, cached ? (cached->flags.all(RE::CachedValues::Flags::kActorIsGhost) ? 1 : 0) : -1, actor->IsInCombat() ? 1 : 0,
+					target ? target->GetFormID() : 0u, crime ? crime->GetFormID() : 0u, values ? values->GetActorValue(RE::ActorValue::kHealth) : -1.0f,
+					actor->GetActorValueMax(RE::ActorValue::kHealth), actor->IsDead() ? 1 : 0, state ? (state->IsBleedingOut() ? 1 : 0) : -1 };
+			}
+		}
+		std::scoped_lock l{ lock };
+		std::string      out = std::format(" ourHitsElsewhere={} lastHitElsewhere={:08X}", ourHitsElsewhere, lastHitElsewhere);
+		for (const auto& [id, remote] : players) {
+			const auto read = reads.contains(id) ? reads[id] : Read{};
+			out += std::format(" | standin player={} id={:08X} ghost={} processGhost={} inCombat={} combatTarget={:08X} crimeFaction={:08X} hp={:.1f} hpMax={:.1f} dead={}"
+							   " bleedout={} hitsOn={} woundsOn={} healthBack={:.1f} magicOn={} blows={} magicRefused={}",
+				id, remote.standInId, read.ghost, read.processGhost, read.inCombat, read.target, read.crime, read.health, read.healthMax, read.dead, read.bleedout,
+				remote.hitsOn, remote.woundsOn, remote.healthBack, remote.magicOnRefused, remote.blows, remote.magicRefused);
+		}
+		return out;
 	}
 
 	bool MadeAsStandIn(const RE::Actor* a_actor)

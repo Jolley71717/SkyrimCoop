@@ -17,6 +17,7 @@
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
 #include "game/Shots.h"
+#include "game/StandInPeace.h"
 #include "game/VirtualPad.h"
 #include "net/Session.h"
 #include "steam/Steam.h"
@@ -176,6 +177,8 @@ namespace
 		}
 		if (!RemotePlayers::Install()) {
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
+		} else {
+			StandInPeace::Install();  // the world's AI leaves the stand-ins alone (says why if not)
 		}
 		if (!NpcSync::Install()) {
 			logs::warn("NPCs: copies of the NPCs this game runs show no actions in the others' games (the graph notify is not hooked)");

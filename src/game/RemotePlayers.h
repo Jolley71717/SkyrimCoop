@@ -85,6 +85,15 @@ namespace RemotePlayers
 	[[nodiscard]] std::optional<std::chrono::steady_clock::time_point> SenderTime(std::uint32_t a_playerId, std::uint32_t a_sentMs);
 	// Each friend's newest state, as it came (their place, for who is nearest an NPC).
 	[[nodiscard]] std::vector<Protocol::PlayerState> FriendStates();
+	// Whether a form id is one of this game's stand-ins, or one of ours on its way out of the world, and whether there is
+	// any: with no lock, for the engine hooks on any thread (StandInPeace.h, PeaceRules::IdSet).
+	[[nodiscard]] bool IsStandInId(RE::FormID a_id);
+	[[nodiscard]] bool AnyStandIn();
+	// Developer channel `peace` (the stand-ins' part, StandInPeace::Command): per player, its stand-in, whether the engine
+	// counts it a ghost (weapons and spells pass through it) and its process's flag, whether it is in combat and with
+	// whom, its crime faction, the hits that landed on it here and the effects put on it refused (none and any), its own
+	// blows and its effects refused.
+	[[nodiscard]] std::string Peace();
 	// How many copies NpcSync moves: while any, the actor update hook asks NpcSync::UpdateCopy about every Character
 	// that is not a stand-in, and the leg channels look actors up.
 	void SetCopies(std::size_t a_count);
