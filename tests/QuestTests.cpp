@@ -385,11 +385,54 @@ TEST("quest rules: a stage's row is found by editor ID in any case and stage")
 {
 	using QuestRules::StageRule;
 	using QuestRules::StageVerdict;
-	const std::array rows{ StageRule{ "MQ305", 100, StageVerdict::kMoves }, StageRule{ "DA01", 5, StageVerdict::kOwn } };
+	const std::array rows{ StageRule{ "DA01", 5, StageVerdict::kOwn }, StageRule{ "MQ305", 100, StageVerdict::kMoves } };
 	CHECK(QuestRules::StageRuleOf(rows, "mq305", 100) == StageVerdict::kMoves);
 	CHECK(!QuestRules::StageRuleOf(rows, "MQ305", 90));
+	CHECK(!QuestRules::StageRuleOf(rows, "MQ30", 100));
 	CHECK(QuestRules::StageRuleOf(rows, "DA01", 5) == StageVerdict::kOwn);
-	CHECK(!QuestRules::StageRuleOf(QuestRules::STAGE_RULES, "MQ305", 100));
+	CHECK(!QuestRules::StageRuleOf(rows, "DA02", 5));
+	CHECK(!QuestRules::StageRuleOf(std::span<const StageRule>{}, "DA01", 5));
+}
+
+TEST("quest rules: the scan's stage rows are sorted as the lookup needs, each once, and name the stages that move the player")
+{
+	using QuestRules::StageVerdict;
+	const auto& rows = QuestRules::STAGE_RULES;
+	REQUIRE(rows.size() > 50);
+	for (std::size_t i = 1; i < rows.size(); ++i) {
+		CHECK(QuestRules::RuleLess(rows[i - 1], rows[i]));  // sorted and no row twice: the binary search finds each
+	}
+	for (const auto& row : rows) {
+		CHECK(!row.editorId.empty());
+		CHECK(QuestRules::StageRuleOf(rows, row.editorId, row.stage) == row.verdict);
+	}
+	// the ones the scan found by their own fragment's MoveTo of the player, through the quest's script, and by the
+	// controls taken away; Sovngarde's return
+	CHECK(QuestRules::StageRuleOf(rows, "TG05", 60) == StageVerdict::kMoves);
+	CHECK(QuestRules::StageRuleOf(rows, "DA09", 200) == StageVerdict::kMoves);
+	CHECK(QuestRules::StageRuleOf(rows, "MQ302", 60) == StageVerdict::kMoves);
+	CHECK(QuestRules::StageRuleOf(rows, "mq305", 260) == StageVerdict::kMoves);
+	// not rows: a stage that ends another quest that runs (MQ102 10 sets MQ101 900, never MQ101's start again), and one
+	// that moves the player's housecarl (Alias_PlayerHousecarl is not the player)
+	CHECK(!QuestRules::StageRuleOf(rows, "MQ102", 10));
+	CHECK(!QuestRules::StageRuleOf(rows, "MQ104", 160));
+	CHECK(QuestRules::CompareName("mg06", "MG07") < 0);
+	CHECK(QuestRules::CompareName("MQ_A", "MQZ") > 0);  // as the scan sorts: upper-cased, '_' after the letters
+}
+
+TEST("quest rules: a stage that moves the player waits for the friend who did it, and is not made from the session's past")
+{
+	using QuestRules::Verdict;
+	QuestRules::Here here{ .exists = true, .cls = QuestRules::Class::kShared, .started = true, .current = 250 };
+	here.rule = QuestRules::StageRuleOf(QuestRules::STAGE_RULES, "MQ305", 260);
+	REQUIRE(here.rule);
+	CHECK(QuestRules::Judge(Stage(0x46EF2, 260), 7, here) == Verdict::kFar);
+	CHECK(QuestRules::Judge(Stage(0x46EF2, 260), 0, here) == Verdict::kFarPast);
+	here.reporterNear = true;
+	CHECK(QuestRules::Judge(Stage(0x46EF2, 260), 7, here) == Verdict::kMake);
+	here.rule = QuestRules::StageRuleOf(QuestRules::STAGE_RULES, "MQ305", 200);
+	here.reporterNear = false;
+	CHECK(QuestRules::Judge(Stage(0x46EF2, 200), 0, here) == Verdict::kPassed);
 }
 
 TEST("quest rules: the done bit is trusted only when no quest never run reads a stage done and running quests read their current stage done")

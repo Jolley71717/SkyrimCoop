@@ -3,6 +3,7 @@
 #include "FormIds.h"
 #include "Protocol.h"
 #include "QuestBook.h"
+#include "StageRows.h"
 
 #include <algorithm>
 #include <array>
@@ -131,31 +132,18 @@ namespace QuestRules
 
 	// ---- stages that are not made as they are ---------------------------------------------------------------------
 
-	enum class StageVerdict : std::uint8_t
-	{
-		kMoves,  // its fragment moves the player (a summons, "come with me"): made only with the friend who did it near
-		kOwn,    // each game's own: never made from the session's word
-	};
-
-	struct StageRule
-	{
-		std::string_view editorId;
-		std::uint16_t    stage = 0;
-		StageVerdict     verdict = StageVerdict::kMoves;
-	};
-
-	// The stages known to move the player or to be each game's own. Empty in this version: the rows come from a scan of
-	// the game's quest fragments (as the sister project's quest scan finds its stages that move the player), and from
-	// the logs: every stage the session's word made here that moved our player is said in the log (MoveGuard), so the
-	// rig and players' reports name the rows. Until then a moving stage moves everyone it is made for.
-	inline constexpr std::array<StageRule, 0> STAGE_RULES{};
-
+	// The stages known to move the player (StageVerdict::kMoves) or to be each game's own (kOwn), StageRule.h's rows in
+	// StageRows.h: written by tools/questscan.ps1 -Write from a scan of the game's own quest fragments (every stage of a
+	// typed quest whose fragment moves the player, fades the screen out or takes their controls away, itself or through
+	// the scripts it calls and the stages it sets, as the sister project's quest scan finds its stages that move the
+	// player), sorted (RuleLess). Every stage the session's word made here that moved our player is still said in the
+	// log (MoveGuard): one the scan did not see (a scene's or a magic effect's move) is a row to add by hand there.
 	[[nodiscard]] inline std::optional<StageVerdict> StageRuleOf(std::span<const StageRule> a_rules, std::string_view a_editorId, std::uint16_t a_stage)
 	{
-		for (const auto& rule : a_rules) {
-			if (rule.stage == a_stage && SameName(rule.editorId, a_editorId)) {
-				return rule.verdict;
-			}
+		const StageRule key{ a_editorId, a_stage };
+		const auto      it = std::lower_bound(a_rules.begin(), a_rules.end(), key, RuleLess);
+		if (it != a_rules.end() && it->stage == a_stage && CompareName(it->editorId, a_editorId) == 0) {
+			return it->verdict;
 		}
 		return std::nullopt;
 	}
