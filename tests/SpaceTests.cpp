@@ -99,3 +99,14 @@ TEST("doors: a stand-in drawn nowhere for three seconds is placed again; any fra
 	CHECK(!watch.Tick(false, t0 + 13s));
 	CHECK(watch.Tick(false, t0 + 13s + SpaceRules::NO_3D_FOR));
 }
+
+TEST("doors: the cell check moves an actor itself, a rider's mount instead of the rider, and never one held in furniture or a pair")
+{
+	using SpaceRules::Mover;
+	CHECK(SpaceRules::Whom(false, false, false, false) == Mover::kSelf);   // walking: a stand-in, a follower's copy
+	CHECK(SpaceRules::Whom(true, true, false, false) == Mover::kMount);    // in the saddle: the horse carries it
+	CHECK(SpaceRules::Whom(true, false, false, false) == Mover::kNone);    // in a saddle with no mount found: left as it is
+	CHECK(SpaceRules::Whom(false, false, true, false) == Mover::kNone);    // sitting: the furniture holds it
+	CHECK(SpaceRules::Whom(false, false, false, true) == Mover::kNone);    // a kill move holds it
+	CHECK(SpaceRules::Whom(true, true, false, true) == Mover::kNone);      // a mounted kill move: the pair holds both
+}

@@ -15,6 +15,7 @@
 #include "game/Party.h"
 #include "game/PeaceRules.h"
 #include "game/Retire.h"
+#include "game/CellKeep.h"
 #include "game/SpaceRules.h"
 #include "game/Riding.h"
 #include "game/SpellRules.h"
@@ -254,6 +255,7 @@ namespace RemotePlayers
 		std::uint64_t travelTaken = 0;
 		std::uint64_t travelCapped = 0;
 		std::uint64_t recelled = 0;
+		std::uint64_t recelledMounts = 0;  // a seated stand-in's mount moved instead
 		std::uint64_t no3dTaken = 0;
 		bool                    placedThisRun = false;  // a stand-in was placed since the game started
 		bool                    coSaveRecord = false;   // the loaded save's co-save has a stand-ins record
@@ -1038,32 +1040,18 @@ namespace RemotePlayers
 			a_remote.tagShown = std::move(tag);
 		}
 
-		// The engine's move of a reference into a cell at a spot (what the console's and Papyrus' MoveTo end in; CommonLibSSE-NG keeps
-		// it private, so it is called through the same address): no target, so the reference keeps its own spot and angle.
-		void MoveInto(RE::TESObjectREFR* a_ref, RE::TESObjectCELL* a_cell, RE::TESWorldSpace* a_world, const RE::NiPoint3& a_position, const RE::NiPoint3& a_angle)
-		{
-			using func_t = void(RE::TESObjectREFR*, const RE::ObjectRefHandle&, RE::TESObjectCELL*, RE::TESWorldSpace*, const RE::NiPoint3&, const RE::NiPoint3&);
-			static REL::Relocation<func_t> func{ RELOCATION_ID(56227, 56626) };
-			func(a_ref, RE::ObjectRefHandle{}, a_cell, a_world, a_position, a_angle);
-		}
-
-		// A stand-in outside moved into the cell under it when that is another the game has loaded (SpaceRules::Recell): moved
-		// by its position alone it would stay in the cell it was placed in, and go when the game lets that cell go.
+		// A stand-in outside kept in the cell under it (CellKeep.h): placed in our player's cell and moved by its position
+		// alone, it would stay in the cell it was placed in, and go when the game lets that cell go. One in the saddle has
+		// its mount moved instead (the copy of its friend's horse); one in furniture or a kill move stays.
 		void KeepInCell(std::uint32_t a_id, RE::Actor* a_actor)
 		{
-			const auto parent = a_actor->GetParentCell();
-			const auto tes = RE::TES::GetSingleton();
-			if (!parent || !tes) {
+			const auto moved = CellKeep::Keep(a_actor);
+			if (!moved) {
 				return;
 			}
-			const auto at = a_actor->GetPosition();
-			const auto under = parent->IsInteriorCell() ? nullptr : tes->GetCell(at);
-			if (!SpaceRules::Recell(parent->IsInteriorCell(), parent->GetFormID(), under ? under->GetFormID() : 0, under && under->IsAttached())) {
-				return;
-			}
-			MoveInto(a_actor, under, a_actor->GetWorldspace(), at, a_actor->GetAngle());
-			++recelled;
-			logs::info("Players: player {}'s stand-in moved from cell {:08X} into {:08X}, the one under it", a_id, parent->GetFormID(), under->GetFormID());
+			++(moved->mount ? recelledMounts : recelled);
+			logs::info("Players: player {}'s stand-in{} moved from cell {:08X} into {:08X}, the one under it", a_id, moved->mount ? std::format("'s mount {:08X}", moved->actor) : "",
+				moved->from, moved->to);
 		}
 
 		bool SameSpace(const Protocol::PlayerState& a_a, const Protocol::PlayerState& a_b)
@@ -2044,9 +2032,9 @@ namespace RemotePlayers
 			disabled += grave.disabledAt && !grave.deleted ? 1 : 0;
 			deleted += grave.deleted ? 1 : 0;
 		}
-		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) driven speed={} direction={} channels={} from={} travelTaken={} travelCapped={} recelled={} no3dTaken={}", players.size(),
+		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) driven speed={} direction={} channels={} from={} travelTaken={} travelCapped={} recelled={} recelledMounts={} no3dTaken={}", players.size(),
 			standIns.load(), graveyard.size(), disabled, deleted, speedsDriven.load(), directionsDriven.load(), drive.Size(), eventsFromTick ? "tick" : "hook", travelTaken, travelCapped,
-			recelled, no3dTaken);
+			recelled, recelledMounts, no3dTaken);
 		const auto  here = LocalPlayer::Read();
 		// What each stand-in really has on: the armor its inventory holds as worn, not what its friend's looks named (the
 		// rig's `forms` step checks an item is on the actor). Read before the lock: the game's inventory has its own.

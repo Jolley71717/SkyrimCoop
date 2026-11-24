@@ -105,6 +105,26 @@ namespace SpaceRules
 		return !a_interior && a_under != 0 && a_under != a_parent && a_underAttached;
 	}
 
+	enum class Mover : std::uint8_t
+	{
+		kSelf,   // the actor itself
+		kMount,  // the mount it is seated on (it goes with it)
+		kNone,   // nothing: furniture or a paired animation holds it, or a saddle with no mount found
+	};
+
+	// Who the cell check moves for an actor (src/game/CellKeep.h): a rider in the saddle is never moved out of it (its
+	// mount is, and carries it); one in furniture or a paired animation stays where those put it.
+	[[nodiscard]] constexpr Mover Whom(bool a_seated, bool a_hasMount, bool a_furniture, bool a_paired)
+	{
+		if (a_furniture || a_paired) {
+			return Mover::kNone;
+		}
+		if (a_seated) {
+			return a_hasMount ? Mover::kMount : Mover::kNone;
+		}
+		return Mover::kSelf;
+	}
+
 	// Watches a stand-in that should be drawn for its 3D: Tick says when it has had none for NO_3D_FOR.
 	class Drawn
 	{
