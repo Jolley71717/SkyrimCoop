@@ -519,15 +519,26 @@ namespace PickupRules
 		return std::nullopt;
 	}
 
-	// The plants this game has seen near our player, and whether each read harvested when last seen (a census of the
-	// plants near our player, and each plant as its cell attaches). A scan for a harvest no activation explains reports only
-	// a plant seen not harvested before that reads harvested now: a harvest since. A plant first seen harvested (in the save
-	// from before the session, our own harvest from before the last load) is never reported by a scan. Past MAX all are
-	// forgotten (counted): a plant not seen again is never reported by a scan (the safe side: each world keeps its own).
+	// The plants this game has seen near our player, in three states (a census of the plants near our player, and each
+	// plant as its cell attaches): growing; harvested since it was seen growing and not reported yet; done (first seen
+	// harvested, or reported). A scan for a harvest no activation explains reports a plant that reads harvested now and was
+	// growing when last seen or harvested since: a harvest since. A later reading of it harvested never erases that (the
+	// census runs every second, the scan only after the 2 s wait for an activation). Our own report and the session's
+	// harvest make a plant done; a reading of it growing (it grew back) makes it growing again. A plant first seen harvested
+	// (in the save from before the session, our own harvest from before the last load) is never reported by a scan. Past
+	// MAX all are forgotten (counted): a plant not seen again is never reported by a scan (the safe side: each world keeps
+	// its own).
 	class Plants
 	{
 	public:
 		static constexpr std::size_t MAX = 16384;
+
+		enum class State : std::uint8_t
+		{
+			kGrowing,
+			kUnreported,  // harvested since it was seen growing, not reported yet
+			kDone         // first seen harvested, or reported
+		};
 
 		void Saw(std::uint32_t a_ref, bool a_harvested)
 		{
@@ -535,21 +546,43 @@ namespace PickupRules
 				return;
 			}
 			if (const auto it = seen.find(a_ref); it != seen.end()) {
-				it->second = a_harvested;
+				if (!a_harvested) {
+					it->second = State::kGrowing;
+				} else if (it->second == State::kGrowing) {
+					it->second = State::kUnreported;
+				}
 				return;
 			}
-			if (seen.size() >= MAX) {
-				seen.clear();
-				++forgot;
-			}
-			seen.emplace(a_ref, a_harvested);
+			Add(a_ref, a_harvested ? State::kDone : State::kGrowing);
 		}
 
-		// Whether a plant was seen not harvested when last seen (one that reads harvested now was harvested since).
+		// Our own report of its harvest, or the session's harvest made here: a scan never reports it again.
+		void Reported(std::uint32_t a_ref)
+		{
+			if (a_ref == 0) {
+				return;
+			}
+			if (const auto it = seen.find(a_ref); it != seen.end()) {
+				it->second = State::kDone;
+				return;
+			}
+			Add(a_ref, State::kDone);
+		}
+
+		// Whether a plant was seen growing and not reported since (one that reads harvested now was harvested since).
 		[[nodiscard]] bool SeenGrowing(std::uint32_t a_ref) const
 		{
 			const auto it = seen.find(a_ref);
-			return it != seen.end() && !it->second;
+			return it != seen.end() && it->second != State::kDone;
+		}
+
+		[[nodiscard]] std::optional<State> StateOf(std::uint32_t a_ref) const
+		{
+			const auto it = seen.find(a_ref);
+			if (it == seen.end()) {
+				return std::nullopt;
+			}
+			return it->second;
 		}
 
 		[[nodiscard]] std::size_t   Size() const { return seen.size(); }
@@ -558,8 +591,17 @@ namespace PickupRules
 		void Clear() { seen.clear(); }
 
 	private:
-		std::unordered_map<std::uint32_t, bool> seen;
-		std::uint64_t                           forgot = 0;
+		void Add(std::uint32_t a_ref, State a_state)
+		{
+			if (seen.size() >= MAX) {
+				seen.clear();
+				++forgot;
+			}
+			seen.emplace(a_ref, a_state);
+		}
+
+		std::unordered_map<std::uint32_t, State> seen;
+		std::uint64_t                            forgot = 0;
 	};
 
 	// The references this game told the session of or made from its word since the welcome or the load: a scan for an

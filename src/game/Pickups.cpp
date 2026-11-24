@@ -299,7 +299,7 @@ namespace Pickups
 			if (why != Why::kShared || !base) {
 				return;
 			}
-			plants.Saw(id, true);
+			plants.Reported(id);
 			if (outbox.Add({ .ref = id, .base = base->GetFormID(), .kind = Pickup::kHarvested })) {
 				known.Ours(id);
 				++counts.harvestsSent;
@@ -369,7 +369,7 @@ namespace Pickups
 					a_ref->Disable();  // its 3D made again, harvested
 					a_ref->Enable(false);
 				}
-				plants.Saw(a_ref->GetFormID(), true);
+				plants.Reported(a_ref->GetFormID());  // the session's harvest: a scan never reports it
 				++counts.harvestsApplied;
 				return;
 			}

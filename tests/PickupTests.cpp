@@ -907,7 +907,9 @@ TEST("pickup rules: a scan reports only a plant seen growing before: never one f
 	CHECK(plants.SeenGrowing(0xB1));
 	CHECK(!plants.SeenGrowing(0xB2));
 	CHECK(!plants.SeenGrowing(0xB3));  // never seen: never reported
-	plants.Saw(0xB1, true);            // reported (or harvested by the session's word): not again
+	plants.Reported(0xB1);             // reported (or harvested by the session's word): not again
+	CHECK(!plants.SeenGrowing(0xB1));
+	plants.Saw(0xB1, true);  // the census after the report: still done
 	CHECK(!plants.SeenGrowing(0xB1));
 	plants.Saw(0xB2, false);  // grown back here: a harvest after this one is news
 	CHECK(plants.SeenGrowing(0xB2));
@@ -925,4 +927,48 @@ TEST("pickup rules: a scan reports only a plant seen growing before: never one f
 	CHECK(plants.Forgot() == 1);
 	CHECK(plants.Size() == 1);
 	CHECK(!plants.SeenGrowing(0x100001));
+}
+
+TEST("pickup rules: a mod's harvest read by the census before the delayed scan is still reported, once")
+{
+	using PlantState = PickupRules::Plants::State;
+	PickupRules::Plants plants;
+	// What Pickups::Scan does with a plant that reads harvested now: report it when seen growing, and mark it reported.
+	const auto scan = [&](std::uint32_t a_ref) {
+		if (!plants.SeenGrowing(a_ref)) {
+			return false;
+		}
+		plants.Reported(a_ref);
+		return true;
+	};
+
+	plants.Saw(0xC1, false);  // the census: growing
+	CHECK(plants.StateOf(0xC1) == PlantState::kGrowing);
+	plants.Saw(0xC1, true);  // a mod harvests it by script; the census 1 s later reads it harvested
+	CHECK(plants.StateOf(0xC1) == PlantState::kUnreported);
+	plants.Saw(0xC1, true);  // the census again (or its cell attaching) before the 2 s wait is over: not erased
+	CHECK(plants.StateOf(0xC1) == PlantState::kUnreported);
+	CHECK(scan(0xC1));   // the scan after the wait reports it
+	CHECK(!scan(0xC1));  // and never a second time
+	plants.Saw(0xC1, true);
+	CHECK(!scan(0xC1));
+	CHECK(plants.StateOf(0xC1) == PlantState::kDone);
+
+	plants.Saw(0xC1, false);  // it grew back: a later harvest is news again
+	CHECK(plants.StateOf(0xC1) == PlantState::kGrowing);
+	plants.Saw(0xC1, true);
+	CHECK(scan(0xC1));
+	CHECK(!scan(0xC1));
+
+	// The session's harvest made here before any census saw the plant: done, never reported by a scan.
+	plants.Reported(0xC2);
+	CHECK(plants.StateOf(0xC2) == PlantState::kDone);
+	plants.Saw(0xC2, true);
+	CHECK(!scan(0xC2));
+	// Our own report right after the census saw it growing: done, the census after it changes nothing.
+	plants.Saw(0xC3, false);
+	plants.Reported(0xC3);
+	plants.Saw(0xC3, true);
+	CHECK(!scan(0xC3));
+	CHECK(!plants.StateOf(0xC4).has_value());
 }
