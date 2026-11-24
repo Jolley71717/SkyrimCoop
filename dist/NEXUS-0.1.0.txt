@@ -1,0 +1,8 @@
+First public pre-alpha: two players over Steam on Skyrim Special Edition 1.7.104.
+Join through Steam: the friend joins the host's game from the Steam overlay, and each player keeps their own character and save.
+You see each other: each player sees the other's character, named and dressed as they are, walking and running where they go.
+Doors are shared: a door one player opens or closes opens or closes for both, and stays that way after a save and a rejoin.
+Load order doesn't matter: games with the same mods loaded in a different order still agree on which door is which.
+14 languages: the mod's own texts are in every language Skyrim has.
+Combat, NPCs, quests, items, time and weather are not shared yet.
+Known limits and bug reports: see the GitHub release notes.
