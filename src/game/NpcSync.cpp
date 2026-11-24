@@ -2,6 +2,7 @@
 
 #include "DevLine.h"
 #include "FormIds.h"
+#include "game/CellKeep.h"
 #include "game/CopyHealth.h"
 #include "game/Furniture.h"
 #include "game/Pairs.h"
@@ -12,6 +13,7 @@
 #include "game/PeaceRules.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/SpaceRules.h"
 #include "game/SpellRules.h"
 #include "game/StateBuffer.h"
 #include "game/VtableHook.h"
@@ -99,6 +101,7 @@ namespace NpcSync
 			NpcRules::ActionQueue actions;
 			NpcRules::Mode        mode = NpcRules::Mode::kSilent;
 			bool                  mirror = false;  // the hook moves it now
+			Clock::time_point     nextCellCheck{};  // when a mirrored copy is next checked to be in the cell under it (CellKeep.h)
 			RE::FormID            actorId = 0;     // the actor that shows it here (0: none)
 			RE::ActorHandle       handle;
 			bool                  spawned = false;  // that actor is one this game placed (a spawn's copy)
@@ -172,6 +175,8 @@ namespace NpcSync
 			std::uint64_t statesSent = 0, statesIn = 0, actionsSent = 0, actionsIn = 0, gearSent = 0, gearIn = 0, gearMissing = 0, gearSkipped = 0, gearTakenOff = 0;
 			std::uint64_t spawnsPlaced = 0, spawnsTaken = 0, unshared = 0, lookDiffers = 0;
 			std::uint64_t fallbackSilent = 0, fallbackElsewhere = 0, fallbackFar = 0;
+			// Mirrored copies moved into the cell under them (CellKeep.h), and copies in the saddle whose mount was moved.
+			std::uint64_t recelled = 0, recelledMounts = 0;
 			// A friend's hits on NPCs we run: came, applied; the healths and deaths we said and heard; NPCs killed as
 			// they loaded for the session's word; copies set to a share.
 			std::uint64_t hitsIn = 0, hitsApplied = 0, healthsSent = 0, healthsIn = 0, deathsSent = 0, deathsIn = 0, killsOnLoad = 0, healthSets = 0;
@@ -1227,6 +1232,7 @@ namespace NpcSync
 				bool                  place = false;
 				bool                  check = false;  // read its gear back (else: dress it)
 				bool                  magicka = false;  // give back the magicka it spent here (else: its gear)
+				bool                  recell = false;   // keep it in the cell under it (CellKeep.h)
 				std::uint32_t         base = 0;
 				Protocol::PlayerState at;
 			};
@@ -1311,6 +1317,12 @@ namespace NpcSync
 						copy.geared = false;
 					}
 					copy.mirror = mirror;
+					// Moved by its position alone, as a stand-in is: kept in the cell under it, or the cell it was in is let
+					// go under it as the group walks on (a friend's follower, the horse a stand-in rides).
+					if (mirror && a_now >= copy.nextCellCheck) {
+						copy.nextCellCheck = a_now + SpaceRules::CELL_CHECK_EVERY;
+						work.push_back({ .key = key, .recell = true });
+					}
 					if (actor) {
 						if (copy.gear && !copy.geared) {
 							work.push_back({ .key = key });
@@ -1398,6 +1410,21 @@ namespace NpcSync
 				}
 				if (job.magicka) {
 					GiveMagickaBack(job.key);
+					continue;
+				}
+				if (job.recell) {
+					RE::NiPointer<RE::Actor> actor;
+					{
+						std::scoped_lock l{ copyLock };
+						if (const auto it = copies.find(job.key); it != copies.end() && it->second.mirror && it->second.actorId != 0) {
+							actor = it->second.handle.get();
+						}
+					}
+					if (const auto moved = actor ? CellKeep::Keep(actor.get()) : std::nullopt) {
+						++(moved->mount ? counts.recelledMounts : counts.recelled);
+						logs::info("NPCs: copy {:08X} of {:08X}{} moved from cell {:08X} into {:08X}, the one under it", actor->GetFormID(), job.key.id,
+							moved->mount ? std::format(" (its mount {:08X})", moved->actor) : "", moved->from, moved->to);
+					}
 					continue;
 				}
 				RE::NiPointer<RE::Actor> actor;
@@ -2245,12 +2272,12 @@ namespace NpcSync
 			return std::format(
 				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} letGo={} graphsReset={} statesSent={} statesIn={} "
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
-				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
+				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} recelled={} recelledMounts={} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
 				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
 				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
-				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
+				counts.fallbackFar, counts.recelled, counts.recelledMounts, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
 				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad,
 				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size());
 		}
