@@ -291,6 +291,10 @@ namespace CopyHealth
 
 		[[nodiscard]] bool SeenAlive() const { return seenAlive; }
 
+		// The session raised it (its runner says it lives after the session had it dead): a body here is raised as any
+		// copy whose runner's NPC lives, in the host's game too (the save's death there was the session's, now ended).
+		void SessionRaised() { seenAlive = true; }
+
 	private:
 		struct Flying
 		{
@@ -375,10 +379,11 @@ namespace CopyHealth
 		return !(a_weAreHost && a_weReportedIt);
 	}
 
-	// What a session-dead NPC that this game kills (KillsOnLoad) is here, for DeadHere: a body (dead, or a spell's
-	// thrall or zombie, which is still a body: its caster's summon until it ends), alive by no word of the session's
-	// (killed), or the session's raise (left alone): a raise in the game that runs it, of one it saw die while it ran it
-	// (a quest's Resurrect, the console), which its health says next and has it alive in every game.
+	// What a session-dead NPC is here, for DeadHere: a body (dead, or a spell's thrall or zombie, which is still a body:
+	// its caster's summon until it ends), alive by no word of the session's (this game's respawn of its cell: killed
+	// again), or the session's raise (left alone): a deliberate raise (a quest's Resurrect, the console's resurrect) in
+	// any game, seen by Raises, or a raise in the game that runs it of one it saw die while it ran it. The session's raise
+	// has it alive in every game (NpcSync: the game that raised it runs it, and its health says it lives).
 	enum class DeadLooks : std::uint8_t
 	{
 		kBody,
@@ -386,13 +391,88 @@ namespace CopyHealth
 		kSessionsRaise,
 	};
 
-	[[nodiscard]] constexpr DeadLooks LookOfDead(bool a_dead, bool a_reanimated, bool a_weRunIt, bool a_weSawItDie)
+	[[nodiscard]] constexpr DeadLooks LookOfDead(bool a_dead, bool a_reanimated, bool a_weRunIt, bool a_weSawItDie, bool a_raisedHere)
 	{
 		if (a_dead || a_reanimated) {
 			return DeadLooks::kBody;
 		}
-		return a_weRunIt && a_weSawItDie ? DeadLooks::kSessionsRaise : DeadLooks::kRisen;
+		return a_raisedHere || (a_weRunIt && a_weSawItDie) ? DeadLooks::kSessionsRaise : DeadLooks::kRisen;
 	}
+
+	// Whether one loaded here that lives again was raised on purpose (a quest's Resurrect, the console's resurrect, in
+	// whichever game: the session's raise) or came back by this game's respawn of its cell (killed again for the
+	// session's death), by form id. Two signs, either enough:
+	// - the engine's resurrect (Actor::Resurrect, hooked: where Papyrus's Resurrect and the console's end) of a dead one
+	//   whose 3D is loaded, not one of ours (a copy raised for its runner's word), up to RAISE_FRESH before it is seen
+	//   alive;
+	// - seen dead here and then alive while it stayed loaded: a cell's respawn only happens across an unload (its
+	//   respawn timer runs while nobody is there), so a body that rises in front of us was raised.
+	// A body a spell has up as a thrall or a zombie is still a body, never a raise.
+	class Raises
+	{
+	public:
+		static constexpr auto        RAISE_FRESH = 10s;
+		static constexpr std::size_t MOST = 1024;
+
+		// The engine's resurrect of a dead one, loaded (the hook, any thread: the caller locks).
+		void Hooked(std::uint32_t a_id, Clock::time_point a_now)
+		{
+			if (auto* s = State(a_id)) {
+				s->hookedAt = a_now;
+			}
+		}
+
+		// Each scan's look at one loaded here: true once, as it is seen alive after a raise.
+		bool Look(std::uint32_t a_id, bool a_dead, bool a_reanimated, Clock::time_point a_now)
+		{
+			if (a_dead && !a_reanimated) {
+				if (auto* s = State(a_id)) {
+					s->seenDead = true;
+				}
+				return false;
+			}
+			const auto it = states.find(a_id);
+			if (it == states.end()) {
+				return false;
+			}
+			if (a_reanimated) {
+				it->second.hookedAt.reset();  // a thrall's or a zombie's, not a raise
+				return false;
+			}
+			const bool raised = it->second.seenDead || (it->second.hookedAt && a_now - *it->second.hookedAt < RAISE_FRESH);
+			states.erase(it);
+			return raised;
+		}
+
+		// Gone from this game's loaded world: what was seen of it is forgotten (a respawn comes after an unload).
+		void Unloaded(std::uint32_t a_id) { states.erase(a_id); }
+
+		// Hooked raises of ones never seen here in time.
+		void Forget(Clock::time_point a_now)
+		{
+			std::erase_if(states, [&](const auto& a_s) { return !a_s.second.seenDead && (!a_s.second.hookedAt || a_now - *a_s.second.hookedAt >= RAISE_FRESH); });
+		}
+
+		void Clear() { states.clear(); }
+		[[nodiscard]] std::size_t Size() const { return states.size(); }
+
+	private:
+		struct Seen
+		{
+			bool                             seenDead = false;
+			std::optional<Clock::time_point> hookedAt;
+		};
+
+		Seen* State(std::uint32_t a_id)
+		{
+			if (states.size() >= MOST && !states.contains(a_id)) {
+				return nullptr;
+			}
+			return &states[a_id];
+		}
+
+		std::map<std::uint32_t, Seen> states;
+	};
 
 	// The session's dead that live here (KillsOnLoad), each looked at as it is loaded here: killed; a kill the game did not
 	// take tried again every KILL_AGAIN, up to KILL_TRIES (then given up, said once: this game keeps it from dying, an

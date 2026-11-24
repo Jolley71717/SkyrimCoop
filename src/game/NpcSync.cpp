@@ -81,6 +81,7 @@ namespace NpcSync
 			Clock::time_point                lastHitAt{};
 			std::optional<Clock::time_point> killMoveAt;  // last seen in a kill move
 			bool                             aliveUnrun = false;  // last seen alive while no other game ran it (a death here after is ours to say)
+			bool                             raisedUnrun = false;  // raised here on purpose while another game ran it: asked for until it is ours
 			std::uint64_t                    castsSent = 0;  // its graph's cast events said (SpellRules::CastEvent), while we ran it
 		};
 		std::map<Key, Loaded> loaded;
@@ -167,6 +168,8 @@ namespace NpcSync
 		std::map<Key, Protocol::NpcDeath> sessionDead;    // every NPC the session has dead (its runner's word), and how
 		std::set<Key>                    ourDeaths;       // of those, the ones this game said
 		CopyHealth::DeadHere             deadHere;        // the session's dead killed here, since the world loaded
+		std::mutex                       raiseLock;
+		CopyHealth::Raises               raises;          // under raiseLock: deliberate raises seen here (ResurrectHook, the scan)
 
 		// Counts for the developer channel.
 		struct Counts
@@ -178,6 +181,7 @@ namespace NpcSync
 			// A friend's hits on NPCs we run: came, applied; the healths and deaths we said and heard; NPCs killed as
 			// they loaded for the session's word; copies set to a share.
 			std::uint64_t hitsIn = 0, hitsApplied = 0, healthsSent = 0, healthsIn = 0, deathsSent = 0, deathsIn = 0, killsOnLoad = 0, healthSets = 0;
+			std::uint64_t sessionRaises = 0;  // the session's dead raised on purpose here (CopyHealth::Raises)
 			// Spells (SpellRules.h): a copy's voice readied as its runner's, or not known here; magicka given back to copies
 			// (times); actors a stand-in or another game's NPC's copy made here, ended by their effect's dispel or taken out.
 			// madeEnded: found (each once); madeDispelled: its making effect dispelled (each try that found one);
@@ -195,6 +199,16 @@ namespace NpcSync
 		// written by TendCopies when the copies change). Far above any scene's; past it, the rest are not judged (said once).
 		constexpr std::size_t                                                                           MAX_COPY_IDS = 512;
 		PeaceRules::IdSet<MAX_COPY_IDS>                                                                 othersCopyIds;
+		// This thread kills a copy on its runner's (or the session's) word: the kill hook lets it through (KillHook).
+		thread_local bool killingOnWord = false;
+		class OnWord
+		{
+		public:
+			OnWord() { killingOnWord = true; }
+			~OnWord() { killingOnWord = false; }
+			OnWord(const OnWord&) = delete;
+			OnWord& operator=(const OnWord&) = delete;
+		};
 		std::vector<std::uint32_t>                                                                      othersCopyList;
 		bool                                                                                            saidCopyIdsFull = false;
 		// Actors a stand-in or a copy made here, on their way out (SpellRules::NextMade): when their effect's dispel was
@@ -230,6 +244,34 @@ namespace NpcSync
 		{
 			const auto state = a_actor->AsActorState();
 			return state && state->GetLifeState() == RE::ACTOR_LIFE_STATE::kReanimate;
+		}
+
+		// ---- the engine's resurrect: Actor::Resurrect, hooked in Character's vtable (any thread) ----
+		// Papyrus's Actor.Resurrect and the console's `resurrect` both end in it. A dead actor raised through it while its 3D
+		// is loaded is noted (CopyHealth::Raises): the scan has it as a deliberate raise, the session's, in whichever game,
+		// never killed again for the session's death. Our own raise of a copy (its runner's NPC lives) is not one.
+		using ResurrectFn = void (*)(RE::Actor*, bool, bool);
+		constexpr std::size_t      RESURRECT_INDEX = 0xAB;  // Actor::Resurrect
+		ResurrectFn                originalResurrect = nullptr;
+		std::atomic<std::uint64_t> raisesHooked{ 0 };
+		thread_local bool          ourRaise = false;
+		class OurRaise
+		{
+		public:
+			OurRaise() { ourRaise = true; }
+			~OurRaise() { ourRaise = false; }
+			OurRaise(const OurRaise&) = delete;
+			OurRaise& operator=(const OurRaise&) = delete;
+		};
+
+		void ResurrectHook(RE::Actor* a_this, bool a_resetInventory, bool a_attach3D)
+		{
+			if (a_this && !ourRaise && a_this->IsDead() && a_this->Is3DLoaded() && !a_this->IsPlayerRef()) {
+				++raisesHooked;
+				std::scoped_lock l{ raiseLock };
+				raises.Hooked(a_this->GetFormID(), Clock::now());
+			}
+			originalResurrect(a_this, a_resetInventory, a_attach3D);
 		}
 
 		// ---- the graph event hook: IAnimationGraphManagerHolder::NotifyAnimationGraph of every Character ----
@@ -1020,6 +1062,10 @@ namespace NpcSync
 			// Gone from this game's loaded world: one we ran is let go of (the next scan of the others' games claims it).
 			for (auto it = loaded.begin(); it != loaded.end();) {
 				if (!found.contains(it->first)) {
+					{
+						std::scoped_lock l{ raiseLock };
+						raises.Unloaded(it->second.id);
+					}
 					it = loaded.erase(it);
 				} else {
 					++it;
@@ -1035,6 +1081,10 @@ namespace NpcSync
 
 		void SendClaims(const SendFn& a_send, Clock::time_point a_now, const std::optional<Protocol::PlayerState>& a_here, const std::vector<Protocol::PlayerState>& a_friends)
 		{
+			{
+				std::scoped_lock l{ raiseLock };
+				raises.Forget(a_now);
+			}
 			const auto           player = RE::PlayerCharacter::GetSingleton();
 			Protocol::NpcClaims  msg;
 			const auto           flush = [&] {
@@ -1057,18 +1107,47 @@ namespace NpcSync
 				}
 				const auto owner = owners.find(key);
 				const bool ours = owner != owners.end() && owner->second == ourId;
+				const bool reanimated = Reanimated(actor.get());
+				bool       raisedHere = false;
+				{
+					std::scoped_lock l{ raiseLock };
+					raisedHere = raises.Look(npc.id, actor->IsDead(), reanimated, a_now);
+				}
+				const auto looks = CopyHealth::LookOfDead(actor->IsDead(), reanimated, ours, npc.deathSent, raisedHere);
+				// Raised here on purpose (a quest's Resurrect, the console's resurrect: CopyHealth::Raises), in whichever game:
+				// the session's raise. It lives here from now; this game asks to run it (as a fight) and, once it does, its
+				// health says it lives, which ends the session's death in every game (the server's too) and raises its copies.
+				if (raisedHere && looks == CopyHealth::DeadLooks::kSessionsRaise && sessionDead.contains(key)) {
+					++counts.sessionRaises;
+					logs::info("NPCs: {:08X} is dead in the session and was raised here (a script's or the console's): the session's raise{}", key.id,
+						ours ? ", said now" : ", said once this game runs it");
+					sessionDead.erase(key);
+					ourDeaths.erase(key);
+					deadHere.Forget(npc.id);
+					health.erase(key);  // a copy's runner's death kills it here no more
+					npc.deathSent = false;
+					npc.reporter.Reset();
+					npc.raisedUnrun = !ours;
+				}
+				if (npc.raisedUnrun) {
+					if (ours || actor->IsDead()) {
+						npc.raisedUnrun = false;
+					} else {
+						NoteFight(npc.id, a_now);  // asked for until it is ours
+					}
+				}
 				// The session has it dead (a death said while it was not loaded here, or before we joined) and it lives
 				// here: killed, not asked for (CopyHealth::KillsOnLoad: the host's game keeps its own save's word). A kill
 				// that does not take is tried again, the engine's kill then the one that ignores the essential flag; one seen
 				// dead here that lives again by no word of the session's (this game's respawn of its cell, a script's or the
 				// console's raise in a game that does not run it) is killed again (CopyHealth::DeadHere). Never killed again:
-				// - a raise in the game that runs it, of one it saw die while it ran it (a quest's Resurrect, the console):
-				//   the session's raise, which SendFates says next (its health), and the session has it alive again;
+				// - a deliberate raise in any game (CopyHealth::Raises: the engine's resurrect, or one seen dead here that
+				//   rose while it stayed loaded), or a raise in the game that runs it of one it saw die while it ran it: the
+				//   session's raise, which SendFates says (its health) once this game runs it, and the session has it alive
+				//   again;
 				// - a body a spell or an effect has up for a while (Reanimated: a thrall, a zombie): the caster's summon,
 				//   looked at as the body it still is, and never run.
 				// (CopyHealth::LookOfDead)
-				const bool reanimated = Reanimated(actor.get());
-				const auto looks = CopyHealth::LookOfDead(actor->IsDead(), reanimated, ours, npc.deathSent);
 				if (sessionDead.contains(key) && looks != CopyHealth::DeadLooks::kSessionsRaise && CopyHealth::KillsOnLoad(ourId == hostId, ourDeaths.contains(key))) {
 					const bool alive = looks == CopyHealth::DeadLooks::kRisen;
 					// (one in a kill move or another pair is left to it, and killed after it if it lives)
@@ -1087,6 +1166,7 @@ namespace NpcSync
 								} else {
 									logs::warn("NPCs: {:08X} is dead in the session and still lives here: killed again (try {} of {})", key.id, tries, CopyHealth::KILL_TRIES);
 								}
+								OnWord word;  // the session's word (a copy's kill passes the kill hook as its runner's death does)
 								if (tries % 2 == 1) {
 									actor->KillImpl(by.get(), 0.0f, true, false);
 								} else {
@@ -1771,12 +1851,16 @@ namespace NpcSync
 						RE::NiPointer<RE::Actor> hold;
 						const auto               by = death != sessionDead.end() ? ActorOfPlayer(death->second.killer, hold) : nullptr;
 						logs::info("NPCs: copy {:08X} of {:08X} killed: its runner (player {}) said it died", one.id, one.key.id, one.runner);
+						OnWord word;
 						actor->KillImpl(by, 0.0f, true, false);
 					}
 					break;
 				case CopyHealth::Do::kRevive:
 					logs::info("NPCs: copy {:08X} of {:08X} raised: it lives in its runner's game (player {}) at {:.0f}%", one.id, one.key.id, one.runner, step.share * 100.0f);
-					actor->Resurrect(false, true);
+					{
+						OurRaise raise;  // not a deliberate raise of the session's dead (ResurrectHook)
+						actor->Resurrect(false, true);
+					}
 					SetShare(actor.get(), step.share, max);
 					break;
 				case CopyHealth::Do::kNothing:
@@ -1805,6 +1889,10 @@ namespace NpcSync
 			events->AddEventSink<RE::TESHitEvent>(&hitSink);
 		}
 		REL::Relocation<std::uintptr_t> holder{ RE::VTABLE_Character[3] };
+		REL::Relocation<std::uintptr_t> character{ RE::VTABLE_Character[0] };
+		if (!VtableHook::Slot<ResurrectFn>(character.address(), RESURRECT_INDEX, &ResurrectHook, originalResurrect, "NPCs", "Character's resurrect")) {
+			logs::warn("NPCs: without the resurrect hook, a raise of the session's dead counts only once this game saw the body rise while loaded");
+		}
 		if (!VtableHook::Slot<NotifyFn>(holder.address(), 1, &NotifyHook, originalNotify, "NPCs", "Character's graph notify")) {
 			logs::warn("NPCs: without the graph notify hook, copies of the NPCs this game runs show their walk but not their attacks or other actions");
 			return false;
@@ -1903,6 +1991,8 @@ namespace NpcSync
 		sessionDead.clear();
 		ourDeaths.clear();
 		deadHere.Clear();
+		std::scoped_lock r{ raiseLock };
+		raises.Clear();
 	}
 
 	void Owners(const Protocol::NpcOwners& a_msg)
@@ -2108,8 +2198,13 @@ namespace NpcSync
 			if (Runs(npc.key) || (health.size() >= Protocol::MAX_NPCS && !health.contains(npc.key))) {
 				continue;  // ours now (an old runner's last word), or too many
 			}
-			health[npc.key].Word(npc.share);
-			// It lives: the session has it dead no more (its runner raised it).
+			auto& copy = health[npc.key];
+			copy.Word(npc.share);
+			// It lives: the session has it dead no more (its runner raised it, or a game that raised it runs it now). A body
+			// here is raised for it, the host's included (CopyHealth::Copy::SessionRaised).
+			if (sessionDead.contains(npc.key)) {
+				copy.SessionRaised();
+			}
 			sessionDead.erase(npc.key);
 			ourDeaths.erase(npc.key);
 		}
@@ -2253,6 +2348,10 @@ namespace NpcSync
 		loaded.clear();
 		// The new world's actors are new ones: the session's dead are killed again as they load; our hits were on the old.
 		deadHere.Clear();
+		{
+			std::scoped_lock r{ raiseLock };
+			raises.Clear();
+		}
 		hitApplied.clear();
 		std::scoped_lock f{ fightLock };
 		ourHits.clear();
@@ -2315,13 +2414,13 @@ namespace NpcSync
 				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} letGo={} graphsReset={} statesSent={} statesIn={} "
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
 				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
-				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} deadRisen={} deadGivenUp={} saveKills={} revived={} healthSets={} dead={} "
+				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} deadRisen={} deadGivenUp={} sessionRaises={} raisesHooked={} saveKills={} revived={} healthSets={} dead={} "
 				"pairActionsSent={} heldActionsDropped={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
 				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
-				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad, deadHere.risen, deadHere.givenUp,
+				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad, deadHere.risen, deadHere.givenUp, counts.sessionRaises, raisesHooked.load(),
 				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size(), pairActionsSent, heldActionsDropped.load());
 		}
 		// One line per NPC: `npcs list`, or `npcs <form id>` for one. Its local form id, who runs it, its kind, where its
