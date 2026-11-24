@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-24T00:10:23+00:00",
+ "updated": "2026-11-24T01:43:16+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -85,8 +85,9 @@
    "title": "A friend sitting, sleeping or working at a station is shown",
    "kind": "feature",
    "priority": 3,
-   "stage": 0,
-   "note": ""
+   "stage": 2,
+   "note": "",
+   "pr": 30
   },
   {
    "id": "a-friend-swimming-shows-as-swimming",
@@ -206,7 +207,7 @@
    "title": "Conversations: one talks, the others see and hear it",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
+   "stage": 1,
    "note": ""
   },
   {
@@ -599,8 +600,9 @@
    "title": "NPCs sit in both games",
    "kind": "feature",
    "priority": 3,
-   "stage": 0,
-   "note": ""
+   "stage": 2,
+   "note": "",
+   "pr": 30
   },
   {
    "id": "older-game-versions-1-5-97",
