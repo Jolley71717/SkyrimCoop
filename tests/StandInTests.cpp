@@ -464,34 +464,90 @@ TEST("stand-in rules: on itself, what only shows on it is kept; what makes, move
 
 // ---- drawn or put away ----
 
-TEST("stand-in rules: a weapon state that disagrees is fixed after the grace, never while drawing, and not again too soon")
+TEST("stand-in rules: what the game's own update asks again: a draw or a sheathe still wanted, nothing otherwise")
 {
+	using W = StandInRules::Weapon;
+	CHECK(StandInRules::AskAgain(W::kWantToDraw) == std::optional<bool>{ true });
+	CHECK(StandInRules::AskAgain(W::kWantToSheathe) == std::optional<bool>{ false });
+	for (const auto state : { W::kSheathed, W::kDrawing, W::kDrawn, W::kSheathing }) {
+		CHECK(!StandInRules::AskAgain(state).has_value());
+	}
+}
+
+TEST("stand-in rules: a stand-in is told to draw the moment its friend draws, once it holds what its friend holds")
+{
+	using W = StandInRules::Weapon;
+	using A = StandInRules::DrawFix::Ask;
 	StandInRules::DrawFix fix;
 	const auto            t = Steady::now();
-	CHECK(!fix.Due(true, true, false, t));   // agrees
-	CHECK(!fix.Due(true, false, false, t));  // disagrees: the grace starts
-	CHECK(!fix.Due(true, false, false, t + StandInRules::DrawFix::GRACE - 1ms));
-	CHECK(fix.Due(true, false, false, t + StandInRules::DrawFix::GRACE));
+	CHECK(fix.Due(false, W::kSheathed, true, t) == A::kNone);  // agrees: nothing
+	CHECK(fix.Due(true, W::kSheathed, false, t) == A::kNone);  // its friend draws, it is not dressed yet: waits
+	CHECK(fix.Due(true, W::kSheathed, true, t + 1ms) == A::kFirst);  // dressed: told at once, no grace
+	CHECK(fix.asks == 1);
+	// On its way (wanting, drawing) or there: nothing more; the game's update finishes a want (AskAgain).
+	for (const auto state : { W::kWantToDraw, W::kDrawing, W::kDrawn }) {
+		CHECK(fix.Due(true, state, true, t + 1s) == A::kNone);
+	}
+	// Its friend puts it away: told at once, whatever the state is (drawing still, or drawn).
+	CHECK(fix.Due(false, W::kDrawing, true, t + 2s) == A::kFirst);
+	CHECK(fix.Due(false, W::kWantToSheathe, true, t + 2s) == A::kNone);
+	CHECK(fix.Due(false, W::kSheathing, true, t + 2s) == A::kNone);
+	CHECK(fix.Due(false, W::kSheathed, true, t + 3s) == A::kNone);
+	// Each kind of hand draws the same way (a sword, a bow, a spell, its fists: the game's action picks the event):
+	// the rule reads the state only. Drawn again: told again.
+	CHECK(fix.Due(true, W::kSheathed, true, t + 4s) == A::kFirst);
+	CHECK(fix.asks == 3);
+	CHECK(fix.fixes == 0);
+}
+
+TEST("stand-in rules: a stand-in placed while its friend has a weapon out draws it as soon as it is dressed")
+{
+	using W = StandInRules::Weapon;
+	using A = StandInRules::DrawFix::Ask;
+	StandInRules::DrawFix fix;
+	const auto            t = Steady::now();
+	CHECK(fix.Due(true, W::kSheathed, false, t) == A::kNone);
+	CHECK(fix.Due(true, W::kSheathed, true, t + 250ms) == A::kFirst);
+	// A new stand-in (a load, a cell changed, placed again): told again though its friend's flag never changed.
+	CHECK(fix.Due(true, W::kDrawn, true, t + 5s) == A::kNone);
+	fix.Reset();
+	CHECK(fix.Due(true, W::kSheathed, true, t + 6s) == A::kFirst);
+	CHECK(fix.asks == 2);
+}
+
+TEST("stand-in rules: a draw that went back is told again after the grace, never while under way, not again too soon")
+{
+	using W = StandInRules::Weapon;
+	using A = StandInRules::DrawFix::Ask;
+	StandInRules::DrawFix fix;
+	const auto            t = Steady::now();
+	CHECK(fix.Due(true, W::kSheathed, true, t) == A::kFirst);
+	// Back to sheathed (a draw turned away and given up): the grace starts.
+	CHECK(fix.Due(true, W::kSheathed, true, t + 10ms) == A::kNone);
+	CHECK(fix.Due(true, W::kSheathed, true, t + 10ms + StandInRules::DrawFix::GRACE - 1ms) == A::kNone);
+	CHECK(fix.Due(true, W::kSheathed, true, t + 10ms + StandInRules::DrawFix::GRACE) == A::kNone);  // the cool-down since the ask
+	const auto again = t + StandInRules::DrawFix::COOL;
+	CHECK(fix.Due(true, W::kSheathed, true, again) == A::kAgain);
 	CHECK(fix.fixes == 1);
 	// Still not drawn: not again before the cool-down, however long it disagrees.
-	const auto after = t + StandInRules::DrawFix::GRACE;
-	CHECK(!fix.Due(true, false, false, after + 1ms));
-	CHECK(!fix.Due(true, false, false, after + StandInRules::DrawFix::GRACE + 1ms));
-	CHECK(fix.Due(true, false, false, after + StandInRules::DrawFix::COOL + StandInRules::DrawFix::GRACE));
+	CHECK(fix.Due(true, W::kSheathed, true, again + 1ms) == A::kNone);
+	CHECK(fix.Due(true, W::kSheathed, true, again + StandInRules::DrawFix::GRACE + 1ms) == A::kNone);
+	CHECK(fix.Due(true, W::kSheathed, true, again + StandInRules::DrawFix::COOL + StandInRules::DrawFix::GRACE) == A::kAgain);
 	CHECK(fix.fixes == 2);
 
-	// Drawing or sheathing now: no fix, and the grace starts over after.
+	// Sheathing while its friend draws (told already): no fix while under way; the grace starts once it is settled.
 	StandInRules::DrawFix busy;
-	CHECK(!busy.Due(false, true, false, t));
-	CHECK(!busy.Due(false, true, true, t + 1s));
-	CHECK(!busy.Due(false, true, false, t + 2s));  // the grace starts here
-	CHECK(!busy.Due(false, true, false, t + 2s + StandInRules::DrawFix::GRACE - 1ms));
-	CHECK(busy.Due(false, true, false, t + 2s + StandInRules::DrawFix::GRACE));
+	CHECK(busy.Due(true, W::kSheathing, true, t) == A::kFirst);
+	CHECK(busy.Due(true, W::kSheathing, true, t + 5s) == A::kNone);
+	CHECK(busy.Due(true, W::kSheathed, true, t + 6s) == A::kNone);  // the grace starts here
+	CHECK(busy.Due(true, W::kSheathed, true, t + 6s + StandInRules::DrawFix::GRACE - 1ms) == A::kNone);
+	CHECK(busy.Due(true, W::kSheathed, true, t + 6s + StandInRules::DrawFix::GRACE) == A::kAgain);
 
-	// A new stand-in starts clean.
-	fix.Reset();
-	CHECK(!fix.Due(false, true, false, after + 10s));
-	CHECK(fix.Due(false, true, false, after + 10s + StandInRules::DrawFix::GRACE));
+	// Put away the same way: drawn while its friend's is away, told, back to drawn: told again.
+	StandInRules::DrawFix away;
+	CHECK(away.Due(false, W::kDrawn, true, t) == A::kFirst);
+	CHECK(away.Due(false, W::kDrawn, true, t + 1s) == A::kNone);
+	CHECK(away.Due(false, W::kDrawn, true, t + 1s + StandInRules::DrawFix::COOL) == A::kAgain);
 }
 
 // ---- aim ----

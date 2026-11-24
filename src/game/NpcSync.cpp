@@ -1736,6 +1736,7 @@ namespace NpcSync
 		RemotePlayers::DriveLegs(a_actor, { step.speed, step.direction });
 		a_actor->UpdateNoAI(a_delta);
 		TellCopy(a_actor, key, step.events, events);
+		RemotePlayers::FinishDraw(a_actor);  // a draw or a sheathe still wanted, asked again as the game's own update would
 		return true;
 	}
 

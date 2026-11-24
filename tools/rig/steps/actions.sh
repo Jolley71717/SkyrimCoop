@@ -29,8 +29,8 @@
 #          did, and the hook heard none, is a FAIL (the events go some way the hook does not see); it did nothing is the
 #          press's (a rig fault).
 #        - the watcher's stand-in played that kind (its byKind=) within ACTIONS_WAIT: FAIL if not.
-#      The weapon drawn and put away is read on the stand-in itself (drawn=), and a draw the stand-in's graph did not
-#      make (drawFixes= up: the game told to draw by hand) is a WARN.
+#      The weapon drawn and put away is read on the stand-in itself (drawn=; a FAIL says its weaponState=, process= and
+#      responses=), and a draw the stand-in had to be told again (drawFixes= up: the first did not hold) is a WARN.
 #   3. It deals nothing here: the mover walks up to the watcher's player with its virtual pad (`walkto` the stand-in of
 #      it, ACTIONS_REACH u; a walk that does not get there facing it is a rig fault), casts Flames at it (magicka spent,
 #      or a rig fault), then looses an arrow at it, then shouts at it. In the watcher's game, its stand-in cast
@@ -180,9 +180,9 @@ act_draw() {
 	if [ "$want" = 1 ] && ! act_own_drawn "$m"; then rig_fault input "$label: the $m's press" "X left the $m's weapon away ($(dc "$m" where | grep -o 'flags=[^ ]*'))"; return 1; fi
 	if [ "$want" = 0 ] && act_own_drawn "$m"; then rig_fault input "$label: the $m's press" "X left the $m's weapon out"; return 1; fi
 	wait_until "$ACTIONS_WAIT" act_drawn "$w" "$want" && pass "$label: the $w's stand-in follows" "drawn=$want" ||
-		fail "$label: the $w's stand-in follows" "drawn=$(act_field "$w" drawn) wanted=$(act_field "$w" wanted) after $ACTIONS_WAIT s"
+		fail "$label: the $w's stand-in follows" "drawn=$(act_field "$w" drawn) wanted=$(act_field "$w" wanted) weaponState=$(act_field "$w" weaponState) drawAsks=$(act_field "$w" drawAsks) drawsFinished=$(act_field "$w" drawsFinished) process=$(act_field "$w" process) responses=$(act_field "$w" responses) after $ACTIONS_WAIT s"
 	local f1; f1=$(act_field "$w" drawFixes)
-	is_num "$f0" && is_num "$f1" && [ "$f1" -gt "$f0" ] && warn "$label: the $w's stand-in's graph followed by itself" "drawn by hand (drawFixes $f0 -> $f1): its graph took no draw event"
+	is_num "$f0" && is_num "$f1" && [ "$f1" -gt "$f0" ] && warn "$label: the $w's stand-in's draw held the second time" "told again (drawFixes $f0 -> $f1): the first time did not hold"
 	return 0
 }
 

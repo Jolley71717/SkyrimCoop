@@ -110,8 +110,24 @@ namespace RemotePlayers
 			std::vector<std::uint32_t> wornLogged;  // the worn list last said in the log
 			Clock::time_point       nextCheck{};
 			Clock::time_point       redressAfter{};
-			StandInRules::DrawFix   drawFix;  // its weapon drawn or put away by hand when its graph disagrees
+			StandInRules::DrawFix   drawFix;  // its weapon drawn or put away as its friend's is (the game's own way)
+			std::uint64_t           drawsFinished = 0;  // updates that told it again, as the game's own update would (under lock)
 		};
+
+		// The game's weapon states, as StandInRules reads them.
+		static_assert(std::to_underlying(RE::WEAPON_STATE::kSheathed) == std::to_underlying(StandInRules::Weapon::kSheathed) &&
+						  std::to_underlying(RE::WEAPON_STATE::kWantToDraw) == std::to_underlying(StandInRules::Weapon::kWantToDraw) &&
+						  std::to_underlying(RE::WEAPON_STATE::kDrawing) == std::to_underlying(StandInRules::Weapon::kDrawing) &&
+						  std::to_underlying(RE::WEAPON_STATE::kDrawn) == std::to_underlying(StandInRules::Weapon::kDrawn) &&
+						  std::to_underlying(RE::WEAPON_STATE::kWantToSheathe) == std::to_underlying(StandInRules::Weapon::kWantToSheathe) &&
+						  std::to_underlying(RE::WEAPON_STATE::kSheathing) == std::to_underlying(StandInRules::Weapon::kSheathing),
+			"StandInRules::Weapon follows RE::WEAPON_STATE");
+
+		std::optional<StandInRules::Weapon> WeaponOf(RE::Actor* a_actor)
+		{
+			const auto state = a_actor ? a_actor->AsActorState() : nullptr;
+			return state ? std::optional{ static_cast<StandInRules::Weapon>(std::to_underlying(state->GetWeaponState())) } : std::nullopt;
+		}
 
 		std::mutex                                lock;  // players' buffers and graph state, byActor and retiring
 		std::unordered_map<std::uint32_t, Remote> players;
@@ -598,6 +614,13 @@ namespace RemotePlayers
 			if (sample && eventsHere) {
 				PlayActions(a_this, playerId, actions);
 			}
+			// A draw or a sheathe its graph turned away is asked again, as the game's own update would (FinishDraw).
+			if (sample && RemotePlayers::FinishDraw(a_this)) {
+				std::scoped_lock l{ lock };
+				if (const auto player = players.find(playerId); player != players.end() && player->second.standInId == a_this->GetFormID()) {
+					++player->second.drawsFinished;
+				}
+			}
 		}
 
 		// ---- placing and taking away ----
@@ -983,23 +1006,28 @@ namespace RemotePlayers
 			}
 		}
 
-		// Its weapon drawn or put away by hand when its graph has not followed its friend's (StandInRules::DrawFix).
+		// Its weapon, spells or fists drawn or put away as its friend's are, the game's own way (StandInRules::DrawFix):
+		// told the moment they part, once it holds what its friend holds, and again if the state went back.
 		void FixDraw(std::uint32_t a_id, Remote& a_remote, RE::Actor* a_actor, const Protocol::PlayerState& a_state, Clock::time_point a_now)
 		{
-			const auto state = a_actor->AsActorState();
-			if (!state) {
+			const auto weapon = WeaponOf(a_actor);
+			if (!weapon) {
 				return;
 			}
-			using WS = RE::WEAPON_STATE;
-			const auto weapon = state->GetWeaponState();
-			const bool busy = weapon == WS::kWantToDraw || weapon == WS::kDrawing || weapon == WS::kWantToSheathe || weapon == WS::kSheathing;
 			const bool wanted = (a_state.flags & Protocol::kWeaponDrawn) != 0;
-			if (a_remote.drawFix.Due(wanted, weapon == WS::kDrawn, busy, a_now)) {
-				a_actor->DrawWeaponMagicHands(wanted);
-				if (a_remote.drawFix.fixes <= 3) {
-					logs::info("Players: player {}'s stand-in {:08X} {} its weapon by hand: its graph had not followed its friend's ({} times so far)", a_id,
-						a_remote.standInId, wanted ? "drew" : "put away", a_remote.drawFix.fixes);
-				}
+			const bool ready = a_remote.dressed && a_remote.checked && a_actor->Is3DLoaded();
+			using A = StandInRules::DrawFix::Ask;
+			const auto ask = a_remote.drawFix.Due(wanted, *weapon, ready, a_now);
+			if (ask == A::kNone) {
+				return;
+			}
+			a_actor->DrawWeaponMagicHands(wanted);
+			const auto now = WeaponOf(a_actor);
+			if (ask == A::kFirst ? a_remote.drawFix.asks <= 2 : a_remote.drawFix.fixes <= 3) {
+				logs::info("Players: player {}'s stand-in {:08X} told to {} ({}; its weapon state {} -> {}{})", a_id, a_remote.standInId,
+					wanted ? "draw" : "put away", ask == A::kFirst ? "its friend did" : "the last time did not hold", std::to_underlying(*weapon),
+					now ? static_cast<int>(std::to_underlying(*now)) : -1,
+					ask == A::kAgain ? std::format("; {} times so far", a_remote.drawFix.fixes) : std::string{});
 			}
 		}
 
@@ -1411,6 +1439,19 @@ namespace RemotePlayers
 		drive.Erase(a_actor);
 	}
 
+	// Actor::Update ends so (Skyrim SE 1.7.104): while the weapon state is kWantToDraw or kWantToSheathe it calls
+	// DrawWeaponMagicHands again with that wish. UpdateNoAI, all a stand-in or a copy gets, does not.
+	bool FinishDraw(RE::Actor* a_actor)
+	{
+		const auto weapon = WeaponOf(a_actor);
+		const auto again = weapon ? StandInRules::AskAgain(*weapon) : std::nullopt;
+		if (!again) {
+			return false;
+		}
+		a_actor->DrawWeaponMagicHands(*again);
+		return true;
+	}
+
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt)
 	{
 		drive.Erase(a_actor);
@@ -1509,12 +1550,21 @@ namespace RemotePlayers
 			int         drawnNow = -1;  // its weapon drawn (1), put away (0), no stand-in (-1)
 			float       angleX = 0.0f;
 			std::uint32_t baseShouts = 0;  // the shouts its base keeps now (Gear::BaseShouts)
+			int         weaponState = -1;  // the game's weapon state (StandInRules::Weapon), -1: none
+			std::string process = "none";   // its process: high, low (no middle-high data), none
+			int         responses = -1;     // its process has the animation event handlers (1) or not (0)
 		};
 		std::unordered_map<std::uint32_t, Read> reads;
 		for (const auto& [id, remote] : players) {
 			if (const auto actor = remote.standIn.get(); actor && actor->GetFormID() == remote.standInId) {
-				const auto state = actor->AsActorState();
-				reads[id] = { state ? (state->GetWeaponState() == RE::WEAPON_STATE::kDrawn ? 1 : 0) : -1, actor->GetAngleX(), Gear::BaseShouts(actor.get()) };
+				const auto weapon = WeaponOf(actor.get());
+				Read read{ weapon ? (*weapon == StandInRules::Weapon::kDrawn ? 1 : 0) : -1, actor->GetAngleX(), Gear::BaseShouts(actor.get()) };
+				read.weaponState = weapon ? static_cast<int>(std::to_underlying(*weapon)) : -1;
+				if (const auto process = actor->GetActorRuntimeData().currentProcess) {
+					read.process = process->InHighProcess() ? "high" : process->middleHigh ? "middle" : "low";
+					read.responses = process->middleHigh ? (process->middleHigh->animResponse ? 1 : 0) : 0;
+				}
+				reads[id] = read;
 			}
 		}
 		std::scoped_lock l{ lock };
@@ -1522,12 +1572,12 @@ namespace RemotePlayers
 			const auto read = reads.contains(id) ? reads[id] : Read{};
 			const auto wanted = remote.hasDrawn ? ((remote.lastDrawn.flags & Protocol::kWeaponDrawn) != 0 ? 1 : 0) : -1;
 			const auto handOk = [&](bool a_ok) { return remote.checked ? (a_ok ? "1" : "0") : "?"; };
-			out += std::format(" | player {} standin={:08X} in={} unplaced={} waiting={} lost={} played={} byKind={} refused={} refusedKinds={}{} drawn={} wanted={} drawFixes={}"
+			out += std::format(" | player {} standin={:08X} in={} unplaced={} waiting={} lost={} played={} byKind={} refused={} refusedKinds={}{} drawn={} wanted={} drawFixes={} weaponState={} drawAsks={} drawsFinished={} process={} responses={}"
 							   " aim={:.2f} angleX={:.2f} right={:08X}:{} left={:08X}:{} ammo={:08X}:{} voice={:08X}/{:08X} gearOk={} missing={} refusedForms={} redressed={} baseShouts={}/{}"
 							   " ammoGiven={} magicRefused={} magicKept={} blows={} casts={} damaged={} dealt={:.1f} undone={:.1f}",
 				id, remote.standInId, remote.actionsIn, remote.actionsUnplaced, remote.actions.Size(), remote.actions.Dropped(), remote.played.Total(),
 				remote.played.Line(), remote.refused.Total(), remote.refused.Line(), remote.lastActionRefused.empty() ? "" : " lastRefused=" + remote.lastActionRefused,
-				read.drawnNow, wanted, remote.drawFix.fixes, remote.aim, read.angleX, remote.gear.right, handOk(remote.held.right), remote.gear.left,
+				read.drawnNow, wanted, remote.drawFix.fixes, read.weaponState, remote.drawFix.asks, remote.drawsFinished, read.process, read.responses, remote.aim, read.angleX, remote.gear.right, handOk(remote.held.right), remote.gear.left,
 				handOk(remote.held.left), remote.gear.ammo, handOk(remote.held.ammo), remote.looks ? remote.looks->voice : 0u, remote.voiceShown,
 				remote.checked ? (remote.held.Complete(remote.gearMissing) && !StandInRules::VoiceDrifted(remote.voiceWanted, !remote.voiceJudged, remote.voiceShown) ? "1" : "0") : "?",
 				remote.gearMissing, remote.refusedForms, remote.redressed, read.baseShouts, remote.baseShouts,
@@ -1567,7 +1617,7 @@ namespace RemotePlayers
 		}
 		const auto id = words.empty() ? std::nullopt : DevLine::Number(words[0]);
 		if (!id) {
-			return "error: usage: graph <player id> [vars | event <name> | float <name> | bool <name> | int <name>] | graph from hook|tick";
+			return "error: usage: graph <player id> [vars | weapon | active | event <name> | float <name> | bool <name> | int <name>] | graph from hook|tick";
 		}
 		const auto it = players.find(static_cast<std::uint32_t>(*id));
 		const auto actor = it != players.end() ? it->second.standIn.get() : RE::NiPointer<RE::Actor>{};
@@ -1591,6 +1641,49 @@ namespace RemotePlayers
 			}
 			std::int32_t v = 0;
 			return actor->GetGraphVariableInt(Name(words[2]), v) ? std::format("{}={}", words[2], v) : std::format("{}: none", words[2]);
+		}
+		if (what == "weapon") {
+			// What a draw, an attack, a block and a cast are known by: the game's weapon state and the graph's own.
+			const auto weapon = WeaponOf(actor.get());
+			std::string out = std::format("{:08X} weaponState={}", actor->GetFormID(), weapon ? static_cast<int>(std::to_underlying(*weapon)) : -1);
+			for (const auto name : { "iRightHandType", "iLeftHandType", "iEquippedItemState", "iWantBlock", "iState", "iLeftHandEquipped" }) {
+				std::int32_t v = 0;
+				out += actor->GetGraphVariableInt(Name(name), v) ? std::format(" {}={}", name, v) : std::format(" {}=none", name);
+			}
+			for (const auto name : { "bEquipOk", "IsEquipping", "IsUnequipping", "IsAttackReady", "IsAttacking", "IsBlocking", "IsCastingRight", "IsCastingLeft",
+					 "bWantCastLeft", "bWantCastRight", "bAllowRotation", "bAnimationDriven", "IsStaggering", "IsRecoiling", "bInJumpState" }) {
+				bool v = false;
+				out += actor->GetGraphVariableBool(Name(name), v) ? std::format(" {}={}", name, v ? 1 : 0) : std::format(" {}=none", name);
+			}
+			return out;
+		}
+		if (what == "active") {
+			// The graph's active nodes by name (its states among them): where it stands when it turns events away.
+			RE::BSTSmartPointer<RE::BSAnimationGraphManager> manager;
+			if (!actor->GetAnimationGraphManager(manager) || !manager) {
+				return std::format("{:08X} active: no graph", actor->GetFormID());
+			}
+			RE::BSSpinLockGuard guard{ manager->GetRuntimeData().updateLock };  // never while the graph updates
+			const auto          index = manager->GetRuntimeData().activeGraph;
+			if (index >= manager->graphs.size() || !manager->graphs[index]) {
+				return std::format("{:08X} active: no graph", actor->GetFormID());
+			}
+			const auto behavior = manager->graphs[index]->behaviorGraph;
+			if (!behavior || !behavior->activeNodes) {
+				return std::format("{:08X} active: no behavior", actor->GetFormID());
+			}
+			const auto& nodes = *behavior->activeNodes;
+			std::string out = std::format("{:08X} active={}:", actor->GetFormID(), nodes.size());
+			for (std::int32_t i = 0; i < nodes.size(); ++i) {
+				const auto node = nodes[i].nodeTemplate;
+				const char* name = node ? node->name.data() : nullptr;
+				out += std::format(" {}", name && *name ? name : "?");
+				if (out.size() > 3000) {
+					out += " ...";
+					break;
+				}
+			}
+			return out;
 		}
 		// The variables a locomotion graph is known by, each as it reads or "none".
 		std::string out = std::format("{:08X}", actor->GetFormID());

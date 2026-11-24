@@ -81,12 +81,15 @@ namespace RemotePlayers
 	// What a copy's graph is given for Speed and Direction from now on (GaitDrive.h), and no more.
 	void DriveLegs(RE::Actor* a_actor, GaitDrive::Values a_values);
 	void StopLegs(RE::Actor* a_actor);
+	// What the game's own actor update does at its end and the no-AI update (a stand-in's, a copy's) does not: an actor
+	// that still wants to draw or put away (StandInRules::AskAgain) is told again. True when it was.
+	bool FinishDraw(RE::Actor* a_actor);
 	// An actor this game placed (a copy of a spawn) goes out of the world as a stand-in does: disabled, then deleted
 	// (Retire.h), its AI off meanwhile, taken out before a save and named in the co-save until it is gone.
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
 
 	// Developer channel: `standins` (one line each), `strays` (placed actors of a preset base in the loaded game:
-	// 0 outside a session means nothing of a session was saved), `graph <player> [event <name> | vars]`.
+	// 0 outside a session means nothing of a session was saved), `graph <player> [event <name> | vars | weapon | active]`.
 	[[nodiscard]] std::string Describe();
 	// Developer channel `actions` (the stand-ins' part): per player, the actions that came and were played or turned
 	// away by kind, the weapon drawn against its friend's, what each hand holds against the looks, and what it did here

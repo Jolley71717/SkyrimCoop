@@ -20,7 +20,7 @@
 
 // What a friend's stand-in does, holds and is let do in this game (docs/DESIGN.md, "Players"): which of a player's graph
 // events go to the others and how fast, what kind of action each is (for the developer channel and the rig), what the
-// stand-in is dressed in and given, when its weapon is drawn by hand because its graph did not draw it, how it aims, and
+// stand-in is dressed in and given, how its weapon is drawn and put away (the game's own way), how it aims, and
 // which of its spells' effects take hold here. A stand-in shows what its friend does; it never deals anything: its
 // friend's own game deals every blow, shot and spell (a hit on a copy of an NPC goes to the NPC's runner, NpcSync), so
 // one dealt here too would land twice. The game's side is src/game/RemotePlayers.cpp and src/game/PlayerActions.cpp. No
@@ -444,45 +444,115 @@ namespace StandInRules
 
 	// ---- drawn or put away ----
 
-	// A stand-in draws and puts away its weapon by its friend's graph events (Unequip, WeapEquip, a spell's draw), played
-	// as they come. If its weapon state still disagrees with its friend's (an event its graph turned away, one lost to
-	// the budget, a stand-in placed with its friend's weapon out), the game is told to draw or sheathe it, after GRACE
-	// of disagreeing while neither is under way, and no sooner than COOL after the last time.
+	// An actor's weapon state, as the game keeps it (RE::WEAPON_STATE, static_asserted in RemotePlayers.cpp): what
+	// Actor::DrawWeaponMagicHands and the draw and sheathe animation events move it through.
+	enum class Weapon : std::uint8_t
+	{
+		kSheathed = 0,
+		kWantToDraw = 1,
+		kDrawing = 2,
+		kDrawn = 3,
+		kWantToSheathe = 4,
+		kSheathing = 5,
+	};
+
+	// The game draws and puts away an actor's weapon, spells or fists through Actor::DrawWeaponMagicHands (read from
+	// Skyrim SE 1.7.104): it asks the actor's graph for the draw or the sheathe through the game's action (ActionDraw,
+	// ActionSheathe: the graph event that fits what the actor holds, a sword, a bow, a spell, its fists) and, when the
+	// graph turns it away (its animation not done yet, say), leaves the actor wanting to (kWantToDraw, kWantToSheathe).
+	// Actor::Update asks again at its end on every update while the actor still wants to; the no-AI update a stand-in
+	// gets (UpdateNoAI) never does, so a stand-in asked once at a moment its graph was busy stayed wanting forever and
+	// its graph never drew. What the game's own update would ask, if anything: draw (true), sheathe (false), nothing.
+	[[nodiscard]] constexpr std::optional<bool> AskAgain(Weapon a_state)
+	{
+		if (a_state == Weapon::kWantToDraw) {
+			return true;
+		}
+		if (a_state == Weapon::kWantToSheathe) {
+			return false;
+		}
+		return std::nullopt;
+	}
+
+	// Drawn or put away, done or under way: where the state stands or is heading (kDrawing, kDrawn and kWantToDraw
+	// toward drawn).
+	[[nodiscard]] constexpr bool TowardDrawn(Weapon a_state)
+	{
+		return a_state == Weapon::kWantToDraw || a_state == Weapon::kDrawing || a_state == Weapon::kDrawn;
+	}
+
+	[[nodiscard]] constexpr bool Settled(Weapon a_state)
+	{
+		return a_state == Weapon::kDrawn || a_state == Weapon::kSheathed;
+	}
+
+	// A stand-in draws and puts away as its friend does, the game's own way: told to (DrawWeaponMagicHands) the moment
+	// its friend's drawn flag and its own weapon state part (kFirst), once it holds what its friend holds (a_ready),
+	// so it draws the friend's sword and not its fists; the game then finishes it (AskAgain). Its friend's own graph
+	// events (WeapEquip, Unequip, a spell's) are played too, as they come: whichever its graph takes first, the
+	// animation's weaponDraw or weaponSheathe event sets the state. If after that ask the state still is the other
+	// one, settled, for GRACE (something put it back: a draw turned away and given up), it is told again (kAgain), no
+	// sooner than COOL after the last time; those are counted (fixes: the rig's drawFixes=).
 	class DrawFix
 	{
 	public:
 		static constexpr auto GRACE = 1500ms;
 		static constexpr auto COOL = 3s;
 
-		// a_wanted: its friend has it drawn; a_shown: the stand-in has; a_busy: the stand-in is drawing or sheathing now.
-		[[nodiscard]] bool Due(bool a_wanted, bool a_shown, bool a_busy, Clock::time_point a_now)
+		enum class Ask : std::uint8_t
 		{
-			if (a_wanted == a_shown || a_busy) {
+			kNone,
+			kFirst,  // its friend's drawn flag changed (or a new stand-in): told now
+			kAgain,  // told before, and its state went back: told again
+		};
+
+		// a_wanted: its friend has it drawn; a_state: the stand-in's weapon state; a_ready: it holds what its friend does.
+		[[nodiscard]] Ask Due(bool a_wanted, Weapon a_state, bool a_ready, Clock::time_point a_now)
+		{
+			if (!a_ready) {
 				since.reset();
-				return false;
+				return Ask::kNone;
+			}
+			if (TowardDrawn(a_state) == a_wanted) {
+				since.reset();  // there, or on its way there (the game finishes a want: AskAgain)
+				return Ask::kNone;
+			}
+			if (asked != a_wanted) {
+				asked = a_wanted;
+				since.reset();
+				last = a_now;
+				++asks;
+				return Ask::kFirst;
+			}
+			if (!Settled(a_state)) {
+				since.reset();  // sheathing while its friend draws, or the other way: told already, under way
+				return Ask::kNone;
 			}
 			if (!since) {
 				since = a_now;
 			}
 			if (a_now - *since < GRACE || (last && a_now - *last < COOL)) {
-				return false;
+				return Ask::kNone;
 			}
 			last = a_now;
 			since.reset();
 			++fixes;
-			return true;
+			return Ask::kAgain;
 		}
 
-		// A new stand-in: nothing it disagreed about before counts.
+		// A new stand-in: nothing it was told before counts (it is told its friend's state again when it is ready).
 		void Reset()
 		{
+			asked.reset();
 			since.reset();
 			last.reset();
 		}
 
-		std::uint64_t fixes = 0;
+		std::uint64_t asks = 0;   // told as its friend's drawn flag changed
+		std::uint64_t fixes = 0;  // told again: the first time did not hold
 
 	private:
+		std::optional<bool>              asked;
 		std::optional<Clock::time_point> since;
 		std::optional<Clock::time_point> last;
 	};
