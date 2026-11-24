@@ -5,8 +5,8 @@
 # screen out or takes their controls away, itself or through the scripts it calls and the stages it sets or the quests it
 # starts (tools/questscan.cs, MoveScan), each with the chain it followed. With -Write: writes those stages as
 # src/game/StageRows.h (or -Out), QuestRules::STAGE_RULES's rows (docs/DESIGN.md, "Stages that move the player"), and
-# prints what it wrote. With -Dump <editor ID>: that quest's record and its stage fragments, disassembled. Windows PowerShell 5.1 compiles the reader (tools/questscan.cs) on the fly; the scan runs at idle
-# priority and reads only the files' quest records and the scripts' archive.
+# prints what it wrote. With -Dump <editor ID>: that quest's record and its stage fragments, disassembled (or, for an image space, whether it plays out or stays on). Windows PowerShell 5.1 compiles the reader (tools/questscan.cs) on the fly; the scan runs at idle
+# priority and reads only the files' quest and image space records and the scripts' archive.
 param([string]$Data = 'F:\SteamLibrary\steamapps\common\Skyrim Special Edition\Data', [switch]$Write, [string]$Dump,
 	[string]$Out = (Join-Path $PSScriptRoot '..\src\game\StageRows.h'))
 $ErrorActionPreference = 'Stop'
