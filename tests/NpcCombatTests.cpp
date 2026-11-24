@@ -179,7 +179,8 @@ TEST("npc combat protocol: the longest of each fits, and one past a limit, cut s
 	CHECK(!hitOf({ GUARD, 1, 1.5f, 0 }));
 	CHECK(!hitOf({ GUARD, 1, -0.1f, 0 }));
 	CHECK(!hitOf({ GUARD, 1, std::nanf(""), 0 }));
-	CHECK(!hitOf({ GUARD, 1, 0.5f, 0x80 }));
+	CHECK(!hitOf({ GUARD, 1, 0.5f, Protocol::kHitEssential }));  // a KillEssential is only ever a script's kill
+	CHECK(hitOf({ GUARD, 1, 0.5f, Protocol::kHitScript | Protocol::kHitEssential }));
 
 	// An answer of no hitter, no hit, an unknown verdict or no share.
 	const auto answerOf = [](Protocol::NpcHitAnswer a_answer) {
@@ -740,16 +741,16 @@ TEST("copy health: a held kill no blow explains is owed until the NPC dies: sent
 	const Steady::time_point t0{ 100s };
 	Held held;
 	// Held before any word of its runner: waits for it.
-	held.Script(0x1234, false);
-	CHECK(!held.Look(0x1234, false, t0).script);
+	held.Script(0x1234, false, t0);
+	CHECK(!held.Look(0x1234, false, false, t0).script);
 	CHECK(held.Owes(0x1234));
-	const auto first = held.Look(0x1234, true, t0);
+	const auto first = held.Look(0x1234, true, false, t0);
 	CHECK(first.script);
 	CHECK(!first.blow);
 	CHECK(!first.byUs);
 	// Due again only SCRIPT_RESEND later (a runner that could not apply it: not loaded there, handed on).
-	CHECK(!held.Look(0x1234, true, t0 + 100ms).script);
-	CHECK(held.Look(0x1234, true, t0 + Held::SCRIPT_RESEND).script);
+	CHECK(!held.Look(0x1234, true, false, t0 + 100ms).script);
+	CHECK(held.Look(0x1234, true, false, t0 + Held::SCRIPT_RESEND).script);
 	// Never forgotten while it lives, however long.
 	held.Forget(t0 + 1h);
 	CHECK(held.Owes(0x1234));
@@ -758,8 +759,8 @@ TEST("copy health: a held kill no blow explains is owed until the NPC dies: sent
 	CHECK(!held.Owes(0x1234));
 	CHECK(!held.Run(0x1234));
 	// A Kill(player) on another: our player its killer; it died: owed no more.
-	held.Script(0x5678, true);
-	CHECK(held.Look(0x5678, true, t0).byUs);
+	held.Script(0x5678, true, t0);
+	CHECK(held.Look(0x5678, true, false, t0).byUs);
 	held.Dead(0x5678);
 	CHECK(!held.Owes(0x5678));
 	CHECK(held.Size() == 0u);
@@ -771,7 +772,7 @@ TEST("copy health: our player's held blow is owed only a moment: one never looke
 	const Steady::time_point t0{ 100s };
 	Held held;
 	held.Blow(0x1234, t0);
-	const auto due = held.Look(0x1234, true, t0 + 16ms);
+	const auto due = held.Look(0x1234, true, false, t0 + 16ms);
 	CHECK(due.blow);
 	CHECK(due.byUs);
 	CHECK(!due.script);
@@ -781,11 +782,11 @@ TEST("copy health: our player's held blow is owed only a moment: one never looke
 	held.Forget(t0 + Held::OUR_BLOW_FRESH);
 	CHECK(!held.Owes(0x2345));
 	held.Blow(0x3456, t0);
-	CHECK(!held.Look(0x3456, true, t0 + Held::OUR_BLOW_FRESH).blow);
+	CHECK(!held.Look(0x3456, true, false, t0 + Held::OUR_BLOW_FRESH).blow);
 	// Held before the word: waits for it, a moment only.
 	held.Blow(0x4567, t0);
-	CHECK(!held.Look(0x4567, false, t0 + 100ms).blow);
-	CHECK(held.Look(0x4567, true, t0 + 200ms).blow);
+	CHECK(!held.Look(0x4567, false, false, t0 + 100ms).blow);
+	CHECK(held.Look(0x4567, true, false, t0 + 200ms).blow);
 	// A blow is never put on here when this game comes to run it (only a script's kill is).
 	held.Blow(0x5678, t0);
 	CHECK(!held.Run(0x5678));
@@ -1154,4 +1155,103 @@ TEST("npc combat server: a death from the game that let go of its NPC a moment a
 	f.fake->Deliver(1, Protocol::Encode(Protocol::NpcDeaths{ .deaths = { { WOLF, 1, 0 } } }));
 	REQUIRE(f.fake->Settle());
 	CHECK(f.fake->Take(2).empty());
+}
+
+TEST("copy health: a kill no blow explains on an essential NPC: owed nothing here; the runner kills it only for a KillEssential, else refuses")
+{
+	// Essential here: the engine's refusal (the console's kill, a quest's Kill() on an essential quest giver): nothing owed.
+	CHECK(!CopyHealth::OwesScriptKill(true));
+	CHECK(CopyHealth::OwesScriptKill(false));
+	// The runner: not essential there, it dies (Kill or KillEssential alike); essential there, only of a KillEssential.
+	using SK = CopyHealth::ScriptKill;
+	CHECK(CopyHealth::OnScriptKill(false, false) == SK::kKill);
+	CHECK(CopyHealth::OnScriptKill(false, true) == SK::kKill);
+	CHECK(CopyHealth::OnScriptKill(true, true) == SK::kKillEssential);
+	CHECK(CopyHealth::OnScriptKill(true, false) == SK::kRefuse);
+}
+
+TEST("copy health: a KillEssential is a kill of a copy seen essential a moment before, and goes with kHitEssential")
+{
+	using Held = CopyHealth::HeldKills;
+	const Steady::time_point t0{ 100s };
+	Held held;
+	// Seen essential, then the script takes the flag off (a frame later the copy is no longer essential) and kills it.
+	CHECK(!held.Look(0x1234, true, true, t0).script);
+	CHECK(!held.Look(0x1234, true, false, t0 + 16ms).script);
+	REQUIRE(held.Script(0x1234, false, t0 + 50ms));
+	const auto due = held.Look(0x1234, true, false, t0 + 66ms);
+	CHECK(due.script);
+	CHECK(due.essential);
+	// Never essential here: a plain kill.
+	REQUIRE(held.Script(0x2345, false, t0));
+	CHECK(!held.Look(0x2345, true, false, t0).essential);
+	// Essential long ago (forgotten): a plain kill.
+	CHECK(!held.Look(0x3456, true, true, t0).script);
+	held.Forget(t0 + Held::ESSENTIAL_FRESH + 1s);
+	REQUIRE(held.Script(0x3456, false, t0 + Held::ESSENTIAL_FRESH + 1s));
+	CHECK(!held.Look(0x3456, true, false, t0 + Held::ESSENTIAL_FRESH + 1s).essential);
+
+	// The copy's look sends it with kHitEssential (no killer named here).
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(1.0f);
+	r.Look({ .share = 1.0f, .floor = floor });
+	const auto kill = r.Look({ .share = 1.0f, .floor = floor, .heldScript = true, .heldEssential = true });
+	CHECK(kill.what == Do::kSend);
+	CHECK(kill.hit.flags == (Protocol::kHitScript | Protocol::kHitEssential));
+}
+
+TEST("copy health: a script's kill its runner answered is sent no more, but stays owed for a take-over; resends are bounded")
+{
+	using Held = CopyHealth::HeldKills;
+	const Steady::time_point t0{ 100s };
+	// The copy: the answer to its script kill settles it (applied, alive: refused there, essential); a blow's answer does not.
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(1.0f);
+	r.Look({ .share = 1.0f, .floor = floor });
+	const auto kill = r.Look({ .share = 1.0f, .floor = floor, .heldScript = true });
+	REQUIRE(kill.what == Do::kSend);
+	CHECK(r.copy.Answer(kill.hit.seq, Verdict::kApplied, 1.0f, r.counts));
+	CHECK(r.Look({ .share = 1.0f, .floor = floor }).what == Do::kNothing);  // it stands where its runner's NPC stands
+	r.t += 16ms;
+	const auto again = r.Look({ .share = 1.0f, .floor = floor, .heldScript = true });
+	REQUIRE(again.what == Do::kSend);
+	CHECK(!r.copy.Answer(again.hit.seq, Verdict::kNotHere, 0.0f, r.counts));  // not loaded there: not settled, sent again
+	Run b;
+	b.Look({ .share = 1.0f, .floor = floor });
+	b.copy.Word(0.5f);
+	b.Look({ .share = 0.5f, .floor = floor });
+	const auto blow = b.Look({ .share = floor, .floor = floor, .heldByUs = true }, b.Hit());
+	REQUIRE(blow.what == Do::kSend);
+	CHECK(!b.copy.Answer(blow.hit.seq, Verdict::kApplied, 0.0f, b.counts));
+
+	// The book: settled, it is due no more, however long, and is still put on at a take-over.
+	Held held;
+	REQUIRE(held.Script(0x1234, true, t0));
+	CHECK(held.Look(0x1234, true, false, t0).script);
+	held.Answered(0x1234);
+	CHECK(!held.Look(0x1234, true, false, t0 + 1h).script);
+	CHECK(held.Owes(0x1234));
+	CHECK(held.Run(0x1234) == std::optional<bool>{ true });
+	// Never answered (a runner that never has it loaded): sent SCRIPT_SENDS_MOST times, then no more; still owed.
+	REQUIRE(held.Script(0x2345, false, t0));
+	int sends = 0;
+	for (int i = 0; i < 3 * Held::SCRIPT_SENDS_MOST; ++i) {
+		sends += held.Look(0x2345, true, false, t0 + i * Held::SCRIPT_RESEND).script ? 1 : 0;
+	}
+	CHECK(sends == Held::SCRIPT_SENDS_MOST);
+	CHECK(held.Owes(0x2345));
+	// A death of it said anywhere (Deaths, loaded here or not) ends it: raised later, it is never killed for it.
+	held.Dead(0x2345);
+	CHECK(!held.Run(0x2345));
+	// Too many owed: a new one is dropped, and says so.
+	Held full;
+	for (std::uint32_t i = 0; i < Held::MOST; ++i) {
+		REQUIRE(full.Script(0x10000 + i, false, t0));
+	}
+	CHECK(!full.Script(0x90000, false, t0));
+	CHECK(full.Script(0x10000, true, t0));  // one owed already is no more
 }
