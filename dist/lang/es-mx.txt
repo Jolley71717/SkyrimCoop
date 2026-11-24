@@ -10,3 +10,10 @@ reject.mods = Tus mods son distintos a los del anfitrión.
 
 steam.status_hosting = Hospedando Skyrim cooperativo
 steam.status_playing = Jugando Skyrim cooperativo
+
+down.you = Caíste. Un amigo que se quede a tu lado puede levantarte. Tienes {n} segundos.
+down.left = Quedan {n} segundos para que un amigo te levante.
+down.friend = {player} cayó. Quédate a su lado para levantarlo.
+down.helping = Levantando a {player}...
+down.helped_them = Levantaste a {player}.
+down.helped_you = {player} te levantó.

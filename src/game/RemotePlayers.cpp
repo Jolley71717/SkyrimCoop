@@ -1901,6 +1901,13 @@ namespace RemotePlayers
 		return actor;
 	}
 
+	std::string NameOf(std::uint32_t a_playerId)
+	{
+		std::scoped_lock l{ lock };
+		const auto       it = players.find(a_playerId);
+		return it == players.end() ? std::string{} : it->second.name;
+	}
+
 	std::uint32_t PlayerOf(const RE::Actor* a_actor)
 	{
 		if (!a_actor) {

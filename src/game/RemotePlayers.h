@@ -81,6 +81,8 @@ namespace RemotePlayers
 	// thread.
 	[[nodiscard]] RE::NiPointer<RE::Actor> StandInOf(std::uint32_t a_playerId);
 	[[nodiscard]] std::uint32_t            PlayerOf(const RE::Actor* a_actor);
+	// A friend's name as their hello gave it (empty: no such friend).
+	[[nodiscard]] std::string NameOf(std::uint32_t a_playerId);
 	// The moment on this game's clock a friend's a_sentMs was (none: not known yet), for their shots (src/game/Shots.h).
 	[[nodiscard]] std::optional<std::chrono::steady_clock::time_point> SenderTime(std::uint32_t a_playerId, std::uint32_t a_sentMs);
 	// Each friend's newest state, as it came (their place, for who is nearest an NPC).

@@ -96,6 +96,8 @@ namespace FormTranslate
 		case MT::kPluginTable:
 		case MT::kPlayerActions:  // a player's graph events: names, no form
 		case MT::kRemoteActions:
+		case MT::kDowned:  // a player's down: a player id and a state
+		case MT::kHelpUp:
 			return false;
 		}
 		return false;  // a type this version does not know

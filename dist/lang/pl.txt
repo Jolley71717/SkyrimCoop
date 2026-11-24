@@ -10,3 +10,10 @@ reject.mods = Twoje mody różnią się od modów hosta.
 
 steam.status_hosting = Hostuje Skyrim w trybie co-op
 steam.status_playing = Gra w Skyrim w trybie co-op
+
+down.you = Leżysz. Przyjaciel, który zostanie przy tobie, może cię podnieść. Masz {n} sekund.
+down.left = Zostało {n} sekund, by przyjaciel cię podniósł.
+down.friend = {player} leży. Zostań przy nim, aby go podnieść.
+down.helping = Podnosisz gracza {player}...
+down.helped_them = Podniosłeś gracza {player}.
+down.helped_you = {player} cię podniósł.

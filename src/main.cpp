@@ -16,6 +16,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Downed.h"
 #include "game/Pairs.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
@@ -221,6 +222,7 @@ namespace
 			Riding::ForgetWorld();
 			Furniture::ForgetWorld();
 			Pairs::ForgetWorld();
+			Downed::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
@@ -236,6 +238,7 @@ namespace
 			Riding::ForgetWorld();
 			Furniture::ForgetWorld();
 			Pairs::ForgetWorld();
+			Downed::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
@@ -245,6 +248,7 @@ namespace
 			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
 			Pairs::BeforeSave();    // actors held by a pair let go: placed by their states again
+			Downed::BeforeSave();   // our essential flag never in a save (back next frame)
 			Shots::BeforeSave();    // our launches ended first: none is in the save
 			NpcSync::BeforeSave();  // copies of spawns first: the stand-ins' save guard names them
 			RemotePlayers::BeforeSave();
@@ -283,6 +287,7 @@ namespace
 		Riding::ForgetWorld();
 		Furniture::ForgetWorld();
 		Pairs::ForgetWorld();
+		Downed::ForgetWorld();
 		Shots::ForgetWorld();
 		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();

@@ -10,3 +10,10 @@ reject.mods = 你的模組與房主的不同。
 
 steam.status_hosting = 正在主持 Skyrim 連線合作
 steam.status_playing = 正在玩 Skyrim 連線合作
+
+down.you = 你倒下了。留在你身邊的朋友可以扶你起來。你還有 {n} 秒。
+down.left = 還剩 {n} 秒讓朋友扶你起來。
+down.friend = {player} 倒下了。留在其身邊即可扶其起來。
+down.helping = 正在扶起 {player}...
+down.helped_them = 你扶起了 {player}。
+down.helped_you = {player} 扶你起來了。
