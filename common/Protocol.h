@@ -53,7 +53,11 @@ namespace Protocol
 	// 14: who sits, lies, leans or works in what furniture (kSits, message type 58): a player's chair, bed or crafting
 	//    station, and those of the NPCs a game runs, so the others put the actor that shows them in the same one. (As
 	//    with 9: whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 14;
+	// 17: loose objects (kObjectHolds, kObjectRests, kAskObjectRests: message types 65-67): what a player holds with Z or
+	//    telekinesis, where it was let go of, and where a loose object their player, spell or NPC moved came to rest, so
+	//    it lies in the same place in every game. (15 and 16 are the conversations' and the mechanisms' changes on the
+	//    other line; whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 17;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -122,6 +126,10 @@ namespace Protocol
 		// 56: the quest runs' (in its own change).
 		kShots = 57,  // both ways, reliable: projectiles our player and the NPCs a game runs launched; the server names the sender
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
+		// 59-64: the conversations' and the mechanisms' (each in its own change).
+		kObjectHolds = 65,     // both ways, on the state channel: the loose object our player holds, in the holder's frame
+		kObjectRests = 66,     // both ways, reliable: let go of, came to rest, picked up (the server names the sender; 0: the session's)
+		kAskObjectRests = 67,  // client -> server, reliable: send me every kept place again (after a load)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -808,6 +816,139 @@ namespace Protocol
 		const bool place = InWorld(a_sit.x) && InWorld(a_sit.y) && InWorld(a_sit.z);
 		const bool end = a_sit.on || (a_sit.furniture == 0 && a_sit.base == 0);
 		return who && place && end && static_cast<std::uint8_t>(a_sit.kind) < SIT_KIND_COUNT;
+	}
+
+	// ---- loose objects (docs/DESIGN.md, "Loose objects") ----
+	// A loose object is a reference of the load order whose 3D holds one rigid body physics moves (clutter, an item lying
+	// about, a moveable static). The game whose player, spell or NPC moved it says where it went: what its player holds
+	// (kObjectHolds, in the holder's frame), where it was let go of and how fast, and where it came to rest (kObjectRests).
+	// The server lets one player hold an object at a time, keeps the first rest of a move for a few seconds, keeps where
+	// each object rests for whoever joins or loads later (common/ObjectBook.h), and passes the rest on.
+
+	// At most this many in one message (a joiner's full list is sent in as many as it takes).
+	inline constexpr std::size_t MAX_OBJECT_RESTS = 64;
+	// A game holds one object at a time (the grab and telekinesis hold one); room for a few.
+	inline constexpr std::size_t MAX_OBJECT_HOLDS = 4;
+	// The fastest a let-go may fly, in units a second (the sister project's HavokGuard cap).
+	inline constexpr float MAX_OBJECT_SPEED = 5000.0f;
+	// How far from its holder a held object may be (the grab holds it a few units ahead; telekinesis further).
+	inline constexpr float MAX_HOLD_REACH = 512.0f;
+
+	// What names a loose object. kRef: a reference of the load order (its form id, translated at the edge). kDrop: a
+	// dropped item's copy by its drop id (the drops' change on the other line), refused until the two meet.
+	enum class ObjectKind : std::uint8_t
+	{
+		kRef = 0,
+		kDrop = 1,
+	};
+	inline constexpr std::uint8_t OBJECT_KIND_COUNT = 2;
+
+	struct ObjectKey
+	{
+		ObjectKind    kind = ObjectKind::kRef;
+		std::uint32_t id = 0;
+		auto operator<=>(const ObjectKey&) const = default;
+	};
+
+	// A rotation as a unit quaternion (Havok's own: x, y, z, w).
+	struct Quat
+	{
+		float x = 0, y = 0, z = 0, w = 1;
+		bool operator==(const Quat&) const = default;
+	};
+
+	// Whether a_q is a rotation: finite, and of length 1 within a few hundredths.
+	[[nodiscard]] inline bool QuatHolds(const Quat& a_q)
+	{
+		if (!std::isfinite(a_q.x) || !std::isfinite(a_q.y) || !std::isfinite(a_q.z) || !std::isfinite(a_q.w)) {
+			return false;
+		}
+		const auto length = a_q.x * a_q.x + a_q.y * a_q.y + a_q.z * a_q.z + a_q.w * a_q.w;
+		return length > 0.94f && length < 1.06f;
+	}
+
+	// What a player holds, in the holder's frame: right, ahead and up of where the holder stands (their feet), and the
+	// body's rotation turned back by the holder's heading, so the others draw it in front of the stand-in wherever that is.
+	struct ObjectHold
+	{
+		ObjectKey key;
+		float     right = 0, ahead = 0, up = 0;
+		Quat      rot;
+		bool operator==(const ObjectHold&) const = default;
+	};
+
+	// sender: 0 from a game; the server names the holder.
+	struct ObjectHolds
+	{
+		std::uint32_t           sender = 0;
+		std::vector<ObjectHold> holds;
+		bool operator==(const ObjectHolds&) const = default;
+	};
+
+	enum class RestKind : std::uint8_t
+	{
+		kLetGo = 0,  // it left its holder's hands here, at that velocity: it flies on
+		kRest = 1,   // it came to rest here
+		kGone = 2,   // it left the world (picked up): no place is kept
+	};
+	inline constexpr std::uint8_t REST_KIND_COUNT = 3;
+
+	// Where a loose object is: its cell (an interior) or worldspace (outside), its body's place and rotation, and for a
+	// let-go its velocity in units a second (0 for the others).
+	struct ObjectRest
+	{
+		ObjectKey     key;
+		RestKind      kind = RestKind::kRest;
+		std::uint32_t cell = 0;
+		std::uint32_t worldspace = 0;
+		float         x = 0, y = 0, z = 0;
+		Quat          rot;
+		float         vx = 0, vy = 0, vz = 0;
+		bool operator==(const ObjectRest&) const = default;
+	};
+
+	// sender: 0 from a game; the server names the game that moved it, or 0 for the session's word (the kept places, to a
+	// joiner or after a load; the place that stands, to a game whose rest came second). full: the first of a whole list
+	// of the kept places: a game forgets every place it was waiting to put before it.
+	struct ObjectRests
+	{
+		std::uint32_t           sender = 0;
+		bool                    full = false;
+		std::vector<ObjectRest> rests;
+		bool operator==(const ObjectRests&) const = default;
+	};
+
+	// Whether a key names something: a known kind, and an id.
+	[[nodiscard]] inline bool ObjectKeyHolds(const ObjectKey& a_key)
+	{
+		return static_cast<std::uint8_t>(a_key.kind) < OBJECT_KIND_COUNT && a_key.id != 0;
+	}
+
+	// Whether a hold can be: a key, an offset within MAX_HOLD_REACH, a rotation.
+	[[nodiscard]] inline bool ObjectHoldHolds(const ObjectHold& a_hold)
+	{
+		if (!ObjectKeyHolds(a_hold.key) || !std::isfinite(a_hold.right) || !std::isfinite(a_hold.ahead) || !std::isfinite(a_hold.up)) {
+			return false;
+		}
+		const auto reach2 = a_hold.right * a_hold.right + a_hold.ahead * a_hold.ahead + a_hold.up * a_hold.up;
+		return reach2 <= MAX_HOLD_REACH * MAX_HOLD_REACH && QuatHolds(a_hold.rot);
+	}
+
+	// Whether a rest can be: a key, a known kind, a place a game can hold, a rotation; a velocity only for a let-go, and
+	// at most MAX_OBJECT_SPEED.
+	[[nodiscard]] inline bool ObjectRestHolds(const ObjectRest& a_rest)
+	{
+		if (!ObjectKeyHolds(a_rest.key) || static_cast<std::uint8_t>(a_rest.kind) >= REST_KIND_COUNT) {
+			return false;
+		}
+		if (!InWorld(a_rest.x) || !InWorld(a_rest.y) || !InWorld(a_rest.z) || !QuatHolds(a_rest.rot)) {
+			return false;
+		}
+		if (!std::isfinite(a_rest.vx) || !std::isfinite(a_rest.vy) || !std::isfinite(a_rest.vz)) {
+			return false;
+		}
+		const auto speed2 = a_rest.vx * a_rest.vx + a_rest.vy * a_rest.vy + a_rest.vz * a_rest.vz;
+		return a_rest.kind == RestKind::kLetGo ? speed2 <= MAX_OBJECT_SPEED * MAX_OBJECT_SPEED : speed2 == 0.0f;
 	}
 
 	// Whether a shot can be: one shooter (a player and no NPC, or an NPC of id != 0), a record, a known kind, hand and
@@ -2070,6 +2211,162 @@ namespace Protocol
 	inline constexpr std::size_t SIT_BYTES = 4 + 8 + 4 + 4 + 3 * 4 + 3;
 	inline constexpr std::size_t MAX_SITS_SIZE = 1 + 4 + 1 + 1 + MAX_SITS * SIT_BYTES;
 	static_assert(MAX_SITS <= 0xFF && MAX_SITS_SIZE <= 2048, "a message of sits stays small");
+
+	inline void WriteObjectKey(Writer& a_writer, const ObjectKey& a_key)
+	{
+		a_writer.U8(static_cast<std::uint8_t>(a_key.kind));
+		a_writer.U32(a_key.id);
+	}
+	inline ObjectKey ReadObjectKey(Reader& a_reader)
+	{
+		ObjectKey key;
+		key.kind = static_cast<ObjectKind>(a_reader.U8());
+		key.id = a_reader.U32();
+		return key;
+	}
+	inline void WriteQuat(Writer& a_writer, const Quat& a_q)
+	{
+		for (const auto v : { a_q.x, a_q.y, a_q.z, a_q.w }) {
+			a_writer.F32(v);
+		}
+	}
+	inline Quat ReadQuat(Reader& a_reader)
+	{
+		Quat q;
+		for (auto* v : { &q.x, &q.y, &q.z, &q.w }) {
+			*v = a_reader.F32();
+		}
+		return q;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const ObjectHolds& a_msg)
+	{
+		Writer     w{ MessageType::kObjectHolds };
+		const auto count = (std::min)(a_msg.holds.size(), MAX_OBJECT_HOLDS);
+		w.U32(a_msg.sender);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& hold = a_msg.holds[i];
+			WriteObjectKey(w, hold.key);
+			for (const auto v : { hold.right, hold.ahead, hold.up }) {
+				w.F32(v);
+			}
+			WriteQuat(w, hold.rot);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_OBJECT_HOLDS, or a hold that does not hold (ObjectHoldHolds).
+	inline std::optional<ObjectHolds> DecodeObjectHolds(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		ObjectHolds msg;
+		msg.sender = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_OBJECT_HOLDS) {
+			return std::nullopt;
+		}
+		msg.holds.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			ObjectHold hold;
+			hold.key = ReadObjectKey(r);
+			for (auto* v : { &hold.right, &hold.ahead, &hold.up }) {
+				*v = r.F32();
+			}
+			hold.rot = ReadQuat(r);
+			if (r.Ok() && !ObjectHoldHolds(hold)) {
+				return std::nullopt;
+			}
+			msg.holds.push_back(hold);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t OBJECT_HOLD_BYTES = 5 + 3 * 4 + 4 * 4;
+	inline constexpr std::size_t MAX_OBJECT_HOLDS_SIZE = 1 + 4 + 1 + MAX_OBJECT_HOLDS * OBJECT_HOLD_BYTES;
+	static_assert(MAX_OBJECT_HOLDS_SIZE <= 1200, "holds stay one datagram");
+
+	inline std::vector<std::uint8_t> Encode(const ObjectRests& a_msg)
+	{
+		Writer     w{ MessageType::kObjectRests };
+		const auto count = (std::min)(a_msg.rests.size(), MAX_OBJECT_RESTS);
+		w.U32(a_msg.sender);
+		w.U8(a_msg.full ? 1 : 0);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& rest = a_msg.rests[i];
+			WriteObjectKey(w, rest.key);
+			w.U8(static_cast<std::uint8_t>(rest.kind));
+			w.U32(rest.cell);
+			w.U32(rest.worldspace);
+			for (const auto v : { rest.x, rest.y, rest.z }) {
+				w.F32(v);
+			}
+			WriteQuat(w, rest.rot);
+			// Only a let-go flies: whatever the caller left in the others' velocity is not written.
+			const bool flies = rest.kind == RestKind::kLetGo;
+			for (const auto v : { rest.vx, rest.vy, rest.vz }) {
+				w.F32(flies ? v : 0.0f);
+			}
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_OBJECT_RESTS, a rest that does not hold (ObjectRestHolds), or a full that is not 0 or 1.
+	inline std::optional<ObjectRests> DecodeObjectRests(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		ObjectRests msg;
+		msg.sender = r.U32();
+		const auto full = r.U8();
+		const auto count = r.U8();
+		if (!r.Ok() || full > 1 || count > MAX_OBJECT_RESTS) {
+			return std::nullopt;
+		}
+		msg.full = full == 1;
+		msg.rests.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			ObjectRest rest;
+			rest.key = ReadObjectKey(r);
+			rest.kind = static_cast<RestKind>(r.U8());
+			rest.cell = r.U32();
+			rest.worldspace = r.U32();
+			for (auto* v : { &rest.x, &rest.y, &rest.z }) {
+				*v = r.F32();
+			}
+			rest.rot = ReadQuat(r);
+			for (auto* v : { &rest.vx, &rest.vy, &rest.vz }) {
+				*v = r.F32();
+			}
+			if (r.Ok() && !ObjectRestHolds(rest)) {
+				return std::nullopt;
+			}
+			msg.rests.push_back(rest);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t OBJECT_REST_BYTES = 5 + 1 + 4 + 4 + 3 * 4 + 4 * 4 + 3 * 4;
+	inline constexpr std::size_t MAX_OBJECT_RESTS_SIZE = 1 + 4 + 1 + 1 + MAX_OBJECT_RESTS * OBJECT_REST_BYTES;
+	static_assert(MAX_OBJECT_RESTS <= 0xFF && MAX_OBJECT_RESTS_SIZE <= 4096, "a message of rests stays small");
+
+	// After a load: every place the session keeps, again (the type alone).
+	inline std::vector<std::uint8_t> EncodeAskObjectRests()
+	{
+		return Writer{ MessageType::kAskObjectRests }.Data();
+	}
+	[[nodiscard]] inline bool DecodeAskObjectRests(std::span<const std::uint8_t> a_data)
+	{
+		return a_data.size() == 1 && a_data[0] == static_cast<std::uint8_t>(MessageType::kAskObjectRests);
+	}
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

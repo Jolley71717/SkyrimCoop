@@ -9,6 +9,7 @@
 #include "RuntimeSupport.h"
 #include "Text.h"
 #include "game/Furniture.h"
+#include "game/LooseObjects.h"
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
@@ -180,6 +181,7 @@ namespace
 		if (!NpcSync::Install()) {
 			logs::warn("NPCs: copies of the NPCs this game runs show no actions in the others' games (the graph notify is not hooked)");
 		}
+		LooseObjects::Install();  // what explosions, hits and pickups do to loose objects (says why if not)
 		Shots::Install();  // every projectile an actor launches, said and shown (says why if not)
 		PlayerActions::Install();  // our player's attacks, casts and shouts, for the others' stand-in of us (says why if not)
 		LocalPlayer::NoteDefaultName();
@@ -215,6 +217,7 @@ namespace
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
 			Riding::ForgetWorld();
 			Furniture::ForgetWorld();
+			LooseObjects::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
@@ -229,6 +232,7 @@ namespace
 			logs::info("Load: a new game started");
 			Riding::ForgetWorld();
 			Furniture::ForgetWorld();
+			LooseObjects::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
@@ -238,6 +242,7 @@ namespace
 			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
 			Shots::BeforeSave();    // our launches ended first: none is in the save
+			LooseObjects::BeforeSave();  // what a friend holds falls: no copy is saved keyframed
 			NpcSync::BeforeSave();  // copies of spawns first: the stand-ins' save guard names them
 			RemotePlayers::BeforeSave();
 			break;
@@ -274,6 +279,7 @@ namespace
 	{
 		Riding::ForgetWorld();
 		Furniture::ForgetWorld();
+		LooseObjects::ForgetWorld();
 		Shots::ForgetWorld();
 		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();

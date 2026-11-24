@@ -8,6 +8,7 @@
 #include "Server.h"
 #include "game/Face.h"
 #include "game/Furniture.h"
+#include "game/LooseObjects.h"
 #include "game/FaceRules.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
@@ -239,6 +240,7 @@ namespace Session
 					NpcSync::Started(playerId, hostId);
 					Riding::Started(playerId);
 					Furniture::Started(playerId);
+					LooseObjects::Started(playerId);
 					Shots::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
@@ -260,6 +262,7 @@ namespace Session
 					RemotePlayers::Left(msg->playerId);
 					Riding::Left(msg->playerId);
 					Furniture::Left(msg->playerId);
+					LooseObjects::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -331,6 +334,16 @@ namespace Session
 			case Protocol::MessageType::kSits:
 				if (const auto msg = Protocol::DecodeSits(a_data); msg && msg->sender != playerId) {
 					Furniture::Sits(*msg);
+				}
+				break;
+			case Protocol::MessageType::kObjectHolds:
+				if (const auto msg = Protocol::DecodeObjectHolds(a_data); msg && msg->sender != playerId) {
+					LooseObjects::Holds(*msg);
+				}
+				break;
+			case Protocol::MessageType::kObjectRests:
+				if (const auto msg = Protocol::DecodeObjectRests(a_data); msg && (msg->sender == 0 || msg->sender != playerId)) {
+					LooseObjects::Rests(*msg);
 				}
 				break;
 			case Protocol::MessageType::kShots:
@@ -508,6 +521,7 @@ namespace Session
 		Shots::Clear();   // our launches ended while the stand-ins and copies that shot them are still there
 		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
 		Furniture::Clear();  // and sitters out of their furniture
+		LooseObjects::Clear();  // what friends held falls
 		NpcSync::Clear();
 		RemotePlayers::Clear();
 		Reset();
@@ -551,6 +565,7 @@ namespace Session
 			Riding::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Furniture::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			LooseObjects::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 	}

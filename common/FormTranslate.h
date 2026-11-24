@@ -84,6 +84,8 @@ namespace FormTranslate
 		case MT::kRides:
 		case MT::kShots:
 		case MT::kSits:
+		case MT::kObjectHolds:
+		case MT::kObjectRests:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -95,6 +97,7 @@ namespace FormTranslate
 		case MT::kPluginTable:
 		case MT::kPlayerActions:  // a player's graph events: names, no form
 		case MT::kRemoteActions:
+		case MT::kAskObjectRests:  // the type alone
 			return false;
 		}
 		return false;  // a type this version does not know
@@ -415,6 +418,20 @@ namespace FormTranslate
 					ctx.Detail(sit.furniture);
 					ctx.Detail(sit.base);
 				}
+			});
+			break;
+		// Loose objects: an object the other side lacks (a mod's it does not have; a runtime reference never maps) is left
+		// out, and so is a rest in a cell or worldspace it lacks. A drop's id is the session's own, never a form.
+		case MT::kObjectHolds:
+			detail::Apply<Protocol::ObjectHolds>(a_packet, ctx, Protocol::DecodeObjectHolds, [&](Protocol::ObjectHolds& a_msg) {
+				ctx.Entries(a_msg.holds, [&](Protocol::ObjectHold& a_hold) { return a_hold.key.kind != Protocol::ObjectKind::kRef || ctx.Key(a_hold.key.id); });
+			});
+			break;
+		case MT::kObjectRests:
+			detail::Apply<Protocol::ObjectRests>(a_packet, ctx, Protocol::DecodeObjectRests, [&](Protocol::ObjectRests& a_msg) {
+				ctx.Entries(a_msg.rests, [&](Protocol::ObjectRest& a_rest) {
+					return (a_rest.key.kind != Protocol::ObjectKind::kRef || ctx.Key(a_rest.key.id)) && ctx.WholePlace(a_rest.cell, a_rest.worldspace);
+				});
 			});
 			break;
 		default:
