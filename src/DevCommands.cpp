@@ -158,14 +158,16 @@ namespace DevCommands
 			return VirtualPad::WalkTo(a_args);
 		}
 
-		// console <command>: runs a console command in this game (the rig places players with coc and saves with save).
+		// console [<ref id>.]<command>: runs a console command in this game, on that reference when one is named (the rig
+		// places players with coc, saves with save, and locks, kills and starts fights with "<ref id>.lock" and the like).
 		std::string ConsoleCommand(std::string_view a_args)
 		{
 			if (a_args.empty()) {
 				return "error: usage: console <command>";
 			}
 			logs::info("Console: running a command from the developer channel: {}", Redact::OneLine(a_args));
-			return Console::Run(a_args) ? "ran" : "error: the game could not run it";
+			const std::string error = Console::Run(a_args);
+			return error.empty() ? "ran" : "error: " + error;
 		}
 
 		struct Entry
