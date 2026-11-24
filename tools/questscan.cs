@@ -895,6 +895,68 @@ public static class MoveScan
         return sb.ToString();
     }
 
+    // ---- stage order: does a quest ever go back to a lower stage? --------------------------------------------------
+
+    // The stages of its own quest a function sets with a literal (SetStage, SetCurrentStageID on self or kmyQuest), itself
+    // or through a function of its own quest's scripts it calls that way, a few calls deep.
+    static void OwnStagesSet(SkyrimFiles.Func f, SkyrimFiles.Quest a_quest, int a_depth, HashSet<string> a_seen, List<KeyValuePair<int, string>> a_into)
+    {
+        if (a_depth > 4 || !a_seen.Add(f.Obj + "." + f.State + "." + f.Name)) return;
+        var own = OwnVars(f);
+        foreach (var i in Reachable(f, null))
+        {
+            if (i.Op != SkyrimFiles.CALLMETHOD && i.Op != SkyrimFiles.CALLPARENT) continue;
+            bool mine = i.Op == SkyrimFiles.CALLPARENT || own.Contains(i.Args[1]) || (i.Op == SkyrimFiles.CALLMETHOD && QuestOf(i.Args[1], a_quest) == a_quest);
+            if (!mine) continue;
+            int s;
+            if (i.Op == SkyrimFiles.CALLMETHOD && (Is(i.Args[0], "SetStage") || Is(i.Args[0], "SetCurrentStageID")))
+            {
+                if (i.Args.Count > 3 && int.TryParse(i.Args[3], out s)) a_into.Add(new KeyValuePair<int, string>(s, f.Obj + "." + f.Name));
+                continue;
+            }
+            string type, name;
+            if (i.Op == SkyrimFiles.CALLPARENT) { Game.Script sc; type = Game.scripts.TryGetValue(f.Obj, out sc) ? sc.Obj.Parent : null; name = i.Args[0]; }
+            else { type = TypeOf(f, i.Args[1]); name = i.Args[0]; }
+            if (type == null) continue;
+            string owner;
+            var g = Find(type, name, out owner);
+            if (g != null) OwnStagesSet(g, a_quest, a_depth + 1, a_seen, a_into);
+        }
+    }
+
+    // Every quest a session could share (Game.Typed) whose stage fragment sets a lower stage of its own quest (the rules
+    // take a higher stage for a later one: QuestRules' kPassed, Apart, QuestBook::Reached), and those whose record
+    // allows a stage to be set again (DNAM 0x0008).
+    public static string Order(string a_data)
+    {
+        Game.Load(a_data);
+        var sb = new StringBuilder();
+        int typed = 0, back = 0, repeat = 0, sets = 0;
+        foreach (var q in Game.quests.Values.Where(Game.Typed).OrderBy(x => x.Edid, StringComparer.OrdinalIgnoreCase))
+        {
+            ++typed;
+            if ((q.Flags & 0x0008) != 0) { ++repeat; sb.AppendLine(string.Format("repeat {0:X8} {1} (type {2}{3})", q.Id, q.Edid, q.Type, Game.Radiant(q) ? ", radiant" : "")); }
+            Game.Script script;
+            if (!Game.scripts.TryGetValue(q.FragmentScript, out script)) continue;
+            foreach (var kv in q.Fragments.OrderBy(k => k.Key))
+                foreach (var name in kv.Value)
+                {
+                    SkyrimFiles.Func f;
+                    if (!script.Funcs.TryGetValue(name, out f)) continue;
+                    var set = new List<KeyValuePair<int, string>>();
+                    OwnStagesSet(f, q, 0, new HashSet<string>(), set);
+                    sets += set.Count;
+                    foreach (var s in set.Where(s => s.Key < kv.Key))
+                    {
+                        ++back;
+                        sb.AppendLine(string.Format("back   {0:X8} {1} {2} -> {3} ({4})", q.Id, q.Edid, kv.Key, s.Key, s.Value));
+                    }
+                }
+        }
+        sb.AppendLine(string.Format("# typed={0} ownStageSets={1} back={2} repeatFlag={3}", typed, sets, back, repeat));
+        return sb.ToString();
+    }
+
     // ---- the audit (src/game/QuestAudit.h, docs/QUEST-AUDIT.md) ----------------------------------------------------
 
     // QuestRules::OWN_QUESTS (src/game/QuestRules.h): tests/QuestTests.cpp checks the two agree, through the audit.
