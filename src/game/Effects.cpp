@@ -177,7 +177,9 @@ namespace Effects
 		}
 		const auto base = a_data.effect ? a_data.effect->baseEffect : nullptr;
 		const auto av = base ? static_cast<std::int32_t>(std::to_underlying(base->data.primaryAV)) : -1;
-		const auto route = EffectRules::OnCopy(a_archetype, av);
+		// A spell, enchantment or poison our player made (a run-time form): no other game has it, taken here as before.
+		const bool madeHere = a_data.magicItem && FormIds::IsRuntime(a_data.magicItem->GetFormID());
+		const auto route = EffectRules::OnCopy(a_archetype, av, madeHere);
 		if (route == EffectRules::Route::kHere) {
 			return false;
 		}
@@ -212,7 +214,10 @@ namespace Effects
 
 	void NoteSelf(RE::Actor* a_caster, const RE::MagicTarget::AddTargetData& a_data, std::int32_t a_archetype)
 	{
-		if (applying || !active.load(std::memory_order_relaxed) || !a_caster || !a_caster->IsPlayerRef() || !EffectRules::SharedWithPlayers(a_archetype)) {
+		// The shout's own Slow Time alone (a voice power's), not a perk's, a potion's or a mod's (EffectRules::SharedWithPlayers).
+		const auto spell = a_data.magicItem ? a_data.magicItem->As<RE::SpellItem>() : nullptr;
+		const bool fromShout = spell && spell->GetSpellType() == RE::MagicSystem::SpellType::kVoicePower;
+		if (applying || !active.load(std::memory_order_relaxed) || !a_caster || !a_caster->IsPlayerRef() || !EffectRules::SharedWithPlayers(a_archetype, fromShout)) {
 			return;
 		}
 		const auto index = IndexOf(a_data.magicItem, a_data.effect);

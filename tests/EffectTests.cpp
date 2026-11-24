@@ -305,12 +305,12 @@ TEST("effect rules: what a shout or a spell does to an NPC goes to its runner; i
 	CHECK(OnCopy(kTurnUndead, -1) == Route::kRunner);
 	CHECK(OnCopy(kBanish, -1) == Route::kRunner);
 	CHECK(OnCopy(kDispel, -1) == Route::kRunner);
-	// Ours: an absorb gives to our player; a soul trap fills our gem; a raised corpse, a summon, a grab are this world's.
+	// Ours: an absorb gives to our player; a soul trap fills our gem; a raised corpse, a summon are this world's.
 	CHECK(OnCopy(kAbsorb, STAMINA) == Route::kHere);
 	CHECK(OnCopy(kSoulTrap, -1) == Route::kHere);
 	CHECK(OnCopy(kReanimate, -1) == Route::kHere);
 	CHECK(OnCopy(kCommandSummoned, -1) == Route::kHere);
-	CHECK(OnCopy(kGrabActor, -1) == Route::kHere);
+	CHECK(OnCopy(kGrabActor, -1) == Route::kRunner);  // Vampiric Grip: the copy is put where its runner's NPC is
 	CHECK(OnCopy(kTelekinesis, -1) == Route::kHere);
 	CHECK(OnCopy(kSpawnHazard, -1) == Route::kHere);
 	CHECK(OnCopy(kArchNone, -1) == Route::kHere);
@@ -318,6 +318,11 @@ TEST("effect rules: what a shout or a spell does to an NPC goes to its runner; i
 	CHECK(OnCopy(kInvisibility, -1) == Route::kBoth);
 	CHECK(OnCopy(kEtherealize, -1) == Route::kBoth);
 	CHECK(RouteName(Route::kRunner) == "runner");
+	// A player's own enchantment, poison or potion (made as the game ran): no other game has it, so all of it stays here.
+	CHECK(OnCopy(kParalysis, -1, true) == Route::kHere);
+	CHECK(OnCopy(kDemoralize, -1, true) == Route::kHere);
+	CHECK(OnCopy(kInvisibility, -1, true) == Route::kHere);
+	CHECK(OnCopy(kParalysis, -1, false) == Route::kRunner);
 	// Every kind is sorted: a kind the game has but the list names not goes to the runner.
 	for (std::int32_t kind = kValueModifier; kind <= kVampireLord; ++kind) {
 		const auto route = OnCopy(kind, -1);
@@ -325,12 +330,13 @@ TEST("effect rules: what a shout or a spell does to an NPC goes to its runner; i
 	}
 }
 
-TEST("effect rules: Slow Time alone is shared, with a player in the same space within reach of the shouter")
+TEST("effect rules: the Slow Time shout alone is shared, with a player in the same space within reach of the shouter")
 {
 	using namespace EffectRules;
-	CHECK(SharedWithPlayers(kSlowTime));
-	CHECK(!SharedWithPlayers(kEtherealize));
-	CHECK(!SharedWithPlayers(kStagger));
+	CHECK(SharedWithPlayers(kSlowTime, true));
+	CHECK(!SharedWithPlayers(kSlowTime, false));  // a perk's, a potion's or a mod's slow: its player's own
+	CHECK(!SharedWithPlayers(kEtherealize, true));
+	CHECK(!SharedWithPlayers(kStagger, true));
 	CHECK(SharesSlowTime(true, 100.0f));
 	CHECK(SharesSlowTime(true, SLOW_TIME_WITHIN));
 	CHECK(!SharesSlowTime(true, SLOW_TIME_WITHIN + 1.0f));

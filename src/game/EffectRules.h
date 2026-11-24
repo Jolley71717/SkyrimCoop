@@ -88,9 +88,13 @@ namespace EffectRules
 	};
 
 	// a_archetype: the effect's kind; a_actorValue: the value it changes (its first; -1 or any for a kind that changes
-	// none).
-	[[nodiscard]] constexpr Route OnCopy(std::int32_t a_archetype, std::int32_t a_actorValue)
+	// none); a_madeHere: its spell, enchantment or poison was made in this game as it ran (a player's own enchantment,
+	// poison or potion): no other game has it to put on, so it is taken here as before.
+	[[nodiscard]] constexpr Route OnCopy(std::int32_t a_archetype, std::int32_t a_actorValue, bool a_madeHere = false)
 	{
+		if (a_madeHere) {
+			return Route::kHere;
+		}
 		switch (a_archetype) {
 		// What changes a value: health's is CopyHealth's (the copy's share goes as a hit, and a dual one on health and
 		// stamina as well, whole); any other value's (stamina, magicka, speed, armor, a resistance) is its runner's NPC's.
@@ -113,7 +117,6 @@ namespace EffectRules
 		case kSoulTrap:
 		case kSpawnHazard:
 		case kSpawnScriptedRef:
-		case kGrabActor:
 		case kLight:
 		case kArchNone:
 			return Route::kHere;
@@ -126,8 +129,9 @@ namespace EffectRules
 		case kDisguise:
 			return Route::kBoth;
 		default:
-			// Stagger, push, paralysis, fear, calm, frenzy, disarm, turn undead, banish, a script (Dragonrend, Soul Tear,
-			// Bend Will), a cure, a dispel, a rally, a werewolf's or a vampire lord's: what its NPC does is its runner's.
+			// Stagger, push, paralysis, fear, calm, frenzy, disarm, turn undead, banish, a grab (Vampiric Grip: the copy is
+			// put where its runner's NPC is every frame, so the pull is that NPC's), a script (Dragonrend, Soul Tear, Bend Will),
+			// a cure, a dispel, a rally, a werewolf's or a vampire lord's: what its NPC does is its runner's.
 			return Route::kRunner;
 		}
 	}
@@ -147,15 +151,18 @@ namespace EffectRules
 
 	// ---- Slow Time ----
 
-	// Our player's effect on themselves that every player near shares: Slow Time. The game slows the world but the
+	// Our player's effect on themselves that every player near shares: Slow Time, the shout's alone (a_fromShout: its spell
+	// is a shout's, a voice power), not a perk's, a potion's or a mod's slow-time effect, which stay their player's own
+	// (decided: the shout is the group's moment; a slow on every aim or every sneak attack would slow everyone's game at
+	// one player's whim). The game slows the world but the
 	// player who shouted, in that player's game only; the NPCs another game runs are drawn at their runner's pace, its
 	// own world's (unslowed), so a world slowed in one game only leaves half the fight at full speed. Every other game
 	// whose player is in the same space and within SLOW_TIME_WITHIN of the shouter's stand-in puts the same effect on its
 	// own player: the world slows everywhere and every player near has the edge, as if each had shouted (a co-op
 	// choice: the shout is the group's moment).
-	[[nodiscard]] constexpr bool SharedWithPlayers(std::int32_t a_archetype)
+	[[nodiscard]] constexpr bool SharedWithPlayers(std::int32_t a_archetype, bool a_fromShout)
 	{
-		return a_archetype == kSlowTime;
+		return a_archetype == kSlowTime && a_fromShout;
 	}
 
 	inline constexpr float SLOW_TIME_WITHIN = 8000.0f;
