@@ -979,3 +979,140 @@ TEST("npc combat server: a death from the game that let go of its NPC a moment a
 	REQUIRE(f.fake->Settle());
 	CHECK(f.fake->Take(2).empty());
 }
+
+TEST("npc combat rules: the session's dead that live here are killed, a kill that did not take tried again then given up once, and one that rises here killed again")
+{
+	using CopyHealth::DeadDo;
+	CopyHealth::DeadHere dead;
+	const auto           t = Steady::now();
+
+	// Loaded alive: killed at once, not again before KILL_AGAIN, then again while it lives.
+	CHECK(dead.Look(1, true, t) == DeadDo::kKill);
+	CHECK(dead.Tries(1) == 1);
+	CHECK(dead.Look(1, true, t + 100ms) == DeadDo::kNothing);
+	CHECK(dead.Look(1, true, t + CopyHealth::KILL_AGAIN) == DeadDo::kKill);
+	CHECK(dead.Tries(1) == 2);
+
+	// It died: nothing more; left dead it is left alone.
+	CHECK(dead.Look(1, false, t + 3s) == DeadDo::kNothing);
+	CHECK(dead.Look(1, false, t + 10s) == DeadDo::kNothing);
+	CHECK(dead.Tries(1) == 0);
+
+	// It rises here (this game's respawn, a raise here alone): killed again at once, counted.
+	CHECK(dead.Look(1, true, t + 20s) == DeadDo::kKill);
+	CHECK(dead.risen == 1u);
+
+	// One that never dies here: KILL_TRIES kills, then given up once, then nothing.
+	auto at = t;
+	int  kills = 0;
+	for (int i = 0; i < 200; ++i, at += 500ms) {
+		switch (dead.Look(2, true, at)) {
+		case DeadDo::kKill:
+			++kills;
+			break;
+		case DeadDo::kGiveUp:
+			CHECK(kills == CopyHealth::KILL_TRIES);
+			break;
+		case DeadDo::kNothing:
+			break;
+		}
+	}
+	CHECK(kills == CopyHealth::KILL_TRIES);
+	CHECK(dead.givenUp == 1u);
+
+	// Given up, it still gets another round if it dies and rises again.
+	CHECK(dead.Look(2, false, at) == DeadDo::kNothing);
+	CHECK(dead.Look(2, true, at + 1s) == DeadDo::kKill);
+	CHECK(dead.risen == 2u);
+
+	// Seen dead first (a body as it loads): nothing to do; forgotten, a later rise is a first load again.
+	CHECK(dead.Look(3, false, t) == DeadDo::kNothing);
+	dead.Forget(3);
+	CHECK(dead.Look(3, true, t + 1s) == DeadDo::kKill);
+	CHECK(dead.risen == 2u);
+	dead.Clear();
+	CHECK(dead.Size() == 0u);
+}
+
+TEST("npc combat rules: a runner's raise of one it saw die is the session's, and a spell's thrall or zombie stays a body; any other rise is killed")
+{
+	using CopyHealth::DeadLooks;
+	using CopyHealth::LookOfDead;
+	// Dead here: a body, whoever runs it.
+	CHECK(LookOfDead(true, false, false, false, false) == DeadLooks::kBody);
+	CHECK(LookOfDead(true, false, true, true, false) == DeadLooks::kBody);
+	// Up as a thrall or a zombie (life state kReanimate), whatever the engine's dead flag says: still a body, in the
+	// runner's game too, so a player's Raise Zombie or Dead Thrall on a co-op kill is never killed again.
+	CHECK(LookOfDead(false, true, false, false, false) == DeadLooks::kBody);
+	CHECK(LookOfDead(false, true, true, true, false) == DeadLooks::kBody);
+	CHECK(LookOfDead(true, true, true, false, false) == DeadLooks::kBody);
+	// Alive in the game that runs it, which saw it die while it ran it (a quest's Resurrect, the console): the session's
+	// raise, said next, never killed.
+	CHECK(LookOfDead(false, false, true, true, false) == DeadLooks::kSessionsRaise);
+	// Alive by no raise seen here: a respawn (its cell reset across an unload), in a game that does not run it, in a runner
+	// that took it over after its death was said (a hand-over on its way), or in one that loaded it alive from its save.
+	CHECK(LookOfDead(false, false, false, true, false) == DeadLooks::kRisen);
+	CHECK(LookOfDead(false, false, false, false, false) == DeadLooks::kRisen);
+	CHECK(LookOfDead(false, false, true, false, false) == DeadLooks::kRisen);
+	// A deliberate raise seen here (Raises: the engine's resurrect, or a body that rose while loaded) is the session's in
+	// any game: the console's resurrect in a game that does not run it (a friend's kill), a quest's Resurrect in the runner
+	// after the body unloaded and loaded again (it no longer saw it die), or in a game that never ran it.
+	CHECK(LookOfDead(false, false, false, false, true) == DeadLooks::kSessionsRaise);
+	CHECK(LookOfDead(false, false, true, false, true) == DeadLooks::kSessionsRaise);
+	CHECK(LookOfDead(false, false, false, true, true) == DeadLooks::kSessionsRaise);
+	// Still a body, raise or not: a thrall's.
+	CHECK(LookOfDead(false, true, false, false, true) == DeadLooks::kBody);
+}
+
+TEST("npc combat rules: a body that rises while loaded, or that the engine's resurrect raised, was raised on purpose; one back after an unload respawned")
+{
+	using CopyHealth::Raises;
+	const Steady::time_point t0{ 100s };
+	// The console's resurrect on a body seen dead here: raised (once).
+	Raises r;
+	CHECK(!r.Look(1, true, false, t0));
+	CHECK(!r.Look(1, true, false, t0 + 250ms));
+	CHECK(r.Look(1, false, false, t0 + 500ms));
+	CHECK(!r.Look(1, false, false, t0 + 750ms));
+	// A respawn: seen dead, unloaded (its cell reset while nobody was there), back alive: no raise.
+	CHECK(!r.Look(2, true, false, t0));
+	r.Unloaded(2);
+	CHECK(!r.Look(2, false, false, t0 + 1h));
+	// Loaded alive, never seen dead here: no raise.
+	CHECK(!r.Look(3, false, false, t0));
+	// A quest's Resurrect as its cell loads, before any scan saw the body dead: the engine's resurrect says so.
+	r.Hooked(4, t0);
+	CHECK(r.Look(4, false, false, t0 + 250ms));
+	// A hooked raise seen too late is not one (another actor of that id later, a respawn), and is forgotten.
+	r.Hooked(5, t0);
+	CHECK(!r.Look(5, false, false, t0 + Raises::RAISE_FRESH));
+	r.Hooked(6, t0);
+	r.Forget(t0 + Raises::RAISE_FRESH);
+	CHECK(!r.Look(6, false, false, t0 + Raises::RAISE_FRESH));
+	// A thrall or a zombie (a spell's) is still a body: never a raise, and the body it falls back to is not one either.
+	CHECK(!r.Look(7, true, false, t0));
+	CHECK(!r.Look(7, false, true, t0 + 1s));
+	CHECK(!r.Look(7, true, false, t0 + 60s));
+	r.Hooked(8, t0);
+	CHECK(!r.Look(8, false, true, t0 + 1s));
+	CHECK(!r.Look(8, false, false, t0 + 2s));
+	// Bodies seen dead are kept until they unload; a load clears all.
+	CHECK(r.Size() == 1u);  // 7, lying dead
+	r.Clear();
+	CHECK(r.Size() == 0u);
+}
+
+TEST("copy health: the session's raise raises a body here, in the host's game too, where its save's death would be killed in its runner's game")
+{
+	Run h;
+	h.copy.Word(0.8f);
+	h.copy.SessionRaised();
+	CHECK(h.copy.SeenAlive());
+	// What NpcSync passes: a_mayRevive = SeenAlive() || not the host's.
+	CHECK(h.Look({ .share = 0.0f, .dead = true }, std::nullopt, h.copy.SeenAlive(), true).what == Do::kNothing);
+	CHECK(h.counts.saveKills == 0u);
+	h.t += CopyHealth::REVIVE_AFTER;
+	const auto up = h.Look({ .share = 0.0f, .dead = true }, std::nullopt, h.copy.SeenAlive(), true);
+	CHECK(up.what == Do::kRevive);
+	CHECK(Near(up.share, 0.8f));
+}
