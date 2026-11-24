@@ -296,21 +296,32 @@ namespace ClockRules
 		Clock::time_point                   lastLook{};
 	};
 
-	// This game's sky, as WeatherFollower needs it.
+	// This game's sky, as WeatherFollower, MagicWatch and AskKeeper need it.
 	struct Sky
 	{
 		bool          outside = false;     // in an exterior cell, under the full sky
 		std::uint32_t worldspace = 0;      // the worldspace whose sky this is (SkyWorld: a walled city's is its parent's); 0 inside
 		std::uint32_t weather = 0;         // the current weather (0 none)
-		bool          overridden = false;  // a script of this game forced a weather (Sky::overrideWeather)
+		bool          overridden = false;  // a script of this game forced a weather (Sky::overrideWeather, and not our pin)
+		bool          pinned = false;      // the override is our pin: the owner's weather, held against this game's climate
+		std::uint32_t overrideWeather = 0; // the weather any override holds (ours or a script's), 0 none
 	};
 
+	// While following, this game holds the owner's weather as an override of its own (the pin), so its climate never
+	// rolls a weather of its own between two of the owner's reports (an override is what the game's scripts use to hold
+	// a weather: the climate leaves it alone). A script of this game that forces its own override replaces the pin (that
+	// weather is held, as before); when it lets go, the owner's is pinned again. The pin is let go when this game is no
+	// longer under the owner's sky, when the owner goes quiet or leaves, and when the session ends, so no game is left
+	// holding a weather no script will ever release; it is taken off (quietly: no release, so the climate does not take
+	// over) while a save is written, so no save holds it, and put back on the next tick.
 	enum class WeatherMove
 	{
-		kNone,    // nothing to do: not under the owner's sky, already the same, or a change under way
-		kEase,    // change to the owner's weather as the game changes weathers (Sky::SetWeather)
-		kForce,   // the owner's weather, now (Sky::ForceWeather)
-		kHeld,    // different, but this game's own scripts forced theirs: left alone
+		kNone,     // nothing to do: not under the owner's sky (and nothing pinned), already pinned, or a change under way
+		kEase,     // change to the owner's weather as the game changes weathers (Sky::SetWeather), pinned
+		kForce,    // the owner's weather, now (Sky::ForceWeather), pinned
+		kHeld,     // different, but this game's own scripts forced theirs: left alone
+		kPin,      // the owner's weather already, not held: pin it (the override set to the current weather, no transition)
+		kRelease,  // our pin, and no longer under the owner's sky: let it go (the game's climate takes over)
 	};
 
 	class WeatherFollower
@@ -321,11 +332,19 @@ namespace ClockRules
 			if (!a_here.outside || a_here.worldspace == 0 || a_owner.worldspace == 0 || a_owner.weather == 0 || a_here.worldspace != a_owner.worldspace) {
 				underSky = false;  // the next time under the owner's sky is an arrival
 				asked.reset();
+				if (a_here.pinned) {
+					++releases;
+					return WeatherMove::kRelease;
+				}
 				return WeatherMove::kNone;
 			}
 			if (a_here.weather == a_owner.weather) {
 				underSky = true;
 				asked.reset();  // the next difference (the owner's turns, or ours does) eases in again
+				if (!a_here.pinned && !a_here.overridden) {
+					++pins;
+					return WeatherMove::kPin;
+				}
 				return WeatherMove::kNone;
 			}
 			if (a_here.overridden) {
@@ -360,7 +379,9 @@ namespace ClockRules
 
 		std::uint64_t forced = 0;
 		std::uint64_t eased = 0;
-		std::uint64_t held = 0;  // decisions, not weathers: one a tick while held
+		std::uint64_t held = 0;      // decisions, not weathers: one a tick while held
+		std::uint64_t pins = 0;      // the owner's weather pinned when it was already ours (after a save, a script's release)
+		std::uint64_t releases = 0;  // our pin let go on leaving the owner's sky
 
 	private:
 		struct Asked
@@ -416,5 +437,286 @@ namespace ClockRules
 
 	private:
 		std::optional<float> own;
+	};
+
+	// ---- a friend's weather magic (Clear Skies, Storm Call, Auriel's sun, a mod's weather spell) ----
+	//
+	// The game's weather magic is a magic effect's script on its caster: Clear Skies' ClearSkiesEffectScript holds a clear
+	// weather as an override and lets go when the effect ends; Storm Call's magicSetWeatherScript sets its storm, held as
+	// an override until the effect ends or not (bHoldWeatherUntilEnd); Dawnguard's sun arrow lets any override go, then
+	// sets its own the same way (a scan of every script of the base game for Weather.SetActive, ForceActive and
+	// ReleaseOverride: the magic ones are these three, all on an ActiveMagicEffect of the caster). The class is told by
+	// what it does, never by a name: a weather change in this game soon after our player's own magic took hold (any
+	// effect our player cast), while we follow the owner's sky. Such a weather is asked of the owner, whose game sets it
+	// (and lets it go when ours does), so it is every game's sky; meanwhile this game leaves its own sky to the magic.
+
+	// After our player's magic takes hold, a weather change here within this long is its (a script runs a few frames,
+	// or under load a few seconds, after its effect starts).
+	inline constexpr auto MAGIC_WINDOW = std::chrono::seconds{ 5 };
+	// A weather magic not held (an override's end never comes): this game leaves its sky alone until the owner's report
+	// carries it, or this long.
+	inline constexpr auto MAGIC_ANSWER = std::chrono::seconds{ 10 };
+	// A held weather magic never let go (a mod's effect that never ends): let go after this, here and at the owner.
+	inline constexpr auto MAGIC_HOLD_MAX = std::chrono::minutes{ 30 };
+
+	// What MagicWatch says to do this tick.
+	struct MagicStep
+	{
+		enum class Kind
+		{
+			kNone,
+			kAsk,      // ask the owner for this weather (Protocol::WeatherAsk)
+			kRelease,  // our held weather magic ended: the owner lets its go
+		};
+		Kind          kind = Kind::kNone;
+		std::uint32_t worldspace = 0;
+		std::uint32_t weather = 0;
+		bool          held = false;  // an override (it ends when the magic does), or a weather the climate takes over from
+	};
+
+	class MagicWatch
+	{
+	public:
+		// Our player's magic took hold (TESMagicEffectApplyEvent, caster our player), seen this tick, with the worldspace of
+		// the owner's sky (0 none heard). The sky before it is the one Seen last noted (the script may already have run).
+		void Cast(Clock::time_point a_now, std::uint32_t a_ownerWorldspace)
+		{
+			if (!lastSeen || !lastSeen->outside || lastSeen->worldspace == 0 || lastSeen->worldspace != a_ownerWorldspace) {
+				return;  // inside, not under the owner's sky, or nothing seen yet: our magic's weather is our own there
+			}
+			++windows;
+			windowUntil = a_now + MAGIC_WINDOW;
+			if (state == State::kIdle || state == State::kWindow) {
+				state = State::kWindow;
+				before = *lastSeen;
+			}
+		}
+
+		// Each tick, with our sky now and the owner's weather heard (0 none): what to do. Seen is called after, once this
+		// game's own changes of the tick are made.
+		[[nodiscard]] MagicStep Look(Clock::time_point a_now, const Sky& a_here, std::uint32_t a_ownerWeather)
+		{
+			switch (state) {
+			case State::kIdle:
+				return {};
+			case State::kWindow:
+				if (a_here.outside && a_here.worldspace == before.worldspace && Changed(a_here)) {
+					return Ask(a_now, a_here);
+				}
+				if (a_now >= windowUntil) {
+					state = State::kIdle;
+				}
+				return {};
+			case State::kAskedHeld:
+				if (!a_here.outside || a_here.worldspace != asked.worldspace || a_here.overrideWeather == 0 || a_here.pinned ||
+					a_now - askedAt >= MAGIC_HOLD_MAX) {
+					return Release();  // let go (its effect ended), out from under that sky, or held too long
+				}
+				if (a_here.overrideWeather != asked.weather) {
+					return Ask(a_now, a_here);  // another magic's (a second shout): it replaces ours at the owner
+				}
+				return {};
+			case State::kAskedOnce:
+				if (a_now < windowUntil && a_here.outside && a_here.worldspace == asked.worldspace && a_here.overridden && a_here.overrideWeather != asked.weather) {
+					return Ask(a_now, a_here);  // the same magic held it after all (the sun arrow: release, then set)
+				}
+				if (a_ownerWeather == asked.weather || a_now - askedAt >= MAGIC_ANSWER || !a_here.outside || a_here.worldspace != asked.worldspace) {
+					state = State::kIdle;
+				}
+				return {};
+			}
+			return {};
+		}
+
+		// The sky as this tick leaves it (after our own changes): what the next cast is compared with.
+		void Seen(const Sky& a_here) { lastSeen = a_here; }
+
+		// This game leaves its sky to our magic (follows nothing, pins nothing): a window open or an ask under way.
+		[[nodiscard]] bool Holds() const { return state != State::kIdle; }
+
+		// A held weather magic of ours asked and not yet let go (the session ending says so to the owner).
+		[[nodiscard]] std::optional<std::uint32_t> Asked() const
+		{
+			return state == State::kAskedHeld ? std::optional<std::uint32_t>{ asked.weather } : std::nullopt;
+		}
+
+		// A load, a new session, the owner gone: nothing of ours is asked any more.
+		void Reset()
+		{
+			state = State::kIdle;
+			lastSeen.reset();
+		}
+
+		std::uint64_t windows = 0;   // casts seen while outside
+		std::uint64_t asks = 0;      // weathers asked of the owner
+		std::uint64_t releases = 0;  // held ones let go
+
+	private:
+		enum class State
+		{
+			kIdle,
+			kWindow,     // our magic took hold: a change of sky now is its
+			kAskedHeld,  // asked, held as an override here until the magic lets go
+			kAskedOnce,  // asked, not held: left alone until the owner's sky has it
+		};
+
+		// The sky changed since the cast, by something not ours: the weather, or an override of a script's.
+		[[nodiscard]] bool Changed(const Sky& a_here) const
+		{
+			if (a_here.overridden && a_here.overrideWeather != 0 && a_here.overrideWeather != before.overrideWeather) {
+				return true;
+			}
+			return a_here.weather != 0 && a_here.weather != before.weather && !a_here.pinned;
+		}
+
+		MagicStep Ask(Clock::time_point a_now, const Sky& a_here)
+		{
+			const bool held = a_here.overridden && a_here.overrideWeather != 0;
+			asked = MagicStep{ MagicStep::Kind::kAsk, a_here.worldspace, held ? a_here.overrideWeather : a_here.weather, held };
+			askedAt = a_now;
+			state = held ? State::kAskedHeld : State::kAskedOnce;
+			++asks;
+			return asked;
+		}
+
+		MagicStep Release()
+		{
+			state = State::kIdle;
+			++releases;
+			return MagicStep{ MagicStep::Kind::kRelease, asked.worldspace, asked.weather, true };
+		}
+
+		State                state = State::kIdle;
+		std::optional<Sky>   lastSeen;
+		Sky                  before;
+		Clock::time_point    windowUntil{};
+		MagicStep            asked;
+		Clock::time_point    askedAt{};
+	};
+
+	// The owner's side: a friend's weather magic asked (kRemoteWeatherAsk). The owner's game sets it as the magic did
+	// (held as an override, or not), under the same sky only (a friend's magic in a worldspace the owner is not under is
+	// that friend's own: nothing is followed there). A held one is let go when its friend says the magic ended, when that
+	// friend leaves, after MAGIC_HOLD_MAX, and when the session ends; it is never written into the owner's save (no
+	// script of the owner's would ever let it go after a load): taken off quietly for the save, put back after it.
+	struct AskMove
+	{
+		enum class Kind
+		{
+			kNone,
+			kSet,      // set this weather (held: as an override), accelerated as a spell's is
+			kRelease,  // let our held asked weather go (Sky::ReleaseWeatherOverride)
+			kIgnore,   // not under that sky: nothing set
+		};
+		Kind          kind = Kind::kNone;
+		std::uint32_t weather = 0;
+		bool          held = false;
+	};
+
+	class AskKeeper
+	{
+	public:
+		// A friend's ask, with the owner's sky now.
+		[[nodiscard]] AskMove Heard(const Protocol::WeatherAsk& a_ask, const Sky& a_here, Clock::time_point a_now)
+		{
+			if (a_ask.release) {
+				return Drop(a_ask.playerId, a_here);
+			}
+			if (!a_here.outside || a_here.worldspace == 0 || a_here.worldspace != a_ask.worldspace || a_ask.weather == 0) {
+				++ignored;
+				return AskMove{ AskMove::Kind::kIgnore };
+			}
+			++sets;
+			if (a_ask.held) {
+				kept = Kept{ a_ask.playerId, a_ask.weather, a_now };
+			} else if (kept) {
+				kept.reset();  // a weather not held replaces the held one: the climate goes on from it
+			}
+			return AskMove{ AskMove::Kind::kSet, a_ask.weather, a_ask.held };
+		}
+
+		// The friend who asked left.
+		[[nodiscard]] AskMove Left(std::uint32_t a_playerId, const Sky& a_here) { return Drop(a_playerId, a_here); }
+
+		// Each tick: a held ask given up past MAGIC_HOLD_MAX, or forgotten when a script of ours replaced or let go of it.
+		[[nodiscard]] AskMove Tick(Clock::time_point a_now, const Sky& a_here)
+		{
+			if (!kept) {
+				return {};
+			}
+			if (a_here.overrideWeather != kept->weather) {
+				kept.reset();  // a script of this game's took the sky (or let it go): nothing of the friend's to let go
+				return {};
+			}
+			if (a_now - kept->at >= MAGIC_HOLD_MAX) {
+				return Drop(kept->playerId, a_here);
+			}
+			return {};
+		}
+
+		// The weather a friend's magic holds here (0 none), and whose.
+		[[nodiscard]] std::uint32_t Weather() const { return kept ? kept->weather : 0; }
+		[[nodiscard]] std::uint32_t By() const { return kept ? kept->playerId : 0; }
+
+		// A load, a new game, the session's end (after letting any go): nothing asked is kept.
+		void Forget() { kept.reset(); }
+
+		std::uint64_t sets = 0;
+		std::uint64_t ignored = 0;
+		std::uint64_t releases = 0;
+
+	private:
+		struct Kept
+		{
+			std::uint32_t     playerId = 0;
+			std::uint32_t     weather = 0;
+			Clock::time_point at{};
+		};
+
+		AskMove Drop(std::uint32_t a_playerId, const Sky& a_here)
+		{
+			if (!kept || kept->playerId != a_playerId) {
+				return {};
+			}
+			const auto weather = kept->weather;
+			kept.reset();
+			if (a_here.overrideWeather != weather) {
+				return {};  // not ours any more (a script of this game's took the sky): nothing to let go
+			}
+			++releases;
+			return AskMove{ AskMove::Kind::kRelease, weather, true };
+		}
+
+		std::optional<Kept> kept;
+	};
+
+	// ---- what a friend's save keeps ----
+	//
+	// A friend's save written in a session holds the session's hour and the day count it reached following the owner
+	// (never its own timescale, nor the owner's weather pinned: both are taken off for the save). It is never put back on
+	// leaving: following only ever moves a friend's day count forward (a line-up goes back within the day at most), as a
+	// wait or a sleep would, and every timer the session started in that game (a cell's reset, a quest's wait, a bounty
+	// letter, a vendor's restock) was started on that day count: putting the date back would run them all backwards. So
+	// the save's date is where the session left it, as if that player had waited the difference; the log says, at each
+	// save and when the session ends, the day count the game had when it joined and the one it keeps (SaveDays).
+	struct SaveDays
+	{
+		std::optional<double> joined;  // the day count when this game joined the session (or loaded a save in it)
+
+		// The game joined (or loaded) with this day count; a second call in the same session keeps the first.
+		void Joined(double a_days)
+		{
+			if (!joined) {
+				joined = a_days;
+			}
+		}
+
+		// Days the save now holds beyond the count it joined with (none when it never joined).
+		[[nodiscard]] std::optional<double> Since(double a_days) const
+		{
+			return joined ? std::optional<double>{ a_days - *joined } : std::nullopt;
+		}
+
+		void Reset() { joined.reset(); }
 	};
 }

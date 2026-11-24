@@ -26,6 +26,21 @@ namespace WorldClock
 		ClockRules::WaitGate                waitGate;        // our own Sleep/Wait: nothing followed while it runs
 		bool                                openingSaid = false;  // the log last said the opening holds our clock
 		std::uint64_t                       waitSaid = 0;          // the wait of ours the log last said holds the clock
+		// The owner's weather pinned here as an override (ClockRules::WeatherMove): its form ID, 0 none.
+		std::uint32_t                       pinned = 0;
+		std::uint64_t                       saveUnpins = 0;  // pins (ours, or a friend's ask kept) taken off for a save
+		// Our player's magic (TESMagicEffectApplyEvent, caster our player), counted on whatever thread sends the event
+		// and read on the tick; and what it does to our sky (ClockRules::MagicWatch).
+		std::atomic<std::uint64_t>          casts{ 0 };
+		std::uint64_t                       castsSeen = 0;
+		ClockRules::MagicWatch              magic;
+		// The owner's side: friends' weather magic asked of us (ClockRules::AskKeeper), and a kept one taken off for a
+		// save, to put back on the next tick (its form ID, 0 none).
+		ClockRules::AskKeeper               keeper;
+		std::uint32_t                       keeperRepin = 0;
+		// What a save keeps (ClockRules::SaveDays): the day count when this game joined the session or loaded in it.
+		ClockRules::SaveDays                saveDays;
+		bool                                magicInstalled = false;
 
 		RE::Calendar* Calendar()
 		{
@@ -132,7 +147,9 @@ namespace WorldClock
 				return here;
 			}
 			here.weather = sky->currentWeather ? sky->currentWeather->GetFormID() : 0;
-			here.overridden = sky->overrideWeather != nullptr;
+			here.overrideWeather = sky->overrideWeather ? sky->overrideWeather->GetFormID() : 0;
+			here.pinned = here.overrideWeather != 0 && here.overrideWeather == pinned;
+			here.overridden = here.overrideWeather != 0 && !here.pinned;
 			if (!cell->IsInteriorCell() && world && sky->mode.get() == RE::Sky::Mode::kFull) {
 				here.outside = true;
 				here.worldspace = SkyOf(world)->GetFormID();
@@ -178,15 +195,72 @@ namespace WorldClock
 			a_calendar->timeScale->value = a_value;
 		}
 
+		// Our pin let go, the game's own way (its climate takes over): on leaving the owner's sky, the owner gone quiet or
+		// gone, the session's end. Only when the override is still ours.
+		void ReleasePin(std::string_view a_why)
+		{
+			const auto sky = RE::Sky::GetSingleton();
+			if (pinned != 0 && sky && sky->overrideWeather && sky->overrideWeather->GetFormID() == pinned) {
+				sky->ReleaseWeatherOverride();
+				logs::info("Clock: weather {:08X} no longer held here ({})", pinned, a_why);
+			}
+			pinned = 0;
+		}
+
+		// An override of ours (the pin, or a friend's ask kept) taken off without the release (which hands the sky to the
+		// climate): for a save, or a moment of our magic's. Put back on a later tick.
+		bool QuietUnpin(std::uint32_t a_weather)
+		{
+			const auto sky = RE::Sky::GetSingleton();
+			if (a_weather == 0 || !sky || !sky->overrideWeather || sky->overrideWeather->GetFormID() != a_weather) {
+				return false;
+			}
+			sky->overrideWeather = nullptr;
+			return true;
+		}
+
+		// The current weather held as an override, with no transition (it is the current one already).
+		bool PinCurrent(std::uint32_t a_weather)
+		{
+			const auto sky = RE::Sky::GetSingleton();
+			if (!sky || sky->overrideWeather || !sky->currentWeather || sky->currentWeather->GetFormID() != a_weather) {
+				return false;
+			}
+			sky->overrideWeather = sky->currentWeather;
+			return true;
+		}
+
 		void FollowWeather(const Protocol::ClockState& a_owner, Clock::time_point a_now)
 		{
 			const auto sky = RE::Sky::GetSingleton();
 			if (!sky) {
 				return;
 			}
+			if (magic.Holds()) {
+				// Our player's magic may be changing our sky: nothing followed or pinned until it has (ClockRules::MagicWatch).
+				if (QuietUnpin(pinned)) {
+					logs::info("Clock: weather {:08X} not held while our player's magic takes hold", pinned);
+				}
+				pinned = 0;
+				return;
+			}
 			const auto here = HereSky();
+			if (!here.pinned) {
+				pinned = 0;  // a script of ours replaced the pin, or let it go: not ours any more
+			}
 			const auto move = weather.Decide(a_owner, here, a_now);
 			if (move == ClockRules::WeatherMove::kNone) {
+				return;
+			}
+			if (move == ClockRules::WeatherMove::kRelease) {
+				ReleasePin("not under player " + std::to_string(a_owner.playerId) + "'s sky");
+				return;
+			}
+			if (move == ClockRules::WeatherMove::kPin) {
+				if (PinCurrent(a_owner.weather)) {
+					pinned = a_owner.weather;
+					logs::info("Clock: weather {:08X} held against this game's climate (player {}'s sky)", pinned, a_owner.playerId);
+				}
 				return;
 			}
 			if (move == ClockRules::WeatherMove::kHeld) {
@@ -199,14 +273,93 @@ namespace WorldClock
 			if (!target) {
 				return;  // not a weather here (the edge kept its ID, but the form is another kind): nothing to follow
 			}
+			// Set as an override (the pin): this game's climate leaves it alone until the owner's sky turns.
 			if (move == ClockRules::WeatherMove::kForce) {
-				sky->ForceWeather(target, false);
+				sky->ForceWeather(target, true);
 			} else {
-				sky->SetWeather(target, false, true);
+				sky->SetWeather(target, true, true);
 			}
-			logs::info("Clock: weather {:08X} -> {:08X} {} (player {}'s sky)", here.weather, a_owner.weather, move == ClockRules::WeatherMove::kForce ? "forced" : "easing in",
-				a_owner.playerId);
+			pinned = sky->overrideWeather == target ? a_owner.weather : 0;
+			logs::info("Clock: weather {:08X} -> {:08X} {} (player {}'s sky{})", here.weather, a_owner.weather, move == ClockRules::WeatherMove::kForce ? "forced" : "easing in",
+				a_owner.playerId, pinned != 0 ? ", held" : ", not held: the game took no override");
 		}
+
+		// Our player's magic and what it did to our sky (ClockRules::MagicWatch), while we follow an owner's: a weather it
+		// made is asked of the owner, and let go there when it ends.
+		void WatchMagic(Clock::time_point a_now, const SendFn& a_send)
+		{
+			const auto seen = casts.load(std::memory_order_relaxed);
+			const bool cast = seen != castsSeen;
+			castsSeen = seen;
+			if (!heard) {
+				return;
+			}
+			if (cast) {
+				magic.Cast(a_now, heard->worldspace);
+			}
+			const auto step = magic.Look(a_now, HereSky(), heard->weather);
+			if (step.kind == ClockRules::MagicStep::Kind::kNone) {
+				return;
+			}
+			Protocol::WeatherAsk ask;
+			ask.worldspace = step.worldspace;
+			ask.weather = step.weather;
+			ask.held = step.held;
+			ask.release = step.kind == ClockRules::MagicStep::Kind::kRelease;
+			a_send(Protocol::Encode(ask));
+			if (ask.release) {
+				logs::info("Clock: our player's weather magic {:08X} ended: player {} is told to let it go", step.weather, heard->playerId);
+			} else {
+				logs::info("Clock: our player's magic made the weather {:08X} ({}): asked of player {}, whose sky is the session's", step.weather,
+					step.held ? "held until it ends" : "not held", heard->playerId);
+			}
+		}
+
+		// The magic's ask let go, said to the owner if one is asked and held (the owner went quiet or left, a load).
+		void DropMagic(const SendFn* a_send)
+		{
+			if (const auto held = magic.Asked(); held && a_send) {
+				Protocol::WeatherAsk ask;
+				ask.release = true;
+				(*a_send)(Protocol::Encode(ask));
+				logs::info("Clock: our player's weather magic {:08X} no longer asked of anyone", *held);
+			}
+			magic.Reset();
+		}
+
+		// The owner's side, each tick: a friend's kept ask put back after a save, given up past its time, or forgotten
+		// when a script of ours took the sky.
+		void KeepAsks(Clock::time_point a_now)
+		{
+			if (keeperRepin != 0) {
+				if (PinCurrent(keeperRepin)) {
+					logs::info("Clock: player {}'s weather {:08X} held again after the save", keeper.By(), keeperRepin);
+				}
+				keeperRepin = 0;
+			}
+			const auto by = keeper.By();
+			if (const auto move = keeper.Tick(a_now, HereSky()); move.kind == ClockRules::AskMove::Kind::kRelease) {
+				if (const auto sky = RE::Sky::GetSingleton()) {
+					sky->ReleaseWeatherOverride();
+				}
+				logs::info("Clock: player {}'s weather {:08X} let go: held {} minutes, its magic never said it ended", by, move.weather,
+					std::chrono::duration_cast<std::chrono::minutes>(ClockRules::MAGIC_HOLD_MAX).count());
+			}
+		}
+
+		class MagicSink : public RE::BSTEventSink<RE::TESMagicEffectApplyEvent>
+		{
+		public:
+			RE::BSEventNotifyControl ProcessEvent(const RE::TESMagicEffectApplyEvent* a_event, RE::BSTEventSource<RE::TESMagicEffectApplyEvent>*) override
+			{
+				const auto player = RE::PlayerCharacter::GetSingleton();
+				if (a_event && player && a_event->caster && a_event->caster.get() == player) {
+					casts.fetch_add(1, std::memory_order_relaxed);
+				}
+				return RE::BSEventNotifyControl::kContinue;
+			}
+		};
+		MagicSink magicSink;
 
 		// The owner's clock followed, this tick: a move forward under way, the owner's report not yet followed, its
 		// timescale and its sky. Never while our own Sleep/Wait runs (Frame).
@@ -318,7 +471,9 @@ namespace WorldClock
 			return std::format(
 				"ready={} opening={} hour={:.3f} days={:.4f} raw={:.4f} midnights={} day={} month={} scale={:.2f} own={} outside={} world={:08X} weather={:08X} "
 				"override={} owner={} heard={} heardAge={:.1f} ownerHour={} ownerWeather={:08X} offset={} moving={:.3f} reports={} lineUps={} hourSets={} "
-				"backSets={} midnightSteps={} forced={} eased={} held={} scaleSets={} scaleBacks={} place={:08X} waiting={} waits={} mq101={} canMove={}",
+				"backSets={} midnightSteps={} forced={} eased={} held={} scaleSets={} scaleBacks={} place={:08X} waiting={} waits={} mq101={} canMove={} "
+				"pinned={} pins={} pinReleases={} saveUnpins={} magic={} magicWindows={} asks={} askReleases={} magicAsked={:08X} asked={:08X} askedBy={} askSets={} askIgnored={} "
+				"askLetGo={} joinedDays={}",
 				Ready() ? 1 : 0, opening.holds ? 1 : 0, c->gameHour->value, c->gameDaysPassed->value, c->rawDaysPassed, c->midnightsPassed,
 				c->gameDay ? c->gameDay->value : 0.0f, c->gameMonth ? c->gameMonth->value + 1.0f : 0.0f, c->timeScale->value,
 				kept ? std::format("{:.2f}", *kept) : std::string{ "-" }, here.outside ? 1 : 0, here.worldspace, here.weather, here.overridden ? 1 : 0,
@@ -327,7 +482,9 @@ namespace WorldClock
 				follower.backSets, follower.midnightSteps, weather.forced, weather.eased, weather.held, scale.sets, scaleBacks, HerePlace(), waitGate.Open() ? 1 : 0,
 				waitGate.waits,
 				opening.found ? std::format("{}/{}/{}", opening.running ? "running" : "stopped", opening.completed ? "completed" : "open", opening.stage) : std::string{ "-" },
-				opening.canMove ? 1 : 0);
+				opening.canMove ? 1 : 0, here.pinned ? 1 : 0, weather.pins, weather.releases, saveUnpins, magic.Holds() ? 1 : 0, magic.windows, magic.asks, magic.releases, magic.Asked().value_or(0),
+				keeper.Weather(), keeper.By(), keeper.sets, keeper.ignored, keeper.releases,
+				saveDays.joined ? std::format("{:.3f}", *saveDays.joined) : std::string{ "-" });
 		}
 	}
 
@@ -340,6 +497,7 @@ namespace WorldClock
 		weather.Reset();
 		reporter.Reset();  // ours goes on the first tick in the world
 		waitGate.Reset();
+		magic.Reset();
 		openingSaid = false;  // a new session says again whether the opening holds our clock
 	}
 
@@ -355,11 +513,16 @@ namespace WorldClock
 			return;
 		}
 		const auto now = Clock::now();
+		saveDays.Joined(calendar->gameDaysPassed->value);
 		if (heard && now - heardAt > ClockRules::HEARD_LASTS) {
+			DropMagic(&a_send);
 			heard.reset();  // the owner went quiet: our own clock until it speaks again
 			fresh = false;
 			weather.Reset();
+			ReleasePin("the owner went quiet");
 		}
+		KeepAsks(now);
+		WatchMagic(now, a_send);
 		// Our own Sleep/Wait runs: the engine passes the hours and ends the wait by the clock, so nothing of ours moves it
 		// (the hour, the day count, the timescale, the sky) until the menu shuts; then the owner's last report is followed
 		// from where the wait left us. Our clock is still said meanwhile (the server passes on only the owner's).
@@ -380,6 +543,7 @@ namespace WorldClock
 			FollowOwner(calendar, now);
 			break;
 		}
+		magic.Seen(HereSky());  // the sky as this tick leaves it: what a cast next tick is compared with
 		const auto ours = Ours(calendar);
 		if (reporter.Due(now, ours)) {
 			reporter.Sent(now, ours);
@@ -405,7 +569,52 @@ namespace WorldClock
 			heard.reset();
 			fresh = false;
 			weather.Reset();
+			magic.Reset();  // its ask went with it
+			ReleasePin("its owner left");
 			logs::info("Clock: player {}, whose clock this game followed, left: our own until the next owner's", a_playerId);
+		}
+		// A friend whose weather magic we hold left: let it go.
+		const auto kept = keeper.Weather();
+		if (const auto move = keeper.Left(a_playerId, HereSky()); move.kind == ClockRules::AskMove::Kind::kRelease) {
+			if (const auto sky = RE::Sky::GetSingleton()) {
+				sky->ReleaseWeatherOverride();
+			}
+			logs::info("Clock: player {} left: its weather {:08X} let go", a_playerId, kept);
+		}
+	}
+
+	void HeardAsk(const Protocol::WeatherAsk& a_ask)
+	{
+		const auto sky = RE::Sky::GetSingleton();
+		if (!sky || a_ask.playerId == ourId) {
+			return;
+		}
+		const auto before = keeper.Weather();
+		const auto here = HereSky();
+		const auto move = keeper.Heard(a_ask, here, Clock::now());
+		switch (move.kind) {
+		case ClockRules::AskMove::Kind::kNone:
+			break;
+		case ClockRules::AskMove::Kind::kIgnore:
+			logs::info("Clock: player {}'s weather magic {:08X} not set here: this game is not under that sky (outside={} world={:08X}, asked {:08X})", a_ask.playerId,
+				a_ask.weather, here.outside ? 1 : 0, here.worldspace, a_ask.worldspace);
+			break;
+		case ClockRules::AskMove::Kind::kRelease:
+			sky->ReleaseWeatherOverride();
+			logs::info("Clock: player {}'s weather magic ended: {:08X} let go", a_ask.playerId, move.weather);
+			break;
+		case ClockRules::AskMove::Kind::kSet:
+			if (const auto target = RE::TESForm::LookupByID<RE::TESWeather>(move.weather)) {
+				if (!move.held && before != 0 && here.overrideWeather == before) {
+					sky->ReleaseWeatherOverride();  // a weather not held replaces a friend's held one: the climate goes on from it
+				}
+				sky->SetWeather(target, move.held, true);
+				logs::info("Clock: player {}'s weather magic: {:08X} -> {:08X} ({}): the session's sky", a_ask.playerId, here.weather, move.weather,
+					move.held ? "held until it ends" : "not held");
+			} else {
+				keeper.Forget();
+			}
+			break;
 		}
 	}
 
@@ -416,6 +625,23 @@ namespace WorldClock
 				SetScale(calendar, *own, "our own, for the save");
 				++scaleBacks;
 			}
+			// What the save keeps of the session's clock (ClockRules::SaveDays): its hour and day count, never put back.
+			if (const auto since = saveDays.Since(calendar->gameDaysPassed->value); since && ourId != 0) {
+				logs::info("Clock: this save keeps the session's hour {:.2f} and day count {:.3f} ({:+.3f} days since this game joined the session or loaded)",
+					calendar->gameHour->value, calendar->gameDaysPassed->value, *since);
+			}
+		}
+		// No override of ours goes into the save (no script would ever let it go after a load): taken off quietly, put
+		// back on the next tick.
+		if (QuietUnpin(pinned)) {
+			++saveUnpins;
+			logs::info("Clock: weather {:08X} not held in the save (held again after it)", pinned);
+		}
+		pinned = 0;
+		if (QuietUnpin(keeper.Weather())) {
+			++saveUnpins;
+			keeperRepin = keeper.Weather();
+			logs::info("Clock: player {}'s weather {:08X} not held in the save (held again after it)", keeper.By(), keeperRepin);
 		}
 	}
 
@@ -426,6 +652,11 @@ namespace WorldClock
 		scale.Forget();
 		weather.Reset();
 		reporter.Reset();
+		pinned = 0;  // the loaded save holds no override of ours
+		magic.Reset();
+		keeper.Forget();
+		keeperRepin = 0;
+		saveDays.Reset();  // the loaded save's day count is the one this game is in the session with
 		fresh = heard.has_value();  // the owner's last word, followed again from the loaded save's clock
 	}
 
@@ -436,9 +667,25 @@ namespace WorldClock
 				SetScale(calendar, *own, "our own again, the session ended");
 				++scaleBacks;
 			}
+			if (const auto since = saveDays.Since(calendar->gameDaysPassed->value); since && ourId != 0) {
+				logs::info("Clock: the session ended: this game keeps the session's hour {:.2f} and day count {:.3f} ({:+.3f} days since it joined), as a wait would",
+					calendar->gameHour->value, calendar->gameDaysPassed->value, *since);
+			}
 		} else {
 			scale.Forget();
 		}
+		ReleasePin("the session ended");
+		if (const auto kept = keeper.Weather(); kept != 0) {
+			const auto sky = RE::Sky::GetSingleton();
+			if (sky && sky->overrideWeather && sky->overrideWeather->GetFormID() == kept) {
+				sky->ReleaseWeatherOverride();
+				logs::info("Clock: player {}'s weather {:08X} let go: the session ended", keeper.By(), kept);
+			}
+		}
+		keeper.Forget();
+		keeperRepin = 0;
+		magic.Reset();
+		saveDays.Reset();
 		heard.reset();
 		fresh = false;
 		ourId = 0;
@@ -446,6 +693,22 @@ namespace WorldClock
 		waitGate.Reset();
 		weather.Reset();
 		reporter.Reset();
+	}
+
+	bool Install()
+	{
+		if (magicInstalled) {
+			return true;
+		}
+		const auto events = RE::ScriptEventSourceHolder::GetSingleton();
+		if (!events) {
+			logs::warn("Clock: the game's event source is not there; a friend's weather magic stays in their own game");
+			return false;
+		}
+		events->AddEventSink<RE::TESMagicEffectApplyEvent>(&magicSink);
+		magicInstalled = true;
+		logs::info("Clock: watching our player's magic (a weather it makes is asked of the session's clock owner)");
+		return true;
 	}
 
 	std::string Command(std::string_view a_args)

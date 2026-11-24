@@ -290,6 +290,11 @@ namespace Session
 					WorldClock::Heard(*msg);
 				}
 				break;
+			case Protocol::MessageType::kRemoteWeatherAsk:
+				if (const auto msg = Protocol::DecodeWeatherAsk(a_data); msg && welcomed) {
+					WorldClock::HeardAsk(*msg);
+				}
+				break;
 			case Protocol::MessageType::kHeartbeatAck:
 				if (const auto msg = Protocol::DecodeHeartbeat(a_data)) {
 					if (const auto it = beats.find(msg->token); it != beats.end()) {

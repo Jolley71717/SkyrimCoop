@@ -178,6 +178,9 @@ namespace
 		if (!WorldObjects::Install()) {
 			logs::warn("World: doors, locks and mechanisms are not shared in this game; a session still runs");
 		}
+		if (!WorldClock::Install()) {
+			logs::warn("Clock: a friend's weather magic stays in their own game; a session still runs");
+		}
 		if (!RemotePlayers::Install()) {
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
 		}

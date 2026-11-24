@@ -69,6 +69,10 @@ namespace
 		TokenBucket       clockBudget{ 4.0, 1.0 };
 		bool              clockOwed = false;
 		bool              toldNotClockOwner = false;
+		// A friend's weather magic asked of the clock owner (kWeatherAsk): a burst of 4, then one every 2 s. A release is
+		// never dropped (one follows each held ask at most), so the owner is never left holding a friend's weather.
+		TokenBucket       weatherAskBudget{ 4.0, 0.5 };
+		bool              toldOwnAsk = false;
 		bool        toldNotHost = false;
 		bool        toldUnknown = false;
 	};
@@ -553,6 +557,30 @@ void Server::Run()
 					broadcast(Protocol::Encode(*said, MT::kRemoteClock), true, &a_key);
 				} else {
 					a_peer.clockOwed = true;  // the newest goes once the budget allows
+				}
+			}
+			break;
+		case MT::kWeatherAsk:
+			// A friend's weather magic goes to the clock owner alone, whose game sets it (its sky is the session's). The
+			// owner's own magic is its own weather, said by its clock: an ask from it is dropped (logged once).
+			if (auto ask = Protocol::DecodeWeatherAsk(a_data)) {
+				const auto owner = clockOwner();
+				if (owner == 0 || a_peer.playerId == owner) {
+					if (!std::exchange(a_peer.toldOwnAsk, true)) {
+						log(owner == 0 ? std::format("server: player {} asked for a weather with no clock owner in the session: dropped", a_peer.playerId)
+						                : std::format("server: player {} asked for a weather while keeping the session's clock itself: dropped", a_peer.playerId));
+					}
+					break;
+				}
+				if (!ask->release && !a_peer.weatherAskBudget.Take(Clock::now())) {
+					break;  // past the budget: a later ask (or the release) says the rest
+				}
+				ask->playerId = a_peer.playerId;
+				for (const auto& [key, peer] : peers) {
+					if (peer.joined && peer.playerId == owner) {
+						send(key, Protocol::Encode(*ask, MT::kRemoteWeatherAsk), true);
+						break;
+					}
 				}
 			}
 			break;

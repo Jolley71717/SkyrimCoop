@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -88,7 +89,7 @@ TEST("clock: a game's clock goes as it is said, the owner named only from the se
 	const auto passed = Protocol::DecodeClockState(Protocol::Encode(ours, MT::kRemoteClock));
 	REQUIRE(passed);
 	CHECK(*passed == ours);
-	CHECK(Protocol::VERSION == 9);
+	CHECK(Protocol::VERSION == 32);
 }
 
 TEST("clock: a clock no game could have is no message")
@@ -521,7 +522,7 @@ TEST("clock rules: weather is forced on arriving under the owner's sky, eased in
 
 	// Arriving (a join, stepping out) under another weather: forced at once; then the same.
 	CHECK(weather.Decide(owner, ourSky, t0) == WeatherMove::kForce);
-	CHECK(weather.Decide(owner, Sky{ .outside = true, .worldspace = 0x3C, .weather = 0xAAAA }, t0 + 1s) == WeatherMove::kNone);
+	CHECK(weather.Decide(owner, Sky{ .outside = true, .worldspace = 0x3C, .weather = 0xAAAA, .pinned = true, .overrideWeather = 0xAAAA }, t0 + 1s) == WeatherMove::kNone);
 
 	// The owner's weather turns: eased in; not asked again while it eases; forced after WEATHER_PATIENCE.
 	const auto turned = Outside(0xCCCC);
@@ -529,7 +530,7 @@ TEST("clock rules: weather is forced on arriving under the owner's sky, eased in
 	CHECK(weather.Decide(turned, stillOld, t0 + 10s) == WeatherMove::kEase);
 	CHECK(weather.Decide(turned, stillOld, t0 + 20s) == WeatherMove::kNone);
 	CHECK(weather.Decide(turned, stillOld, t0 + 10s + WEATHER_PATIENCE) == WeatherMove::kForce);
-	CHECK(weather.Decide(turned, Sky{ .outside = true, .worldspace = 0x3C, .weather = 0xCCCC }, t0 + 41s) == WeatherMove::kNone);
+	CHECK(weather.Decide(turned, Sky{ .outside = true, .worldspace = 0x3C, .weather = 0xCCCC, .pinned = true, .overrideWeather = 0xCCCC }, t0 + 41s) == WeatherMove::kNone);
 
 	// Our own game rolls another weather: eased back, not snapped.
 	CHECK(weather.Decide(turned, Sky{ .outside = true, .worldspace = 0x3C, .weather = 0xDDDD }, t0 + 60s) == WeatherMove::kEase);
@@ -619,7 +620,8 @@ TEST("clock rules: a walled city and the land round it are one sky: a world on i
 	using Clock = std::chrono::steady_clock;
 	const auto t0 = Clock::time_point{} + 1000s;
 	const auto at = [&](std::uint32_t a_world, std::uint32_t a_weather) {
-		return Sky{ .outside = true, .worldspace = SkyWorld(a_world, parentSky), .weather = a_weather };
+		// Following, the weather here is our pin (WeatherFollower: set as an override).
+		return Sky{ .outside = true, .worldspace = SkyWorld(a_world, parentSky), .weather = a_weather, .pinned = true, .overrideWeather = a_weather };
 	};
 	const auto says = [&](std::uint32_t a_world, std::uint32_t a_weather) { return Outside(a_weather, SkyWorld(a_world, parentSky)); };
 
@@ -644,8 +646,10 @@ TEST("clock rules: a walled city and the land round it are one sky: a world on i
 	CHECK(weather.forced == 1u);
 	CHECK(weather.eased == 3u);
 
-	// A world on its own climate is another sky: not followed.
-	CHECK(weather.Decide(says(0x3C, 0xEEEE), at(0x7777, 0xDDDD), t0 + 70s) == WeatherMove::kNone);
+	// A world on its own climate is another sky: not followed, and our pin let go there (its climate's weather from now).
+	CHECK(weather.Decide(says(0x3C, 0xEEEE), at(0x7777, 0xDDDD), t0 + 70s) == WeatherMove::kRelease);
+	CHECK(weather.Decide(says(0x3C, 0xEEEE), Sky{ .outside = true, .worldspace = 0x7777, .weather = 0xDDDD }, t0 + 71s) == WeatherMove::kNone);
+	CHECK(weather.releases == 1u);
 }
 
 TEST("clock rules: nothing follows while this game's own Sleep/Wait runs; once it shuts, the owner's clock is lined up from there")
@@ -704,4 +708,454 @@ TEST("clock rules: the Helgen opening holds the clock only once it has begun: a 
 	CHECK(!OpeningHolds(true, true, 1000, true));  // done
 	CHECK(!OpeningHolds(false, false, 0, false));  // not running (a scene elsewhere holds the player)
 	CHECK(!OpeningHolds(false, true, 1000, true));
+}
+
+// ---- a friend's weather magic (Clear Skies, Storm Call, the sun arrow, a mod's weather spell) ------------------------
+
+namespace
+{
+	using Protocol::WeatherAsk;
+
+	std::vector<WeatherAsk> AsksIn(const std::vector<std::vector<std::uint8_t>>& a_packets)
+	{
+		std::vector<WeatherAsk> out;
+		for (const auto& packet : a_packets) {
+			if (Protocol::PeekType(packet) == MT::kRemoteWeatherAsk) {
+				if (const auto ask = Protocol::DecodeWeatherAsk(packet)) {
+					out.push_back(*ask);
+				}
+			}
+		}
+		return out;
+	}
+
+	// Following player 1 under Tamriel's sky: its weather here, pinned (WeatherFollower).
+	Sky Pinned(std::uint32_t a_weather)
+	{
+		return Sky{ .outside = true, .worldspace = 0x3C, .weather = a_weather, .pinned = true, .overrideWeather = a_weather };
+	}
+
+	// Under Tamriel's sky with a script's override (a spell's), or none.
+	Sky Held(std::uint32_t a_weather, std::uint32_t a_override)
+	{
+		return Sky{ .outside = true, .worldspace = 0x3C, .weather = a_weather, .overridden = a_override != 0, .overrideWeather = a_override };
+	}
+
+	Sky Plain(std::uint32_t a_weather)
+	{
+		return Sky{ .outside = true, .worldspace = 0x3C, .weather = a_weather };
+	}
+}
+
+TEST("weather ask: a friend's weather magic goes as it is said, the asker named only from the server; a release names nothing")
+{
+	const WeatherAsk ask{ .playerId = 7, .worldspace = 0x3C, .weather = 0x10A241, .held = true };
+	const auto       sent = Protocol::Encode(ask);
+	REQUIRE(Protocol::PeekType(sent) == MT::kWeatherAsk);
+	const auto read = Protocol::DecodeWeatherAsk(sent);
+	REQUIRE(read);
+	CHECK(read->playerId == 0u);  // a game does not say who it is: the server knows
+	CHECK(read->worldspace == 0x3Cu);
+	CHECK(read->weather == 0x10A241u);
+	CHECK(read->held);
+	CHECK(!read->release);
+	const auto passed = Protocol::DecodeWeatherAsk(Protocol::Encode(ask, MT::kRemoteWeatherAsk));
+	REQUIRE(passed);
+	CHECK(*passed == ask);
+
+	// A release: its forms and its hold are not written (only the asker's held one is let go).
+	const WeatherAsk release{ .playerId = 7, .worldspace = 0x3C, .weather = 0x10A241, .held = true, .release = true };
+	const auto       let = Protocol::DecodeWeatherAsk(Protocol::Encode(release, MT::kRemoteWeatherAsk));
+	REQUIRE(let);
+	CHECK(let->release);
+	CHECK(!let->held);
+	CHECK(let->worldspace == 0u);
+	CHECK(let->weather == 0u);
+	CHECK(let->playerId == 7u);
+}
+
+TEST("weather ask: an ask no game could make is no message")
+{
+	const WeatherAsk good{ .worldspace = 0x3C, .weather = 0x10A241 };
+	CHECK(Protocol::DecodeWeatherAsk(Protocol::Encode(good)));
+	CHECK(!Protocol::DecodeWeatherAsk(Protocol::Encode(WeatherAsk{ .worldspace = 0x3C })));   // no weather to set
+	CHECK(!Protocol::DecodeWeatherAsk(Protocol::Encode(WeatherAsk{ .weather = 0x10A241 })));  // no sky to set it under
+
+	auto flags = Protocol::Encode(good);
+	flags.back() = 4;  // a flag no game knows
+	CHECK(!Protocol::DecodeWeatherAsk(flags));
+	flags.back() = 2;  // a release naming forms
+	CHECK(!Protocol::DecodeWeatherAsk(flags));
+	auto heldRelease = Protocol::Encode(WeatherAsk{ .release = true });
+	REQUIRE(Protocol::DecodeWeatherAsk(heldRelease));
+	heldRelease.back() = 3;  // a release that holds
+	CHECK(!Protocol::DecodeWeatherAsk(heldRelease));
+
+	auto longer = Protocol::Encode(good);
+	longer.push_back(0);
+	CHECK(!Protocol::DecodeWeatherAsk(longer));
+	auto shorter = Protocol::Encode(good);
+	shorter.pop_back();
+	CHECK(!Protocol::DecodeWeatherAsk(shorter));
+	CHECK(!Protocol::DecodeWeatherAsk(Protocol::Encode(Owner(12.0f, 1.0f))));
+}
+
+TEST("weather ask: its worldspace and weather cross by plugin name; one the owner's game lacks is not asked at all")
+{
+	using FormIds::Mapper;
+	using FormTranslate::Result;
+	using FormTranslate::Way;
+	CHECK(FormTranslate::CarriesForms(MT::kWeatherAsk));
+	CHECK(FormTranslate::CarriesForms(MT::kRemoteWeatherAsk));
+
+	// As in the clock's test: the host has Weathers.esp before Shared.esp; the guest (the owner here) Shared.esp only.
+	const auto host = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Weathers.esp", "Shared.esp" }, {});
+	const auto guest = Protocol::ComparedLoadOrder({ "Skyrim.esm", "Shared.esp" }, {});
+	std::vector<std::string> session;
+	FormIds::Extend(session, host);
+	FormIds::Extend(session, guest);
+	const Mapper guestEdge(guest, session);
+	const auto   toGuest = [&](const WeatherAsk& a_ask) {
+		return FormTranslate::Translate(guestEdge, Way::kToLocal, Protocol::Encode(a_ask, MT::kRemoteWeatherAsk));
+	};
+
+	// Tamriel and a base game weather: as they are.
+	auto result = toGuest(WeatherAsk{ .playerId = 2, .worldspace = 0x3C, .weather = 0x0010A241, .held = true });
+	CHECK(result.kind == Result::Kind::kSame);
+
+	// A weather of Shared.esp: the guest's own ID for it, the rest as it was.
+	result = toGuest(WeatherAsk{ .playerId = 2, .worldspace = 0x3C, .weather = 0x02000801, .held = true });
+	REQUIRE(result.kind == Result::Kind::kChanged);
+	const auto mapped = Protocol::DecodeWeatherAsk(result.packet);
+	REQUIRE(mapped);
+	CHECK(mapped->weather == 0x01000801u);
+	CHECK(mapped->worldspace == 0x3Cu);
+	CHECK(mapped->playerId == 2u);
+	CHECK(mapped->held);
+
+	// A weather, or a worldspace, of Weathers.esp, which the guest lacks: nothing it could set, so not read at all.
+	CHECK(toGuest(WeatherAsk{ .playerId = 2, .worldspace = 0x3C, .weather = 0x01000801 }).kind == Result::Kind::kDrop);
+	CHECK(toGuest(WeatherAsk{ .playerId = 2, .worldspace = 0x01000D62, .weather = 0x0010A241 }).kind == Result::Kind::kDrop);
+
+	// A release names nothing: always read.
+	CHECK(toGuest(WeatherAsk{ .playerId = 2, .release = true }).kind == Result::Kind::kSame);
+}
+
+TEST("weather ask server: a friend's goes to the clock owner alone, with whose it is; the owner's own is dropped; a burst is budgeted, a release never")
+{
+	Server::Options options;
+	options.hostIdentity = 0x4057;
+	Fixture f{ options };
+	f.fake->SetLocal(1);
+	const auto host = f.Join(1, Fixture::MakeHello("Host", 0x4057));
+	const auto a = f.Join(2, Fixture::MakeHello("A", 0x2222));
+	const auto b = f.Join(3, Fixture::MakeHello("B", 0x3333));
+	REQUIRE(host);
+	REQUIRE(a);
+	REQUIRE(b);
+	REQUIRE(f.fake->Settle());
+	f.fake->Take(1);
+	f.fake->Take(2);
+	f.fake->Take(3);
+
+	// A's Clear Skies: to the host, named A's; not to B, not back to A.
+	f.fake->Deliver(2, Protocol::Encode(WeatherAsk{ .worldspace = 0x3C, .weather = 0x10A241, .held = true }));
+	const auto heard = f.fake->WaitFor(1, Type(MT::kRemoteWeatherAsk));
+	REQUIRE(heard);
+	const auto ask = Protocol::DecodeWeatherAsk(*heard);
+	REQUIRE(ask);
+	CHECK(ask->playerId == a->playerId);
+	CHECK(ask->weather == 0x10A241u);
+	CHECK(ask->held);
+	REQUIRE(f.fake->Settle());
+	CHECK(CountOf(f.fake->Take(2), MT::kRemoteWeatherAsk) == 0);
+	CHECK(CountOf(f.fake->Take(3), MT::kRemoteWeatherAsk) == 0);
+
+	// The host's own magic is its own sky, said by its clock: an ask from it goes nowhere, said once in the log.
+	f.fake->Deliver(1, Protocol::Encode(WeatherAsk{ .worldspace = 0x3C, .weather = 0x10A241 }));
+	f.fake->Deliver(1, Protocol::Encode(WeatherAsk{ .worldspace = 0x3C, .weather = 0x10A242 }));
+	REQUIRE(f.LoggedSoon(std::format("player {} asked for a weather while keeping the session's clock itself: dropped", host->playerId)));
+	REQUIRE(f.fake->Settle());
+	CHECK(CountOf(f.fake->Take(1), MT::kRemoteWeatherAsk) == 0);
+	CHECK(CountOf(f.fake->Take(2), MT::kRemoteWeatherAsk) == 0);
+	CHECK(CountOf(f.fake->Take(3), MT::kRemoteWeatherAsk) == 0);
+	CHECK(std::ranges::count_if(f.LogLines(), [](const std::string& a_line) { return a_line.find("asked for a weather while keeping") != std::string::npos; }) == 1);
+
+	// B spams its shout: a burst of 4 goes, the rest are dropped; its release always goes.
+	for (std::uint32_t i = 0; i < 12; ++i) {
+		f.fake->Deliver(3, Protocol::Encode(WeatherAsk{ .worldspace = 0x3C, .weather = 0x10A241u + i, .held = true }));
+	}
+	f.fake->Deliver(3, Protocol::Encode(WeatherAsk{ .release = true }));
+	std::vector<WeatherAsk> got;
+	const auto              deadline = std::chrono::steady_clock::now() + 10s;
+	while (std::chrono::steady_clock::now() < deadline && (got.empty() || !got.back().release)) {
+		const auto more = AsksIn(f.fake->Take(1));
+		got.insert(got.end(), more.begin(), more.end());
+		std::this_thread::sleep_for(20ms);
+	}
+	REQUIRE(!got.empty());
+	CHECK(got.back().release);
+	CHECK(got.back().playerId == b->playerId);
+	CHECK(got.size() >= 5u);
+	CHECK(got.size() <= 7u);  // 4 at once and the release (one or two refilled at most, on a slow machine)
+}
+
+TEST("weather follow: the owner's weather is pinned here while following, and let go on leaving its sky")
+{
+	using Clock = std::chrono::steady_clock;
+	const auto      t0 = Clock::time_point{} + 1000s;
+	WeatherFollower weather;
+	const auto      owner = Outside(0xAAAA);
+
+	// Already the owner's weather (a save just written, a script let its own go): pinned as it is, no transition.
+	CHECK(weather.Decide(owner, Plain(0xAAAA), t0) == WeatherMove::kPin);
+	CHECK(weather.Decide(owner, Pinned(0xAAAA), t0 + 1s) == WeatherMove::kNone);
+	CHECK(weather.pins == 1u);
+
+	// A script of ours holds its own override (a quest's storm): not pinned over it.
+	CHECK(weather.Decide(owner, Held(0xAAAA, 0xAAAA), t0 + 2s) == WeatherMove::kNone);
+	CHECK(weather.Decide(owner, Held(0xEEEE, 0xEEEE), t0 + 3s) == WeatherMove::kHeld);
+	CHECK(weather.pins == 1u);
+
+	// Inside (the pin is still the sky's override until let go): let go once; nothing after.
+	Sky inside = Pinned(0xAAAA);
+	inside.outside = false;
+	inside.worldspace = 0;
+	CHECK(weather.Decide(owner, inside, t0 + 4s) == WeatherMove::kRelease);
+	CHECK(weather.Decide(owner, Sky{}, t0 + 5s) == WeatherMove::kNone);
+	CHECK(weather.releases == 1u);
+
+	// The owner went inside (no weather said): ours let go too, under the climate here.
+	CHECK(weather.Decide(owner, Pinned(0xAAAA), t0 + 6s) == WeatherMove::kNone);
+	CHECK(weather.Decide(Outside(0, 0), Pinned(0xAAAA), t0 + 7s) == WeatherMove::kRelease);
+	CHECK(weather.releases == 2u);
+}
+
+TEST("weather magic: a held weather of our magic is asked of the owner, and let go there when it ends")
+{
+	using Clock = std::chrono::steady_clock;
+	const auto t0 = Clock::time_point{} + 1000s;
+	MagicWatch magic;
+
+	// Nothing seen yet (the first tick): a cast opens nothing.
+	magic.Cast(t0, 0x3C);
+	CHECK(!magic.Holds());
+	CHECK(magic.windows == 0u);
+
+	// Following player 1's sky, AAAA pinned. Our Clear Skies takes hold: a window opens (our pin is taken off).
+	magic.Seen(Pinned(0xAAAA));
+	magic.Cast(t0, 0x3C);
+	CHECK(magic.Holds());
+	CHECK(magic.windows == 1u);
+	CHECK(magic.Look(t0, Plain(0xAAAA), 0xAAAA).kind == MagicStep::Kind::kNone);
+
+	// Its script holds a clear weather as an override: asked, held.
+	const auto asked = magic.Look(t0 + 100ms, Held(0xAAAA, 0xCCCC), 0xAAAA);
+	CHECK(asked.kind == MagicStep::Kind::kAsk);
+	CHECK(asked.worldspace == 0x3Cu);
+	CHECK(asked.weather == 0xCCCCu);
+	CHECK(asked.held);
+	CHECK(magic.Asked() == std::optional<std::uint32_t>{ 0xCCCC });
+	CHECK(magic.asks == 1u);
+
+	// While it lasts: nothing more, and the sky is the magic's (the owner's report carries it soon).
+	CHECK(magic.Look(t0 + 10s, Held(0xCCCC, 0xCCCC), 0xCCCC).kind == MagicStep::Kind::kNone);
+	CHECK(magic.Holds());
+
+	// Another cast meanwhile (a potion) changes nothing of it.
+	magic.Seen(Held(0xCCCC, 0xCCCC));
+	magic.Cast(t0 + 20s, 0x3C);
+	CHECK(magic.Look(t0 + 20s, Held(0xCCCC, 0xCCCC), 0xCCCC).kind == MagicStep::Kind::kNone);
+
+	// The effect ends (its script lets the override go): the owner is told to let go.
+	const auto ended = magic.Look(t0 + 60s, Plain(0xCCCC), 0xCCCC);
+	CHECK(ended.kind == MagicStep::Kind::kRelease);
+	CHECK(ended.weather == 0xCCCCu);
+	CHECK(!magic.Holds());
+	CHECK(!magic.Asked());
+	CHECK(magic.releases == 1u);
+}
+
+TEST("weather magic: a weather our magic sets and does not hold is asked once; the window closes on its own")
+{
+	using Clock = std::chrono::steady_clock;
+	const auto t0 = Clock::time_point{} + 1000s;
+
+	// A Storm Call not held: the weather turns, no override. Asked, not held; left to the magic until the owner's
+	// report carries it.
+	{
+		MagicWatch magic;
+		magic.Seen(Pinned(0xAAAA));
+		magic.Cast(t0, 0x3C);
+		const auto asked = magic.Look(t0 + 1s, Plain(0xDDDD), 0xAAAA);
+		CHECK(asked.kind == MagicStep::Kind::kAsk);
+		CHECK(asked.weather == 0xDDDDu);
+		CHECK(!asked.held);
+		CHECK(!magic.Asked());  // nothing to let go later
+		CHECK(magic.Look(t0 + 3s, Plain(0xDDDD), 0xAAAA).kind == MagicStep::Kind::kNone);
+		CHECK(magic.Holds());
+		CHECK(magic.Look(t0 + 4s, Plain(0xDDDD), 0xDDDD).kind == MagicStep::Kind::kNone);
+		CHECK(!magic.Holds());  // the owner's sky has it: followed again
+	}
+	// ... and the owner never says it (its game went inside): given up after MAGIC_ANSWER.
+	{
+		MagicWatch magic;
+		magic.Seen(Pinned(0xAAAA));
+		magic.Cast(t0, 0x3C);
+		CHECK(magic.Look(t0 + 1s, Plain(0xDDDD), 0xAAAA).kind == MagicStep::Kind::kAsk);
+		CHECK(magic.Look(t0 + MAGIC_ANSWER, Plain(0xDDDD), 0).kind == MagicStep::Kind::kNone);
+		CHECK(magic.Holds());
+		CHECK(magic.Look(t0 + 1s + MAGIC_ANSWER, Plain(0xDDDD), 0).kind == MagicStep::Kind::kNone);
+		CHECK(!magic.Holds());
+	}
+	// The sun arrow: it lets every override go, then sets its own, held: asked once, then asked again held.
+	{
+		MagicWatch magic;
+		magic.Seen(Pinned(0xAAAA));
+		magic.Cast(t0, 0x3C);
+		CHECK(magic.Look(t0 + 1s, Plain(0xBBBB), 0xAAAA).kind == MagicStep::Kind::kAsk);
+		const auto held = magic.Look(t0 + 2s, Held(0xBBBB, 0x5555), 0xAAAA);
+		CHECK(held.kind == MagicStep::Kind::kAsk);
+		CHECK(held.weather == 0x5555u);
+		CHECK(held.held);
+		CHECK(magic.asks == 2u);
+	}
+	// A spell that does nothing to the sky (a heal): the window closes, nothing asked.
+	{
+		MagicWatch magic;
+		magic.Seen(Pinned(0xAAAA));
+		magic.Cast(t0, 0x3C);
+		CHECK(magic.Look(t0 + 1s, Plain(0xAAAA), 0xAAAA).kind == MagicStep::Kind::kNone);
+		CHECK(magic.Holds());
+		CHECK(magic.Look(t0 + MAGIC_WINDOW, Plain(0xAAAA), 0xAAAA).kind == MagicStep::Kind::kNone);
+		CHECK(!magic.Holds());
+		CHECK(magic.asks == 0u);
+	}
+	// Inside, or under a sky not the owner's (our own climate's): our magic's weather is our own, nothing opens.
+	{
+		MagicWatch magic;
+		magic.Seen(Sky{});
+		magic.Cast(t0, 0x3C);
+		CHECK(!magic.Holds());
+		magic.Seen(Sky{ .outside = true, .worldspace = 0x7777, .weather = 0xAAAA });
+		magic.Cast(t0, 0x3C);
+		CHECK(!magic.Holds());
+		magic.Seen(Pinned(0xAAAA));
+		magic.Cast(t0, 0);  // no owner's sky heard
+		CHECK(!magic.Holds());
+		CHECK(magic.windows == 0u);
+	}
+}
+
+TEST("weather magic: a held one is let go on leaving its sky, after MAGIC_HOLD_MAX, and replaced by a second")
+{
+	using Clock = std::chrono::steady_clock;
+	const auto t0 = Clock::time_point{} + 1000s;
+	const auto ask = [&](MagicWatch& a_magic, std::uint32_t a_override) {
+		a_magic.Seen(Pinned(0xAAAA));
+		a_magic.Cast(t0, 0x3C);
+		return a_magic.Look(t0, Held(0xAAAA, a_override), 0xAAAA);
+	};
+	{
+		MagicWatch magic;
+		REQUIRE(ask(magic, 0xCCCC).held);
+		CHECK(magic.Look(t0 + 5s, Sky{}, 0xCCCC).kind == MagicStep::Kind::kRelease);  // went inside
+	}
+	{
+		MagicWatch magic;
+		REQUIRE(ask(magic, 0xCCCC).held);
+		CHECK(magic.Look(t0 + MAGIC_HOLD_MAX - 1s, Held(0xCCCC, 0xCCCC), 0xCCCC).kind == MagicStep::Kind::kNone);
+		CHECK(magic.Look(t0 + MAGIC_HOLD_MAX, Held(0xCCCC, 0xCCCC), 0xCCCC).kind == MagicStep::Kind::kRelease);
+	}
+	{
+		MagicWatch magic;
+		REQUIRE(ask(magic, 0xCCCC).held);
+		const auto storm = magic.Look(t0 + 30s, Held(0xCCCC, 0xDDDD), 0xCCCC);  // Storm Call over Clear Skies
+		CHECK(storm.kind == MagicStep::Kind::kAsk);
+		CHECK(storm.weather == 0xDDDDu);
+		CHECK(magic.Asked() == std::optional<std::uint32_t>{ 0xDDDD });
+	}
+	{
+		MagicWatch magic;
+		REQUIRE(ask(magic, 0xCCCC).held);
+		magic.Reset();  // a load, the owner gone
+		CHECK(!magic.Holds());
+		CHECK(!magic.Asked());
+	}
+}
+
+TEST("weather magic, the owner: a friend's is set under our sky, held until it ends, its friend leaves, or MAGIC_HOLD_MAX")
+{
+	using Clock = std::chrono::steady_clock;
+	const auto t0 = Clock::time_point{} + 1000s;
+	AskKeeper  keeper;
+	const Sky  ours = Plain(0xAAAA);
+	const Sky  held = Held(0xCCCC, 0xCCCC);
+	const auto clearSkies = [](std::uint32_t a_player) { return WeatherAsk{ .playerId = a_player, .worldspace = 0x3C, .weather = 0xCCCC, .held = true }; };
+
+	// Not under that sky (inside, or another worldspace): nothing set.
+	CHECK(keeper.Heard(clearSkies(2), Sky{}, t0).kind == AskMove::Kind::kIgnore);
+	CHECK(keeper.Heard(WeatherAsk{ .playerId = 2, .worldspace = 0x7777, .weather = 0xCCCC, .held = true }, ours, t0).kind == AskMove::Kind::kIgnore);
+	CHECK(keeper.ignored == 2u);
+	CHECK(keeper.Weather() == 0u);
+
+	// Player 2's Clear Skies: set, held.
+	auto move = keeper.Heard(clearSkies(2), ours, t0);
+	CHECK(move.kind == AskMove::Kind::kSet);
+	CHECK(move.weather == 0xCCCCu);
+	CHECK(move.held);
+	CHECK(keeper.Weather() == 0xCCCCu);
+	CHECK(keeper.By() == 2u);
+	CHECK(keeper.Tick(t0 + 10s, held).kind == AskMove::Kind::kNone);
+
+	// Someone else's release is not 2's; 2's lets it go.
+	CHECK(keeper.Heard(WeatherAsk{ .playerId = 3, .release = true }, held, t0 + 20s).kind == AskMove::Kind::kNone);
+	CHECK(keeper.Weather() == 0xCCCCu);
+	move = keeper.Heard(WeatherAsk{ .playerId = 2, .release = true }, held, t0 + 30s);
+	CHECK(move.kind == AskMove::Kind::kRelease);
+	CHECK(move.weather == 0xCCCCu);
+	CHECK(keeper.Weather() == 0u);
+	CHECK(keeper.releases == 1u);
+
+	// 2 leaves while it holds: let go.
+	REQUIRE(keeper.Heard(clearSkies(2), ours, t0 + 40s).kind == AskMove::Kind::kSet);
+	CHECK(keeper.Left(3, held).kind == AskMove::Kind::kNone);
+	CHECK(keeper.Left(2, held).kind == AskMove::Kind::kRelease);
+	CHECK(keeper.Weather() == 0u);
+
+	// Never said to end: let go after MAGIC_HOLD_MAX.
+	REQUIRE(keeper.Heard(clearSkies(2), ours, t0 + 50s).kind == AskMove::Kind::kSet);
+	CHECK(keeper.Tick(t0 + 50s + MAGIC_HOLD_MAX - 1s, held).kind == AskMove::Kind::kNone);
+	move = keeper.Tick(t0 + 50s + MAGIC_HOLD_MAX, held);
+	CHECK(move.kind == AskMove::Kind::kRelease);
+	CHECK(keeper.Weather() == 0u);
+
+	// A script of ours took the sky (a quest's storm) meanwhile: forgotten, and nothing of ours let go.
+	REQUIRE(keeper.Heard(clearSkies(2), ours, t0 + 60s).kind == AskMove::Kind::kSet);
+	CHECK(keeper.Tick(t0 + 61s, Held(0xEEEE, 0xEEEE)).kind == AskMove::Kind::kNone);
+	CHECK(keeper.Weather() == 0u);
+	CHECK(keeper.Heard(WeatherAsk{ .playerId = 2, .release = true }, Held(0xEEEE, 0xEEEE), t0 + 62s).kind == AskMove::Kind::kNone);
+
+	// A weather not held (a Storm Call that lets the climate go on) replaces a held one: nothing kept.
+	REQUIRE(keeper.Heard(clearSkies(2), ours, t0 + 70s).kind == AskMove::Kind::kSet);
+	move = keeper.Heard(WeatherAsk{ .playerId = 3, .worldspace = 0x3C, .weather = 0xDDDD }, held, t0 + 71s);
+	CHECK(move.kind == AskMove::Kind::kSet);
+	CHECK(!move.held);
+	CHECK(keeper.Weather() == 0u);
+	CHECK(keeper.sets == 6u);
+	CHECK(keeper.releases == 3u);
+}
+
+TEST("weather magic, the save: a friend's save keeps the session's day count, said against the one it joined with")
+{
+	SaveDays days;
+	CHECK(!days.Since(12.0));
+	days.Joined(10.25);
+	days.Joined(11.0);  // the next tick: the first is kept
+	REQUIRE(days.Since(12.75));
+	CHECK(Near(*days.Since(12.75), 2.5));
+	days.Reset();  // a load: its day count is the one it is in the session with
+	CHECK(!days.Since(12.75));
+	days.Joined(30.0);
+	CHECK(Near(*days.Since(30.5), 0.5));
 }
