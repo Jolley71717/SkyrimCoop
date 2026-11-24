@@ -2,6 +2,7 @@
 
 #include "FormIds.h"
 #include "Protocol.h"
+#include "QuestAudit.h"
 #include "QuestBook.h"
 #include "StageRows.h"
 
@@ -84,7 +85,7 @@ namespace QuestRules
 	}
 
 	// Typed quests that are each player's own, by editor ID (any case), each for a reason the record does not show.
-	// The audit of every quest (docs/FEATURES.md, "What stays each player's own") adds to it; a mod's quest is judged
+	// The audit of every quest (docs/QUEST-AUDIT.md, QUEST_AUDIT) lists them as ownList; a mod's quest is judged
 	// by its record like any other.
 	struct OwnQuest
 	{
@@ -178,6 +179,109 @@ namespace QuestRules
 			return row;
 		}
 		return a_started ? nullptr : StartUpRowOf(a_rules, a_editorId);
+	}
+
+	// ---- the audit: every quest of the base game, shared or not, with the reason ------------------------------------
+
+	// How many of a quest's stages STAGE_RULES has.
+	[[nodiscard]] inline std::uint16_t NearStagesOf(std::span<const StageRule> a_rules, std::string_view a_editorId)
+	{
+		const StageRule key{ a_editorId, 0 };
+		std::uint16_t   n = 0;
+		for (auto it = std::lower_bound(a_rules.begin(), a_rules.end(), key, RuleLess); it != a_rules.end() && CompareName(it->editorId, a_editorId) == 0; ++it) {
+			++n;
+		}
+		return n;
+	}
+
+	// What a quest's class and its stage rows make it: the audit's verdict and reason (AuditRule.h).
+	struct Audited
+	{
+		AuditVerdict verdict = AuditVerdict::kNotShared;
+		AuditWhy     why = AuditWhy::kUntyped;
+		bool         operator==(const Audited&) const = default;
+	};
+
+	[[nodiscard]] constexpr Audited AuditOfClass(Class a_class, std::uint16_t a_nearStages)
+	{
+		switch (a_class) {
+		case Class::kShared:
+			return a_nearStages != 0 ? Audited{ AuditVerdict::kLimited, AuditWhy::kNearStages } : Audited{ AuditVerdict::kShared, AuditWhy::kWhole };
+		case Class::kRadiant:
+			return { AuditVerdict::kLimited, AuditWhy::kHostRun };
+		case Class::kOwn:
+			return { AuditVerdict::kNotShared, AuditWhy::kOwnList };
+		case Class::kMisc:
+			return { AuditVerdict::kNotShared, AuditWhy::kMisc };
+		case Class::kUntyped:
+			return { AuditVerdict::kNotShared, AuditWhy::kUntyped };
+		case Class::kNoName:
+			return { AuditVerdict::kNotShared, AuditWhy::kNoName };
+		}
+		return {};
+	}
+
+	// The class an audit row's reason stands for.
+	[[nodiscard]] constexpr Class ClassOfAudit(const AuditRow& a_row)
+	{
+		switch (a_row.why) {
+		case AuditWhy::kWhole:
+		case AuditWhy::kNearStages:
+			return Class::kShared;
+		case AuditWhy::kHostRun:
+			return Class::kRadiant;
+		case AuditWhy::kOwnList:
+			return Class::kOwn;
+		case AuditWhy::kMisc:
+			return Class::kMisc;
+		case AuditWhy::kUntyped:
+			return Class::kUntyped;
+		case AuditWhy::kNoName:
+			return Class::kNoName;
+		}
+		return Class::kUntyped;
+	}
+
+	// The facts an audit row keeps, as QuestSync reads them from the game (the event is any one when it is radiant).
+	[[nodiscard]] inline Facts FactsOf(const AuditRow& a_row)
+	{
+		return { a_row.type, a_row.radiant ? 0 : -1, 0, std::string{ a_row.editorId } };
+	}
+
+	// A base game quest's row (QUEST_AUDIT, sorted by form ID), by its form ID as the game loads it; none for any other.
+	[[nodiscard]] inline const AuditRow* AuditOf(std::span<const AuditRow> a_audit, std::uint32_t a_formId)
+	{
+		const auto it = std::lower_bound(a_audit.begin(), a_audit.end(), a_formId, [](const AuditRow& a_row, std::uint32_t a_id) { return a_row.formId < a_id; });
+		return it != a_audit.end() && it->formId == a_formId ? &*it : nullptr;
+	}
+
+	[[nodiscard]] inline const AuditRow* AuditOf(std::uint32_t a_formId) { return AuditOf(QUEST_AUDIT, a_formId); }
+
+	// The masters the audit covers: their quests' form IDs have these indices on top (Skyrim.esm 00 ... Dragonborn.esm 04,
+	// which the game always loads first, in that order).
+	inline constexpr std::uint32_t AUDIT_MASTERS = 5;
+	[[nodiscard]] constexpr bool OfAuditedMaster(std::uint32_t a_formId) { return (a_formId >> 24) < AUDIT_MASTERS; }
+
+	// This game's own judgement of a base game quest against the audit's: the same, or apart (a mod changed its record, or
+	// the audit is out of date), or not in the audit at all. The game's own record always wins; this is for the log.
+	enum class AuditCheck : std::uint8_t
+	{
+		kSame,
+		kApart,
+		kMissing,
+		kNotAudited,  // not a quest of the masters (a mod's, the Creation Club's): judged by its record alone
+	};
+
+	[[nodiscard]] inline AuditCheck CheckAudit(std::span<const AuditRow> a_audit, std::uint32_t a_formId, Class a_class, std::uint16_t a_nearStages)
+	{
+		if (!OfAuditedMaster(a_formId)) {
+			return AuditCheck::kNotAudited;
+		}
+		const auto row = AuditOf(a_audit, a_formId);
+		if (!row) {
+			return AuditCheck::kMissing;
+		}
+		return AuditOfClass(a_class, a_nearStages) == Audited{ row->verdict, row->why } ? AuditCheck::kSame : AuditCheck::kApart;
 	}
 
 	// ---- reading the game's stages: can the done bit be trusted? ---------------------------------------------------

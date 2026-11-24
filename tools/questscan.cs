@@ -895,6 +895,236 @@ public static class MoveScan
         return sb.ToString();
     }
 
+    // ---- stage order: does a quest ever go back to a lower stage? --------------------------------------------------
+
+    // The stages of its own quest a function sets with a literal (SetStage, SetCurrentStageID on self or kmyQuest), itself
+    // or through a function of its own quest's scripts it calls that way, a few calls deep.
+    static void OwnStagesSet(SkyrimFiles.Func f, SkyrimFiles.Quest a_quest, int a_depth, HashSet<string> a_seen, List<KeyValuePair<int, string>> a_into)
+    {
+        if (a_depth > 4 || !a_seen.Add(f.Obj + "." + f.State + "." + f.Name)) return;
+        var own = OwnVars(f);
+        foreach (var i in Reachable(f, null))
+        {
+            if (i.Op != SkyrimFiles.CALLMETHOD && i.Op != SkyrimFiles.CALLPARENT) continue;
+            bool mine = i.Op == SkyrimFiles.CALLPARENT || own.Contains(i.Args[1]) || (i.Op == SkyrimFiles.CALLMETHOD && QuestOf(i.Args[1], a_quest) == a_quest);
+            if (!mine) continue;
+            int s;
+            if (i.Op == SkyrimFiles.CALLMETHOD && (Is(i.Args[0], "SetStage") || Is(i.Args[0], "SetCurrentStageID")))
+            {
+                if (i.Args.Count > 3 && int.TryParse(i.Args[3], out s)) a_into.Add(new KeyValuePair<int, string>(s, f.Obj + "." + f.Name));
+                continue;
+            }
+            string type, name;
+            if (i.Op == SkyrimFiles.CALLPARENT) { Game.Script sc; type = Game.scripts.TryGetValue(f.Obj, out sc) ? sc.Obj.Parent : null; name = i.Args[0]; }
+            else { type = TypeOf(f, i.Args[1]); name = i.Args[0]; }
+            if (type == null) continue;
+            string owner;
+            var g = Find(type, name, out owner);
+            if (g != null) OwnStagesSet(g, a_quest, a_depth + 1, a_seen, a_into);
+        }
+    }
+
+    // Every quest a session could share (Game.Typed) whose stage fragment sets a lower stage of its own quest (the rules
+    // take a higher stage for a later one: QuestRules' kPassed, Apart, QuestBook::Reached), and those whose record
+    // allows a stage to be set again (DNAM 0x0008).
+    public static string Order(string a_data)
+    {
+        Game.Load(a_data);
+        var sb = new StringBuilder();
+        int typed = 0, back = 0, repeat = 0, sets = 0;
+        foreach (var q in Game.quests.Values.Where(Game.Typed).OrderBy(x => x.Edid, StringComparer.OrdinalIgnoreCase))
+        {
+            ++typed;
+            if ((q.Flags & 0x0008) != 0) { ++repeat; sb.AppendLine(string.Format("repeat {0:X8} {1} (type {2}{3})", q.Id, q.Edid, q.Type, Game.Radiant(q) ? ", radiant" : "")); }
+            Game.Script script;
+            if (!Game.scripts.TryGetValue(q.FragmentScript, out script)) continue;
+            foreach (var kv in q.Fragments.OrderBy(k => k.Key))
+                foreach (var name in kv.Value)
+                {
+                    SkyrimFiles.Func f;
+                    if (!script.Funcs.TryGetValue(name, out f)) continue;
+                    var set = new List<KeyValuePair<int, string>>();
+                    OwnStagesSet(f, q, 0, new HashSet<string>(), set);
+                    sets += set.Count;
+                    foreach (var s in set.Where(s => s.Key < kv.Key))
+                    {
+                        ++back;
+                        sb.AppendLine(string.Format("back   {0:X8} {1} {2} -> {3} ({4})", q.Id, q.Edid, kv.Key, s.Key, s.Value));
+                    }
+                }
+        }
+        sb.AppendLine(string.Format("# typed={0} ownStageSets={1} back={2} repeatFlag={3}", typed, sets, back, repeat));
+        return sb.ToString();
+    }
+
+    // ---- choices kept in script variables ---------------------------------------------------------------------------
+
+    // Every quest a session may share whose script property is written by a dialogue line's or a scene's fragment
+    // (TIF__, SF_ scripts: they run only in the game whose player talks or watches, unlike a stage's fragment) and read
+    // by the quest's stage fragments or its own scripts: a choice the quest keeps in a variable and branches on later.
+    // Also each GlobalVariable those fragments set (by the property's name: the forms are in the dialogue records).
+    public static string Choices(string a_data)
+    {
+        Game.Load(a_data);
+        var writes = new Dictionary<string, Dictionary<string, HashSet<string>>>(StringComparer.OrdinalIgnoreCase);  // quest -> property -> writers
+        var globals = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        int fragments = 0;
+        foreach (var script in Game.scripts.Values)
+        {
+            var name = script.Obj.Name;
+            bool tif = name.StartsWith("TIF__", StringComparison.OrdinalIgnoreCase), scene = name.StartsWith("SF_", StringComparison.OrdinalIgnoreCase);
+            if (!tif && !scene) continue;
+            ++fragments;
+            foreach (var f in script.Funcs.Values)
+                foreach (var i in f.Code)
+                {
+                    if (i.Op == 29 && i.Args.Count >= 2)  // propset name object value
+                    {
+                        var type = TypeOf(f, i.Args[1]);
+                        SkyrimFiles.Quest q;
+                        if (type == null || !Game.questOfScript.TryGetValue(type, out q) || !Game.Typed(q)) continue;
+                        Dictionary<string, HashSet<string>> props;
+                        if (!writes.TryGetValue(q.Edid, out props)) writes[q.Edid] = props = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                        HashSet<string> who;
+                        if (!props.TryGetValue(i.Args[0], out who)) props[i.Args[0]] = who = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        who.Add(name);
+                    }
+                    else if (i.Op == SkyrimFiles.CALLMETHOD && (Is(i.Args[0], "SetValue") || Is(i.Args[0], "SetValueInt") || Is(i.Args[0], "Mod")) &&
+                             string.Equals(TypeOf(f, i.Args[1]), "GlobalVariable", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int n;
+                        globals.TryGetValue(i.Args[1], out n);
+                        globals[i.Args[1]] = n + 1;
+                    }
+                }
+        }
+        var sb = new StringBuilder();
+        int quests = 0, read = 0;
+        foreach (var kv in writes.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            var q = Game.byEdid[kv.Key];
+            ++quests;
+            foreach (var p in kv.Value.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                // read: a propget of it in the quest's stage fragments, or its auto property's variable in the quest's scripts
+                bool isRead = false;
+                foreach (var sname in q.Scripts.Concat(new[] { q.FragmentScript }).Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    Game.Script sc;
+                    if (!Game.scripts.TryGetValue(sname, out sc)) continue;
+                    foreach (var f in sc.Funcs.Values)
+                        if (f.Code.Any(i => (i.Op == 28 && Is(i.Args[0], p.Key)) || i.Args.Any(a => Is(a, "::" + p.Key + "_var"))))
+                        { isRead = true; break; }
+                    if (isRead) break;
+                }
+                if (isRead) ++read;
+                sb.AppendLine(string.Format("{0} {1:X8} {2}.{3} written by {4}{5}", isRead ? "branch" : "kept  ", q.Id, q.Edid, p.Key,
+                    string.Join(",", p.Value.OrderBy(x => x).Take(4).ToArray()), p.Value.Count > 4 ? " (+" + (p.Value.Count - 4) + ")" : ""));
+            }
+        }
+        foreach (var g in globals.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)) sb.AppendLine(string.Format("global {0} set by {1} fragments", g.Key, g.Value));
+        sb.AppendLine(string.Format("# dialogue and scene fragment scripts={0} quests={1} properties={2} read by the quest={3} globals={4}", fragments, quests,
+            writes.Values.Sum(v => v.Count), read, globals.Count));
+        return sb.ToString();
+    }
+
+    // ---- the audit (src/game/QuestAudit.h, docs/QUEST-AUDIT.md) ----------------------------------------------------
+
+    // QuestRules::OWN_QUESTS (src/game/QuestRules.h): tests/QuestTests.cpp checks the two agree, through the audit.
+    static readonly string[] OWN_QUESTS = { "MQ101", "RelationshipMarriage", "BYOHRelationshipAdoption" };
+
+    static readonly string[] TABS = { "none", "main", "College", "Thieves Guild", "Dark Brotherhood", "Companions", "misc", "Daedric", "side", "Civil War", "Dawnguard", "Dragonborn" };
+
+    public class Audited { public SkyrimFiles.Quest Quest; public int Near; public string Verdict; public string Why; }
+
+    // Every quest of the masters, judged as QuestRules::Classify judges it and AuditOfClass sums it up, sorted by form ID.
+    public static List<Audited> Audit(string a_data)
+    {
+        var near = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in Rows(a_data))
+        {
+            int n;
+            near.TryGetValue(r.Quest.Edid, out n);
+            near[r.Quest.Edid] = n + 1;
+        }
+        var all = new List<Audited>();
+        foreach (var q in Game.quests.Values.OrderBy(x => x.Id))
+        {
+            var a = new Audited { Quest = q };
+            near.TryGetValue(q.Edid, out a.Near);
+            if (q.Type <= 0 || q.Type > 11) { a.Verdict = "kNotShared"; a.Why = "kUntyped"; }
+            else if (q.Type == 6) { a.Verdict = "kNotShared"; a.Why = "kMisc"; }
+            else if (q.Edid.Length == 0) { a.Verdict = "kNotShared"; a.Why = "kNoName"; }
+            else if (OWN_QUESTS.Any(o => string.Equals(o, q.Edid, StringComparison.OrdinalIgnoreCase))) { a.Verdict = "kNotShared"; a.Why = "kOwnList"; }
+            else if (Game.Radiant(q)) { a.Verdict = "kLimited"; a.Why = "kHostRun"; }
+            else if (a.Near > 0) { a.Verdict = "kLimited"; a.Why = "kNearStages"; }
+            else { a.Verdict = "kShared"; a.Why = "kWhole"; }
+            all.Add(a);
+        }
+        return all;
+    }
+
+    // src/game/QuestAudit.h (ASCII, CRLF).
+    public static string AuditHeader(List<Audited> a_all)
+    {
+        var sb = new StringBuilder();
+        sb.Append("#pragma once\r\n\r\n#include \"AuditRule.h\"\r\n\r\n#include <array>\r\n\r\n");
+        sb.Append("// Written by tools/questscan.ps1 -Audit from the game's own files (Skyrim.esm, Update.esm, Dawnguard.esm,\r\n");
+        sb.Append("// HearthFires.esm, Dragonborn.esm and the scripts in Skyrim - Misc.bsa); do not edit by hand, run it again. Every quest\r\n");
+        sb.Append("// of the base game as the game loads it, sorted by form ID: its journal tab, whether it is a radiant job, its stages\r\n");
+        sb.Append("// in STAGE_RULES, and whether a session shares it, with the reason (AuditRule.h). docs/QUEST-AUDIT.md is the same\r\n");
+        sb.Append("// list for reading.\r\n");
+        sb.Append("namespace QuestRules\r\n{\r\n");
+        sb.Append("\tinline constexpr std::array<AuditRow, " + a_all.Count + "> QUEST_AUDIT{ {\r\n");
+        foreach (var a in a_all)
+            sb.Append(string.Format("\t\t{{ 0x{0:X8}, \"{1}\", {2}, {3}, {4}, AuditVerdict::{5}, AuditWhy::{6} }},\r\n", a.Quest.Id, a.Quest.Edid, Math.Max(0, a.Quest.Type),
+                Game.Radiant(a.Quest) ? "true" : "false", a.Near, a.Verdict, a.Why));
+        sb.Append("\t} };\r\n}\r\n");
+        return sb.ToString();
+    }
+
+    static string WhyText(Audited a_a)
+    {
+        switch (a_a.Why)
+        {
+            case "kWhole": return "every stage as it is";
+            case "kNearStages": return a_a.Near + (a_a.Near == 1 ? " stage" : " stages") + " made only with the friend who did it near";
+            case "kHostRun": return "a radiant job: shared while it runs as the host's, with the host's targets" + (a_a.Near > 0 ? "; " + a_a.Near + " near-only " + (a_a.Near == 1 ? "stage" : "stages") : "");
+            case "kOwnList": return "each player plays it for themselves";
+            case "kMisc": return "the misc tab: each player's own in this version";
+            case "kUntyped": return "the game's machinery (no journal tab)";
+            case "kNoName": return "no editor ID";
+        }
+        return "?";
+    }
+
+    // docs/QUEST-AUDIT.md: the counts, then every quest with a journal tab, by verdict and tab (CRLF).
+    public static string AuditDoc(List<Audited> a_all)
+    {
+        var sb = new StringBuilder();
+        sb.Append("# Quest audit\r\n\r\n");
+        sb.Append("Written by `tools/questscan.ps1 -Audit` from the game's own files; do not edit by hand, run it again. The code reads the same list (`src/game/QuestAudit.h`): each game checks its records against it at load, and the unit tests check every row against the rules, so nothing here is left unknown. How each kind is shared is in docs/DESIGN.md, \"Quests\". Not tested in a game yet.\r\n\r\n");
+        sb.Append("| Verdict | Why | Quests |\r\n| --- | --- | --- |\r\n");
+        foreach (var g in a_all.GroupBy(a => a.Verdict + "|" + a.Why).OrderBy(g => g.Key))
+        {
+            var first = g.First();
+            sb.Append(string.Format("| {0} | {1} | {2} |\r\n", Plain(first.Verdict), Plain(first.Why), g.Count()));
+        }
+        sb.Append(string.Format("| | all | {0} |\r\n", a_all.Count));
+        foreach (var section in new[] { new[] { "kShared", "Shared" }, new[] { "kLimited", "Shared, with limits" }, new[] { "kNotShared", "Not shared (quests with a journal tab; the game's untyped machinery is only counted above)" } })
+        {
+            var rows = a_all.Where(a => a.Verdict == section[0] && a.Why != "kUntyped").OrderBy(a => a.Quest.Type).ThenBy(a => a.Quest.Edid, StringComparer.OrdinalIgnoreCase).ToList();
+            sb.Append("\r\n## " + section[1] + "\r\n\r\n");
+            if (rows.Count == 0) { sb.Append("None.\r\n"); continue; }
+            sb.Append("| Quest | Form ID | Tab | Why |\r\n| --- | --- | --- | --- |\r\n");
+            foreach (var a in rows)
+                sb.Append(string.Format("| {0} | {1:X8} | {2} | {3} |\r\n", a.Quest.Edid, a.Quest.Id, TABS[Math.Max(0, Math.Min(11, a.Quest.Type))], WhyText(a)));
+        }
+        return sb.ToString();
+    }
+
+    static string Plain(string a_name) { return a_name.Length > 1 && a_name[0] == 'k' ? char.ToLowerInvariant(a_name[1]) + a_name.Substring(2) : a_name; }
+
     // src/game/StageRows.h: the rows, each with what was found (ASCII, CRLF).
     public static string Header(string a_data)
     {
