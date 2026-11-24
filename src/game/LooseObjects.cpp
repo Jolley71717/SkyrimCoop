@@ -42,6 +42,10 @@ namespace LooseObjects
 		constexpr std::uint32_t FOLLOW_ON_MAX = 8;
 		// A friend's hold not heard for this long is over: our copy falls where it is.
 		constexpr auto HOLD_STALE = 2s;
+		// A held copy's body is written every frame; its reference (its place for the save and a cell's reload, and its 3D
+		// moved with it) this often: 20 times a second keeps the mesh with the body if the engine does not draw a keyframed
+		// body's moves itself, at a third of the cost. Whether it does is for the rig (`objects`: refWrites, bodyOnly).
+		constexpr auto HOLD_REF_EVERY = 50ms;
 		// The session's places waiting here are tried this often.
 		constexpr auto WAITING_EVERY = 1s;
 		// Explosion::Update, the explosion's own update (SE and AE; this plugin is not built for VR).
@@ -167,6 +171,7 @@ namespace LooseObjects
 			Clock::time_point    heard{};
 			std::optional<Pose>  drawn;
 			bool                 keyframed = false;  // we made our copy keyframed
+			std::optional<Clock::time_point> refWritten;  // its reference last written
 			std::optional<RE::COL_LAYER> layer;      // and took it out of collisions: the layer it had
 		};
 		// Our player's let-go, said LET_GO_AFTER after it.
@@ -210,7 +215,7 @@ namespace LooseObjects
 			std::uint64_t restsSaid = 0, restsSent = 0, restsHeard = 0, restsApplied = 0, restsLeft = 0, answers = 0, catchUps = 0;
 			std::uint64_t placesApplied = 0, goneSent = 0, goneHeard = 0;
 			std::uint64_t scans = 0, started = 0, notOurs = 0, hushed = 0, followOns = 0, lost = 0, gaveUp = 0;
-			std::uint64_t badPoses = 0, writes = 0, writeFails = 0, refWrites = 0, refUnwritten = 0, keyframes = 0, releases = 0;
+			std::uint64_t badPoses = 0, writes = 0, writeFails = 0, refWrites = 0, refUnwritten = 0, bodyOnly = 0, keyframes = 0, releases = 0;
 		};
 		Counts counts;
 
@@ -400,7 +405,8 @@ namespace LooseObjects
 		// place and angles, then its 3D and collision moved with them, as the engine moves a reference: what the save, a
 		// cell's reload and the game's own drawing use), then its body, kept in step and given the velocity. A body moved
 		// alone, asleep, would collide where its mesh is not, and the reference would go back to its old place on a reload.
-		bool Write(RE::TESObjectREFR* a_ref, const Pose& a_pose, const Vec& a_velocity)
+		// a_moveRef false: the body alone (a held copy between its reference's writes).
+		bool Write(RE::TESObjectREFR* a_ref, const Pose& a_pose, const Vec& a_velocity, bool a_moveRef = true)
 		{
 			const auto bodies = a_ref ? BodiesOf(a_ref) : Bodies{};
 			if (!a_ref || bodies.count != 1 || !ObjectRules::Finite(a_velocity)) {
@@ -411,7 +417,9 @@ namespace LooseObjects
 			const auto root = a_ref->Get3D();
 			const auto senseOfBody = bodySense.Settled();
 			const auto senseOfAngles = angleSense.Settled();
-			if (here && root && senseOfBody != ObjectRules::Sense::kUnknown && senseOfAngles != ObjectRules::Sense::kUnknown) {
+			if (!a_moveRef) {
+				++counts.bodyOnly;
+			} else if (here && root && senseOfBody != ObjectRules::Sense::kUnknown && senseOfAngles != ObjectRules::Sense::kUnknown) {
 				const auto& t = root->world.translate;
 				const Pose  rootNow{ { t.x, t.y, t.z }, ObjectRules::RotOf(MatFrom(root->world.rotate), senseOfBody) };
 				// Where the body lies in the reference's frame (its collision may sit off the root), and so where the
@@ -545,6 +553,10 @@ namespace LooseObjects
 					if (const auto node = BodiesOf(ref).node) {
 						node->SetCollisionLayer(*layer);
 					}
+				}
+				// Its reference where its body is now (written at most HOLD_REF_EVERY ago): the save and a reload keep it there.
+				if (const auto pose = PoseOf(BodiesOf(ref).first)) {
+					Write(ref, *pose, {});
 				}
 				ref->SetMotionType(RE::hkpMotion::MotionType::kDynamic, true);
 				++counts.releases;
@@ -844,8 +856,12 @@ namespace LooseObjects
 						node->SetCollisionLayer(RE::COL_LAYER::kNonCollidable);
 					}
 				}
-				if (Write(ref, *hold.drawn, {})) {
+				const bool refDue = !hold.refWritten || a_now - *hold.refWritten >= HOLD_REF_EVERY;
+				if (Write(ref, *hold.drawn, {}, refDue)) {
 					++counts.holdsDrawn;
+					if (refDue) {
+						hold.refWritten = a_now;
+					}
 				}
 			}
 		}
@@ -1215,11 +1231,11 @@ namespace LooseObjects
 			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} | letGos sent={} heard={} applied={} | "
 			"rests said={} sent={} heard={} applied={} left={} answers={} placesApplied={} catchUps={} waiting={} waitingRefused={} | gone sent={} heard={} | "
 			"scans={} started={} notOurs={} hushed={} followOns={} lost={} gaveUp={} watched={} seen={} causes={} paced={} pacedDropped={} echoStopped={} | "
-			"blasts={} hits={} pickups={} | writes={} refWrites={} refUnwritten={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
+			"blasts={} hits={} pickups={} | writes={} refWrites={} refUnwritten={} bodyOnly={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
 			active.load() ? 1 : 0, explosionHooked ? 1 : 0, c.holdsSent, c.holdsHeard, c.holdsDrawn, c.holdsRefused, c.grabsDropped, c.holdsEnded, c.keyframes, c.releases,
 			c.letGosSent, c.letGosHeard, c.letGosApplied, c.restsSaid, c.restsSent, c.restsHeard, c.restsApplied, c.restsLeft, c.answers, c.placesApplied, c.catchUps,
 			waiting.Size(), waiting.refused, c.goneSent, c.goneHeard, c.scans, c.started, c.notOurs, c.hushed, c.followOns, c.lost, c.gaveUp, watches.size(), seen.Size(),
-			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), c.writes, c.refWrites, c.refUnwritten,
+			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), c.writes, c.refWrites, c.refUnwritten, c.bodyOnly,
 			c.writeFails, c.badPoses, SenseName(bodySense.Settled()), bodySense.same, bodySense.transposed, SenseName(angleSense.Settled()), angleSense.same,
 			angleSense.transposed);
 	}
