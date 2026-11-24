@@ -20,3 +20,4 @@ travel.offer_somewhere = {player} part en voyage. Appuyez sur {key} pour suivre.
 travel.refused_combat = Impossible de suivre pendant un combat.
 travel.refused_weight = Vous portez trop de choses pour suivre.
 travel.refused_now = Impossible de suivre pour le moment.
+travel.refused_place = Impossible de voyager rapidement d'ici.

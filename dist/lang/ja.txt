@@ -20,3 +20,4 @@ travel.offer_somewhere = {player}が移動します。{key}で同行します。
 travel.refused_combat = 戦闘中は同行できません。
 travel.refused_weight = 荷物が重すぎて同行できません。
 travel.refused_now = 今は同行できません。
+travel.refused_place = ここからはファストトラベルできません。

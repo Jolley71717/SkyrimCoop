@@ -20,3 +20,4 @@ travel.offer_somewhere = {player} reist ab. Drücke {key}, um zu folgen.
 travel.refused_combat = Im Kampf kannst du nicht folgen.
 travel.refused_weight = Du trägst zu viel, um zu folgen.
 travel.refused_now = Du kannst gerade nicht folgen.
+travel.refused_place = Von hier aus kannst du nicht schnellreisen.

@@ -26,6 +26,7 @@ namespace TravelTogether
 		std::uint64_t                                      offersMade = 0;
 		std::uint64_t                                      follows = 0;
 		std::uint64_t                                      controlsOff = 0;  // follows the game's fast travel controls refused
+		std::uint64_t                                      placeOff = 0;     // offers not made: fast travel is off where the trip began
 		std::map<TravelRules::Refusal, std::uint64_t>      refused;
 		std::string                                        lastTrip = "none";  // ours, for the dev channel
 
@@ -62,6 +63,49 @@ namespace TravelTogether
 				return RE::BSEventNotifyControl::kContinue;
 			}
 		};
+
+		// The player's queued move as the engine holds it: set, into another space, how far (Began adds the rest).
+		TravelRules::Queued ReadQueue(RE::PlayerCharacter* a_player)
+		{
+			const auto&         target = a_player->GetPlayerRuntimeData().queuedTargetLoc;
+			TravelRules::Queued queued;
+			queued.valid = target.isValid;
+			if (!queued.valid) {
+				return queued;
+			}
+			const auto cell = a_player->GetParentCell();
+			const bool inside = cell && cell->IsInteriorCell();
+			queued.otherSpace = target.interior ? target.interior != cell : (inside || target.world != a_player->GetWorldspace());
+			queued.distance = a_player->GetPosition().GetDistance(target.location);
+			return queued;
+		}
+
+		// Whether the game's data turns fast travel off at a place: an interior's cell (the DATA bit the Creation Kit
+		// calls "can't travel from here", CommonLibSSE-NG's kCanTravelFromHere), outside its worldspace's "can't fast
+		// travel" (Sovngarde, the Soul Cairn). Game.FastTravel from a script does not ask, so we do.
+		bool PlaceOff(const RE::TESObjectCELL* a_cell, const RE::TESWorldSpace* a_world)
+		{
+			const bool interior = a_cell && a_cell->IsInteriorCell();
+			return TravelRules::TravelOff(interior, a_cell && a_cell->cellFlags.any(RE::TESObjectCELL::Flag::kCanTravelFromHere),
+				a_world && a_world->flags.any(RE::TESWorldSpace::Flag::kCantFastTravel));
+		}
+
+		bool PlaceOff(RE::PlayerCharacter* a_player)
+		{
+			const auto cell = a_player->GetParentCell();
+			return PlaceOff(cell, cell && cell->IsInteriorCell() ? nullptr : a_player->GetWorldspace());
+		}
+
+		// Where a trip began, as this game has it (FormTranslate gave both or neither).
+		bool PlaceOff(const Protocol::Trip& a_trip)
+		{
+			const auto cell = a_trip.fromCell ? RE::TESForm::LookupByID<RE::TESObjectCELL>(a_trip.fromCell) : nullptr;
+			const auto world = a_trip.fromWorld ? RE::TESForm::LookupByID<RE::TESWorldSpace>(a_trip.fromWorld) : nullptr;
+			if (a_trip.fromWorld == 0) {
+				return cell && PlaceOff(cell, nullptr);
+			}
+			return world && PlaceOff(nullptr, world);
+		}
 
 		// A load door near the player that goes where the queued move does: a door's move, not a trip.
 		bool DoorGoes(RE::PlayerCharacter* a_player, const RE::NiPoint3& a_to)
@@ -102,7 +146,7 @@ namespace TravelTogether
 		}
 
 		// A queued move first seen: a trip of ours is said to the session with where we leave from.
-		void Began(RE::PlayerCharacter* a_player, const SendFn& a_send)
+		void Began(RE::PlayerCharacter* a_player, TravelRules::Queued a_queued, const SendFn& a_send)
 		{
 			const auto& target = a_player->GetPlayerRuntimeData().queuedTargetLoc;
 			const auto  cell = a_player->GetParentCell();
@@ -111,11 +155,8 @@ namespace TravelTogether
 			const auto  at = a_player->GetPosition();
 			const auto  marker = RE::TESObjectREFR::LookupByHandle(target.fastTravelMarker);
 
-			TravelRules::Queued queued;
-			queued.valid = true;
+			auto& queued = a_queued;
 			queued.marker = static_cast<bool>(marker);
-			queued.otherSpace = target.interior ? target.interior != cell : (inside || target.world != world);
-			queued.distance = at.GetDistance(target.location);
 			queued.door = !queued.marker && DoorGoes(a_player, target.location);
 
 			std::uint32_t destination = 0;
@@ -202,7 +243,8 @@ namespace TravelTogether
 
 			TravelRules::Now state;
 			state.offer = offer.has_value();
-			state.travelling = a_player->GetPlayerRuntimeData().queuedTargetLoc.isValid;
+			state.travelling = TravelRules::Active(ReadQueue(a_player));
+			state.placeOff = PlaceOff(a_player) || (offer && PlaceOff(*offer));
 			state.busy = (ui && (ui->GameIsPaused() || ui->IsMenuOpen(RE::DialogueMenu::MENU_NAME))) || (controls && !controls->IsMovementControlsEnabled());
 			state.combat = a_player->IsInCombat();
 			state.overWeight = a_player->IsOverEncumbered();
@@ -245,9 +287,11 @@ namespace TravelTogether
 			pressed = false;  // a key pressed on a loading screen is no follow
 			return;
 		}
-		const bool queued = player->GetPlayerRuntimeData().queuedTargetLoc.isValid;
+		// The start of a move under way, not of a queue the engine left set after it landed (TravelRules::Active).
+		const auto queue = ReadQueue(player);
+		const bool queued = TravelRules::Active(queue);
 		if (queued && !wasQueued) {
-			Began(player, a_send);
+			Began(player, queue, a_send);
 		}
 		wasQueued = queued;
 		if (pressed.exchange(false)) {
@@ -268,6 +312,11 @@ namespace TravelTogether
 		const auto at = player->GetPosition();
 		if (!TravelRules::Near(a_trip, cell->GetFormID(), inside || !world ? 0 : world->GetFormID(), at.x, at.y, at.z)) {
 			logs::info("Travel: player {} is travelling to {:08X}; we were not near", a_trip.traveller, a_trip.destination);
+			return;
+		}
+		if (PlaceOff(a_trip) || PlaceOff(player)) {
+			++placeOff;
+			logs::info("Travel: player {} is travelling to {:08X} from a place where fast travel is off: no offer", a_trip.traveller, a_trip.destination);
 			return;
 		}
 		offers.Take(a_trip, Clock::now());
@@ -300,9 +349,11 @@ namespace TravelTogether
 		for (const auto& [why, count] : refused) {
 			refusals += std::format(" {}={}", TravelRules::RefusalName(why), count);
 		}
-		return std::format("key={} installed={} sent={} last={} heard={} offers={} offer={} follows={} controlsOff={} refused:{}",
+		const auto player = RE::PlayerCharacter::GetSingleton();
+		const auto here = player ? (PlaceOff(player) ? "off" : "on") : "?";
+		return std::format("key={} installed={} sent={} last={} heard={} offers={} offer={} follows={} controlsOff={} placeOff={} here={} refused:{}",
 			TravelRules::KeyName(Config::Get().followKey), installed ? 1 : 0, tripsSent, lastTrip, tripsHeard, offersMade,
-			offer ? std::format("{:08X} from player {}", offer->destination, offer->traveller) : std::string{ "none" }, follows, controlsOff,
+			offer ? std::format("{:08X} from player {}", offer->destination, offer->traveller) : std::string{ "none" }, follows, controlsOff, placeOff, here,
 			refusals.empty() ? std::string{ " none" } : refusals);
 	}
 }

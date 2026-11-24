@@ -20,3 +20,4 @@ travel.offer_somewhere = {player}: подорож. Натисніть {key}, щ�
 travel.refused_combat = Не можна вирушити слідом під час бою.
 travel.refused_weight = Завеликий вантаж, щоб вирушити слідом.
 travel.refused_now = Зараз не можна вирушити слідом.
+travel.refused_place = Звідси не можна швидко подорожувати.

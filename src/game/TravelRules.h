@@ -16,7 +16,8 @@
 // nobody waits for a vote. A friend who was near the traveller when they left is offered to follow: a notice names the
 // place and the key, for a minute, and the key fast travels them to the same marker by the game's own fast travel (time
 // passes for them as for anyone who travels). Not while they fight, carry too much, are in a menu or a scene that took
-// the controls, or the game has fast travel turned off.
+// the controls, or the game has fast travel turned off (a quest's switch, which Game.IsFastTravelControlsEnabled reports,
+// or a place where fast travel is off: Sovngarde, the Soul Cairn, Apocrypha).
 namespace TravelRules
 {
 	using Clock = std::chrono::steady_clock;
@@ -31,6 +32,9 @@ namespace TravelRules
 	// A carriage (or a script) that moves the player with no fast travel marker: the trip goes to the map marker nearest
 	// where they land, within this.
 	inline constexpr float MARKER_NEAR = 6000.0f;
+	// A queued move whose target is this near the player's own spot, in the same space, is one the engine left set after
+	// it landed (as Party.cpp reads it): not a move under way.
+	inline constexpr float QUEUE_LANDED = 512.0f;
 	// F7 (the keyboard scan code): the follow key unless SkyrimCoop.ini says another (iFollowKey; 0: none).
 	inline constexpr std::uint32_t DEFAULT_FOLLOW_KEY = 0x41;
 
@@ -54,6 +58,20 @@ namespace TravelRules
 		bool  otherSpace = false;  // another interior or worldspace
 		float distance = 0.0f;
 	};
+
+	// Whether a queued move is under way: set, and somewhere other than where the player stands. The rising edge of this
+	// is a move's start, and a player with one under way is already travelling.
+	[[nodiscard]] constexpr bool Active(const Queued& a_queued)
+	{
+		return a_queued.valid && (a_queued.otherSpace || a_queued.distance > QUEUE_LANDED);
+	}
+
+	// Whether fast travel is off at a place, as the game's data says: an interior by its cell ("can't travel from
+	// here"), outside by its worldspace ("can't fast travel": Sovngarde, the Soul Cairn).
+	[[nodiscard]] constexpr bool TravelOff(bool a_interior, bool a_cellCant, bool a_worldCant)
+	{
+		return a_interior ? a_cellCant : a_worldCant;
+	}
 
 	enum class Start : std::uint8_t
 	{
@@ -82,6 +100,7 @@ namespace TravelRules
 		kWeight,      // over-encumbered
 		kBusy,        // a menu, dialogue, or controls a scene took
 		kTravelling,  // already on a trip
+		kPlace,       // fast travel is off where we stand (or where the traveller left)
 	};
 
 	struct Now
@@ -91,6 +110,7 @@ namespace TravelRules
 		bool overWeight = false;
 		bool busy = false;
 		bool travelling = false;
+		bool placeOff = false;
 	};
 
 	// Whether following now is refused, and why (the first that holds, in this order).
@@ -101,6 +121,9 @@ namespace TravelRules
 		}
 		if (a_now.travelling) {
 			return Refusal::kTravelling;
+		}
+		if (a_now.placeOff) {
+			return Refusal::kPlace;
 		}
 		if (a_now.busy) {
 			return Refusal::kBusy;
@@ -129,6 +152,8 @@ namespace TravelRules
 			return "busy";
 		case Refusal::kTravelling:
 			return "travelling";
+		case Refusal::kPlace:
+			return "place";
 		}
 		return "?";
 	}
@@ -143,6 +168,8 @@ namespace TravelRules
 			return "travel.refused_weight";
 		case Refusal::kBusy:
 			return "travel.refused_now";
+		case Refusal::kPlace:
+			return "travel.refused_place";
 		default:
 			return {};
 		}

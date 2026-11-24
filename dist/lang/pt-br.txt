@@ -20,3 +20,4 @@ travel.offer_somewhere = {player} está viajando. Pressione {key} para seguir.
 travel.refused_combat = Não é possível seguir durante um combate.
 travel.refused_weight = Você está carregando peso demais para seguir.
 travel.refused_now = Não é possível seguir agora.
+travel.refused_place = Não é possível viajar rápido daqui.

@@ -46,5 +46,6 @@ namespace Text
 		{ "travel.refused_combat", "You can't follow while in combat." },
 		{ "travel.refused_weight", "You are carrying too much to follow." },
 		{ "travel.refused_now", "You can't follow right now." },
+		{ "travel.refused_place", "You can't fast travel from here." },
 	};
 }

@@ -20,3 +20,4 @@ travel.offer_somewhere = {player} – podróż. Naciśnij {key}, aby podążyć.
 travel.refused_combat = Nie można podążyć podczas walki.
 travel.refused_weight = Masz zbyt duże obciążenie, aby podążyć.
 travel.refused_now = Teraz nie można podążyć.
+travel.refused_place = Stąd nie można szybko podróżować.

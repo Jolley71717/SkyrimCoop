@@ -178,7 +178,33 @@ TEST("travel: a queued move is a trip when it names a marker, or goes far or els
 	CHECK(TravelRules::TripOf(queued) == Start::kNone);  // a load door
 }
 
-TEST("travel: following is refused with no offer, on the way already, busy, in combat or carrying too much, in that order")
+TEST("travel: a queued move is under way while it goes elsewhere or away from the player's spot, not once it has landed")
+{
+	TravelRules::Queued queued;
+	CHECK(!TravelRules::Active(queued));
+	queued.valid = true;
+	CHECK(!TravelRules::Active(queued));  // left set on the spot it landed on
+	queued.distance = 400.0f;
+	CHECK(!TravelRules::Active(queued));
+	queued.distance = 600.0f;
+	CHECK(TravelRules::Active(queued));
+	queued.distance = 0.0f;
+	queued.otherSpace = true;
+	CHECK(TravelRules::Active(queued));
+	queued.valid = false;
+	CHECK(!TravelRules::Active(queued));
+}
+
+TEST("travel: fast travel is off where an interior's cell or, outside, the worldspace says so")
+{
+	CHECK(!TravelRules::TravelOff(false, false, false));
+	CHECK(TravelRules::TravelOff(false, false, true));   // Sovngarde, the Soul Cairn
+	CHECK(!TravelRules::TravelOff(false, true, false));  // an exterior cell's bit is not read
+	CHECK(TravelRules::TravelOff(true, true, false));
+	CHECK(!TravelRules::TravelOff(true, false, true));   // inside, the cell decides
+}
+
+TEST("travel: following is refused with no offer, on the way already, where fast travel is off, busy, in combat or carrying too much, in that order")
 {
 	using TravelRules::Refusal;
 	TravelRules::Now now;
@@ -191,12 +217,16 @@ TEST("travel: following is refused with no offer, on the way already, busy, in c
 	CHECK(TravelRules::Refuse(now) == Refusal::kCombat);
 	now.busy = true;
 	CHECK(TravelRules::Refuse(now) == Refusal::kBusy);
+	now.placeOff = true;
+	CHECK(TravelRules::Refuse(now) == Refusal::kPlace);
 	now.travelling = true;
 	CHECK(TravelRules::Refuse(now) == Refusal::kTravelling);
 
 	CHECK(TravelRules::RefusalText(Refusal::kCombat) == "travel.refused_combat");
 	CHECK(TravelRules::RefusalText(Refusal::kWeight) == "travel.refused_weight");
 	CHECK(TravelRules::RefusalText(Refusal::kBusy) == "travel.refused_now");
+	CHECK(TravelRules::RefusalText(Refusal::kPlace) == "travel.refused_place");
+	CHECK(TravelRules::RefusalName(Refusal::kPlace) == "place");
 	CHECK(TravelRules::RefusalText(Refusal::kNoOffer).empty());
 	CHECK(TravelRules::RefusalText(Refusal::kTravelling).empty());
 }

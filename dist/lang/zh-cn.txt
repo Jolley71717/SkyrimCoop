@@ -20,3 +20,4 @@ travel.offer_somewhere = {player}正在旅行。按 {key} 跟随。
 travel.refused_combat = 战斗中无法跟随。
 travel.refused_weight = 负重过多，无法跟随。
 travel.refused_now = 现在无法跟随。
+travel.refused_place = 无法从这里快速旅行。
