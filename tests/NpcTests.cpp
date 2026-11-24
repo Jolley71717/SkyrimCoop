@@ -99,6 +99,11 @@ TEST("npc protocol: claims, owners, states, actions and gear read back as they w
 
 	const Protocol::NpcGear gear{ .runner = 2, .key = GUARD, .worn = { { 0x00012E49, 0x4 }, { 0x00012E4B, 0x80 } }, .right = 0x00012EB7, .left = 0x00012EB6, .ammo = 0x0001397D, .unnamed = Protocol::kAmmoUnnamed, .unnamedSlots = 0x2 };
 	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(gear)) == gear);
+	// A mage's: a spell in each hand and a shout ready (protocol 21), the voice unnamed or not.
+	const Protocol::NpcGear mage{ .runner = 2, .key = GUARD, .right = 0x00012FCD, .left = 0x0002F3B8, .voice = 0x00013E07 };
+	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(mage)) == mage);
+	const Protocol::NpcGear unnamedVoice{ .runner = 2, .key = GUARD, .right = 0x00012FCD, .unnamed = Protocol::kVoiceUnnamed };
+	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(unnamedVoice)) == unnamedVoice);
 }
 
 TEST("npc protocol: the longest of each message fits its limit, and one past a limit, or cut short, is refused")
@@ -177,9 +182,11 @@ TEST("npc protocol: a claim of no NPC or of an unknown reason, a state of no NPC
 	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(Protocol::NpcGear{ .key = {} })));
 	// An unnamed bit this version does not know is refused.
 	auto unknownBit = Protocol::Encode(Protocol::NpcGear{ .key = GUARD });
-	unknownBit[unknownBit.size() - 5] = 0x08;
+	unknownBit[unknownBit.size() - 5] = 0x10;
 	CHECK(!Protocol::DecodeNpcGear(unknownBit));
 	unknownBit[unknownBit.size() - 5] = Protocol::kAllUnnamed;
+	CHECK(Protocol::DecodeNpcGear(unknownBit));
+	unknownBit[unknownBit.size() - 5] = Protocol::kAllLooksUnnamed;  // the voice's bit too (protocol 21)
 	CHECK(Protocol::DecodeNpcGear(unknownBit));
 }
 
@@ -285,6 +292,17 @@ TEST("npc form translate: an NPC of a plugin both games have is named as each ga
 	CHECK(gear->right == 0u);
 	CHECK(gear->left == 0x01000903u);
 	CHECK(gear->unnamed == Protocol::kRightUnnamed);  // the left's is known, and no ammunition is none, not unnamed
+	CHECK(gear->voice == 0u);
+	// The voice the same way (protocol 21): a shout or power of B.esp is renumbered; one of Extra.esp, which the guest
+	// lacks, is 0 said as unnamed (the copy keeps its own ready), never as none.
+	const auto voiced = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofB, .voice = 0x03000904 })));
+	REQUIRE(voiced);
+	CHECK(voiced->voice == 0x01000904u);
+	CHECK(voiced->unnamed == 0u);
+	const auto unvoiced = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofB, .voice = 0x04000905 })));
+	REQUIRE(unvoiced);
+	CHECK(unvoiced->voice == 0u);
+	CHECK(unvoiced->unnamed == Protocol::kVoiceUnnamed);
 	const auto lacked = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofExtra, .worn = { { 0x00012E49, 0x4 } } })));
 	REQUIRE(lacked);
 	CHECK(lacked->key.id == 0u);

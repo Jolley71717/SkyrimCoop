@@ -94,6 +94,10 @@ namespace RemotePlayers
 	// whom, its crime faction, the hits that landed on it here and the effects put on it refused (none and any), its own
 	// blows and its effects refused.
 	[[nodiscard]] std::string Peace();
+	// The effect hook of Character's magic target (a stand-in's spells take hold on no one here; a copy's make nothing
+	// here: SpellRules.h), put in from a_character (any Character but the player) if no stand-in put it in yet: NpcSync
+	// asks with its first copy, which may come before any stand-in. Main thread.
+	void HookMagic(RE::Actor* a_character);
 	// How many copies NpcSync moves: while any, the actor update hook asks NpcSync::UpdateCopy about every Character
 	// that is not a stand-in, and the leg channels look actors up.
 	void SetCopies(std::size_t a_count);

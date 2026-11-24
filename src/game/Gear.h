@@ -10,10 +10,10 @@
 // What an actor wears and holds, read and put on, for every actor this game shows for another game: a copy of an NPC
 // another game runs (NpcSync) and a friend's stand-in (RemotePlayers), and what our own player holds (LocalPlayer). One
 // rule for all of them (NpcRules::PlanGear, CheckGear): each body slot, each hand (a weapon, a staff, a shield, a
-// torch, a scroll), the ammunition. Spells in hands only where asked (Spells::kHands): a stand-in's, taught what it
-// lacks (it is this game's own and never saved). A copy of an NPC is dressed with Spells::kLeft: a spell in a hand is
-// neither put on nor taken off nor judged (its runner's AI casts it; a copy holding one would cast it here when its
-// runner's cast events play: docs/DESIGN.md, "Not shared yet"). Main thread.
+// torch, a scroll, a spell), the ammunition. A spell in a hand is taught only to an actor this game made as it ran (a
+// stand-in, a spawn's copy: never saved); a copy of a load-order NPC is that NPC of this game, and readies only a spell
+// it knows (one taught would stay in its save), keeping its own in that hand otherwise (docs/DESIGN.md, "NPCs":
+// "Spells"). Main thread.
 namespace Gear
 {
 	// A runtime armor's or weapon's plugin form (the one it was made from: an enchanted or tempered copy), for
@@ -33,16 +33,8 @@ namespace Gear
 	// a_wanted's hands counted as two each), as NpcRules::PlanGear and CheckGear take it.
 	[[nodiscard]] NpcRules::Wearing WearingOf(RE::Actor* a_actor, std::vector<NpcRules::Count>* a_carried, const Protocol::NpcGear* a_wanted = nullptr);
 
-	// Whether spells go in an actor's hands: a stand-in's (kHands) or not (kLeft: a copy of an NPC, as above).
-	enum class Spells : bool
-	{
-		kLeft,
-		kHands,
-	};
-
-	// What it wears and holds, read back, against the gear it was dressed for (NpcRules::CheckGear). With kLeft, a hand
-	// that holds a spell, or should, is not judged.
-	[[nodiscard]] NpcRules::GearShown Check(const Protocol::NpcGear& a_gear, RE::Actor* a_actor, Spells a_spells);
+	// What it wears and holds, read back, against the gear it was dressed for (NpcRules::CheckGear).
+	[[nodiscard]] NpcRules::GearShown Check(const Protocol::NpcGear& a_gear, RE::Actor* a_actor);
 
 	struct Dressed
 	{
@@ -53,8 +45,15 @@ namespace Gear
 	};
 
 	// Takes off and puts on what a_gear says (NpcRules::PlanGear); a_mayAdd: it is this game's own actor (a spawn's copy,
-	// a stand-in), given what it lacks. With kLeft a spell in a hand, wanted or held, is counted skipped and left be.
-	Dressed Dress(const Protocol::NpcGear& a_gear, bool a_mayAdd, RE::Actor* a_actor, Spells a_spells);
+	// a stand-in), given what it lacks and taught the spells it does not know. The voice is not dressed here (SetVoice).
+	Dressed Dress(const Protocol::NpcGear& a_gear, bool a_mayAdd, RE::Actor* a_actor);
+
+	// Whether a_id (a spell, a power or a shout) is one the actor knows (its base's or its own); false for anything else.
+	[[nodiscard]] bool Knows(RE::Actor* a_actor, std::uint32_t a_id);
+	// Whether a_id names a spell, a power or a shout (what is cast, not held as an item).
+	[[nodiscard]] bool IsMagic(std::uint32_t a_id);
+	// Whether the actor holds a spell in a hand or has a power or a shout ready (its casts cost it magicka).
+	[[nodiscard]] bool HoldsMagic(RE::Actor* a_actor);
 
 	// What our player holds, as the looks send it (Protocol::PlayerLooks' hands): each hand's object, the ammunition and
 	// the voice (the shout or power ready), a runtime form as the plugin form it was made from, or 0 with its unnamed bit.

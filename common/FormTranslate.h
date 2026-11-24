@@ -356,6 +356,7 @@ namespace FormTranslate
 				held(a_msg.right, Protocol::kRightUnnamed);
 				held(a_msg.left, Protocol::kLeftUnnamed);
 				held(a_msg.ammo, Protocol::kAmmoUnnamed);
+				held(a_msg.voice, Protocol::kVoiceUnnamed);
 			});
 			break;
 		// NPC health and deaths: an NPC the other side lacks is left out of each list (it has no copy to hurt or kill).

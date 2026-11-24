@@ -8,8 +8,10 @@
 #include "game/Gear.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcRules.h"
+#include "game/PeaceRules.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/SpellRules.h"
 #include "game/StateBuffer.h"
 #include "game/VtableHook.h"
 #include "game/Water.h"
@@ -44,6 +46,8 @@ namespace NpcSync
 		// this often after that (its own scripts may change it).
 		constexpr auto WEAR_CHECK_AFTER = 500ms;
 		constexpr auto WEAR_CHECK_EVERY = 2s;
+		// A mirrored copy holding a spell or a voice has the magicka it spent here given back this often (SpellRules::MagickaBack).
+		constexpr auto MAGICKA_EVERY = 250ms;
 		constexpr std::size_t MAX_PENDING_EVENTS = 512;
 		// Skyrim.esm's keyword for people (every race a person is of has it).
 		constexpr RE::FormID ACTOR_TYPE_NPC = 0x00013794;
@@ -75,6 +79,7 @@ namespace NpcSync
 			Clock::time_point                lastHitAt{};
 			std::optional<Clock::time_point> killMoveAt;  // last seen in a kill move
 			bool                             aliveUnrun = false;  // last seen alive while no other game ran it (a death here after is ours to say)
+			std::uint64_t                    castsSent = 0;  // its graph's cast events said (SpellRules::CastEvent), while we ran it
 		};
 		std::map<Key, Loaded> loaded;
 		// The numbers of the states of every NPC we ran this session (not forgotten with its loaded entry).
@@ -116,6 +121,15 @@ namespace NpcSync
 			std::uint64_t         refloats = 0;  // the water moved it off the height it is shown at (RemotePlayers::HoldDepth)
 			float                 drift = 0.0f;  // the engine's last update's move off its height while swimming
 			std::string           lastRefused;
+			// Spells (SpellRules.h): another game runs its NPC (the effect hook refuses what such a copy makes); it holds a
+			// spell or a voice (its magicka is kept up while mirrored); its runner's cast events its graph took and turned
+			// away, and the last cast it played; the magicka given back.
+			bool                  othersRun = false;
+			bool                  holdsMagic = false;
+			std::uint64_t         castsPlayed = 0;
+			std::uint64_t         castsRefused = 0;
+			std::string           lastCast;
+			float                 magickaBack = 0.0f;
 		};
 		std::mutex                                copyLock;
 		std::map<Key, Copy>                       copies;
@@ -160,8 +174,28 @@ namespace NpcSync
 			// A friend's hits on NPCs we run: came, applied; the healths and deaths we said and heard; NPCs killed as
 			// they loaded for the session's word; copies set to a share.
 			std::uint64_t hitsIn = 0, hitsApplied = 0, healthsSent = 0, healthsIn = 0, deathsSent = 0, deathsIn = 0, killsOnLoad = 0, healthSets = 0;
+			// Spells (SpellRules.h): a copy's voice readied as its runner's, or not known here; magicka given back to copies
+			// (times); actors a stand-in or another game's NPC's copy made here, ended by their effect's dispel or taken out.
+			std::uint64_t voicesSet = 0, voicesLacked = 0, magickaTopUps = 0, madeEnded = 0, madeRemoved = 0;
 		};
 		Counts counts;
+		// A copy's effects refused by kind (SpellRules::CopyMagic; any thread: the effect hook), and whether they are
+		// (`npcs spells refuse off`: the rig lets one through to see the scan end what it made).
+		std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(SpellRules::CopyMagic::kCount)> copyMagicRefused{};
+		std::atomic<bool>                                                                               refuseCopyMagic{ true };
+		bool                                                                                            magicHookAsked = false;
+		// The copies of NPCs another game runs, by form id, for the effect hook on any thread (no lock: PeaceRules::IdSet,
+		// written by TendCopies when the copies change). Far above any scene's; past it, the rest are not judged (said once).
+		constexpr std::size_t                                                                           MAX_COPY_IDS = 512;
+		PeaceRules::IdSet<MAX_COPY_IDS>                                                                 othersCopyIds;
+		std::vector<std::uint32_t>                                                                      othersCopyList;
+		bool                                                                                            saidCopyIdsFull = false;
+		// Actors a stand-in or a copy made here, ended once (their effect dispelled) and when: one still there a while
+		// after is taken out of the world.
+		std::unordered_map<RE::FormID, Clock::time_point>                                                madeEnding;
+		Clock::time_point                                                                               nextMagicka{};
+		// What `npcs spells arm` taught an NPC we run (its form id, the spell's), taken back by `arm ... 0`.
+		std::set<std::pair<RE::FormID, RE::FormID>>                                                    armTaught;
 
 		// ---- the graph's names (a BSFixedString takes the game's string cache's lock) ----
 		const RE::BSFixedString& Name(std::string_view a_text)
@@ -445,6 +479,7 @@ namespace NpcSync
 			gear.right = held(right, Protocol::kRightUnnamed);
 			gear.left = held(left, Protocol::kLeftUnnamed);
 			gear.ammo = held(a_actor->GetCurrentAmmo(), Protocol::kAmmoUnnamed);
+			gear.voice = held(Gear::VoiceOf(a_actor), Protocol::kVoiceUnnamed);  // the shout or power it has ready
 			return gear;
 		}
 
@@ -459,7 +494,10 @@ namespace NpcSync
 			std::uint64_t walkRefused = 0;
 			std::uint64_t swimTaken = 0;
 			std::uint64_t swimRefused = 0;
+			std::uint64_t castsPlayed = 0;
+			std::uint64_t castsRefused = 0;
 			std::string   lastRefused;
+			std::string   lastCast;
 			std::vector<std::pair<std::string_view, bool>> results;
 			results.reserve(a_step.events.size());
 			for (const auto event : a_step.events) {
@@ -473,11 +511,17 @@ namespace NpcSync
 				}
 			}
 			for (const auto& event : a_events) {
+				const bool cast = SpellRules::CastEvent(event);
 				if (a_actor->NotifyAnimationGraph(Name(event))) {
 					++played;
+					if (cast) {
+						++castsPlayed;
+						lastCast = event;
+					}
 				} else {
 					++refused;
 					lastRefused = event;
+					castsRefused += cast ? 1 : 0;
 				}
 			}
 			if (played == 0 && refused == 0 && results.empty()) {
@@ -492,6 +536,11 @@ namespace NpcSync
 				copy.walkRefused += walkRefused;
 				copy.swimTaken += swimTaken;
 				copy.swimRefused += swimRefused;
+				copy.castsPlayed += castsPlayed;
+				copy.castsRefused += castsRefused;
+				if (!lastCast.empty()) {
+					copy.lastCast = lastCast;
+				}
 				if (settled.swimGivenUp) {
 					++copy.swimGivenUp;
 				}
@@ -682,6 +731,141 @@ namespace NpcSync
 			return last && last.get() == a_actor;
 		}
 
+		// ---- spells (SpellRules.h; main thread) ----
+
+		// Who made an actor this game made as it ran, of those the scan does not share: a friend's stand-in, a copy of an
+		// NPC another game runs, or anyone else.
+		SpellRules::MadeBy MadeByOf(RE::Actor* a_commander)
+		{
+			if (!a_commander) {
+				return SpellRules::MadeBy::kNobody;
+			}
+			if (RemotePlayers::IsOurs(a_commander)) {
+				return SpellRules::MadeBy::kStandIn;
+			}
+			std::scoped_lock l{ copyLock };
+			const auto       byActor = copyByActor.find(a_commander);
+			const auto       copy = byActor != copyByActor.end() ? copies.find(byActor->second) : copies.end();
+			return copy != copies.end() && copy->second.othersRun && copy->second.actorId == a_commander->GetFormID() ? SpellRules::MadeBy::kOthersCopy :
+			                                                                                                            SpellRules::MadeBy::kOther;
+		}
+
+		// The effect that made a_made (a summon's, on its caster; a raised corpse's or a command's, on itself) dispelled:
+		// the engine's own end of it (the summon's light, the corpse falls). False: none found.
+		bool DispelMaker(RE::Actor* a_made, RE::Actor* a_commander)
+		{
+			for (auto* holder : { a_commander, a_made }) {
+				const auto target = holder ? holder->AsMagicTarget() : nullptr;
+				const auto list = target ? target->GetActiveEffectList() : nullptr;
+				if (!list) {
+					continue;
+				}
+				for (auto* effect : *list) {
+					if (!effect) {
+						continue;
+					}
+					RE::ActorHandle commanded;
+					if (const auto summon = skyrim_cast<RE::SummonCreatureEffect*>(effect)) {
+						commanded = summon->commandedActor;
+					} else if (const auto command = skyrim_cast<RE::CommandEffect*>(effect)) {
+						commanded = command->commandedActor;
+					} else {
+						continue;
+					}
+					if (const auto actor = commanded.get(); actor && actor.get() == a_made) {
+						effect->Dispel(true);
+						return true;
+					}
+				}
+			}
+			return false;
+		}
+
+		// An actor a stand-in or another game's NPC's copy made here (SpellRules::EndsMade): its effect dispelled once; one
+		// still there MADE_GRACE after (no effect found, or the dispel left it) is disabled and deleted (a runtime
+		// reference of this game's, never a load-order one).
+		constexpr auto MADE_GRACE = 2s;
+
+		void EndMade(RE::Actor* a_made, RE::Actor* a_commander, SpellRules::MadeBy a_by, Clock::time_point a_now)
+		{
+			const auto id = a_made->GetFormID();
+			const auto ending = madeEnding.find(id);
+			if (ending == madeEnding.end()) {
+				madeEnding[id] = a_now;
+				const bool dispelled = DispelMaker(a_made, a_commander);
+				++counts.madeEnded;
+				logs::info("NPCs: {:08X} (made here by {} {:08X}) ended{}: its game makes the real one", id, a_by == SpellRules::MadeBy::kStandIn ? "the stand-in" : "the copy",
+					a_commander ? a_commander->GetFormID() : 0, dispelled ? "" : " (no effect of it found: taken out)");
+				if (dispelled) {
+					return;
+				}
+			} else if (a_now - ending->second < MADE_GRACE) {
+				return;
+			}
+			if (FormIds::IsRuntime(id) && !a_made->IsDisabled()) {
+				a_made->Disable();
+				a_made->SetDelete(true);
+				++counts.madeRemoved;
+			}
+		}
+
+		// A copy's voice readied as its runner's NPC's (a shout or a power): one it does not know is not taught to a copy
+		// of a load-order NPC (it stays in its save), only to a spawn's copy (a_mayAdd); an unnamed one leaves its own.
+		void ReadyVoice(const Protocol::NpcGear& a_gear, bool a_mayAdd, RE::Actor* a_actor)
+		{
+			if ((a_gear.unnamed & Protocol::kVoiceUnnamed) != 0) {
+				return;
+			}
+			const auto held = Gear::VoiceOf(a_actor);
+			if ((held ? held->GetFormID() : 0u) == a_gear.voice) {
+				return;
+			}
+			if (a_gear.voice != 0 && !a_mayAdd && !Gear::Knows(a_actor, a_gear.voice)) {
+				++counts.voicesLacked;
+				return;
+			}
+			if (Gear::SetVoice(a_actor, a_gear.voice, a_mayAdd)) {
+				counts.voicesSet += a_gear.voice != 0 ? 1 : 0;
+			} else {
+				++counts.voicesLacked;
+			}
+		}
+
+		// The magicka a mirrored copy spent here given back (SpellRules::MagickaBack): its runner's NPC is the truth of it.
+		void GiveMagickaBack(const Key& a_key)
+		{
+			RE::NiPointer<RE::Actor> actor;
+			bool                     mirror = false;
+			bool                     magic = false;
+			{
+				std::scoped_lock l{ copyLock };
+				const auto       it = copies.find(a_key);
+				if (it == copies.end() || it->second.actorId == 0) {
+					return;
+				}
+				actor = it->second.handle.get();
+				mirror = it->second.mirror;
+				magic = it->second.holdsMagic;
+				if (!actor || actor->GetFormID() != it->second.actorId) {
+					return;
+				}
+			}
+			const auto values = actor->AsActorValueOwner();
+			if (!values || actor->IsDead()) {
+				return;
+			}
+			const float back = SpellRules::MagickaBack(mirror, magic, -actor->GetActorValueModifier(RE::ACTOR_VALUE_MODIFIER::kDamage, RE::ActorValue::kMagicka));
+			if (back <= 0.0f) {
+				return;
+			}
+			values->RestoreActorValue(RE::ActorValue::kMagicka, back);
+			++counts.magickaTopUps;
+			std::scoped_lock l{ copyLock };
+			if (const auto it = copies.find(a_key); it != copies.end()) {
+				it->second.magickaBack += back;
+			}
+		}
+
 		void Scan(Clock::time_point a_now)
 		{
 			const auto lists = RE::ProcessLists::GetSingleton();
@@ -698,7 +882,8 @@ namespace NpcSync
 					}
 				}
 			}
-			std::set<Key> found;
+			std::set<Key>                  found;
+			std::unordered_set<RE::FormID> madeFound;
 			for (const auto* handles : { &lists->highActorHandles, &lists->middleHighActorHandles }) {
 				for (const auto& handle : *handles) {
 					const auto actor = handle.get();
@@ -714,7 +899,18 @@ namespace NpcSync
 						// Made as this game ran: shared as our spawn when our player or an NPC we run commands it (every
 						// summon, raised corpse and thrall, whoever cast it); any other (a quest's or an encounter's,
 						// which every game makes its own of) is not shared yet. A horse of ours is (NpcRules::SharedRuntime).
-						if (!loaded.contains(Key{ id, ourId }) && !NpcRules::SharedRuntime(CommanderOf(actor.get(), player), OurMount(actor.get(), player))) {
+						const auto commander = CommanderOf(actor.get(), player);
+						if (!loaded.contains(Key{ id, ourId }) && !NpcRules::SharedRuntime(commander, OurMount(actor.get(), player))) {
+							// One a stand-in or another game's NPC's copy made here (its own AI's conjuring, a cast the
+							// effect hook did not see) is ended: that game makes the real one (SpellRules::EndsMade).
+							if (commander == NpcRules::Commander::kOther && !actor->IsDead()) {
+								const auto by = actor->GetCommandingActor();
+								if (const auto made = MadeByOf(by.get()); SpellRules::EndsMade(made)) {
+									madeFound.insert(id);
+									EndMade(actor.get(), by.get(), made, a_now);
+									continue;
+								}
+							}
 							++counts.unshared;
 							continue;
 						}
@@ -733,6 +929,7 @@ namespace NpcSync
 					}
 				}
 			}
+			std::erase_if(madeEnding, [&](const auto& a_entry) { return !madeFound.contains(a_entry.first); });
 			// Gone from this game's loaded world: one we ran is let go of (the next scan of the others' games claims it).
 			for (auto it = loaded.begin(); it != loaded.end();) {
 				if (!found.contains(it->first)) {
@@ -929,6 +1126,9 @@ namespace NpcSync
 				if (key == keyOf.end() || !Runs(key->second)) {
 					continue;
 				}
+				if (SpellRules::CastEvent(event.event)) {
+					++loaded[key->second].castsSent;
+				}
 				actions.actions.push_back({ key->second, event.sentMs, std::move(event.event) });
 				if (actions.actions.size() >= Protocol::MAX_NPC_ACTIONS) {
 					counts.actionsSent += actions.actions.size();
@@ -951,6 +1151,7 @@ namespace NpcSync
 				Key                   key;
 				bool                  place = false;
 				bool                  check = false;  // read its gear back (else: dress it)
+				bool                  magicka = false;  // give back the magicka it spent here (else: its gear)
 				std::uint32_t         base = 0;
 				Protocol::PlayerState at;
 			};
@@ -962,6 +1163,7 @@ namespace NpcSync
 					const auto owner = owners.find(key);
 					const bool nobody = owner == owners.end();
 					const bool othersRun = !nobody && owner->second != ourId;
+					copy.othersRun = othersRun;
 					copy.buffer.Frame(a_now);
 					const auto sample = copy.buffer.Sample(a_now);
 					// Ours now, or nobody's for a while: forgotten (a spawn's copy goes with it). Nobody's a short while:
@@ -1063,6 +1265,28 @@ namespace NpcSync
 					}
 				}
 				RemotePlayers::SetCopies(copyByActor.size());
+				std::vector<std::uint32_t> others;
+				for (const auto& [key, copy] : copies) {
+					if (copy.othersRun && copy.actorId != 0) {
+						others.push_back(copy.actorId);
+					}
+				}
+				std::ranges::sort(others);
+				if (others != othersCopyList) {
+					if (!othersCopyIds.Assign(others) && !saidCopyIdsFull) {
+						saidCopyIdsFull = true;
+						logs::warn("NPCs: more than {} copies: the effects of the rest are not judged (what they make here is still ended by the scan)", MAX_COPY_IDS);
+					}
+					othersCopyList = std::move(others);
+				}
+				if (a_now >= nextMagicka) {
+					nextMagicka = a_now + MAGICKA_EVERY;
+					for (const auto& [key, copy] : copies) {
+						if (copy.mirror && copy.holdsMagic && copy.actorId != 0) {
+							work.push_back({ .key = key, .magicka = true });
+						}
+					}
+				}
 			}
 			ResetLetGo();
 			// What calls the game at length (placing, equipping) runs outside the lock: the hook takes it on job threads,
@@ -1097,6 +1321,10 @@ namespace NpcSync
 						job.at.y, job.at.z);
 					continue;
 				}
+				if (job.magicka) {
+					GiveMagickaBack(job.key);
+					continue;
+				}
 				RE::NiPointer<RE::Actor> actor;
 				Protocol::NpcGear        gear;
 				bool                     mayAdd = false;
@@ -1113,10 +1341,20 @@ namespace NpcSync
 				if (!actor || !actor->Is3DLoaded()) {
 					continue;
 				}
+				if (!magicHookAsked) {
+					// The effect hook that keeps a copy from making anything here goes in with the first copy dressed, if
+					// no stand-in put it in yet.
+					magicHookAsked = true;
+					RemotePlayers::HookMagic(actor.get());
+				}
 				if (job.check) {
 					// Read back what it wears and holds now, a while after it was dressed.
-					const auto shown = Gear::Check(gear, actor.get(), Gear::Spells::kLeft);  // spells in a copy's hands are not shared yet
+					const auto shown = Gear::Check(gear, actor.get());
+					const bool magic = Gear::HoldsMagic(actor.get());
 					std::scoped_lock l{ copyLock };
+					if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID()) {
+						it->second.holdsMagic = magic;
+					}
 					if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID() && it->second.gear == gear && it->second.geared) {
 						if (!shown.Complete(it->second.gearLacks) && (!it->second.wears || it->second.wears->Complete(it->second.gearLacks))) {
 							logs::info("NPCs: copy {:08X} of {:08X} does not show its runner's gear: wears {}/{} of it, {} left on, hands {}/{}, ammo {} ({} it lacks)", actor->GetFormID(),
@@ -1127,9 +1365,12 @@ namespace NpcSync
 					}
 					continue;
 				}
-				const auto dressed = Gear::Dress(gear, mayAdd, actor.get(), Gear::Spells::kLeft);
+				const auto dressed = Gear::Dress(gear, mayAdd, actor.get());
+				ReadyVoice(gear, mayAdd, actor.get());
+				const bool       magic = Gear::HoldsMagic(actor.get());
 				std::scoped_lock l{ copyLock };
 				if (const auto it = copies.find(job.key); it != copies.end() && it->second.actorId == actor->GetFormID() && it->second.gear == gear) {
+					it->second.holdsMagic = magic;
 					it->second.geared = true;
 					it->second.gearLacks = dressed.missing;
 					it->second.wears.reset();
@@ -1500,7 +1741,10 @@ namespace NpcSync
 			copies.clear();
 			copyByActor.clear();
 			RemotePlayers::SetCopies(0);
+			othersCopyIds.Assign({});
+			othersCopyList.clear();
 		}
+		madeEnding.clear();
 		ResetLetGo();
 		{
 			std::scoped_lock l{ eventLock };
@@ -1858,6 +2102,9 @@ namespace NpcSync
 		}
 		copyByActor.clear();
 		RemotePlayers::SetCopies(0);
+		othersCopyIds.Assign({});
+		othersCopyList.clear();
+		madeEnding.clear();
 		loaded.clear();
 		// The new world's actors are new ones: the session's dead are killed again as they load; our hits were on the old.
 		killedOnLoad.clear();
@@ -1882,9 +2129,17 @@ namespace NpcSync
 		}
 	}
 
+	namespace
+	{
+		std::string Spells(const std::vector<std::string_view>& a_words);  // `npcs spells` (below)
+	}
+
 	std::string Describe(std::string_view a_args)
 	{
 		const auto words = DevLine::Words(a_args);
+		if (!words.empty() && words[0] == "spells") {
+			return Spells(words);
+		}
 		std::array<std::size_t, static_cast<std::size_t>(NpcRules::Kind::kCount)> kinds{};
 		std::size_t run = 0;
 		for (const auto& [key, npc] : loaded) {
@@ -2102,6 +2357,262 @@ namespace NpcSync
 			}
 		}
 		return out;
+	}
+
+	bool RefusesCopyMagic(const RE::Actor* a_caster, std::int32_t a_archetype)
+	{
+		const auto kind = SpellRules::JudgeCopyMagic(a_archetype);
+		if (kind == SpellRules::CopyMagic::kLet || !a_caster || !refuseCopyMagic.load(std::memory_order_relaxed) || !othersCopyIds.Contains(a_caster->GetFormID())) {
+			return false;
+		}
+		if (copyMagicRefused[static_cast<std::size_t>(kind)].fetch_add(1, std::memory_order_relaxed) == 0) {
+			logs::info("NPCs: a copy's effect that would {} here was refused, the first of its kind ({:08X}; its runner's game makes the real one; counted in `npcs spells`)",
+				SpellRules::CopyMagicName(kind), a_caster->GetFormID());
+		}
+		return true;
+	}
+
+	namespace
+	{
+		std::string HexOrNone(const RE::TESForm* a_form)
+		{
+			return std::format("{:08X}", a_form ? a_form->GetFormID() : 0u);
+		}
+
+		// `npcs spells find <aimed|self|summon|power>`: a spell of the load order of that kind, for the rig: aimed, a
+		// one-handed spell cast at a target; self, a one-handed spell on its caster (a heal, a flesh spell; no summon, no
+		// bound weapon); summon, one whose costliest effect conjures a creature; power, a lesser power or a power. The
+		// lowest id of Skyrim.esm first.
+		std::string FindSpell(std::string_view a_kind)
+		{
+			using RE::MagicSystem::Delivery;
+			using RE::MagicSystem::SpellType;
+			const auto dh = RE::TESDataHandler::GetSingleton();
+			if (!dh) {
+				return "none: no data yet";
+			}
+			if (a_kind != "aimed" && a_kind != "self" && a_kind != "summon" && a_kind != "power") {
+				return "error: usage: npcs spells find <aimed|self|summon|power>";
+			}
+			RE::SpellItem* best = nullptr;
+			for (const auto spell : dh->GetFormArray<RE::SpellItem>()) {
+				if (!spell || std::string_view{ spell->GetName() }.empty()) {
+					continue;
+				}
+				const auto effect = spell->GetCostliestEffectItem();
+				const auto setting = effect ? effect->baseEffect : nullptr;
+				if (!setting) {
+					continue;
+				}
+				const auto archetype = static_cast<std::int32_t>(std::to_underlying(setting->GetArchetype()));
+				const auto type = spell->GetSpellType();
+				const auto delivery = spell->GetDelivery();
+				const bool oneHand = type == SpellType::kSpell && !Gear::TwoHanded(spell);
+				bool       fits = false;
+				if (a_kind == "aimed") {
+					fits = oneHand && delivery == Delivery::kAimed && archetype != SpellRules::kArchSummonCreature;
+				} else if (a_kind == "self") {
+					fits = oneHand && delivery == Delivery::kSelf && SpellRules::JudgeCopyMagic(archetype) == SpellRules::CopyMagic::kLet && archetype != SpellRules::kArchBoundWeapon;
+				} else if (a_kind == "summon") {
+					fits = type == SpellType::kSpell && archetype == SpellRules::kArchSummonCreature;
+				} else {
+					fits = (type == SpellType::kLesserPower || type == SpellType::kPower) && SpellRules::JudgeCopyMagic(archetype) == SpellRules::CopyMagic::kLet;
+				}
+				if (fits && (!best || spell->GetFormID() < best->GetFormID())) {
+					best = spell;
+				}
+			}
+			if (!best) {
+				return std::format("none: no {} spell", a_kind);
+			}
+			return std::format("spell id={:08X} kind={} casting={} name=\"{}\"", best->GetFormID(), a_kind,
+				best->GetCastingType() == RE::MagicSystem::CastingType::kConcentration ? "held" : "ff", best->GetName());
+		}
+
+		// `npcs spells arm <local id> <right|left|voice> <spell id | 0>`: the rig's set-up of an NPC this game runs: the
+		// spell (or power, or shout for the voice) taught if it does not know it and put in that hand; 0 empties the hand
+		// (or the voice) and takes back what arm taught it that it no longer holds.
+		std::string Arm(const std::vector<std::string_view>& a_words)
+		{
+			const auto local = a_words.size() == 5 ? FormId(a_words[2]) : std::nullopt;
+			const auto id = a_words.size() == 5 ? FormId(a_words[4]) : std::nullopt;
+			const auto handWord = a_words.size() == 5 ? a_words[3] : std::string_view{};
+			if (!local || !id || (handWord != "right" && handWord != "left" && handWord != "voice")) {
+				return "error: usage: npcs spells arm <local id> <right|left|voice> <spell id | 0>";
+			}
+			const auto actor = RE::TESForm::LookupByID<RE::Actor>(*local);
+			const auto key = actor ? KeyOf(actor) : std::nullopt;
+			if (!actor || !key || !Runs(*key)) {
+				return std::format("error: {:08X} is no NPC this game runs", *local);
+			}
+			const bool voice = handWord == "voice";
+			const auto hand = handWord == "left" ? NpcRules::Hand::kLeft : NpcRules::Hand::kRight;
+			const auto holds = [&] {
+				return voice ? HexOrNone(Gear::VoiceOf(actor)) : HexOrNone(actor->GetEquippedObject(hand == NpcRules::Hand::kLeft));
+			};
+			if (*id == 0) {
+				if (voice) {
+					Gear::SetVoice(actor, 0, false);
+				} else if (const auto held = actor->GetEquippedObject(hand == NpcRules::Hand::kLeft); Gear::IsSpell(held)) {
+					actor->DeselectSpell(held->As<RE::SpellItem>());
+				}
+				std::size_t untaught = 0;
+				for (auto it = armTaught.begin(); it != armTaught.end();) {
+					const auto spell = it->first == actor->GetFormID() ? RE::TESForm::LookupByID<RE::SpellItem>(it->second) : nullptr;
+					const bool held = spell && (actor->GetEquippedObject(false) == spell || actor->GetEquippedObject(true) == spell || Gear::VoiceOf(actor) == spell);
+					if (spell && !held) {
+						actor->RemoveSpell(spell);
+						++untaught;
+						it = armTaught.erase(it);
+					} else {
+						++it;
+					}
+				}
+				return std::format("cleared {} holds={} untaught={}", handWord, holds(), untaught);
+			}
+			const auto form = RE::TESForm::LookupByID(*id);
+			const auto spell = form && Gear::IsSpell(form) ? form->As<RE::SpellItem>() : nullptr;
+			if (!spell && !(voice && form && form->Is(RE::FormType::Shout))) {
+				return std::format("error: {:08X} is no spell{}", *id, voice ? ", power or shout" : "");
+			}
+			bool taught = false;
+			if (spell && !actor->HasSpell(spell)) {
+				actor->AddSpell(spell);
+				armTaught.emplace(actor->GetFormID(), spell->GetFormID());
+				taught = true;
+			}
+			if (voice) {
+				if (!Gear::SetVoice(actor, *id, true)) {
+					return std::format("error: the voice refused {:08X} (taught={})", *id, taught ? 1 : 0);
+				}
+			} else if (const auto why = Gear::EquipOne(actor, form, hand); !why.empty()) {
+				return std::format("error: {} (taught={})", why, taught ? 1 : 0);
+			}
+			return std::format("armed {} {:08X} taught={} holds={}", handWord, *id, taught ? 1 : 0, holds());
+		}
+
+		// How many actors made here by a stand-in or another game's NPC's copy are in the world now (alive, enabled).
+		std::size_t MadeNow()
+		{
+			const auto lists = RE::ProcessLists::GetSingleton();
+			std::size_t n = 0;
+			if (!lists) {
+				return n;
+			}
+			for (const auto* handles : { &lists->highActorHandles, &lists->middleHighActorHandles }) {
+				for (const auto& handle : *handles) {
+					const auto actor = handle.get();
+					if (!actor || actor->IsDead() || actor->IsDisabled() || actor->IsDeleted() || !FormIds::IsRuntime(actor->GetFormID())) {
+						continue;
+					}
+					const auto by = actor->GetCommandingActor();
+					n += by && SpellRules::EndsMade(MadeByOf(by.get())) ? 1 : 0;
+				}
+			}
+			return n;
+		}
+
+		// `npcs spells [<form id>]`: the counts, then each copy that holds or should hold a spell or a voice (its runner's
+		// against its own, each hand judged: SpellRules::JudgeHand), its magicka and the casts its graph played, and each
+		// NPC this game runs that holds one, with the casts it said. One NPC asked for is listed whatever it holds.
+		std::string Spells(const std::vector<std::string_view>& a_words)
+		{
+			if (a_words.size() >= 2 && a_words[1] == "find") {
+				return a_words.size() == 3 ? FindSpell(a_words[2]) : "error: usage: npcs spells find <aimed|self|summon|power>";
+			}
+			if (a_words.size() >= 2 && a_words[1] == "arm") {
+				return Arm(a_words);
+			}
+			if (a_words.size() >= 2 && a_words[1] == "refuse") {
+				if (a_words.size() != 3 || (a_words[2] != "on" && a_words[2] != "off")) {
+					return "error: usage: npcs spells refuse <on|off>";
+				}
+				refuseCopyMagic = a_words[2] == "on";
+				return std::format("refuse={}", refuseCopyMagic ? 1 : 0);
+			}
+			const auto only = a_words.size() == 2 ? FormId(a_words[1]) : std::nullopt;
+			if (a_words.size() > 2 || (a_words.size() == 2 && !only)) {
+				return "error: usage: npcs spells [<form id> | find <kind> | arm <local id> <right|left|voice> <spell id | 0> | refuse <on|off>]";
+			}
+			const auto  madeNow = MadeNow();
+			std::string refused;
+			for (std::size_t i = 1; i < copyMagicRefused.size(); ++i) {
+				refused += std::format("{}{}:{}", refused.empty() ? "" : ",", SpellRules::CopyMagicName(static_cast<SpellRules::CopyMagic>(i)), copyMagicRefused[i].load());
+			}
+			std::uint64_t castsSent = 0;
+			for (const auto& [key, npc] : loaded) {
+				castsSent += npc.castsSent;
+			}
+			std::string   rows;
+			std::size_t   others = 0;
+			std::size_t   holding = 0;
+			std::uint64_t played = 0;
+			std::uint64_t turned = 0;
+			std::array<std::size_t, 5> states{};
+			{
+				std::scoped_lock l{ copyLock };
+				for (const auto& [key, copy] : copies) {
+					if (!copy.othersRun || copy.actorId == 0) {
+						continue;
+					}
+					++others;
+					holding += copy.holdsMagic ? 1 : 0;
+					played += copy.castsPlayed;
+					turned += copy.castsRefused;
+					const auto actor = copy.handle.get();
+					if (!actor || actor->GetFormID() != copy.actorId) {
+						continue;
+					}
+					const auto  gear = copy.gear.value_or(Protocol::NpcGear{});
+					const auto  [right, left] = Gear::HeldObjects(actor.get());
+					const auto  voice = Gear::VoiceOf(actor.get());
+					const bool  spawned = copy.spawned;
+					std::string hands;
+					bool        magic = false;
+					const auto  judge = [&](std::string_view a_name, std::uint32_t a_want, std::uint8_t a_bit, const RE::TESForm* a_held) {
+						const auto held = a_held ? a_held->GetFormID() : 0u;
+						const bool wantMagic = Gear::IsMagic(a_want);
+						magic = magic || wantMagic || Gear::IsMagic(held);
+						const auto state = SpellRules::JudgeHand(a_want, (gear.unnamed & a_bit) != 0, held, wantMagic, Gear::Knows(actor.get(), a_want), spawned);
+						++states[static_cast<std::size_t>(state)];
+						hands += std::format(" {}={:08X}/{:08X}:{}", a_name, a_want, held, SpellRules::HandName(state));
+					};
+					judge("right", gear.right, Protocol::kRightUnnamed, right);
+					judge("left", gear.left, Protocol::kLeftUnnamed, left);
+					judge("voice", gear.voice, Protocol::kVoiceUnnamed, voice);
+					const bool asked = only && (*only == key.id || *only == copy.actorId);
+					if ((!magic && !asked) || (only && !asked)) {
+						continue;
+					}
+					const auto values = actor->AsActorValueOwner();
+					rows += std::format(" | {:08X}{} local={:08X} role=copy runner={} mirror={} gear={}{} magicka={:.0f}/{:.0f} magickaBack={:.0f} castsPlayed={} castsRefused={} lastCast={}", key.id,
+						key.IsSpawn() ? std::format(" spawner={}", key.spawner) : "", copy.actorId, copy.feed.runner, copy.mirror ? 1 : 0, copy.gear ? 1 : 0, hands,
+						values ? values->GetActorValue(RE::ActorValue::kMagicka) : 0.0f, actor->GetActorValueMax(RE::ActorValue::kMagicka), copy.magickaBack, copy.castsPlayed,
+						copy.castsRefused, copy.lastCast.empty() ? "none" : copy.lastCast);
+				}
+			}
+			for (const auto& [key, npc] : loaded) {
+				if (!Runs(key)) {
+					continue;
+				}
+				const auto actor = npc.handle.get();
+				if (!actor || actor->GetFormID() != npc.id) {
+					continue;
+				}
+				const bool asked = only && (*only == key.id || *only == npc.id);
+				if ((only && !asked) || (!asked && !Gear::HoldsMagic(actor.get()))) {
+					continue;
+				}
+				const auto [right, left] = Gear::HeldObjects(actor.get());
+				rows += std::format(" | {:08X}{} local={:08X} role=run right={} left={} voice={} castsSent={}", key.id, key.IsSpawn() ? std::format(" spawner={}", key.spawner) : "", npc.id,
+					HexOrNone(right), HexOrNone(left), HexOrNone(Gear::VoiceOf(actor.get())), npc.castsSent);
+			}
+			return std::format("spells copies={} holding={} hands=shown:{},lacks:{},unnamed:{},differs:{} castsPlayed={} castsRefused={} castsSent={} voicesSet={} voicesLacked={} "
+							   "magickaTopUps={} refuse={} refused={} madeEnded={} madeRemoved={} madeNow={}{}",
+				others, holding, states[static_cast<std::size_t>(SpellRules::Hand::kShown)], states[static_cast<std::size_t>(SpellRules::Hand::kLacks)],
+				states[static_cast<std::size_t>(SpellRules::Hand::kUnnamed)], states[static_cast<std::size_t>(SpellRules::Hand::kDiffers)], played, turned, castsSent, counts.voicesSet,
+				counts.voicesLacked, counts.magickaTopUps, refuseCopyMagic ? 1 : 0, refused, counts.madeEnded, counts.madeRemoved, madeNow, rows);
+		}
 	}
 
 	std::string Swim()
