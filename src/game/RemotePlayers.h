@@ -91,6 +91,9 @@ namespace RemotePlayers
 	// game) and every change of its state, capped.
 	void TraceEvent(RE::TESObjectREFR* a_ref, const char* a_event, bool a_taken);
 	void TraceState(RE::Actor* a_actor);
+	// True when the game's own event would put away the weapon, spells or fists of a stand-in whose friend has them out: the
+	// notify hook turns it away (StandInRules::HoldsOffSheathe).
+	bool HoldsOffSheathe(RE::TESObjectREFR* a_ref, const char* a_event);
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
 
 	// Developer channel: `standins` (one line each), `strays` (placed actors of a preset base in the loaded game:

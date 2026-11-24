@@ -177,6 +177,9 @@ namespace NpcSync
 
 		bool NotifyHook(RE::IAnimationGraphManagerHolder* a_this, const RE::BSFixedString& a_event)
 		{
+			if (RemotePlayers::HoldsOffSheathe(static_cast<RE::TESObjectREFR*>(a_this), a_event.c_str())) {
+				return false;
+			}
 			const bool taken = originalNotify(a_this, a_event);
 			RemotePlayers::TraceEvent(static_cast<RE::TESObjectREFR*>(a_this), a_event.c_str(), taken);
 			if (!taken || recording.load(std::memory_order_relaxed) == 0) {

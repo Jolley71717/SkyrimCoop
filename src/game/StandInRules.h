@@ -484,6 +484,15 @@ namespace StandInRules
 		return again && a_friendDrawn ? a_friendDrawn : again;
 	}
 
+	// The game puts a stand-in's weapon away on its own (rig, 2026-11-24: an Unequip event of the game's, about a second
+	// after each draw, as an NPC without a fight lowers it); a stand-in's weapon state is its friend's. The game's own
+	// event that would put it away is turned away while its friend has it out; this plugin's own events (its friend's
+	// sheathe played, a fix) pass. Every kind: sword, bow, spells, shouts and fists all go away by these events.
+	[[nodiscard]] constexpr bool HoldsOffSheathe(std::string_view a_event, bool a_ours, bool a_friendDrawn)
+	{
+		return a_friendDrawn && !a_ours && (a_event == "Unequip" || a_event == "weaponSheathe");
+	}
+
 	// Skyrim SE 1.7.104: an actor's draw is only asked of its graph once the models of what its hands hold have loaded.
 	// While an equip's model load is pending (the middle-high process's hand load ids, +0x1F8 and +0x1FA, not 0xFFFF),
 	// DrawWeaponMagicHands leaves it wanting to draw without asking. Actor::OnItemEquipped (vfunc 0xB2) checks the load

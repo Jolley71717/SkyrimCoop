@@ -754,3 +754,13 @@ TEST("stand-in rules: a voice that is not its friend's is drift, none included; 
 	CHECK(!StandInRules::VoiceDrifted(0, false, 0));
 	CHECK(!StandInRules::VoiceDrifted(0, true, 0x00013E07));  // their game could not name it: kept as it is
 }
+
+TEST("stand-in rules: the game's own put-away events are turned away while its friend has it out, the plugin's own pass")
+{
+	CHECK(StandInRules::HoldsOffSheathe("Unequip", false, true));
+	CHECK(StandInRules::HoldsOffSheathe("weaponSheathe", false, true));
+	CHECK(!StandInRules::HoldsOffSheathe("Unequip", true, true));    // its friend's sheathe, played
+	CHECK(!StandInRules::HoldsOffSheathe("Unequip", false, false));  // its friend has it away
+	CHECK(!StandInRules::HoldsOffSheathe("WeapEquip", false, true));
+	CHECK(!StandInRules::HoldsOffSheathe("attackStart", false, true));
+}

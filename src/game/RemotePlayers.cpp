@@ -13,6 +13,7 @@
 #include "game/StateBuffer.h"
 #include "game/VtableHook.h"
 
+#include <unordered_set>
 #include <Windows.h>
 
 namespace RemotePlayers
@@ -139,6 +140,8 @@ namespace RemotePlayers
 			~Own() { --ownCalls; }
 		};
 		std::atomic<int> traceLines{ 0 };
+		std::mutex                      drawnLock;
+		std::unordered_set<RE::FormID> drawnIds;  // stand-ins whose friend has the weapon, spells or fists out (HoldsOffSheathe)
 		constexpr int    TRACE_MAX = 400;
 
 		// The middle-high process's hand model loads: pending (+0x1F8 right, +0x1FA left; 0xFFFF none) and last loaded
@@ -657,6 +660,12 @@ namespace RemotePlayers
 			}
 			if (sample) {
 				RemotePlayers::TraceState(a_this);
+				std::scoped_lock held{ drawnLock };
+				if ((sample->state.flags & Protocol::kWeaponDrawn) != 0) {
+					drawnIds.insert(a_this->GetFormID());
+				} else {
+					drawnIds.erase(a_this->GetFormID());
+				}
 			}
 		}
 
@@ -1524,6 +1533,22 @@ namespace RemotePlayers
 		const auto weapon = WeaponOf(actor);
 		logs::info("Players: trace stand-in {:08X} graph event {} {} by {} (weapon state {}, thread {})", actor->GetFormID(), a_event, a_taken ? "taken" : "turned away",
 			ownCalls > 0 ? "us" : "the game", weapon ? static_cast<int>(std::to_underlying(*weapon)) : -1, GetCurrentThreadId());
+	}
+
+	bool HoldsOffSheathe(RE::TESObjectREFR* a_ref, const char* a_event)
+	{
+		if (!a_event || !a_ref || ownCalls > 0 || a_ref->GetFormID() < 0xFF000000 || !StandInRules::HoldsOffSheathe(a_event, false, true)) {
+			return false;
+		}
+		std::scoped_lock l{ drawnLock };
+		if (!drawnIds.contains(a_ref->GetFormID())) {
+			return false;
+		}
+		if (traceLines.load(std::memory_order_relaxed) < TRACE_MAX) {
+			++traceLines;
+			logs::info("Players: stand-in {:08X}: the game's {} turned away, its friend has it out", a_ref->GetFormID(), a_event);
+		}
+		return true;
 	}
 
 	void TraceState(RE::Actor* a_actor)
