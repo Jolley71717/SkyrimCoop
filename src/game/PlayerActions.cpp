@@ -2,6 +2,7 @@
 
 #include "DevLine.h"
 #include "game/Furniture.h"
+#include "game/Pairs.h"
 #include "game/Gear.h"
 #include "game/StandInRules.h"
 #include "game/VtableHook.h"
@@ -64,6 +65,12 @@ namespace PlayerActions
 			// The engine's furniture play (sitting down, the idle, getting up) is never sent: every game plays its own for
 			// the stand-in it puts in its copy of the furniture (Furniture.h).
 			if (!inSession || Furniture::EngineOwnsEvents(player)) {
+				return taken;
+			}
+			// Nor a paired animation's (a kill move): its beginning is said as a pair, and every game plays the whole pair on
+			// the actors that show both (Pairs.h).
+			Pairs::Noted(player, name);
+			if (Pairs::EventsStay(player)) {
 				return taken;
 			}
 			std::scoped_lock l{ lock };

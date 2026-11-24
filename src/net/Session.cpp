@@ -15,6 +15,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Pairs.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
 #include "game/Water.h"
@@ -241,6 +242,7 @@ namespace Session
 					Riding::Started(playerId);
 					Furniture::Started(playerId);
 					Shots::Started(playerId);
+					Pairs::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -261,6 +263,7 @@ namespace Session
 					RemotePlayers::Left(msg->playerId);
 					Riding::Left(msg->playerId);
 					Furniture::Left(msg->playerId);
+					Pairs::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -337,6 +340,11 @@ namespace Session
 			case Protocol::MessageType::kShots:
 				if (const auto msg = Protocol::DecodeShots(a_data); msg && msg->sender != playerId) {
 					Shots::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kPairs:
+				if (const auto msg = Protocol::DecodePairs(a_data); msg && msg->sender != playerId) {
+					Pairs::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -506,6 +514,7 @@ namespace Session
 				Steam::Leave();
 			}
 		}
+		Pairs::Clear();   // actors held by a pair let go first
 		Shots::Clear();   // our launches ended while the stand-ins and copies that shot them are still there
 		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
 		Furniture::Clear();  // and sitters out of their furniture
@@ -553,6 +562,7 @@ namespace Session
 			Riding::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Furniture::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Pairs::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 		StandInPeace::Frame();  // after the stand-ins are placed: actors fighting one told to stop

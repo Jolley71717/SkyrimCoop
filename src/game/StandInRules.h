@@ -78,7 +78,8 @@ namespace StandInRules
 	// voice's), a spell put in a hand a draw.
 	[[nodiscard]] inline Act ActOf(std::string_view a_event)
 	{
-		if (Has(a_event, "killmove") || Has(a_event, "paired")) {
+		// (a paired idle's own event begins "pa_": PairRules::RoleOf)
+		if (Has(a_event, "killmove") || Has(a_event, "paired") || (a_event.size() > 3 && NpcRules::SameName(a_event.substr(0, 3), "pa_"))) {
 			return Act::kKillMove;
 		}
 		if (Has(a_event, "voice") || Has(a_event, "shout")) {

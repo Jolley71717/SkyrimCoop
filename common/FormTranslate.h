@@ -84,6 +84,7 @@ namespace FormTranslate
 		case MT::kRides:
 		case MT::kShots:
 		case MT::kSits:
+		case MT::kPairs:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -415,6 +416,17 @@ namespace FormTranslate
 				for (auto& sit : a_msg.sits) {
 					ctx.Detail(sit.furniture);
 					ctx.Detail(sit.base);
+				}
+			});
+			break;
+		// Paired animations: one whose attacker or victim is an NPC the other side lacks is left out (no copy to play it
+		// on); an idle record it lacks (a mod's kill move) becomes none, and the reader finds the idle by its event.
+		case MT::kPairs:
+			detail::Apply<Protocol::Pairs>(a_packet, ctx, Protocol::DecodePairs, [&](Protocol::Pairs& a_msg) {
+				const auto side = [&](Protocol::PairSide& a_side) { return a_side.player != 0 || ctx.Npc(a_side.npc); };
+				ctx.Entries(a_msg.pairs, [&](Protocol::Pair& a_pair) { return side(a_pair.attacker) && side(a_pair.victim); });
+				for (auto& pair : a_msg.pairs) {
+					ctx.Detail(pair.idle);
 				}
 			});
 			break;

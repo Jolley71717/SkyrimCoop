@@ -4,6 +4,7 @@
 #include "FormIds.h"
 #include "game/CopyHealth.h"
 #include "game/Furniture.h"
+#include "game/Pairs.h"
 #include "game/Gait.h"
 #include "game/Gear.h"
 #include "game/LocalPlayer.h"
@@ -240,8 +241,13 @@ namespace NpcSync
 			}
 			std::scoped_lock l{ eventLock };
 			// The engine's furniture play (sitting down, the idle, getting up) is not sent: each game plays its own
-			// (Furniture.h; it takes no lock).
-			if (runIds.contains(id) && !Furniture::EngineOwnsEvents(static_cast<RE::Actor*>(ref))) {
+			// (Furniture.h; it takes no lock). Nor is a paired animation's (a kill move): its beginning is said as a pair, and
+			// every game plays the whole pair itself (Pairs.h; its lock is taken after this one, never before).
+			const auto actor = static_cast<RE::Actor*>(ref);
+			if (runIds.contains(id)) {
+				Pairs::Noted(actor, name);
+			}
+			if (runIds.contains(id) && !Furniture::EngineOwnsEvents(actor) && !Pairs::EventsStay(actor)) {
 				if (heard.size() < MAX_PENDING_EVENTS) {
 					heard.push_back({ id, Protocol::SentMs(Clock::now()), std::string{ name } });
 				} else {
@@ -2087,7 +2093,8 @@ namespace NpcSync
 		}
 		// Getting in or out of furniture (Furniture.h), the engine's own update runs for it (its sit procedure is the AI's),
 		// for a few seconds at most. In it, or waiting by furniture another actor is in, it is not placed, its walk not told.
-		if (Furniture::Assisted(a_actor)) {
+		// The same in a paired animation played here (Pairs.h: a kill move): the engine's pairing places both actors.
+		if (Furniture::Assisted(a_actor) || Pairs::Held(a_actor)) {
 			return false;
 		}
 		const bool seated = Riding::Seated(a_actor) || Furniture::Held(a_actor);
