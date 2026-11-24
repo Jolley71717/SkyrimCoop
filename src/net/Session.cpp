@@ -169,7 +169,7 @@ namespace Session
 			if (Protocol::PluginsFit(order)) {
 				hello.plugins = std::move(order);
 			} else {
-				logs::warn("Session: the load order ({} names) is too long for a hello's plugin list; only its hash is sent, so a host whose mods differ can't say which",
+				logs::warn("Session: the load order ({} names) is too long for a hello's plugin list; only its hash is sent, so this game can join only a session with exactly the same load order, and its forms are not translated",
 					order.size());
 			}
 			Send(Protocol::Encode(hello), true);
