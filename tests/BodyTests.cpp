@@ -117,10 +117,10 @@ namespace
 
 // ---- the message ----
 
-TEST("body protocol: falls and rests read back as written, as message 68 of protocol 18, and carry forms")
+TEST("body protocol: falls and rests read back as written, as message 69 of protocol 19, and carry forms")
 {
-	static_assert(static_cast<int>(MT::kBodies) == 68);
-	static_assert(Protocol::VERSION >= 18);
+	static_assert(static_cast<int>(MT::kBodies) == 69);
+	static_assert(Protocol::VERSION >= 19);
 	auto outside = Rest(INNKEEPER);
 	outside.cell = 0;
 	outside.worldspace = TAMRIEL;

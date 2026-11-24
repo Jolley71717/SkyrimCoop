@@ -57,10 +57,10 @@ namespace Protocol
 	//    telekinesis, where it was let go of, and where a loose object their player, spell or NPC moved came to rest, so
 	//    it lies in the same place in every game. (15 and 16 are the conversations' and the mechanisms' changes on the
 	//    other line; whichever change lands later renumbers.)
-	// 18: bodies of the dead (kBodies, message type 68): how an NPC's body fell at its death and where its ragdoll's bones
-	//    came to rest, from its runner, so a copy's body falls the same way and lies in the same place. (As with 17:
-	//    whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 18;
+	// 19: bodies of the dead (kBodies, message type 69): how an NPC's body fell at its death and where its ragdoll's bones
+	//    came to rest, from its runner, so a copy's body falls the same way and lies in the same place. (18 and type 68
+	//    are the quests' ended-quest snapshot on the other line; as with 17: whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 19;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -133,7 +133,7 @@ namespace Protocol
 		kObjectHolds = 65,     // both ways, on the state channel: the loose object our player holds, in the holder's frame
 		kObjectRests = 66,     // both ways, reliable: let go of, came to rest, picked up (the server names the sender; 0: the session's)
 		kAskObjectRests = 67,  // client -> server, reliable: send me every kept place again (after a load), bodies' too
-		kBodies = 68,          // both ways, reliable: a body's fall at its death, its bones at rest (the server names the sender; 0: the session's)
+		kBodies = 69,          // both ways, reliable: a body's fall at its death, its bones at rest (the server names the sender; 0: the session's)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
