@@ -1068,6 +1068,15 @@ namespace RemotePlayers
 			}
 		}
 
+		// Talking, pickpocketing, trading, follower commands and looting its body (a dead actor's container menu is an
+		// activation too): all blocked, the prompt hidden where the game knows that flag.
+		void BlockActivation(RE::Actor* a_actor)
+		{
+			a_actor->extraList.SetExtraFlags(static_cast<RE::ExtraFlags::Flag>(
+				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivate) | std::to_underlying(RE::ExtraFlags::Flag::kBlockPlayerActivate) |
+				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivateText)), true);
+		}
+
 		// Whether a stand-in fell here (StandInRules::FallOf): its life state, and the engine's own word on its death.
 		StandInRules::Fall FallOf(RE::Actor* a_actor)
 		{
@@ -1136,11 +1145,9 @@ namespace RemotePlayers
 			actor->SetPosition({ a_at.x, a_at.y, a_at.z }, true);
 			actor->SetHeading(a_at.heading);
 			// Nothing a player does to a stand-in reaches the preset NPC under it: talking, pickpocketing, trading,
-			// follower commands and any other activation are all one activation, blocked here (the prompt is hidden
-			// too where the game knows that flag). It is a friend, not an NPC with dialogue of its own.
-			actor->extraList.SetExtraFlags(static_cast<RE::ExtraFlags::Flag>(
-				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivate) | std::to_underlying(RE::ExtraFlags::Flag::kBlockPlayerActivate) |
-				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivateText)), true);
+			// follower commands and any other activation are all one activation, blocked here (BlockActivation). It is
+			// a friend, not an NPC with dialogue of its own.
+			BlockActivation(actor);
 			if (!a_remote.name.empty()) {
 				actor->SetDisplayName(a_remote.name, true);
 			}
@@ -1591,7 +1598,11 @@ namespace RemotePlayers
 				continue;
 			}
 			// One that fell here (StandInRules::Falls): taken away at once and another placed, its friend being up. A pair it
-			// is held in (a kill move) ends first.
+			// is held in (a kill move) ends first. Until then it is a body wearing its friend's gear, and never looted: its
+			// activation, blocked when it was placed, is blocked again in case a script opened it (BlockActivation).
+			if (actor && remote.standInId != 0 && FallOf(actor.get()) != StandInRules::Fall::kStanding) {
+				BlockActivation(actor.get());
+			}
 			if (actor && remote.standInId != 0 && !Pairs::Held(actor.get())) {
 				if (const auto fall = FallOf(actor.get()); fall != StandInRules::Fall::kStanding) {
 					const auto wait = remote.falls.Fell(now);
