@@ -382,7 +382,6 @@ namespace CopyHealth
 	// alone). The session's word is that it is dead: a body risen in a friend's game and fought there would be run alive and
 	// raise it in every game. (A raise by its runner is the session's: its health said again ends the session's death,
 	// and Forget with it.)
-	inline constexpr auto KILL_AGAIN = 2s;
 	inline constexpr int  KILL_TRIES = 5;
 
 	enum class DeadDo : std::uint8_t
