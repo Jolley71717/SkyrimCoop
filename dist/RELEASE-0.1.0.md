@@ -27,7 +27,7 @@ Also known:
 - Game versions older than 1.7.104: Anniversary Edition 1.6.317 and later load with a warning and are untested; 1.5.97 and older do not load.
 - Skyrim VR and the GOG and Microsoft Store versions are not supported.
 
-How it was tested: This exact zip was installed on two PCs, each with its own Steam account, and played by two scripted games for about 30 minutes with real input in both directions; unit tests pass. The test could not judge walking, sprinting and jumping, or the cave pillar check, so those were not part of it.
+How it was tested: this exact zip was installed on two PCs, each with its own Steam account, and two scripted games joined, saw each other, opened and closed doors, saved and rejoined, in both directions, for about an hour; unit tests pass. That scripted test could not judge walking, sprinting and jumping, so those were not part of it.
 
 Reporting a problem: use the bug form at https://github.com/Jolley71717/SkyrimCoop/issues/new/choose and attach `SkyrimCoop.log` from `Documents\My Games\Skyrim Special Edition\SKSE`. The log leaves out player names, Steam ids and addresses; check anything else you attach.
 
