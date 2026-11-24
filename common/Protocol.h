@@ -60,10 +60,10 @@ namespace Protocol
 	// 19: bodies of the dead (kBodies, message type 69): how an NPC's body fell at its death and where its ragdoll's bones
 	//    came to rest, from its runner, so a copy's body falls the same way and lies in the same place. (18 and type 68
 	//    are the quests' ended-quest snapshot on the other line; as with 17: whichever change lands later renumbers.)
-	// 24: a loose object of several bodies (a hanging chain, a cage, a heap of bones) rests whole: a kObjectRests rest
-	//    carries the place of each of its loose bodies by name (ObjectPart). (20 to 23 are other changes of the stack: as
+	// 25: a loose object of several bodies (a hanging chain, a cage, a heap of bones) rests whole: a kObjectRests rest
+	//    carries the place of each of its loose bodies by name (ObjectPart). (20 to 24 are other changes of the stack: as
 	//    with 17, whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 24;
+	inline constexpr std::uint16_t VERSION = 25;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;

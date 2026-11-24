@@ -1163,9 +1163,9 @@ TEST("object holds: a holder's hold heard just after its let-go or rest of the o
 	CHECK(ends.Size() == 0u);
 }
 
-TEST("object parts: a rest of an object of several bodies reads back with its parts, as protocol 24; parts only on a rest, at most MAX_OBJECT_PARTS, named once, near and turned")
+TEST("object parts: a rest of an object of several bodies reads back with its parts, as protocol 25; parts only on a rest, at most MAX_OBJECT_PARTS, named once, near and turned")
 {
-	static_assert(Protocol::VERSION >= 24);
+	static_assert(Protocol::VERSION >= 25);
 	static_assert(Protocol::MAX_OBJECT_RESTS_SIZE <= 16384);
 	const Protocol::ObjectRests rests{ .sender = 2, .rests = { Several(TANKARD, 5), RestAt(BUCKET), Several(0x00100000, Protocol::MAX_OBJECT_PARTS) } };
 	CHECK(Protocol::DecodeObjectRests(Protocol::Encode(rests)) == rests);
