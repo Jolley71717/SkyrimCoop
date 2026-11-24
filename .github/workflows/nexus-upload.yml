@@ -2,10 +2,12 @@
 # version. Run by hand only (Actions > Upload to Nexus > Run workflow): Nexus gets settled versions rarely, when the
 # maintainer decides (docs/RELEASING.md). The GitHub release must already carry SkyrimCoop-X.Y.Z-nexus.zip.
 #
-# NOT IN USE YET. The mod has no page on Nexus Mods, so there is no file id or mod id to upload to, and the repository
-# secret NEXUSMODS_API_KEY is not set. The first step refuses every run until the two ids below are filled in (the
-# maintainer does that, and sets the secret, when the page exists). Carried from the sister project (F4Multiplayer),
-# where this workflow is how every Nexus upload is made.
+# NOT IN USE YET. The mod's page exists on Nexus Mods (mod id 200124, unpublished) but has no file, and the repository
+# secret NEXUSMODS_API_KEY is not set. This action (Nexus-Mods/upload-action, API v3) only adds a new version to a file
+# that already exists: it cannot create a page's first file. So the maintainer uploads the first file by hand on the
+# mod page (Manage files), once, then copies that file's id (Files tab > Advanced, or Manage Files > edit menu) into
+# NEXUS_FILE_ID below and sets the secret. The first step refuses every run until both ids are filled in. Every upload
+# after that one goes through this workflow. Carried from the sister project (F4Multiplayer).
 name: Upload to Nexus
 
 on:
@@ -24,9 +26,10 @@ permissions:
 
 env:
   # The main file's API file id (the mod page's Files tab > Advanced) and the mod's unique API id (for the changelog).
-  # Empty until the mod has a page on Nexus Mods.
+  # The mod id is the number in the page's address. The file id stays empty until the page's first file has been
+  # uploaded by hand: the upload API cannot create it.
   NEXUS_FILE_ID: ""
-  NEXUS_MOD_ID: ""
+  NEXUS_MOD_ID: "200124"
 
 jobs:
   upload:
@@ -37,7 +40,7 @@ jobs:
       - name: Refuse until the mod has a Nexus page
         run: |
           if [ -z "$NEXUS_FILE_ID" ] || [ -z "$NEXUS_MOD_ID" ]; then
-            echo "::error::Not in use yet: the mod has no Nexus page. Set NEXUS_FILE_ID and NEXUS_MOD_ID in this file and the repository secret NEXUSMODS_API_KEY first (docs/RELEASING.md)."
+            echo "::error::Not in use yet: upload the page's first file by hand on Nexus, then set NEXUS_FILE_ID in this file and the repository secret NEXUSMODS_API_KEY first (docs/RELEASING.md)."
             exit 1
           fi
 

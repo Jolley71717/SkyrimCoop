@@ -2,7 +2,7 @@ blank_issues_enabled: false
 contact_links:
   - name: Where the project stands
     url: https://github.com/Jolley71717/SkyrimCoop/blob/main/docs/PLAN.md
-    about: Nothing is playable yet. The plan lists the phases and what each one has to prove.
+    about: The mod is pre-alpha. The plan lists the phases and what each one has to prove.
   - name: How to install
     url: https://github.com/Jolley71717/SkyrimCoop/blob/main/dist/INSTALL.md
     about: Requirements, where the files go and how to check that the plugin loaded.
