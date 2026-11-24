@@ -180,6 +180,11 @@ TEST("pair protocol: the most fit; more, a side of nobody or of both, one actor 
 	CHECK(refused(bad));
 	bad = KillMove(PlayerSide(1), NpcSide(BANDIT));
 	bad.event = "pa_\x01kill";
+	CHECK(!Protocol::PairHolds(bad));  // a control character: no game writes one
+	const auto cleaned = Protocol::DecodePairs(Protocol::Encode(Protocol::Pairs{ .pairs = { bad } }));
+	REQUIRE(cleaned);  // ... and the reader drops it (Reader::Str), as from every string on the wire
+	CHECK(cleaned->pairs[0].event == "pa_kill");
+	bad.event = "\x01\x02";  // nothing left: no event
 	CHECK(refused(bad));
 	bad = KillMove(PlayerSide(1), NpcSide(BANDIT));
 	bad.flags = 4;
