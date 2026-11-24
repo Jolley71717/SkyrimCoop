@@ -84,6 +84,7 @@ namespace RemotePlayers
 			std::uint64_t           actionsIn = 0;
 			std::uint64_t           actionsUnplaced = 0;  // came while it had no stand-in here: not played
 			std::string             lastActionRefused;
+			std::vector<std::pair<std::string, Clock::time_point>> again;  // actions its graph turned away, tried again a while (StandInRules::ACTION_RETRY)
 			float                   aim = 0.0f;  // the pitch it aims at (StandInRules::AimPitch)
 			// What it did here, its friend's game being the one that deals it all (the hooks and event sinks, under lock):
 			// effects of its spells refused and let take hold (on itself), its blows and casts, health its blows took
@@ -140,6 +141,7 @@ namespace RemotePlayers
 			~Own() { --ownCalls; }
 		};
 		std::atomic<int> traceLines{ 0 };
+		std::atomic<int>                heldOff{ 0 };
 		std::mutex                      drawnLock;
 		std::unordered_set<RE::FormID> drawnIds;  // stand-ins whose friend has the weapon, spells or fists out (HoldsOffSheathe)
 		constexpr int    TRACE_MAX = 400;
@@ -385,13 +387,30 @@ namespace RemotePlayers
 		// Plays a friend's actions that are due on their stand-in's graph, and counts each by kind, played or turned away.
 		void PlayActions(RE::Actor* a_actor, std::uint32_t a_player, const std::vector<std::string>& a_events)
 		{
-			if (a_events.empty()) {
+			const auto now = Clock::now();
+			// What its graph turned away last time and still counts, then the new ones.
+			std::vector<std::pair<std::string, Clock::time_point>> todo;
+			{
+				std::scoped_lock l{ lock };
+				if (const auto player = players.find(a_player); player != players.end() && player->second.standInId == a_actor->GetFormID()) {
+					for (auto& [event, born] : player->second.again) {
+						if (now - born < StandInRules::ACTION_RETRY) {
+							todo.emplace_back(std::move(event), born);
+						}
+					}
+					player->second.again.clear();
+				}
+			}
+			for (const auto& event : a_events) {
+				todo.emplace_back(event, now);
+			}
+			if (todo.empty()) {
 				return;
 			}
 			const Own own;
 			std::vector<std::pair<std::string_view, bool>> results;
-			results.reserve(a_events.size());
-			for (const auto& event : a_events) {
+			results.reserve(todo.size());
+			for (const auto& [event, born] : todo) {
 				results.emplace_back(event, a_actor->NotifyAnimationGraph(Name(event)));
 			}
 			std::scoped_lock l{ lock };
@@ -400,19 +419,26 @@ namespace RemotePlayers
 				return;
 			}
 			auto& remote = player->second;
-			for (const auto& [event, taken] : results) {
+			for (std::size_t i = 0; i < results.size(); ++i) {
+				const auto& [event, taken] = results[i];
 				if (taken) {
 					if (remote.played.Total() == 0) {
 						logs::info("Players: player {}'s stand-in {:08X} played its friend's first action ({})", a_player, remote.standInId, event);
 					}
 					remote.played.Add(event);
 				} else {
-					if (remote.refused.Total() == 0 || remote.lastActionRefused != event) {
+					const bool again = todo[i].second != now;  // a retry: counted and logged the first time
+					if (!again && (remote.refused.Total() == 0 || remote.lastActionRefused != event)) {
 						logs::info("Players: player {}'s stand-in {:08X}: its graph turned its friend's {} away ({} turned away so far)", a_player, remote.standInId, event,
 							remote.refused.Total() + 1);
 					}
-					remote.refused.Add(event);
+					if (!again) {
+						remote.refused.Add(event);
+					}
 					remote.lastActionRefused = std::string{ event };
+					if (now - todo[i].second < StandInRules::ACTION_RETRY) {
+						remote.again.emplace_back(todo[i]);
+					}
 				}
 			}
 		}
@@ -1544,8 +1570,7 @@ namespace RemotePlayers
 		if (!drawnIds.contains(a_ref->GetFormID())) {
 			return false;
 		}
-		if (traceLines.load(std::memory_order_relaxed) < TRACE_MAX) {
-			++traceLines;
+		if (heldOff.fetch_add(1, std::memory_order_relaxed) < 3) {
 			logs::info("Players: stand-in {:08X}: the game's {} turned away, its friend has it out", a_ref->GetFormID(), a_event);
 		}
 		return true;

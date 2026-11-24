@@ -488,6 +488,10 @@ namespace StandInRules
 	// after each draw, as an NPC without a fight lowers it); a stand-in's weapon state is its friend's. The game's own
 	// event that would put it away is turned away while its friend has it out; this plugin's own events (its friend's
 	// sheathe played, a fix) pass. Every kind: sword, bow, spells, shouts and fists all go away by these events.
+	// An action its friend did that its graph turns away (a swing while its draw is still on, a cast while its hands are
+	// busy) is tried again each update for this long.
+	inline constexpr auto ACTION_RETRY = 1200ms;
+
 	[[nodiscard]] constexpr bool HoldsOffSheathe(std::string_view a_event, bool a_ours, bool a_friendDrawn)
 	{
 		return a_friendDrawn && !a_ours && (a_event == "Unequip" || a_event == "weaponSheathe");
