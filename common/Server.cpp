@@ -729,11 +729,15 @@ void Server::Run()
 			}
 			break;
 		case MT::kDowned:
-			// Its own player's down, the sender named, to the others; kept while it is on the ground, for a joiner. An up
-			// always goes (a friend's stand-in must not be left kneeling); a wait past the budget is dropped (said again).
+			// Its own player's down, the sender named, to the others; kept while it is on the ground, for a joiner. An up that
+			// ends a kept down always goes (a friend's stand-in must not be left kneeling), and one that ends nothing is
+			// dropped (the others have it up), so ups are bounded by downs; a down past the budget is dropped (said again).
 			if (auto msg = Protocol::DecodeDowned(a_data)) {
 				msg->player = a_peer.playerId;
 				const bool up = msg->state == static_cast<std::uint8_t>(0);
+				if (up && !a_peer.downed) {
+					break;
+				}
 				if (!up && !a_peer.downBudget.Take(Clock::now())) {
 					if (!a_peer.toldDownsDropped) {
 						a_peer.toldDownsDropped = true;

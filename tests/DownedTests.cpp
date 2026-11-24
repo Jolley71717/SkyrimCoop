@@ -129,6 +129,27 @@ TEST("downed server: a down goes to the others with the sender named, a waiting 
 	CHECK(SentTo<Protocol::Downed>(f, 4, MT::kDowned, Protocol::DecodeDowned).empty());
 }
 
+TEST("downed server: an up that ends no kept down is not passed on, so a client saying up in a loop reaches nobody")
+{
+	Fixture f;
+	AllIn(f, 2);
+	for (int i = 0; i < 50; ++i) {
+		f.fake->Deliver(2, Protocol::Encode(Protocol::Downed{ .state = 0 }));
+	}
+	REQUIRE(f.fake->Settle());
+	CHECK(SentTo<Protocol::Downed>(f, 1, MT::kDowned, Protocol::DecodeDowned).empty());
+	// A down, then ups: the first up ends it and goes; the rest end nothing.
+	f.fake->Deliver(2, Protocol::Encode(Protocol::Downed{ .state = 1, .secondsLeft = 45 }));
+	for (int i = 0; i < 20; ++i) {
+		f.fake->Deliver(2, Protocol::Encode(Protocol::Downed{ .state = 0 }));
+	}
+	REQUIRE(f.fake->Settle());
+	const auto got = SentTo<Protocol::Downed>(f, 1, MT::kDowned, Protocol::DecodeDowned);
+	REQUIRE(got.size() == 2u);
+	CHECK(got[0].state == 1u);
+	CHECK(got[1].state == 0u);
+}
+
 TEST("downed server: a help goes to the downed player alone, the helper named; never one's own, nor to one not waiting")
 {
 	Fixture f;
@@ -372,6 +393,94 @@ TEST("downed rules: stood up by another path while down is up; a save that took 
 	CHECK(quest.Now() == Phase::kUp);
 }
 
+TEST("downed rules: a save made while down, loaded, is a down no flag holds: stood up after 1.5 s of play, never a fresh down")
+{
+	for (const bool friends : { true, false }) {
+		DownRules::Self self;
+		auto            t = Steady::now();
+		(void)self.Frame(Standing(), t);
+		(void)self.Frame(Down(), t);
+		REQUIRE(self.Now() == Phase::kDown);
+		// The load: our flags were off for the save, which holds the engine's bleedout.
+		self.Forget();
+		const auto loaded = DownRules::Facts{ .friends = friends, .down = true };
+		auto       step = self.Frame(loaded, t + 10s);
+		CHECK(!step.essential);  // never ours again: that would be a fresh 45 s down, and a death that loads this save
+		CHECK(!step.wentDown);
+		CHECK(!step.standUp);
+		// A menu's time does not count.
+		auto paused = loaded;
+		paused.paused = true;
+		CHECK(!self.Frame(paused, t + 11s).standUp);
+		CHECK(!self.Frame(loaded, t + 12s).standUp);
+		CHECK(!self.Frame(loaded, t + 12400ms).standUp);
+		step = self.Frame(loaded, t + 12600ms);
+		CHECK(step.standUp);
+		CHECK(step.flagless);
+		CHECK(step.health);
+		CHECK(step.recovery);
+		CHECK(step.say);
+		CHECK(!step.kill);
+		CHECK(self.Now() == Phase::kGettingUp);
+		CHECK(self.Says() == Said::kGettingUp);  // nobody helps one getting up
+		CHECK(self.counts.flagless == 1u);
+		CHECK(self.counts.downs == 1u);
+		// Still down: stood up again each second, and kept from dying meanwhile.
+		step = self.Frame(loaded, t + 13700ms);
+		CHECK(step.standUp);
+		CHECK(step.essential == std::optional<bool>{ true });
+		// Up: said, and our flag judged again as ever.
+		step = self.Frame(DownRules::Facts{ .friends = friends, .ours = true }, t + 14s);
+		CHECK(step.gotUp);
+		CHECK(self.Now() == Phase::kUp);
+		step = self.Frame(DownRules::Facts{ .friends = friends, .ours = true }, t + 15s);
+		CHECK((step.essential.has_value() == !friends));
+	}
+	// One that never gets up ends in the bleed-out's death, never left there.
+	DownRules::Self stuck;
+	auto            t = Steady::now();
+	stuck.Forget();
+	const auto loaded = DownRules::Facts{ .friends = true, .down = true };
+	bool       killed = false;
+	for (int i = 0; i < 400 && !killed; ++i) {
+		t += 100ms;
+		auto facts = loaded;
+		facts.ours = stuck.Now() == Phase::kGettingUp;
+		killed = stuck.Frame(facts, t).kill;
+	}
+	CHECK(killed);
+	CHECK(stuck.counts.neverUp == 1u);
+	// A down another flag holds (a quest's essential, another mod's) is that flag's: never stood up by us.
+	DownRules::Self quest;
+	quest.Forget();
+	const auto theirs = DownRules::Facts{ .friends = true, .elsewise = true, .down = true };
+	for (int i = 0; i < 100; ++i) {
+		const auto step = quest.Frame(theirs, t + std::chrono::milliseconds(100 * i));
+		CHECK(!step.standUp);
+		CHECK(!step.essential);
+	}
+	CHECK(quest.Now() == Phase::kUp);
+}
+
+TEST("downed rules: a save took our no-recovery flag off while down: the next frame puts it back")
+{
+	DownRules::Self self;
+	auto            t = Steady::now();
+	(void)self.Frame(Standing(), t);
+	auto down = Down();
+	(void)self.Frame(down, t);
+	down.noRecovery = true;
+	CHECK(!self.Frame(down, t + 1s).noRecovery);
+	auto saved = Down();  // both off for the save
+	saved.ours = false;
+	const auto step = self.Frame(saved, t + 2s);
+	CHECK(step.noRecovery);
+	CHECK(step.essential == std::optional<bool>{ true });
+	// Getting up, the engine's recovery is let be: never put back then.
+	CHECK(self.Help(t + 3s));
+	CHECK(!self.Frame(saved, t + 3100ms).noRecovery);
+}
+
 TEST("downed rules: a bleedout camera with nobody down is ended after a second, again every 2 s while it stays")
 {
 	DownRules::Self self;
@@ -424,6 +533,11 @@ TEST("downed rules: 2000 random frames never leave us down past the bleed-out wi
 			}
 			if (dead && rng() % 20 == 0) {
 				dead = false;
+				self.Forget();
+			}
+			// Now and then a save made while down is loaded: our flags were off for it, the bleedout is in it.
+			if (down && rng() % 300 == 0) {
+				ours = false;
 				self.Forget();
 			}
 			if (down) {

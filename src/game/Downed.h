@@ -12,7 +12,8 @@
 // A player brought down and helped up, the game's side (docs/DESIGN.md, "Downed and helped up"; the rules are
 // src/game/DownRules.h).
 // - Ours: with a friend in the session our player is essential by our own flag (the player's base and the actor's own,
-//   never in a save: BeforeSave takes it off, the next frame puts it back), so a blow that would kill them brings them
+//   never in a save: BeforeSave takes it and the no-recovery flag off, the next frame puts them back; a save made while
+//   down, loaded, is stood up), so a blow that would kill them brings them
 //   down into the engine's bleedout, its own recovery off. Our game says the down (kDowned) and waits for a friend's
 //   help (kHelpUp) for DownRules::BLEED_OUT; helped, our player gets HEALTH_ON_UP of their health and the engine stands
 //   them up (by hand when it does not); no help in time, our flag comes off and they die: the game loads their save.
@@ -37,9 +38,11 @@ namespace Downed
 	void Left(std::uint32_t a_playerId);
 	// The session ended: friends' downs are forgotten. Ours goes on (its clock ends it; a friend may come back).
 	void Clear();
-	// SKSE's kSaveGame: our essential flag off, so no save keeps it (the next frame puts it back).
+	// SKSE's kSaveGame (every save: ours, an autosave, another mod's): our flags off (essential, no recovery), so no save
+	// keeps them (the next frame puts them back while down).
 	void BeforeSave();
-	// A load or a new game: the world of the down is gone.
+	// A load or a new game: our flags off the player first (its base is a form a load may not write again), and the world
+	// of the down is gone.
 	void ForgetWorld();
 
 	// Developer channel `downed`: ours (phase, flag, life state, seconds left, counts) and each friend's (said, kneel,

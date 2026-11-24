@@ -21,6 +21,12 @@
 //   take is tried again with our flag kept off; a bleedout camera left behind by any path is ended; friends who leave
 //   do not end a down (one may come back), and a down that another mod's or a quest's essential flag began is that
 //   flag's, never ours to end.
+// - Nothing of ours goes in a save: before any save (ours, an autosave, the console's, another mod's: SKSE's kSaveGame
+//   comes for each) our essential flag and the no-recovery flag come off, and the next frame puts them back while still
+//   down. A save made while down still holds the engine's bleedout: loaded, it is a down no flag holds, and it is ended,
+//   never begun again: after GET_UP_WAIT of play the player is stood up by hand as a helped one is, and one that never
+//   gets up ends in the bleed-out's death. A load or a new game after quitting while down takes our flags off first. A
+//   crash writes nothing.
 // The game's side is src/game/Downed.cpp. No game here: tests/DownedTests.cpp.
 namespace DownRules
 {
@@ -93,6 +99,7 @@ namespace DownRules
 		bool ours = false;           // our essential flag is on (set by us)
 		bool elsewise = false;       // essential (or protected) for another reason: a quest, a mod, the console
 		bool down = false;           // the engine's bleedout (its life state: essential down or bleeding out)
+		bool noRecovery = false;     // the engine's own recovery from it is off (kNoBleedoutRecovery)
 		bool dead = false;           // dying or dead
 		bool paused = false;         // a menu stops the game
 		bool bleedCamera = false;    // the camera is in its bleedout state
@@ -107,6 +114,7 @@ namespace DownRules
 		bool wentDown = false;
 		bool health = false;            // give HEALTH_ON_UP of the most health (helped)
 		bool standUp = false;           // end the bleedout by hand (the engine's own get-up did not come)
+		bool flagless = false;          // (with standUp) the down was no flag's: a save made while down, loaded
 		bool kill = false;
 		bool gotUp = false;
 		bool fixCamera = false;         // end a bleedout camera nobody's down is in
@@ -120,6 +128,7 @@ namespace DownRules
 		std::uint64_t helped = 0;       // helps taken
 		std::uint64_t helpsRefused = 0; // helps that came while not waiting
 		std::uint64_t gotUp = 0;
+		std::uint64_t flagless = 0;     // downs no flag held (a save made while down, loaded): stood up
 		std::uint64_t upElsewise = 0;   // stood up by another path while down (a console, a script): taken as up
 		std::uint64_t standUps = 0;     // get-ups done by hand
 		std::uint64_t bledOut = 0;
@@ -147,6 +156,23 @@ namespace DownRules
 					step.wentDown = step.noRecovery = step.say = true;
 					break;
 				}
+				// A down no flag holds, ours or another's (a save made while down, loaded): nobody's to wait out. Never made
+				// ours (that would be a fresh down, and a death that loads the same save again): after GET_UP_WAIT of play it
+				// is ended as a helped one is, stood up by hand.
+				if (a_facts.down && !a_facts.dead && !a_facts.ours && !a_facts.elsewise) {
+					flagless += played;
+					if (flagless >= GET_UP_WAIT) {
+						phase = Phase::kGettingUp;
+						gettingUp = GET_UP_WAIT;
+						flagless = Clock::duration::zero();
+						standUpAt = a_now;
+						++counts.flagless;
+						++counts.standUps;
+						step.standUp = step.health = step.recovery = step.say = step.flagless = true;
+					}
+					break;
+				}
+				flagless = Clock::duration::zero();
 				// Ours on while a friend is here and nothing else makes our player essential; never on a dead player.
 				if (const bool want = a_facts.friends && !a_facts.elsewise && !a_facts.dead; want != a_facts.ours) {
 					step.essential = want;
@@ -165,6 +191,9 @@ namespace DownRules
 					break;
 				}
 				keepOurs(a_facts, step);  // put back after a save took it off
+				if (!a_facts.noRecovery) {
+					step.noRecovery = true;  // the same
+				}
 				if (a_now - downAt >= BLEED_OUT) {
 					phase = Phase::kBledOut;
 					++counts.bledOut;
@@ -266,10 +295,12 @@ namespace DownRules
 			return std::exchange(helpPending, false);
 		}
 
-		// A load or a new game: whatever was before is another world's. Our flag is judged again next frame.
+		// A load or a new game: whatever was before is another world's. Our flag is judged again next frame; a down the
+		// save holds is no flag's, and is stood up.
 		void Forget()
 		{
 			phase = Phase::kUp;
+			flagless = Clock::duration::zero();
 			killAt.reset();
 			standUpAt.reset();
 			strayCameraSince.reset();
@@ -317,6 +348,7 @@ namespace DownRules
 		Clock::time_point                saidAt{};
 		Clock::time_point                helpedAt{};
 		Clock::duration                  gettingUp{};
+		Clock::duration                  flagless{};  // play time down with no flag, while up
 		int                              reminded = 0;
 		bool                             helpPending = false;
 		std::optional<Clock::time_point> last;

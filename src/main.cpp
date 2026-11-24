@@ -248,7 +248,7 @@ namespace
 			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
 			Pairs::BeforeSave();    // actors held by a pair let go: placed by their states again
-			Downed::BeforeSave();   // our essential flag never in a save (back next frame)
+			Downed::BeforeSave();   // our flags never in a save (back next frame while down)
 			Shots::BeforeSave();    // our launches ended first: none is in the save
 			NpcSync::BeforeSave();  // copies of spawns first: the stand-ins' save guard names them
 			RemotePlayers::BeforeSave();
