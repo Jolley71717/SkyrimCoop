@@ -63,13 +63,14 @@ namespace Protocol
 	//    talk with an NPC someone else talks with is closed. Written on top of 12 (quest runs) beside 12, 13 and 14 (riding,
 	//    projectiles and furniture, another branch): the number is above both lines' and is renumbered at merge; its messages
 	//    (59-62) clash with neither line's.
-	// 17: the host's world said whole (kQuestWorld; docs/DESIGN.md "Quests"): the host's snapshot (at its welcome and
+	// 18: the host's world said whole (kQuestWorld; docs/DESIGN.md "Quests"): the host's snapshot (at its welcome and
 	//    after each load) is its own message, and also says the shared quests its world has ended; the server passes it
 	//    on as the session's word (player 0), as to a joiner, so a stage of it that moves a player is the past
 	//    everywhere, and a friend that never started a quest the host ended keeps its word aside until the quest starts
-	//    there. Written on top of 15 (conversations) beside 16 (mechanism outcomes, another branch, types 63-64): the
-	//    number is above both and is renumbered at merge; its message (65) clashes with neither.
-	inline constexpr std::uint16_t VERSION = 17;
+	//    there. Written on top of 15 (conversations) beside 16 (mechanism outcomes, types 63-64) and 17 (loose objects,
+	//    types 65-67), each on another branch: the number is above all three and is renumbered at merge; its message (68)
+	//    clashes with none.
+	inline constexpr std::uint16_t VERSION = 18;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -150,8 +151,8 @@ namespace Protocol
 		kRemoteLine = 60,  // server -> the others: that player's line (never kept: a joiner hears only what is said after)
 		kTalk = 61,        // client -> server, reliable: our player talks with this NPC (again every few seconds), or no longer
 		kTalkAnswer = 62,  // server -> the asker alone: who talks with that NPC (the asker: it is theirs)
-		// 63 and 64 are left for mechanism outcomes, written at the same time on another branch.
-		kQuestWorld = 65,  // host -> server, reliable: its world's quests, as kQuests: passed on as the session's word (player 0)
+		// 63 and 64 are left for mechanism outcomes and 65 to 67 for loose objects, written at the same time on other branches.
+		kQuestWorld = 68,  // host -> server, reliable: its world's quests, as kQuests: passed on as the session's word (player 0)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
