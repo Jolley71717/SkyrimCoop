@@ -133,6 +133,12 @@ namespace DevCommands
 			return LocalPlayer::Describe();
 		}
 
+		// forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>]: the session's form IDs (net/FormsCommand.h).
+		std::string Forms(std::string_view a_args)
+		{
+			return Session::Forms(a_args);
+		}
+
 		std::string StandIns(std::string_view)
 		{
 			return RemotePlayers::Describe();
@@ -180,6 +186,7 @@ namespace DevCommands
 			{ "steam", SteamCommand },
 			{ "probe", Probe },
 			{ "session", SessionCommand },
+			{ "forms", Forms },
 			{ "where", Where },
 			{ "standins", StandIns },
 			{ "strays", Strays },
@@ -202,7 +209,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

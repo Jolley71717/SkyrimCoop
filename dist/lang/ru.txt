@@ -7,9 +7,6 @@ reject.version = В этой игре другая версия мода (про
 reject.password = Неверный пароль.
 reject.full = Игра заполнена (игроков: {n}).
 reject.mods = Ваши моды отличаются от модов хоста.
-reject.mods_missing = Ваши моды отличаются от модов хоста: у вас нет {plugin}.
-reject.mods_extra = Ваши моды отличаются от модов хоста: у хоста нет {plugin}.
-reject.mods_order = Ваши моды отличаются от модов хоста: те же плагины, но в другом порядке.
 
 steam.status_hosting = Проводит кооперативную игру в Skyrim
 steam.status_playing = Играет в Skyrim в кооперативе

@@ -1,6 +1,7 @@
 #include "Server.h"
 
 #include "EnetTransport.h"
+#include "FormIds.h"
 #include "Name.h"
 #include "Redact.h"
 #include "Text.h"
@@ -44,45 +45,27 @@ namespace
 		bool        toldUnknown = false;
 	};
 
-	// The refusal of a joiner whose load order differs from the session's: the first plugin one side has and the
-	// other lacks, as the English the server sends (a reject.* key, filled in) and as the log says it. a_session and
-	// a_joiner are laid out as hellos carry them (Protocol::ComparedLoadOrder); either empty says only that they differ.
-	// Names are looked up, not searched for: each list may hold thousands (Protocol::MAX_PLUGINS), and any game that
-	// connects can send one.
-	struct LoadOrderRefusal
+	// How a joiner's load order differs from the session's table, for the log: counts only. A plugin's name is the
+	// player's own business (a host can name one after themselves), and the plugins that differ are named in each game's
+	// own log (src/net/Session.cpp), where they are that player's. Names are looked up, not searched for: each list may
+	// hold thousands (Protocol::MAX_PLUGINS), and any game that connects can send one.
+	std::string LoadOrderDifference(const std::vector<std::string>& a_table, const std::vector<std::string>& a_joiner)
 	{
-		std::string reason;
-		std::string logged;
-	};
-
-	LoadOrderRefusal LoadOrderDifference(const std::vector<std::string>& a_session, const std::vector<std::string>& a_joiner)
-	{
-		if (a_session.empty() || a_joiner.empty()) {
-			return { Text::GetEnglish("reject.mods"), "another load order" };
-		}
-		const auto names = [](const std::vector<std::string>& a_list) {
-			std::unordered_set<std::string> out;
-			out.reserve(a_list.size());
-			for (const auto& name : a_list) {
-				out.insert(Protocol::LowerPluginName(name));
+		const auto table = FormIds::Table::Of(a_table);
+		const auto joiner = FormIds::Table::Of(a_joiner);
+		const auto missing = [](const FormIds::Table& a_from, const FormIds::Table& a_in) {
+			std::size_t count = 0;
+			for (const auto* kind : { &a_from.full, &a_from.light }) {
+				count += static_cast<std::size_t>(std::ranges::count_if(*kind, [&](const std::string& a_name) { return !a_in.Find(a_name); }));
 			}
-			return out;
+			return count;
 		};
-		const auto session = names(a_session);
-		const auto joiner = names(a_joiner);
-		for (const auto& name : a_session) {
-			if (name != Protocol::LIGHT_PLUGINS && !joiner.contains(Protocol::LowerPluginName(name))) {
-				return { Text::FormatEnglish("reject.mods_missing", { { "plugin", name } }),
-					std::format("another load order (you don't have {})", Redact::OneLine(name)) };
-			}
+		const auto theirs = missing(joiner, table);
+		const auto lacking = missing(table, joiner);
+		if (theirs == 0 && lacking == 0) {
+			return "the same plugins, in another order";
 		}
-		for (const auto& name : a_joiner) {
-			if (name != Protocol::LIGHT_PLUGINS && !session.contains(Protocol::LowerPluginName(name))) {
-				return { Text::FormatEnglish("reject.mods_extra", { { "plugin", name } }),
-					std::format("another load order (the host doesn't have {})", Redact::OneLine(name)) };
-			}
-		}
-		return { Text::GetEnglish("reject.mods_order"), "another load order (the same plugins, in another order)" };
+		return std::format("{} plugins the session has not, {} of the session's it lacks", theirs, lacking);
 	}
 }
 
@@ -152,9 +135,13 @@ void Server::Run()
 	std::unordered_map<std::uint64_t, std::uint32_t> knownIds;
 	std::uint32_t                                    nextPlayerId = 1;
 	std::uint32_t                                    hostId = 0;
-	// The session's load order: the first player's to join. Everyone after must match it while anyone is in.
+	// The session's load order: the first player's to join (its hash), and the session's plugin table, which numbers
+	// every form ID on the wire (Protocol::PluginTable, common/FormIds.h): that load order with every later joiner's
+	// other plugins added after it. A joiner with another load order is let in when both lists are known: their game
+	// translates its form IDs by plugin name. Without a list (a tool's hello, or one too long to carry) nothing can
+	// translate theirs, so they must have the session's load order.
 	std::optional<std::uint32_t> sessionHash;
-	std::vector<std::string>     sessionPlugins;
+	std::vector<std::string>     sessionTable;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -223,9 +210,9 @@ void Server::Run()
 			return;
 		}
 		const bool othersIn = countPlayers() > (replaced ? 1u : 0u);
-		if (othersIn && sessionHash && *sessionHash != hello->contentHash) {
-			auto difference = LoadOrderDifference(sessionPlugins, hello->plugins);
-			refuse(a_key, std::move(difference.reason), difference.logged);
+		const bool otherOrder = othersIn && sessionHash && *sessionHash != hello->contentHash;
+		if (otherOrder && (sessionTable.empty() || hello->plugins.empty())) {
+			refuse(a_key, Text::GetEnglish("reject.mods"), "another load order, and no list of it to translate by");
 			return;
 		}
 
@@ -237,7 +224,24 @@ void Server::Run()
 		}
 		if (!othersIn) {
 			sessionHash = hello->contentHash;
-			sessionPlugins = hello->plugins;
+			sessionTable.clear();  // the first player's load order numbers the new session
+		} else if (otherOrder) {
+			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
+			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
+				LoadOrderDifference(sessionTable, hello->plugins)));
+		}
+		// Their plugins the table lacks get places after the rest of their kind (an ID it gave stays what it was). The
+		// players already in hear the grown table first, on the reliable channel, ahead of anything numbered by it; the
+		// joiner hears it before the welcome. A state on the state channel can still come before it: one that names a
+		// place of a plugin new to the table reads as nowhere there, once.
+		if (const auto added = FormIds::Extend(sessionTable, hello->plugins); added != 0) {
+			log(std::format("server: the session's plugin table has {} plugins ({} new)", FormIds::Table::Of(sessionTable).Size(), added));
+			if (othersIn) {
+				broadcast(Protocol::Encode(Protocol::PluginTable{ sessionTable }), true, &a_key);
+			}
+		}
+		if (!sessionTable.empty()) {
+			send(a_key, Protocol::Encode(Protocol::PluginTable{ sessionTable }), true);
 		}
 
 		// a_peer is still valid: std::map keeps its other entries where they are.

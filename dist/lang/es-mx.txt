@@ -7,9 +7,6 @@ reject.version = Este juego usa otra versión del mod (protocolo {you}, el anfit
 reject.password = Contraseña incorrecta.
 reject.full = La partida está llena ({n} jugadores).
 reject.mods = Tus mods son distintos a los del anfitrión.
-reject.mods_missing = Tus mods son distintos a los del anfitrión: no tienes {plugin}.
-reject.mods_extra = Tus mods son distintos a los del anfitrión: el anfitrión no tiene {plugin}.
-reject.mods_order = Tus mods son distintos a los del anfitrión: los mismos plugins, en otro orden.
 
 steam.status_hosting = Hospedando Skyrim cooperativo
 steam.status_playing = Jugando Skyrim cooperativo

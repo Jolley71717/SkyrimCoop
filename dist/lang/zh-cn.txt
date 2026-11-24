@@ -7,9 +7,6 @@ reject.version = 这个游戏使用的是另一个版本的 MOD（协议 {you}�
 reject.password = 密码错误。
 reject.full = 游戏已满（{n} 名玩家）。
 reject.mods = 你的 MOD 与房主的不同。
-reject.mods_missing = 你的 MOD 与房主的不同：你没有 {plugin}。
-reject.mods_extra = 你的 MOD 与房主的不同：房主没有 {plugin}。
-reject.mods_order = 你的 MOD 与房主的不同：插件相同，但顺序不同。
 
 steam.status_hosting = 正在主持 Skyrim 联机
 steam.status_playing = 正在玩 Skyrim 联机

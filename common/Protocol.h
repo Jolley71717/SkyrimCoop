@@ -28,7 +28,9 @@ namespace Protocol
 	// each other at the hello, with a reason that says so.
 	// 2: a player's looks (PlayerLooks, RemoteLooks), for the stand-in the others show of them.
 	// 3: a hello carries a whole Skyrim load order (MAX_PLUGINS names, in at most MAX_PLUGIN_LIST_BYTES), not 512 names.
-	inline constexpr std::uint16_t VERSION = 3;
+	// 4: form ids on the wire are the session's (PluginTable, kPluginTable): a form is named by its plugin's file name,
+	//    never by a game's load order, so games whose mods are in another order, or differ, play together.
+	inline constexpr std::uint16_t VERSION = 4;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -76,6 +78,7 @@ namespace Protocol
 		kHeartbeatAck = 9,
 		kPlayerLooks = 10,  // client -> server, reliable: what my character looks like (again whenever it changes)
 		kRemoteLooks = 11,  // server -> the others (and each one there, to the one who joined): that player's looks
+		kPluginTable = 12,  // server -> client, reliable: the session's plugin table, before the welcome and when it grows
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -98,9 +101,11 @@ namespace Protocol
 	// A player's transform and movement, sampled on the owning client.
 	struct PlayerState
 	{
-		std::uint32_t sequence = 0;    // increases per sample; receivers drop older ones
-		std::uint32_t cell = 0;        // interior cell form ID, or 0 when outside
-		std::uint32_t worldspace = 0;  // worldspace form ID, or 0 when inside
+		std::uint32_t sequence = 0;  // increases per sample; receivers drop older ones
+		// Interior cell form ID, or 0 when outside; worldspace form ID, or 0 when inside. Both 0: somewhere the reading
+		// game lacks (a cell or worldspace of a plugin it doesn't have, FormTranslate.h): nowhere it can show them.
+		std::uint32_t cell = 0;
+		std::uint32_t worldspace = 0;
 		float         x = 0, y = 0, z = 0;
 		float         heading = 0;  // radians
 		float         speed = 0;    // units/second, for picking walk/run animations
@@ -151,13 +156,13 @@ namespace Protocol
 	{
 		std::uint32_t magic = MAGIC;
 		std::uint16_t version = VERSION;
-		std::uint32_t contentHash = 0;  // LoadOrderHash of the client's load order; all players must match
+		std::uint32_t contentHash = 0;  // LoadOrderHash of the client's load order; a hello without plugins must match the session's
 		std::string   name;
 		std::string   password;
 		// Random, kept on the player's PC: the server gives a player who comes back the same player
 		// ID, so their own changes to the world are still known as theirs. 0 = none.
 		std::uint64_t identity = 0;
-		// The load order (plugin file names, in order: ComparedLoadOrder), so a refusal can say which plugins differ.
+		// The load order (plugin file names, in order: ComparedLoadOrder), which the session's plugin table is made of.
 		// At most MAX_PLUGINS names in MAX_PLUGIN_LIST_BYTES (WritePlugins leaves the rest off); contentHash is over the
 		// whole list all the same.
 		std::vector<std::string> plugins;
@@ -166,8 +171,10 @@ namespace Protocol
 	};
 
 	// The session's plugin table: the plugins that number every form ID on the wire, as Hello::plugins lays a load order
-	// out (the full ones, LIGHT_PLUGINS, the light ones). Every game translates its own form IDs to it and back by plugin
-	// name (common/FormIds.h). No message carries it yet: the first server only lets in games whose load orders match.
+	// out (the full ones, LIGHT_PLUGINS, the light ones). The first player's load order, with the plugins each later
+	// joiner brings added after the rest of their kind (FormIds::Extend), so an ID it gave never changes. Every game
+	// translates its own form IDs to it and back by plugin name (common/FormIds.h, FormTranslate.h). The server sends it
+	// to a joiner before the welcome, and to everyone in when it grows, on the reliable channel.
 	struct PluginTable
 	{
 		std::vector<std::string> plugins;
@@ -217,8 +224,8 @@ namespace Protocol
 		std::uint32_t token = 0;
 	};
 
-	// What a player's character looks like, as the others' stand-in of them shows it. Form ids go over the wire as they
-	// are: the session lets in only games with the same load order (DESIGN.md, "Form ids across load orders").
+	// What a player's character looks like, as the others' stand-in of them shows it. Form ids in the session's numbering
+	// (PluginTable): a race the reading game lacks reads 0, worn items it lacks are left out (FormTranslate.h).
 	struct PlayerLooks
 	{
 		std::uint32_t race = 0;  // TESRace form id; 0: not known
@@ -730,6 +737,24 @@ namespace Protocol
 		}
 		msg.looks = std::move(*looks);
 		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const PluginTable& a_msg)
+	{
+		Writer w{ MessageType::kPluginTable };
+		WritePlugins(w, a_msg.plugins);
+		return w.Data();
+	}
+
+	inline std::optional<PluginTable> DecodePluginTable(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		auto plugins = ReadPlugins(r);
+		if (!plugins || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		return PluginTable{ std::move(*plugins) };
 	}
 
 	// ---- load orders ---------------------------------------------------------------

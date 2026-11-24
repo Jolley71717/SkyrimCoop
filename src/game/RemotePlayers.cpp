@@ -1,6 +1,7 @@
 #include "game/RemotePlayers.h"
 
 #include "DevLine.h"
+#include "FormIds.h"
 #include "game/Gait.h"
 #include "game/GaitDrive.h"
 #include "game/GameThread.h"
@@ -22,6 +23,9 @@ namespace RemotePlayers
 		constexpr float HIDE_BEYOND = 10000.0f;
 		// After a stand-in is taken away for a save or by its looks changing, the next is placed no sooner than this.
 		constexpr auto RESPAWN_AFTER = 250ms;
+		// A friend whose race this game lacks (a race mod only they have: their looks name race 0, FormTranslate.h) is
+		// shown as a Nord, which every game has (Skyrim.esm's NordRace).
+		constexpr RE::FormID NORD_RACE = 0x00013746;
 
 		struct Remote
 		{
@@ -34,6 +38,7 @@ namespace RemotePlayers
 			RE::FormID        standInId = 0;
 			RE::TESNPC*       base = nullptr;
 			bool              dressed = false;
+			std::size_t       wornShown = 0;  // of looks->worn, the items the stand-in was dressed in
 			Clock::time_point placeAfter{};
 			Clock::time_point placedAt{};
 			std::uint32_t     placed = 0;
@@ -438,6 +443,7 @@ namespace RemotePlayers
 			}
 			a_remote.standIn = {};
 			a_remote.dressed = false;
+			a_remote.wornShown = 0;
 			a_remote.placeAfter = Clock::now() + RESPAWN_AFTER;
 		}
 
@@ -454,7 +460,8 @@ namespace RemotePlayers
 		void Place(std::uint32_t a_id, Remote& a_remote, const Protocol::PlayerState& a_at)
 		{
 			const auto player = RE::PlayerCharacter::GetSingleton();
-			const auto base = BaseFor(a_remote.looks->race, a_remote.looks->female);
+			const auto race = a_remote.looks->race;  // none, or a runtime form (another game's ID): a Nord
+			const auto base = BaseFor(race != 0 && !FormIds::IsRuntime(race) ? race : NORD_RACE, a_remote.looks->female);
 			if (!base || !player) {
 				a_remote.placeAfter = Clock::now() + 10s;  // said once in the log; looked at again now and then
 				return;
@@ -487,6 +494,7 @@ namespace RemotePlayers
 			a_remote.standIn = actor->GetHandle();
 			a_remote.base = base;
 			a_remote.dressed = false;
+			a_remote.wornShown = 0;
 			a_remote.placedAt = Clock::now();
 			++a_remote.placed;
 			{
@@ -509,7 +517,11 @@ namespace RemotePlayers
 			std::size_t worn = 0;
 			for (const auto id : a_remote.looks->worn) {
 				// Another player's game named it: only armor a player can wear (no creature skins, no non-playable
-				// pieces).
+				// pieces), and never a runtime form (FF): that ID is another game's, and here names something else or
+				// nothing (FormTranslate drops them; this holds for any that get through).
+				if (FormIds::IsRuntime(id)) {
+					continue;
+				}
 				const auto armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(id);
 				if (!armor || !armor->GetPlayable()) {
 					continue;
@@ -519,6 +531,7 @@ namespace RemotePlayers
 				++worn;
 			}
 			a_remote.dressed = true;
+			a_remote.wornShown = worn;
 			logs::info("Players: player {}'s stand-in {:08X} dressed in {} of {} worn items", a_id, a_remote.standInId, worn, a_remote.looks->worn.size());
 		}
 
@@ -809,6 +822,26 @@ namespace RemotePlayers
 		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) driven speed={} direction={} channels={} from={}", players.size(),
 			standIns.load(), graveyard.size(), disabled, deleted, speedsDriven.load(), directionsDriven.load(), drive.Size(), eventsFromTick ? "tick" : "hook");
 		const auto  here = LocalPlayer::Read();
+		// What each stand-in really has on: the armor its inventory holds as worn, not what its friend's looks named (the
+		// rig's `forms` step checks an item is on the actor). Read before the lock: the game's inventory has its own.
+		std::unordered_map<std::uint32_t, std::string> equipped;
+		for (const auto& [id, remote] : players) {
+			const auto actor = remote.standIn.get();
+			if (!actor) {
+				continue;
+			}
+			std::vector<RE::FormID> ids;
+			for (const auto& [item, data] : actor->GetInventory([](RE::TESBoundObject& a_object) { return a_object.IsArmor(); })) {
+				if (data.first > 0 && data.second && data.second->IsWorn()) {
+					ids.push_back(item->GetFormID());
+				}
+			}
+			std::ranges::sort(ids);
+			auto& list = equipped[id];
+			for (const auto item : ids) {
+				list += std::format("{}{:08X}", list.empty() ? "" : ",", item);
+			}
+		}
 		std::scoped_lock l{ lock };
 		for (const auto& [id, remote] : players) {
 			const auto actor = remote.standIn.get();
@@ -846,7 +879,17 @@ namespace RemotePlayers
 					aimed = pick->GetActiveTarget().get().get() == actor.get();
 				}
 			}
-			out += std::format(" named={} aimed={}", named, aimed ? 1 : 0);
+			// What it wears: how many of the items its friend's game named it was dressed in, their form IDs in this game as
+			// the looks named them (wornIds), and the armor the stand-in really has on (equippedIds: what the rig checks).
+			std::string wornIds;
+			if (remote.looks) {
+				for (const auto item : remote.looks->worn) {
+					wornIds += std::format("{}{:08X}", wornIds.empty() ? "" : ",", item);
+				}
+			}
+			const auto on = equipped.find(id);
+			out += std::format(" named={} aimed={} race={:08X} worn={}/{} wornIds={} equippedIds={}", named, aimed ? 1 : 0, remote.looks ? remote.looks->race : 0u, remote.wornShown,
+				remote.looks ? remote.looks->worn.size() : 0u, wornIds.empty() ? "none" : wornIds, on == equipped.end() || on->second.empty() ? "none" : on->second);
 		}
 		return out;
 	}
