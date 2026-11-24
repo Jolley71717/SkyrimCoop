@@ -24,7 +24,7 @@ body:
     attributes:
       label: Plugin version
       description: The first line of `Documents\My Games\Skyrim Special Edition\SKSE\SkyrimCoop.log`.
-      placeholder: "SkyrimCoop 0.0.1"
+      placeholder: "SkyrimCoop 0.1.0"
     validations:
       required: true
   - type: input

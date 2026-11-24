@@ -1,8 +1,8 @@
 # SkyrimCoop: install
 
-**Nothing is playable yet.** This build is the project's first step: an SKSE plugin that loads into the game, checks the game's version, reads its settings and writes a log. It does not connect two games. [docs/PLAN.md](https://github.com/Jolley71717/SkyrimCoop/blob/main/docs/PLAN.md) says what comes next, and this page grows with it.
+**Pre-alpha.** This is an early test build for two players over Steam (the settings allow up to 4 by default; more than two is untested): it has bugs, and some things in the game are not shared yet. Back up your saves before you play with it. The release notes on the [releases page](https://github.com/Jolley71717/SkyrimCoop/releases) say what works and what is known not to; [docs/PLAN.md](https://github.com/Jolley71717/SkyrimCoop/blob/main/docs/PLAN.md) says what comes next.
 
-No build of this mod has been run in a game yet: the steps below are how SKSE plugins are installed, written before the first game test.
+Everyone in a session needs the same version of the mod, and the same mods otherwise.
 
 ## What you need
 
@@ -37,7 +37,7 @@ Start the game through SKSE and get to the main menu, then open
 It should begin like this:
 
 ```
-SkyrimCoop 0.0.1 (protocol 3)
+SkyrimCoop 0.1.0 (protocol N)
 Game version 1.7.104.0 (the tested one)
 ...
 Config: host no, transport auto, port 7780, up to 4 players, password none, address none, log level info

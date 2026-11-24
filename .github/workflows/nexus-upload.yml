@@ -2,18 +2,22 @@
 # version. Run by hand only (Actions > Upload to Nexus > Run workflow): Nexus gets settled versions rarely, when the
 # maintainer decides (docs/RELEASING.md). The GitHub release must already carry SkyrimCoop-X.Y.Z-nexus.zip.
 #
-# NOT IN USE YET. The mod has no page on Nexus Mods, so there is no file id or mod id to upload to, and the repository
-# secret NEXUSMODS_API_KEY is not set. The first step refuses every run until the two ids below are filled in (the
-# maintainer does that, and sets the secret, when the page exists). Carried from the sister project (F4Multiplayer),
-# where this workflow is how every Nexus upload is made.
+# NOT IN USE YET. The mod's page exists on Nexus Mods (page number 200124, unpublished) but has no file, and the repository
+# secret NEXUSMODS_API_KEY is not set. This action (Nexus-Mods/upload-action, API v3) only adds a new version to a file
+# that already exists: it cannot create a page's first file. So the maintainer uploads the first file by hand on the
+# mod page (Manage files), once, then copies that file's id (Files tab > Advanced, or Manage Files > edit menu) into
+# NEXUS_FILE_ID below and sets the secret. The first step refuses every run until both ids are filled in, except a
+# check_only run with no tag, which only asks Nexus whether it accepts the key. Every upload after the first goes
+# through this workflow. Carried from the sister project (F4Multiplayer).
 name: Upload to Nexus
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to upload (vX.Y.Z; release candidates never go to Nexus)
-        required: true
+        description: Release tag to upload (vX.Y.Z; release candidates never go to Nexus). May be empty with check_only, which then checks the API key alone
+        required: false
+        default: ""
       check_only:
         description: Only check the zip and the API key; upload nothing
         type: boolean
@@ -24,9 +28,13 @@ permissions:
 
 env:
   # The main file's API file id (the mod page's Files tab > Advanced) and the mod's unique API id (for the changelog).
-  # Empty until the mod has a page on Nexus Mods.
+  # The mod id is the mod's unique API id, not the page number: (game id << 32) | page number. F4Multiplayer's
+  # 4943507467508 is (1151 << 32) | 109812; Skyrim SE's game id is 1704, so page 200124 gives 7318624472508. That value
+  # is computed, not read from Nexus: CHECK IT against the "Advanced" view after the first hand upload, together with
+  # the file id, before the first run. The file id stays empty until the page's first file has been uploaded by hand
+  # (the upload API cannot create it).
   NEXUS_FILE_ID: ""
-  NEXUS_MOD_ID: ""
+  NEXUS_MOD_ID: "7318624472508"
 
 jobs:
   upload:
@@ -34,15 +42,27 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Refuse until the mod has a Nexus page
+      - name: Refuse until the Nexus ids are set
+        env:
+          TAG: ${{ inputs.tag }}
+          CHECK_ONLY: ${{ inputs.check_only }}
         run: |
+          if [ -z "$TAG" ] && [ "$CHECK_ONLY" != true ]; then
+            echo "::error::Give the release tag to upload"
+            exit 1
+          fi
+          if [ "$CHECK_ONLY" = true ] && [ -z "$TAG" ]; then
+            echo "Key-only check: the ids are not needed"
+            exit 0
+          fi
           if [ -z "$NEXUS_FILE_ID" ] || [ -z "$NEXUS_MOD_ID" ]; then
-            echo "::error::Not in use yet: the mod has no Nexus page. Set NEXUS_FILE_ID and NEXUS_MOD_ID in this file and the repository secret NEXUSMODS_API_KEY first (docs/RELEASING.md)."
+            echo "::error::Not in use yet: upload the page's first file by hand on Nexus, then set NEXUS_FILE_ID in this file and the repository secret NEXUSMODS_API_KEY first (docs/RELEASING.md)."
             exit 1
           fi
 
       - name: Take the release's Nexus zip
         id: zip
+        if: ${{ inputs.tag != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}

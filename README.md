@@ -1,6 +1,6 @@
 # SkyrimCoop
 
-**Coming soon: nothing playable yet.**
+**Pre-alpha: for testers.** The first public builds are for people who want to try it and report what breaks. Expect bugs, and back up your saves before every session.
 
 SkyrimCoop will be a co-op mod for The Elder Scrolls V: Skyrim Special Edition on Steam, from the makers of [F4Multiplayer](https://github.com/Jolley71717/F4Multiplayer), the co-op mod for Fallout 4. The idea is the same one:
 
@@ -11,7 +11,7 @@ SkyrimCoop will be a co-op mod for The Elder Scrolls V: Skyrim Special Edition o
 
 ## Where it is today
 
-The project is at its very start. What exists is the foundation: an SKSE plugin that loads into the game and writes a log, the network and session code carried over from F4Multiplayer, a dedicated server, and their unit tests. In a game it has gone as far as two games finding each other through a Steam lobby; players can't see each other yet.
+SkyrimCoop is pre-alpha: version 0.1.0 is the first one meant for other people to try. It is an SKSE plugin for Skyrim Special Edition 1.7.104 (Steam), for two players over Steam (up to 4 by default in the settings; more than two is untested). What a release can and cannot do is in its release notes on the [releases page](https://github.com/Jolley71717/SkyrimCoop/releases); [dist/INSTALL.md](dist/INSTALL.md) says how to install it.
 
 [docs/PLAN.md](docs/PLAN.md) lists the phases in order, from "the plugin loads" to shared quests, and what each one has to prove before the next begins. There are no dates.
 
