@@ -14,3 +14,10 @@ steam.status_playing = Играет в Skyrim в кооперативе
 party.tag_hurt = {name} ({health}%)
 
 map.found = {player}: открыто место «{place}»
+
+travel.offer = {player}: путешествие в «{place}». Нажмите {key}, чтобы последовать.
+travel.offer_somewhere = {player}: путешествие. Нажмите {key}, чтобы последовать.
+travel.refused_combat = Нельзя последовать во время боя.
+travel.refused_weight = Слишком большой груз, чтобы последовать.
+travel.refused_now = Сейчас нельзя последовать.
+travel.refused_place = Отсюда нельзя быстро перемещаться.

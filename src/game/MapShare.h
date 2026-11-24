@@ -27,6 +27,10 @@ namespace MapShare
 	void AfterLoad();
 	// Leaving the session.
 	void Clear();
+	// The load order's map markers of places (read once, when first asked), and a marker's place name ("" for none):
+	// for fast travel together, which goes to the one nearest where a carriage lands.
+	[[nodiscard]] const std::vector<std::uint32_t>& Places();
+	[[nodiscard]] std::string PlaceName(std::uint32_t a_ref);
 	// Dev channel `mapshare`.
 	[[nodiscard]] std::string Command(std::string_view a_args);
 }

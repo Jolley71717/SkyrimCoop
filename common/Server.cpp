@@ -57,6 +57,10 @@ namespace
 		std::optional<Protocol::PlayerStatus> status;
 		TokenBucket                           statusBudget{ 8.0, 4.0 };
 		bool                                  statusOwed = false;
+		// Trips passed on (kTrip): a burst of 4, then one every 2 s. Past it a trip is dropped: an offer to follow is for
+		// then, and no player fast travels that often.
+		TokenBucket tripBudget{ 4.0, 0.5 };
+		std::uint64_t tripsDropped = 0;
 		// Heartbeats answered: a burst of twenty, then ten a second (the game sends a few a second at most).
 		TokenBucket heartbeats{ 20.0, 10.0 };
 		// Hits on copies sent on (NpcFates.h): a burst of 64, then 20 a second (a flurry of daggers, a flame spell's
@@ -499,6 +503,19 @@ void Server::Run()
 				if (auto gained = mapBook.Take(msg->markers); !gained.empty()) {
 					broadcast(Protocol::Encode(Protocol::MapMarkers{ a_peer.playerId, std::move(gained) }), true, &a_key);
 				}
+			}
+			break;
+		case MT::kTrip:
+			// A player's trip: to the others with the traveller named, within its budget.
+			if (auto trip = Protocol::DecodeTrip(a_data)) {
+				if (!a_peer.tripBudget.Take(Clock::now())) {
+					if (a_peer.tripsDropped++ == 0) {
+						log(std::format("server: player {} sent trips past their budget; those are dropped", a_peer.playerId));
+					}
+					break;
+				}
+				trip->traveller = a_peer.playerId;
+				broadcast(Protocol::Encode(*trip), true, &a_key);
 			}
 			break;
 		case MT::kNpcClaims:

@@ -14,3 +14,10 @@ steam.status_playing = Jugando a Skyrim cooperativo
 party.tag_hurt = {name} ({health}%)
 
 map.found = {player} ha descubierto {place}
+
+travel.offer = {player} viaja a {place}. Pulsa {key} para seguirle.
+travel.offer_somewhere = {player} se va de viaje. Pulsa {key} para seguirle.
+travel.refused_combat = No puedes seguirle en combate.
+travel.refused_weight = Llevas demasiado peso para seguirle.
+travel.refused_now = Ahora no puedes seguirle.
+travel.refused_place = No puedes viajar rápido desde aquí.

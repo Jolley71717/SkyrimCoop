@@ -14,3 +14,10 @@ steam.status_playing = 正在玩 Skyrim 联机
 party.tag_hurt = {name}（{health}%）
 
 map.found = {player}发现了{place}
+
+travel.offer = {player}正在前往{place}。按 {key} 跟随。
+travel.offer_somewhere = {player}正在旅行。按 {key} 跟随。
+travel.refused_combat = 战斗中无法跟随。
+travel.refused_weight = 负重过多，无法跟随。
+travel.refused_now = 现在无法跟随。
+travel.refused_place = 无法从这里快速旅行。

@@ -14,3 +14,10 @@ steam.status_playing = Playing Skyrim co-op
 party.tag_hurt = {name} ({health}%)
 
 map.found = {player} discovered {place}
+
+travel.offer = {player} is travelling to {place}. Press {key} to follow.
+travel.offer_somewhere = {player} is travelling. Press {key} to follow.
+travel.refused_combat = You can't follow while in combat.
+travel.refused_weight = You are carrying too much to follow.
+travel.refused_now = You can't follow right now.
+travel.refused_place = You can't fast travel from here.

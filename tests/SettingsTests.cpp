@@ -41,6 +41,7 @@ TEST("settings: every key is read, with comments, blank lines and either line en
 		"sLogLevel = debug\n"
 		"bRunInBackground = false\n"
 		"bShareMap = false\n"
+		"iFollowKey = 34\n"
 		"bDevChannel = true\n"
 		"iDevChannelPort = 7795\n";
 	std::vector<std::string> notes;
@@ -61,6 +62,10 @@ TEST("settings: every key is read, with comments, blank lines and either line en
 	CHECK(values.devChannelPort == 7795);
 	CHECK(Settings::Parse("").runInBackground);  // on unless the player turns it off
 	CHECK(!values.shareMap);
+	CHECK(values.followKey == 34u);
+	CHECK(Settings::Parse("").followKey == 0x41u);  // F7
+	CHECK(Settings::Parse("iFollowKey = 0").followKey == 0u);
+	CHECK(Settings::Parse("iFollowKey = 300").followKey == 0x41u);
 	CHECK(Settings::Parse("").shareMap);  // on unless the player turns it off
 }
 

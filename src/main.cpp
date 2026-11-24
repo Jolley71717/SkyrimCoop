@@ -14,6 +14,7 @@
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/MapShare.h"
+#include "game/TravelTogether.h"
 #include "game/NpcSync.h"
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
@@ -191,6 +192,7 @@ namespace
 		Pairs::Install();  // the load order's paired idles, by their events (kill moves said and played)
 		PlayerActions::Install();  // our player's attacks, casts and shouts, for the others' stand-in of us (says why if not)
 		FriendMarkers::Install();  // friends on the compass and the maps, their names over their heads (says why if not)
+		TravelTogether::Install();  // the key that follows a friend's fast travel (says why if not)
 		LocalPlayer::NoteDefaultName();
 		NoFirstRunPrompts();
 		RunInBackground();  // before the first tick: the main menu must not stall either

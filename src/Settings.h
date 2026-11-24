@@ -43,6 +43,9 @@ namespace Settings
 		// Map markers a friend discovers in the session go on our map, ready for fast travel, and ours go on theirs
 		// (src/game/MapShare.h). Off: neither.
 		bool shareMap = true;
+		// The key that follows a friend's fast travel or carriage ride (src/game/TravelRules.h): a keyboard scan code, F7
+		// unless set; 0: none (no offers shown).
+		std::uint32_t followKey = 0x41;
 		// The developer channel (DevChannel.h): test tools on this PC drive the game through it. Off for players.
 		bool          devChannel = false;
 		std::uint16_t devChannelPort = DEV_CHANNEL_PORT;
@@ -137,6 +140,14 @@ namespace Settings
 		}
 		if (const auto share = IniFile::GetValue(a_text, "bShareMap")) {
 			values.shareMap = detail::ParseBool(*share, values.shareMap);
+		}
+		if (const auto key = IniFile::GetValue(a_text, "iFollowKey")) {
+			std::uint32_t number = 0;
+			if (detail::ParseNumber(*key, number) && number <= 255) {
+				values.followKey = number;
+			} else {
+				note("iFollowKey = " + *key + " is not a key's scan code (0 to 255); it is " + std::to_string(values.followKey));
+			}
 		}
 		if (const auto dev = IniFile::GetValue(a_text, "bDevChannel")) {
 			values.devChannel = detail::ParseBool(*dev, values.devChannel);
