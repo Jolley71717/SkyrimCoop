@@ -420,6 +420,49 @@ TEST("quest rules: the scan's stage rows are sorted as the lookup needs, each on
 	CHECK(QuestRules::CompareName("MQ_A", "MQZ") > 0);  // as the scan sorts: upper-cased, '_' after the letters
 }
 
+TEST("quest rules: the scan's rows cover the class: the screen held, controls, the player frozen, chargen; the worst effect is said")
+{
+	using QuestRules::StageEffect;
+	const auto effect = [](std::string_view a_edid, std::uint16_t a_stage) {
+		const auto row = QuestRules::StageRowOf(QuestRules::STAGE_RULES, a_edid, a_stage);
+		return row ? std::optional<StageEffect>{ row->effect } : std::nullopt;
+	};
+	CHECK(effect("DLC1VQ06", 61) == StageEffect::kScreen);   // an image space cross-faded and held (fade to white)
+	CHECK(effect("MG02", 50) == StageEffect::kScreen);       // ... popped to and held
+	CHECK(effect("MQ201", 95) == StageEffect::kControls);    // DisablePlayerControls
+	CHECK(effect("MQ101", 98) == StageEffect::kFrozen);      // SetRestrained on the player
+	CHECK(effect("DLC2MQ02", 50) == StageEffect::kChargen);  // SetInChargen
+	CHECK(effect("MQ305", 260) == StageEffect::kMove);       // fades and moves: the move is said
+	CHECK(effect("TG05", 60) == StageEffect::kMove);
+	CHECK(QuestRules::EffectName(StageEffect::kScreen) == "fades or holds the screen black");
+}
+
+TEST("quest rules: a stage of a quest not started here is judged by the quest's start-up row too (setstage runs it)")
+{
+	using QuestRules::StageRule;
+	using QuestRules::StageVerdict;
+	using QuestRules::StageEffect;
+	const std::array rows{ StageRule{ "MG08", 0, StageVerdict::kMoves, StageEffect::kMove, true }, StageRule{ "MG08", 30, StageVerdict::kMoves, StageEffect::kScreen },
+		StageRule{ "MQ305", 260, StageVerdict::kMoves } };
+	REQUIRE(QuestRules::StartUpRowOf(rows, "mg08"));
+	CHECK(QuestRules::StartUpRowOf(rows, "mg08")->stage == 0);
+	CHECK(!QuestRules::StartUpRowOf(rows, "MQ305"));
+	CHECK(!QuestRules::StartUpRowOf(rows, "MG07"));
+	// MG08 10 has no row of its own: while MG08 is not started here, making it would run stage 0 (a move)
+	const auto* row = QuestRules::StageRowHere(rows, "MG08", 10, false);
+	REQUIRE(row);
+	CHECK(row->stage == 0);
+	CHECK(!QuestRules::StageRowHere(rows, "MG08", 10, true));
+	// a stage's own row comes first
+	REQUIRE(QuestRules::StageRowHere(rows, "MG08", 30, false));
+	CHECK(QuestRules::StageRowHere(rows, "MG08", 30, false)->effect == StageEffect::kScreen);
+	CHECK(!QuestRules::StageRowHere(rows, "MQ305", 250, false));
+	// and the scan's own rows say MG08's start-up stage
+	REQUIRE(QuestRules::StartUpRowOf(QuestRules::STAGE_RULES, "MG08"));
+	CHECK(QuestRules::StartUpRowOf(QuestRules::STAGE_RULES, "MG08")->stage == 0);
+	CHECK(!QuestRules::StartUpRowOf(QuestRules::STAGE_RULES, "MQ305"));
+}
+
 TEST("quest rules: a stage that moves the player waits for the friend who did it, and is not made from the session's past")
 {
 	using QuestRules::Verdict;
@@ -805,7 +848,7 @@ TEST("quest maker: a moving stage waits for the friend who did it to be near, ho
 	CHECK(step->want.entry == Stage(0x20, 1));
 	now += QuestRules::MAKE_EVERY;
 	CHECK(!maker.Next(now, game.Looker()));
-	CHECK(maker.Held(game.Looker()) == 1);
+	CHECK(maker.Held(game.Looker(), now) == 1);
 	game.near.insert(2);
 	step = maker.Next(now, game.Looker());
 	REQUIRE(step);
@@ -823,6 +866,98 @@ TEST("quest maker: a moving stage waits for the friend who did it to be near, ho
 	step = past.Next(T0, far.Looker());
 	REQUIRE(step);
 	CHECK(step->want.entry == Stage(0x10, 60));
+}
+
+TEST("quest maker: a moving stage's nearness is the friend's as its word came, not where the stage has since taken them")
+{
+	// The friend was beside ours when they set 50 (near at the step); by the time it is judged here the stage has moved
+	// their stand-in to its destination (not near now). It is made: the friends who were with them go with them.
+	QuestRules::Maker maker;
+	FakeGame          game;
+	game.moves.insert({ 0x10, 50 });
+	maker.Add(Stage(0x10, 50), 2, T0, true);
+	maker.Add(Stage(0x10, 60), 2, T0, true);
+	auto step = maker.Next(T0 + 1s, game.Looker());
+	REQUIRE(step);
+	CHECK(step->verdict == QuestRules::Verdict::kMake);
+	CHECK(step->want.entry == Stage(0x10, 50));
+	CHECK(maker.TakeHeld().empty());
+
+	// Not near at the step, near now (the friend walked over): made too.
+	QuestRules::Maker later;
+	FakeGame          walked;
+	walked.moves.insert({ 0x10, 50 });
+	later.Add(Stage(0x10, 50), 2, T0, false);
+	CHECK(!later.Next(T0, walked.Looker()));
+	walked.near.insert(2);
+	step = later.Next(T0 + 10s, walked.Looker());
+	REQUIRE(step);
+	CHECK(step->verdict == QuestRules::Verdict::kMake);
+
+	// A newer word on the same stage from another friend takes that friend's nearness.
+	QuestRules::Maker other;
+	FakeGame          none;
+	none.moves.insert({ 0x10, 50 });
+	other.Add(Stage(0x10, 50), 2, T0, true);
+	other.Add(Stage(0x10, 50), 3, T0, false);
+	CHECK(!other.Next(T0, none.Looker()));
+	CHECK(other.Held(none.Looker(), T0) == 1);
+}
+
+TEST("quest maker: a stage held for a far friend is given up after FAR_WAIT, or when they leave, and its quest goes on")
+{
+	QuestRules::Maker maker;
+	FakeGame          game;
+	game.moves.insert({ 0x10, 50 });
+	game.moves.insert({ 0x20, 7 });
+	auto now = T0;
+	maker.Add(Stage(0x10, 50), 2, now);
+	maker.Add(Stage(0x10, 60), 2, now);
+	maker.Add(Stage(0x20, 7), 3, now);
+	maker.Add(Stage(0x20, 8), 3, now);
+	CHECK(!maker.Next(now, game.Looker()));
+	const auto held = maker.TakeHeld();
+	REQUIRE(held.size() == 2);  // each said once
+	CHECK(held[0].entry == Stage(0x10, 50));
+	CHECK(held[1].entry == Stage(0x20, 7));
+	CHECK(!maker.Next(now + 1s, game.Looker()));
+	CHECK(maker.TakeHeld().empty());
+
+	// player 3 leaves: 0x20's 7 is given up (not made), its 8 goes on
+	maker.Left(3);
+	now += 1s;
+	auto step = maker.Next(now, game.Looker());
+	REQUIRE(step);
+	CHECK(step->verdict == QuestRules::Verdict::kFarPast);
+	CHECK(step->release == QuestRules::Maker::Release::kLeft);
+	CHECK(step->want.entry == Stage(0x20, 7));
+	step = maker.Next(now, game.Looker());
+	REQUIRE(step);
+	CHECK(step->verdict == QuestRules::Verdict::kMake);
+	CHECK(step->want.entry == Stage(0x20, 8));
+	maker.Done(0x20, 8, now);
+
+	// player 2 stays far: 0x10's 50 is held until FAR_WAIT, then given up, and its 60 is made
+	CHECK(!maker.Next(T0 + QuestRules::FAR_WAIT - 1ms, game.Looker()));
+	step = maker.Next(T0 + QuestRules::FAR_WAIT, game.Looker());
+	REQUIRE(step);
+	CHECK(step->verdict == QuestRules::Verdict::kFarPast);
+	CHECK(step->release == QuestRules::Maker::Release::kWaited);
+	CHECK(step->want.entry == Stage(0x10, 50));
+	step = maker.Next(T0 + QuestRules::FAR_WAIT, game.Looker());
+	REQUIRE(step);
+	CHECK(step->verdict == QuestRules::Verdict::kMake);
+	CHECK(step->want.entry == Stage(0x10, 60));
+	CHECK(maker.Size() == 0);
+
+	// Left for a friend with nothing held, or for player 0, changes nothing.
+	QuestRules::Maker quiet;
+	quiet.Add(Stage(0x30, 1), 2, T0);
+	quiet.Left(0);
+	quiet.Left(9);
+	step = quiet.Next(T0, game.Looker());
+	REQUIRE(step);
+	CHECK(step->verdict == QuestRules::Verdict::kMake);
 }
 
 namespace

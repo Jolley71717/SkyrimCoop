@@ -424,14 +424,17 @@ public static class Game
     public static bool Radiant(SkyrimFiles.Quest a_q) { return a_q.Event.Length > 0 && (a_q.Flags & 0x0100) == 0; }
 }
 
-// The stages that move the player, or take their screen or controls away: a stage's own fragment (MoveTo of the player,
-// a door the player is made to use, Game.FastTravel, Game.FadeOutGame, Game.DisablePlayerControls with movement,
-// Game.SetPlayerAIDriven), or what it calls (its quest's own script through kmyQuest or self, any script a property or
-// local is typed with, a few calls deep, a branch on a literal argument followed one way) and the stages it sets (SetStage
-// on its own quest or on a quest property) or the quests it starts (Start: their start-up stages). What
-// src/game/StageRows.h's rows are (tools/questscan.ps1 -Write writes it). What it does not see: a scene, a package or a
-// dialogue line a stage starts (their own fragments run in every game that runs the scene), a magic effect, and a
-// reference reached through a variable set at run time.
+// The stages that move the player, or take their screen, controls or saving away: a stage's own fragment (Direct: MoveTo,
+// SetPosition or TranslateTo of the player, a door the player is made to use, Game.FastTravel, Game.FadeOutGame, an image
+// space applied, cross-faded or held, a race menu, Game.DisablePlayerControls taking anything, Game.SetPlayerAIDriven,
+// the player restrained, made not to move or their AI off, Game.SetInChargen), or what it calls (its quest's own script
+// through kmyQuest or self, any script a property or local is typed with, a few calls deep, a branch on a literal
+// argument followed one way) and the stages it sets (SetStage on its own quest or on a quest property) or the quests it
+// starts (Start: their start-up stages). The player is a variable got from Game.GetPlayer, a property of the quest that
+// holds form 0x14, or (where the form is not known) one named for the player. What src/game/StageRows.h's rows are
+// (tools/questscan.ps1 -Write writes it). What it does not see: a scene, a package or a dialogue line a stage starts
+// (their own fragments run in every game that runs the scene), a magic effect, and a reference reached through a
+// variable set at run time.
 public static class MoveScan
 {
     static bool Is(string a, string b) { return a.Equals(b, StringComparison.OrdinalIgnoreCase); }
@@ -551,7 +554,7 @@ public static class MoveScan
     static readonly string[] GETREF = { "GetReference", "GetRef", "GetActorRef", "GetActorReference" };
 
     // A property or alias named for the player (PlayerRef, pPlayerRef, Alias_Player, TG05PlayerAlias), not for someone
-    // of theirs (Alias_PlayerHousecarl, PlayerHorse).
+    // of theirs (Alias_PlayerHousecarl, PlayerHorse). The fallback where the form is not known (PlayerForm).
     public static bool PlayerName(string a_var)
     {
         var n = Bare(a_var).ToLowerInvariant();
@@ -559,39 +562,87 @@ public static class MoveScan
         return n == "player" || n == "pplayer" || n.EndsWith("playerref") || n.EndsWith("playeralias");
     }
 
-    // What a function's own code does to the player that is looked for (not through what it calls), or null.
-    public static string Direct(List<SkyrimFiles.Instr> a_code)
+    // A property of a_quest's scripts that holds the player's own reference (form 0x00000014), whatever it is called
+    // (ThePlayer, PlayerActor, ...): the quest's record gives each object property's form.
+    public static bool PlayerForm(string a_var, SkyrimFiles.Quest a_quest)
+    {
+        uint form;
+        return a_quest != null && a_quest.Forms.TryGetValue(Bare(a_var), out form) && form == 0x00000014;
+    }
+
+    // Whether a call's argument a_at (counted from its first parameter) is anything but the literal False: True, or a value
+    // known only at run time (a variable, a parameter), which may be True. Left out (a default): a_default.
+    static bool Takes(SkyrimFiles.Instr a_i, int a_first, int a_at, bool a_default)
+    {
+        int k = a_first + a_at;
+        if (k >= a_i.Args.Count) return a_default;
+        return !Is(a_i.Args[k], "False") && !Is(a_i.Args[k], "0");
+    }
+
+    static readonly string[] MOVES = { "MoveTo", "MoveToNode", "MoveToMyEditorLocation", "MoveToInteractionLocation", "MoveToPackageLocation", "SetPosition",
+        "TranslateTo", "TranslateToRef", "SplineTranslateTo", "SplineTranslateToRef", "SplineTranslateToRefNode" };
+
+    // What a function's own code does to the player that is looked for (not through what it calls), or null: it moves
+    // them (MoveTo and its kin, SetPosition, TranslateTo, a door they are made to use, Game.FastTravel), takes their
+    // screen (Game.FadeOutGame, an image space applied, cross-faded or held, a race menu), their controls
+    // (Game.DisablePlayerControls taking anything, Game.SetPlayerAIDriven), freezes them (SetRestrained, SetDontMove,
+    // EnableAI(False)) or stops saving and waiting (Game.SetInChargen). An argument known only at run time counts as
+    // taking: a row that fires too often costs a stage made only with its friend near, a missed one a frozen friend.
+    // a_f: the function (the types of its variables); a_quest: the quest whose script or fragment it is, when known.
+    public static string Direct(List<SkyrimFiles.Instr> a_code, SkyrimFiles.Func a_f, SkyrimFiles.Quest a_quest)
     {
         var players = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        Func<string, bool> player = v => players.Contains(v) || PlayerName(v);
+        Func<string, bool> player = v => players.Contains(v) || PlayerName(v) || PlayerForm(v, a_quest);
+        // the first of each kind, said by the worst: a move, then the player frozen, controls, chargen, the screen
+        var found = new string[5];
+        Action<int, string> note = (k, w) => { if (found[k] == null) found[k] = w; };
         foreach (var i in a_code)
         {
             if (i.Op == SkyrimFiles.CALLSTATIC && Is(i.Args[0], "game"))
             {
                 var m = i.Args[1];
                 if (Is(m, "GetPlayer")) { players.Add(i.Args[2]); continue; }
-                if (Is(m, "FadeOutGame") && i.Args.Count > 3 && Is(i.Args[3], "True")) return "Game.FadeOutGame";
-                if (Is(m, "DisablePlayerControls") && (i.Args.Count <= 3 || Is(i.Args[3], "True"))) return "Game.DisablePlayerControls";
-                if (Is(m, "SetPlayerAIDriven") && (i.Args.Count <= 3 || Is(i.Args[3], "True"))) return "Game.SetPlayerAIDriven";
-                if (Is(m, "FastTravel")) return "Game.FastTravel " + Bare(i.Args.Count > 3 ? i.Args[3] : "");
+                if (Is(m, "FastTravel")) note(0, "Game.FastTravel " + Bare(i.Args.Count > 3 ? i.Args[3] : ""));
+                // abMovement, abFighting, abCamSwitch, abLooking, abSneaking, abMenu, abActivate, abJournalTabs: any one
+                if (Is(m, "DisablePlayerControls") && (i.Args.Count <= 3 || Enumerable.Range(0, 8).Any(k => Takes(i, 3, k, false)))) note(2, "Game.DisablePlayerControls");
+                if (Is(m, "SetPlayerAIDriven") && Takes(i, 3, 0, true)) note(2, "Game.SetPlayerAIDriven");
+                if (Is(m, "SetInChargen") && (Takes(i, 3, 0, false) || Takes(i, 3, 1, false))) note(3, "Game.SetInChargen");
+                if (Is(m, "FadeOutGame") && Takes(i, 3, 0, false)) note(4, "Game.FadeOutGame");
+                if (Is(m, "ShowRaceMenu") || Is(m, "ShowLimitedRaceMenu")) note(4, "Game." + m);
                 continue;
             }
             if (i.Op == SkyrimFiles.ASSIGN || i.Op == SkyrimFiles.CAST) { if (player(i.Args[1])) players.Add(i.Args[0]); else players.Remove(i.Args[0]); continue; }
             if (i.Op != SkyrimFiles.CALLMETHOD) continue;
             var name = i.Args[0]; var self = i.Args[1];
-            if (GETREF.Any(g => Is(name, g)) && PlayerName(self)) { players.Add(i.Args[2]); continue; }
-            if ((Is(name, "MoveTo") || Is(name, "MoveToNode") || Is(name, "MoveToMyEditorLocation") || Is(name, "MoveToInteractionLocation")) && player(self))
-                return "MoveTo " + Bare(i.Args.Count > 3 ? i.Args[3] : "");
-            if (Is(name, "Activate") && i.Args.Count > 3 && player(i.Args[3]) && Bare(self).IndexOf("Door", StringComparison.OrdinalIgnoreCase) >= 0) return "the player through " + Bare(self);
+            if (GETREF.Any(g => Is(name, g)) && (PlayerName(self) || PlayerForm(self, a_quest))) { players.Add(i.Args[2]); continue; }
+            if (MOVES.Any(n => Is(name, n)) && player(self))
+                note(0, (Is(name, "SetPosition") || name.IndexOf("Translate", StringComparison.OrdinalIgnoreCase) >= 0 ? name : "MoveTo") + " " + Bare(i.Args.Count > 3 ? i.Args[3] : ""));
+            if (Is(name, "Activate") && i.Args.Count > 3 && player(i.Args[3]) && Bare(self).IndexOf("Door", StringComparison.OrdinalIgnoreCase) >= 0) note(0, "the player through " + Bare(self));
+            if ((Is(name, "SetRestrained") || Is(name, "SetDontMove")) && player(self) && Takes(i, 3, 0, true)) note(1, name + " on the player");
+            if (Is(name, "EnableAI") && player(self) && i.Args.Count > 3 && !Is(i.Args[3], "True") && !Is(i.Args[3], "1")) note(1, "EnableAI(False) on the player");
+            if ((Is(name, "Apply") || Is(name, "ApplyCrossFade") || Is(name, "PopTo")) && a_f != null && Is(TypeOf(a_f, self) ?? "", "ImageSpaceModifier"))
+                note(4, "ImageSpaceModifier." + name + " " + Bare(self));
             players.Remove(i.Args[2]);
         }
-        return null;
+        return found.FirstOrDefault(w => w != null);
+    }
+
+    // What a row's chain ends in, as src/game/StageRule.h's StageEffect.
+    public static string Effect(string a_why)
+    {
+        var at = a_why.LastIndexOf(": ", StringComparison.Ordinal);
+        var w = at >= 0 ? a_why.Substring(at + 2) : a_why;
+        if (w.StartsWith("Game.FadeOutGame") || w.StartsWith("ImageSpaceModifier.") || w.StartsWith("Game.Show")) return "kScreen";
+        if (w.StartsWith("Game.DisablePlayerControls") || w.StartsWith("Game.SetPlayerAIDriven")) return "kControls";
+        if (w.StartsWith("SetRestrained") || w.StartsWith("SetDontMove") || w.StartsWith("EnableAI")) return "kFrozen";
+        if (w.StartsWith("Game.SetInChargen")) return "kChargen";
+        return "kMove";
     }
 
     // A walk through what a function or a stage runs (the sister project's MoveScan.Walk, for Skyrim's scripts).
     public class Walk
     {
-        public Func<List<SkyrimFiles.Instr>, string> Direct;
+        public Func<List<SkyrimFiles.Instr>, SkyrimFiles.Func, SkyrimFiles.Quest, string> Direct;
         readonly Dictionary<string, string> funcs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<string, string> stages = new Dictionary<string, string>();
 
@@ -605,7 +656,7 @@ public static class MoveScan
             if (!a_seen.Add(key)) return null;
             var code = Reachable(f, a_args);
             var own = OwnVars(f);
-            string why = Direct(code);
+            string why = Direct(code, f, a_quest);
             if (why != null) why = f.Obj + "." + f.Name + ": " + why;
             for (int n = 0; why == null && n < code.Count; n++)
             {
@@ -750,15 +801,19 @@ public static class MoveScan
         sb.Append("#pragma once\r\n\r\n#include \"StageRule.h\"\r\n\r\n#include <array>\r\n\r\n");
         sb.Append("// Written by tools/questscan.ps1 -Write from the game's own files (Skyrim.esm, Update.esm, Dawnguard.esm,\r\n");
         sb.Append("// HearthFires.esm, Dragonborn.esm and the scripts in Skyrim - Misc.bsa); do not edit by hand, run it again. Each row is a\r\n");
-        sb.Append("// stage of a quest a session may share whose fragment moves the player, or takes their screen or controls away, itself or\r\n");
-        sb.Append("// through what it calls, sets or starts (tools/questscan.cs, MoveScan): made only with the friend who did it near.\r\n");
-        sb.Append("// The comment after each row is the chain the scan followed to it. Sorted by editor ID (any case), then stage.\r\n");
+        sb.Append("// stage of a quest a session may share whose fragment moves the player, or takes their screen, controls or saving away,\r\n");
+        sb.Append("// itself or through what it calls, sets or starts (tools/questscan.cs, MoveScan): made only with the friend who did it\r\n");
+        sb.Append("// near (StageEffect: what it does, for the log).\r\n");
+        sb.Append("// The comment after each row is the chain the scan followed to it. A row ending in true is its quest's start-up stage:\r\n");
+        sb.Append("// any stage made while the quest is not started starts it and runs that stage too (QuestRules::StageRowHere). Sorted by\r\n");
+        sb.Append("// editor ID (any case), then stage.\r\n");
         sb.Append("namespace QuestRules\r\n{\r\n");
         sb.Append("\tinline constexpr std::array<StageRule, " + rows.Count + "> STAGE_RULES{ {\r\n");
         foreach (var r in rows)
         {
             var why = r.Why.Replace("\r", " ").Replace("\n", " ");
-            sb.Append(string.Format("\t\t{{ \"{0}\", {1}, StageVerdict::kMoves }},  // {2}\r\n", r.Quest.Edid, r.Stage, why));
+            var startup = r.Quest.Startup().Contains(r.Stage) ? ", true" : "";
+            sb.Append(string.Format("\t\t{{ \"{0}\", {1}, StageVerdict::kMoves, StageEffect::{2}{3} }},  // {4}\r\n", r.Quest.Edid, r.Stage, Effect(r.Why), startup, why));
         }
         sb.Append("\t} };\r\n}\r\n");
         return sb.ToString();

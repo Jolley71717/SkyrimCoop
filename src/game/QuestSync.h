@@ -51,6 +51,11 @@ namespace QuestSync
 	void HostReset(std::uint32_t a_hostId);
 	void HeardRun(const Protocol::QuestRun& a_run);
 
+	// A friend joined or left the session (kPlayerJoined, kPlayerLeft): a stage that moves the player is judged by how
+	// near its doer was as its word came, and a stage held for a friend who left is given up (QuestRules::Maker).
+	void PlayerJoined(std::uint32_t a_playerId);
+	void PlayerLeft(std::uint32_t a_playerId);
+
 	// A save is about to load: the alias records rewritten for a run's start are put back.
 	void BeforeLoad();
 

@@ -138,14 +138,45 @@ namespace QuestRules
 	// the scripts it calls and the stages it sets, as the sister project's quest scan finds its stages that move the
 	// player), sorted (RuleLess). Every stage the session's word made here that moved our player is still said in the
 	// log (MoveGuard): one the scan did not see (a scene's or a magic effect's move) is a row to add by hand there.
-	[[nodiscard]] inline std::optional<StageVerdict> StageRuleOf(std::span<const StageRule> a_rules, std::string_view a_editorId, std::uint16_t a_stage)
+	[[nodiscard]] inline const StageRule* StageRowOf(std::span<const StageRule> a_rules, std::string_view a_editorId, std::uint16_t a_stage)
 	{
 		const StageRule key{ a_editorId, a_stage };
 		const auto      it = std::lower_bound(a_rules.begin(), a_rules.end(), key, RuleLess);
 		if (it != a_rules.end() && it->stage == a_stage && CompareName(it->editorId, a_editorId) == 0) {
-			return it->verdict;
+			return &*it;
+		}
+		return nullptr;
+	}
+
+	[[nodiscard]] inline std::optional<StageVerdict> StageRuleOf(std::span<const StageRule> a_rules, std::string_view a_editorId, std::uint16_t a_stage)
+	{
+		if (const auto row = StageRowOf(a_rules, a_editorId, a_stage)) {
+			return row->verdict;
 		}
 		return std::nullopt;
+	}
+
+	// The row of a quest's start-up stage, if it has one (StageRule::startUp). Any stage made of a quest not started here
+	// starts it (setstage), and the engine then runs its start-up stage unjudged: so a stage made while the quest is not
+	// started is judged by this row too (StageRowHere).
+	[[nodiscard]] inline const StageRule* StartUpRowOf(std::span<const StageRule> a_rules, std::string_view a_editorId)
+	{
+		const StageRule key{ a_editorId, 0 };
+		for (auto it = std::lower_bound(a_rules.begin(), a_rules.end(), key, RuleLess); it != a_rules.end() && CompareName(it->editorId, a_editorId) == 0; ++it) {
+			if (it->startUp) {
+				return &*it;
+			}
+		}
+		return nullptr;
+	}
+
+	// The row a stage is judged by here: its own, or, while its quest is not started here, its quest's start-up stage's.
+	[[nodiscard]] inline const StageRule* StageRowHere(std::span<const StageRule> a_rules, std::string_view a_editorId, std::uint16_t a_stage, bool a_started)
+	{
+		if (const auto row = StageRowOf(a_rules, a_editorId, a_stage)) {
+			return row;
+		}
+		return a_started ? nullptr : StartUpRowOf(a_rules, a_editorId);
 	}
 
 	// ---- reading the game's stages: can the done bit be trusted? ---------------------------------------------------
@@ -428,6 +459,14 @@ namespace QuestRules
 	inline constexpr std::size_t MAX_WANTS = 8192;
 	// A friend this near (in one space) is "near" for a stage that moves the player.
 	inline constexpr float NEAR_FRIEND = 4096.0f;
+	// Nearness for such a stage is decided when its word is heard, not when it is made: the stage has moved its doer by
+	// then (its fragment runs in the frame it is set), so their stand-in may already be at the destination. A friend
+	// read near within NEAR_LATELY before the word came was near at the step.
+	inline constexpr auto NEAR_LATELY = std::chrono::seconds{ 5 };
+	// A stage held for a far friend (kFar) is given up (made the past: not made, later stages go on) after FAR_WAIT, or
+	// at once when that friend leaves the session: a held stage holds its quest's later stages, and no friend is left
+	// stuck behind one.
+	inline constexpr auto FAR_WAIT = std::chrono::seconds{ 60 };
 
 	// What this game reads of one thing the session says, for Judge.
 	struct Here
@@ -472,8 +511,9 @@ namespace QuestRules
 		kMissing,     // no such quest here (a mod this game lacks, or a form of another kind): dropped
 		kNotHere,     // the quest is not shared by this game's own record: dropped
 		kOwn,         // a stage the rules keep each game's own: dropped
-		kFar,         // a stage that moves the player, said by a friend who is not near: held until they are
-		kFarPast,     // ... said as the session's word (a join, a load: no friend did it now): dropped, not made
+		kFar,         // a stage that moves the player, said by a friend who was not near when they set it: held until
+		              // they are near (Maker gives it up after FAR_WAIT, or when they leave: kFarPast)
+		kFarPast,     // ... said as the session's word (a join, a load: no friend did it now), or given up: dropped, not made
 		kPassed,      // a stage below the current one of a quest started here: this game went past it (done, or a
 		              // branch it did not take), so it is never set again (its fragment would run twice): dropped
 		kNotStarted,  // an objective or end of a quest not started here (its stages bring it, or were not made): dropped
@@ -551,6 +591,17 @@ namespace QuestRules
 			Entry             entry;
 			std::uint32_t     reporter = 0;
 			Clock::time_point heard{};
+			bool              nearAtStep = false;  // the friend who did it was near ours when its word was heard
+			bool              gone = false;        // ... and has left the session since
+			bool              held = false;        // judged kFar once (said once, TakeHeld)
+		};
+
+		// Why a held stage (kFar) was given up.
+		enum class Release : std::uint8_t
+		{
+			kNone,
+			kLeft,    // the friend who did it left the session
+			kWaited,  // FAR_WAIT passed with them not near
 		};
 
 		// What Next decided, for the caller to make (kMake) or count.
@@ -558,12 +609,14 @@ namespace QuestRules
 		{
 			Want    want;
 			Verdict verdict = Verdict::kMake;
+			Release release = Release::kNone;  // a kFarPast given up from a hold
 		};
 
 		using Look = std::function<Here(const Entry&, std::uint32_t)>;
 
-		// a_entry heard from the session (new to this game's view). False when the queue is full (dropped).
-		bool Add(const Entry& a_entry, std::uint32_t a_reporter, Clock::time_point a_now)
+		// a_entry heard from the session (new to this game's view). False when the queue is full (dropped). a_nearAtStep:
+		// the friend who did it (a_reporter) was near ours as the word came (NEAR_LATELY), for a stage that moves them.
+		bool Add(const Entry& a_entry, std::uint32_t a_reporter, Clock::time_point a_now, bool a_nearAtStep = false)
 		{
 			if (wants.size() >= MAX_WANTS) {
 				++dropped;
@@ -573,13 +626,34 @@ namespace QuestRules
 			for (auto& w : wants) {
 				if (w.entry.SameThing(a_entry)) {
 					w.entry = a_entry.kind == Entry::kObjective ? QuestBook::Merge(w.entry, a_entry) : a_entry;
+					if (w.reporter != a_reporter) {
+						w.nearAtStep = false;
+						w.gone = false;
+					}
 					w.reporter = a_reporter;
+					w.nearAtStep = w.nearAtStep || a_nearAtStep;
 					return true;
 				}
 			}
-			wants.push_back({ a_entry, a_reporter, a_now });
+			wants.push_back({ a_entry, a_reporter, a_now, a_nearAtStep });
 			return true;
 		}
+
+		// A friend left the session: the stages held for them are given up at the next Next.
+		void Left(std::uint32_t a_playerId)
+		{
+			if (a_playerId == 0) {
+				return;
+			}
+			for (auto& w : wants) {
+				if (w.reporter == a_playerId) {
+					w.gone = true;
+				}
+			}
+		}
+
+		// The wants newly held for a far friend since the last call (each said once in the log).
+		[[nodiscard]] std::vector<Want> TakeHeld() { return std::exchange(newlyHeld, {}); }
 
 		// Our game read a stage of a quest done (its event): a stage made here and waited for is done.
 		void Done(std::uint32_t a_questId, std::uint16_t a_stage, Clock::time_point a_now)
@@ -621,8 +695,12 @@ namespace QuestRules
 						continue;
 					}
 				}
-				const auto here = a_look(e, it->reporter);
-				const auto verdict = Judge(e, it->reporter, here);
+				auto release = Release::kNone;
+				const auto verdict = JudgeWant(*it, a_now, a_look, release);
+				if (verdict == Verdict::kFar && !it->held) {
+					it->held = true;
+					newlyHeld.push_back(*it);
+				}
 				if (verdict == Verdict::kFar || verdict == Verdict::kHold) {
 					blocked.insert(e.questId);  // its later stages wait behind it
 					continue;
@@ -636,7 +714,7 @@ namespace QuestRules
 						flight[e.questId] = Flight{ e.index, a_now };
 					}
 				}
-				Step step{ *it, verdict };
+				Step step{ *it, verdict, release };
 				wants.erase(it);
 				return step;
 			}
@@ -644,11 +722,12 @@ namespace QuestRules
 		}
 
 		// The wants held for a far friend (kFar), for the dev command.
-		[[nodiscard]] std::size_t Held(const Look& a_look) const
+		[[nodiscard]] std::size_t Held(const Look& a_look, Clock::time_point a_now) const
 		{
 			std::size_t n = 0;
 			for (const auto& w : wants) {
-				if (w.entry.kind == Entry::kStage && Judge(w.entry, w.reporter, a_look(w.entry, w.reporter)) == Verdict::kFar) {
+				auto release = Release::kNone;
+				if (w.entry.kind == Entry::kStage && JudgeWant(w, a_now, a_look, release) == Verdict::kFar) {
 					++n;
 				}
 			}
@@ -706,6 +785,27 @@ namespace QuestRules
 			Clock::time_point since{};
 		};
 
+		// A want judged as it stands now: near at its step counts as near; a hold whose friend left, or that waited
+		// FAR_WAIT, is given up (kFarPast, a_release says why).
+		[[nodiscard]] static Verdict JudgeWant(const Want& a_want, Clock::time_point a_now, const Look& a_look, Release& a_release)
+		{
+			auto here = a_look(a_want.entry, a_want.reporter);
+			here.reporterNear = here.reporterNear || a_want.nearAtStep;
+			const auto verdict = QuestRules::Judge(a_want.entry, a_want.reporter, here);
+			a_release = Release::kNone;
+			if (verdict == Verdict::kFar) {
+				if (a_want.gone) {
+					a_release = Release::kLeft;
+				} else if (a_now - a_want.heard >= FAR_WAIT) {
+					a_release = Release::kWaited;
+				}
+				if (a_release != Release::kNone) {
+					return Verdict::kFarPast;
+				}
+			}
+			return verdict;
+		}
+
 		[[nodiscard]] bool HasStageWaiting(std::uint32_t a_questId) const
 		{
 			return std::ranges::any_of(wants, [&](const Want& a_w) { return a_w.entry.questId == a_questId && a_w.entry.kind == Entry::kStage; });
@@ -718,6 +818,7 @@ namespace QuestRules
 		std::uint64_t                                            dropped = 0;
 		std::uint64_t                                            stuck = 0;
 		std::optional<Entry>                                     lastStuck;
+		std::vector<Want>                                        newlyHeld;
 	};
 
 	// ---- a stage that moved our player ------------------------------------------------------------------------------

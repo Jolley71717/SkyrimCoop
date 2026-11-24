@@ -55,6 +55,9 @@ namespace QuestSync
 		QuestRules::Maker              maker;
 		QuestRules::MoveGuard          guard;
 		QuestRules::Apart              apart;
+		// The friends in the session, each with the last time it was read near ours (Near; zero: never): a stage that
+		// moves the player is judged near by where its doer was as the word came, not where the stage took them.
+		std::unordered_map<std::uint32_t, Clock::time_point> friends;
 		// The stages this game set while it ran (their events), by quest: done whatever the done bit reads.
 		std::unordered_map<RE::FormID, std::unordered_set<std::uint16_t>> seen;
 		struct Again
@@ -93,6 +96,9 @@ namespace QuestSync
 			std::uint64_t notHere = 0;     // ... about a quest this game's record does not share
 			std::uint64_t own = 0;         // ... a stage the rules keep each game's own
 			std::uint64_t farPast = 0;     // ... a stage that moves the player, said as the session's past: not made
+			std::uint64_t farHeld = 0;     // ... said by a friend not near at its step: held (each once)
+			std::uint64_t farLeft = 0;     // ... held, and given up when that friend left (counted in farPast too)
+			std::uint64_t farWaited = 0;   // ... held, and given up after FAR_WAIT (counted in farPast too)
 			std::uint64_t passed = 0;      // ... a stage below the current one of a quest started here: not set again
 			std::uint64_t notStarted = 0;  // ... an objective or end of a quest not started here
 			std::uint64_t failedKept = 0;  // ... an objective failed or a quest failed: not made (no console for it)
@@ -901,6 +907,25 @@ namespace QuestSync
 			return a.space != 0 && a.space == b.space && std::hypot(a.x - b.x, a.y - b.y, a.z - b.z) <= QuestRules::NEAR_FRIEND;
 		}
 
+		// Whether a_playerId was near ours as their word came: now, or read so within NEAR_LATELY before (a stage that
+		// moves its doer has moved their stand-in by the time its word is read here).
+		bool NearLately(std::uint32_t a_playerId, Clock::time_point a_now)
+		{
+			if (Near(a_playerId)) {
+				return true;
+			}
+			const auto it = friends.find(a_playerId);
+			return it != friends.end() && it->second != Clock::time_point{} && a_now - it->second <= QuestRules::NEAR_LATELY;
+		}
+
+		// A stage row's effect on the player, for the log.
+		std::string_view EffectOf(const Entry& a_entry)
+		{
+			const auto quest = QuestOf(a_entry.questId);
+			const auto row = quest ? QuestRules::StageRowHere(QuestRules::STAGE_RULES, EditorId(quest), a_entry.index, Started(quest)) : nullptr;
+			return row ? QuestRules::EffectName(row->effect) : "moves the player"sv;
+		}
+
 		// What this game reads of one thing the session says (QuestRules::Judge).
 		QuestRules::Here Look(const Entry& a_entry, std::uint32_t a_reporter)
 		{
@@ -920,7 +945,9 @@ namespace QuestSync
 			switch (a_entry.kind) {
 			case Entry::kStage:
 				here.has = StageDone(quest, a_entry.index);
-				here.rule = QuestRules::StageRuleOf(QuestRules::STAGE_RULES, EditorId(quest), a_entry.index);
+				if (const auto row = QuestRules::StageRowHere(QuestRules::STAGE_RULES, EditorId(quest), a_entry.index, here.started)) {
+					here.rule = row->verdict;
+				}
 				here.reporterNear = here.rule && Near(a_reporter);
 				break;
 			case Entry::kObjective:
@@ -1306,6 +1333,11 @@ namespace QuestSync
 		if (!LocalPlayer::InWorld()) {
 			return;  // a loading screen, the main menu: the events wait in the queue (up to MAX_QUEUED)
 		}
+		for (auto& [id, seen] : friends) {
+			if (Near(id)) {
+				seen = now;
+			}
+		}
 		Catalog();
 		if (std::exchange(rebase, false)) {
 			Rebase(now);
@@ -1506,6 +1538,13 @@ namespace QuestSync
 				break;
 			case QuestRules::Verdict::kFarPast:
 				++counts.farPast;
+				if (step->release != QuestRules::Maker::Release::kNone) {
+					const bool left = step->release == QuestRules::Maker::Release::kLeft;
+					++(left ? counts.farLeft : counts.farWaited);
+					logs::info("Quests: {} stage {} (it {}) given up here: player {} who set it {}; it is not made, the quest's later stages go on",
+						QuestName(step->want.entry.questId), step->want.entry.index, EffectOf(step->want.entry), step->want.reporter,
+						left ? "left the session"s : std::format("was not near ours for {} s", QuestRules::FAR_WAIT.count()));
+				}
 				break;
 			case QuestRules::Verdict::kPassed:
 				++counts.passed;
@@ -1517,6 +1556,12 @@ namespace QuestSync
 			case QuestRules::Verdict::kHold:
 				break;
 			}
+		}
+		for (const auto& held : maker.TakeHeld()) {
+			++counts.farHeld;
+			logs::info("Quests: {} stage {} (it {}) held here: player {} who set it was not near ours then; made if they come near, given up "
+					   "if they leave or after {} s (the quest's later stages wait behind it)",
+				QuestName(held.entry.questId), held.entry.index, EffectOf(held.entry), held.reporter, QuestRules::FAR_WAIT.count());
 		}
 		// What was made, read again: the console runs a command it could not compile without a word.
 		for (auto it = checks.begin(); it != checks.end();) {
@@ -1549,6 +1594,8 @@ namespace QuestSync
 	{
 		const auto now = Clock::now();
 		const bool ours = a_batch.playerId != 0 && a_batch.playerId == ourId;
+		// near as the word came, for a stage that moves the player (QuestRules::NEAR_LATELY)
+		const bool nearAtStep = !ours && a_batch.playerId != 0 && NearLately(a_batch.playerId, now);
 		for (const auto& entry : a_batch.entries) {
 			if (entry.questId == 0) {
 				continue;
@@ -1560,8 +1607,21 @@ namespace QuestSync
 			if (ours) {
 				continue;  // our own report, now the session's: this game has it
 			}
-			maker.Add(entry, a_batch.playerId, now);
+			maker.Add(entry, a_batch.playerId, now, nearAtStep);
 		}
+	}
+
+	void PlayerJoined(std::uint32_t a_playerId)
+	{
+		if (a_playerId != 0 && a_playerId != ourId) {
+			friends.try_emplace(a_playerId, Clock::time_point{});
+		}
+	}
+
+	void PlayerLeft(std::uint32_t a_playerId)
+	{
+		friends.erase(a_playerId);
+		maker.Left(a_playerId);  // the stages held for them are given up (their quests' later stages go on)
 	}
 
 	void Answered(const Protocol::QuestBatch& a_batch)
@@ -1733,6 +1793,7 @@ namespace QuestSync
 		ourId = 0;
 		host = false;
 		view.ClearAll();
+		friends.clear();
 		Forget();
 		askAgain = false;
 		sayWorld = false;
@@ -1920,7 +1981,7 @@ namespace QuestSync
 			}
 			const auto look = [](const Entry& a_e, std::uint32_t a_r) { return Look(a_e, a_r); };
 			return std::format("installed={} host={} quests={} shared={} own={} radiant={} misc={} untyped={} noname={} doneBit={} session={}/{} outstanding={} "
-							   "based={} kept={} wants={} inflight={} held={} events={} sent={} heard={} made={} has={} missing={} nothere={} ownStages={} farPast={} "
+							   "based={} kept={} wants={} inflight={} held={} events={} sent={} heard={} made={} has={} missing={} nothere={} ownStages={} farPast={} farHeld={} farLeft={} farWaited={} "
 							   "passed={} notStarted={} failedKept={} answered={} busy={} refused={} stuck={} lastStuck={} asks={} resets={} rebases={} snapshots={}/{} "
 							   "apart={} lastApart={} apartStages={} apartHeld={} moved={} lastMoved={} lastMade={} unmade={} lastUnmade={} wantsDropped={} "
 							   "eventsDropped={} offmain={} norun={} runs={} runsSent={} runsHeard={} runsStarted={} runsAdopted={} runsGaveUp={} forced={} "
@@ -1929,8 +1990,8 @@ namespace QuestSync
 							   "stopsOld={} orphansStopped={} candidates={} lastOrphan={} startsOffMain={} lastStartThread={} lastRun={}",
 				installed ? 1 : 0, host ? 1 : 0, catalog.size(), classCounts[0], classCounts[1], classCounts[2], classCounts[3], classCounts[4], classCounts[5],
 				!bit ? "unread" : bit->trusted ? "trusted" : "untrusted", view.Quests(), view.Entries(), view.Outstanding(), view.Based(), view.Kept(), maker.Size(),
-				maker.InFlight(), maker.Held(look), Counted(counts.events), Counted(counts.sent), Counted(counts.heard), Counted(counts.made), Counted(counts.has),
-				Counted(counts.missing), Counted(counts.notHere), Counted(counts.own), Counted(counts.farPast), Counted(counts.passed), Counted(counts.notStarted),
+				maker.InFlight(), maker.Held(look, Clock::now()), Counted(counts.events), Counted(counts.sent), Counted(counts.heard), Counted(counts.made), Counted(counts.has),
+				Counted(counts.missing), Counted(counts.notHere), Counted(counts.own), Counted(counts.farPast), Counted(counts.farHeld), Counted(counts.farLeft), Counted(counts.farWaited), Counted(counts.passed), Counted(counts.notStarted),
 				Counted(counts.failedKept), Counted(counts.answered), Counted(counts.busy), Counted(counts.refused), Counted(maker.Stuck()),
 				maker.LastStuck() ? std::format("{:08X}:{}", maker.LastStuck()->questId, maker.LastStuck()->index) : "none"s, Counted(counts.asks),
 				Counted(counts.resets), Counted(counts.rebases), Counted(counts.snapshots), Counted(counts.snapshotEntries), Counted(apart.Quests()),
