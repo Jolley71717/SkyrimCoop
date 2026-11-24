@@ -189,7 +189,7 @@ TEST("reward judge: a key is the door's, not a reward; anything else a player ca
 		CHECK(Judge(talk, T0, kind) == Why::kReward);
 	}
 	CHECK(std::string{ WhyName(Why::kMade) } == "made");
-	CHECK(WHY_COUNT == 6);
+	static_assert(WHY_COUNT == 6);
 }
 
 TEST("reward judge: an item a stage of the quest made here from the session's word just gave is that stage's, not our reward")
