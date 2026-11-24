@@ -94,6 +94,9 @@ namespace NpcSync
 	// a_caster is a copy of an NPC another game runs and the effect makes or moves something here (SpellRules::
 	// JudgeCopyMagic); counted by kind when it is.
 	[[nodiscard]] bool                                                             RefusesCopyMagic(const RE::Actor* a_caster, std::int32_t a_archetype);
+	// For the effect hook (any thread, no lock): whether a_actor is a copy of an NPC another game runs (src/game/Effects.h:
+	// our player's magic on it is dealt in its runner's game).
+	[[nodiscard]] bool                                                             OthersCopy(const RE::Actor* a_actor);
 	// For projectiles (src/game/Shots.h): whether a_actor is a copy this game moves by its runner's states now (any
 	// thread: the projectile hook asks), and the moment on this game's clock its runner's a_sentMs was (none: not known).
 	[[nodiscard]] bool                                                             Mirrored(const RE::Actor* a_actor);

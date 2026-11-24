@@ -14,6 +14,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Effects.h"
 #include "game/Pairs.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
@@ -219,6 +220,13 @@ namespace DevCommands
 			return Pairs::Command(a_args);
 		}
 
+		// effects [last]: our player's magic on NPCs other games run, held back and sent; friends' put on the NPCs we run;
+		// Slow Times shared (Effects::Command).
+		std::string EffectsCommand(std::string_view a_args)
+		{
+			return Effects::Command(a_args);
+		}
+
 		// peace [targeting | find <base> [radius] | line <stand-in> [beyond] [width]]: the world leaving the stand-ins alone, what was turned away and told to stop, each stand-in's
 		// ghost flag and what landed on it, our player's bounty (StandInPeace::Command).
 		std::string PeaceCommand(std::string_view a_args)
@@ -277,6 +285,7 @@ namespace DevCommands
 			{ "peace", PeaceCommand },
 			{ "shots", ShotsCommand },
 			{ "pairs", PairsCommand },
+			{ "effects", EffectsCommand },
 			{ "strays", Strays },
 			{ "npcs", Npcs },
 			{ "graph", Graph },

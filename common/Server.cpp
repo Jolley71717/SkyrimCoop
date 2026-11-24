@@ -75,6 +75,13 @@ namespace
 		// begin a few at a time). Past it one is dropped, never kept: the pair is over by the time a budget would let it go.
 		TokenBucket pairBudget{ 16.0, 8.0 };
 		bool        toldPairsDropped = false;
+		// Magic effects on NPCs other games run passed to their runners (kNpcEffects): a burst of 64, then 32 a second (a
+		// shout's cone or an explosion reaches a crowd at once, a few effects each; a concentration spell puts its effects on
+		// again about ten times a second). Past it one is dropped (said once): a spell cast again is the player's to do.
+		TokenBucket effectBudget{ 64.0, 32.0 };
+		bool        toldEffectsDropped = false;
+		// Slow Times passed on (kSlowTimes): a burst of 4, then one a second (a shout's cooldown is longer).
+		TokenBucket slowTimeBudget{ 4.0, 1.0 };
 		bool        toldUnknown = false;
 	};
 
@@ -689,6 +696,45 @@ void Server::Run()
 					msg->sender = a_peer.playerId;
 					broadcast(Protocol::Encode(*msg), true, &a_key);
 				}
+			}
+			break;
+		case MT::kNpcEffects:
+			// Each effect to its NPC's runner alone, by the server's own book, the caster named: one on an NPC nobody runs, or
+			// the caster's own game does (its own copy of it was stale), or whose runner is gone, goes nowhere. Each within the
+			// caster's budget (past it dropped, said once).
+			if (const auto msg = Protocol::DecodeNpcEffects(a_data)) {
+				const auto                                     now = Clock::now();
+				std::map<std::uint32_t, Protocol::NpcEffects> toRunners;
+				bool                                           dropped = false;
+				for (const auto& effect : msg->effects) {
+					const auto runner = npcs.Owner(effect.key);
+					if (runner == 0 || runner == a_peer.playerId || !peerOf(runner)) {
+						continue;
+					}
+					if (!a_peer.effectBudget.Take(now)) {
+						dropped = true;
+						continue;
+					}
+					auto& out = toRunners[runner];
+					out.caster = a_peer.playerId;
+					out.effects.push_back(effect);
+				}
+				if (dropped && !a_peer.toldEffectsDropped) {
+					a_peer.toldEffectsDropped = true;
+					log(std::format("server: player {} sends magic effects on NPCs faster than they are passed on: the rest are dropped (said once)", a_peer.playerId));
+				}
+				for (const auto& [runner, effects] : toRunners) {
+					if (const auto to = peerOf(runner)) {
+						send(*to, Protocol::Encode(effects), true);
+					}
+				}
+			}
+			break;
+		case MT::kSlowTimes:
+			// To the others, the player named (each game judges whether its player is near enough to share it).
+			if (auto msg = Protocol::DecodeSlowTime(a_data); msg && a_peer.slowTimeBudget.Take(Clock::now())) {
+				msg->player = a_peer.playerId;
+				broadcast(Protocol::Encode(*msg), true, &a_key);
 			}
 			break;
 		case MT::kPairs:

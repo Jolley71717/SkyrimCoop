@@ -2534,6 +2534,11 @@ namespace NpcSync
 		return out;
 	}
 
+	bool OthersCopy(const RE::Actor* a_actor)
+	{
+		return a_actor && othersCopyIds.Contains(a_actor->GetFormID());
+	}
+
 	bool RefusesCopyMagic(const RE::Actor* a_caster, std::int32_t a_archetype)
 	{
 		const auto kind = SpellRules::JudgeCopyMagic(a_archetype);
