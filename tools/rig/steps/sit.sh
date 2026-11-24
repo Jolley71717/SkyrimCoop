@@ -8,8 +8,10 @@
 #   bash tools/rig/steps/sit.sh selftest     the step's reading, no game and no rig (CI runs it)
 #
 # A player, each way (the mover sits, the watcher's stand-in of it is read), both players near each other:
-#   1. `sit find <kind>` in the mover: the nearest free furniture of that kind (sit: a chair or a bench; work: a crafting
-#      station). No seat near is a rig fault (the scene); no crafting station near is a WARN (that leg is not tried).
+#   1. `sit find <sit|station>` in the mover: the nearest free furniture of that kind (sit: a chair or a bench; work: a
+#      crafting station, furniture with a bench type that opens a crafting menu, never a chopping block or an ore vein:
+#      those need a tool). No seat near is a rig fault (the scene); no crafting station near is a WARN (that leg is not
+#      tried).
 #   2. The mover walks to within SIT_REACH of it with its virtual pad, turns its view with the right stick until its
 #      crosshair is on it (`sit find`: aimed=1, the same id; never on it is a rig fault) and presses A (the game's own
 #      activation). Not in it after SIT_WAIT (`sit`: ours in=1 furn=<that id>) is a rig fault.
@@ -23,7 +25,8 @@
 #      station>`: placement, set-up): both games live, no stray, and the stand-in is in the station again.
 #   5. The mover gets up: from a seat with the left stick (the game's own getting up), from a crafting station with B
 #      (closing its menu). Not up after SIT_WAIT is a rig fault. In the watcher, the stand-in is up within SIT_WAIT (no
-#      sitter part, or on=0 state=0 occupies=00000000).
+#      sitter part, or on=0 state=0 occupies=00000000), its getting up written in its own update when one was asked for
+#      (standsWritten= rose with stands=; never written is a WARN).
 # An NPC, each way and each kind (sit, sleep, lean, work; the mover's game runs the NPC):
 #   6. A person the mover runs that the watcher shows (the nearest to the mover), and the nearest free furniture of that
 #      kind to the mover, marker furniture too (`sit find <kind> SIT_RANGE markers`); the mover's console
@@ -55,6 +58,20 @@ st_said_npc() { awk -v p="npc=$2" 'BEGIN { RS = " [|] " } { sub(/\n$/, "") } $1 
 st_counts() { awk 'BEGIN { RS = " [|] " } { sub(/\n$/, "") } $1 == "sits" { print; exit }' <<<"$1"; }
 # st_find <sit find reply> <field>: a field of the furniture found; nothing when none
 st_find() { [[ $1 == "furniture id="* ]] && field "$2" "$1"; }
+# st_find_kind <sit|work>: the kind a player's leg asks `sit find` for (work: a crafting station only)
+st_find_kind() { if [ "$1" = work ]; then echo station; else echo "$1"; fi; }
+# st_station <sit find reply>: furniture with a bench type (it opens a crafting menu)
+st_station() { local b; b=$(st_find "$1" bench); is_num "$b" && [ "$b" -gt 0 ]; }
+# st_stands_asked <counts before> <counts after>: 1 when the watcher asked for a getting up between them (stands= rose)
+st_stands_asked() {
+	local s0 s1; s0=$(field stands "$1"); s1=$(field stands "$2")
+	is_num "$s0" && is_num "$s1" && [ "$s1" -gt "$s0" ] && echo 1 || echo 0
+}
+# st_stands_written <counts before> <counts after>: a getting up was asked for and written in the actor's own update
+st_stands_written() {
+	local w0 w1; w0=$(field standsWritten "$1"); w1=$(field standsWritten "$2")
+	[ "$(st_stands_asked "$1" "$2")" = 1 ] && is_num "$w0" && is_num "$w1" && [ "$w1" -gt "$w0" ]
+}
 # st_seated_in <sitter part>: in the furniture said, as the engine has it
 st_seated_in() { [ "$(field seated "$1")" = 1 ] && [ "$(field inWanted "$1")" = 1 ]; }
 # st_up_in <sitter part>: up (none listed, or said up, standing and in nothing as the engine has it)
@@ -133,16 +150,22 @@ sit_cell() {
 
 # sit_way <mover> <watcher> <sit|work>: the mover's player in a seat or at a crafting station
 sit_way() {
-	local m=$1 w=$2 kind=$3 label="sit $3 ($1 sits, $2 watches)" id found furn fx fy i part k0 k1
+	local m=$1 w=$2 kind=$3 label="sit $3 ($1 sits, $2 watches)" id found furn fx fy i part k0 k1 fk
 	id=$(field player "$(dc "$m" 'session status')")
-	# 1. furniture by the mover
-	found=$(dc "$m" "sit find $kind $SIT_RANGE")
+	# 1. furniture by the mover. A player's work leg takes a crafting station only (`sit find station`: a bench type,
+	# a crafting menu): a work spot with none (a chopping block, an ore vein) needs a tool the player may not carry.
+	fk=$(st_find_kind "$kind")
+	found=$(dc "$m" "sit find $fk $SIT_RANGE")
 	furn=$(st_find "$found" id)
+	if [ -n "$furn" ] && [ "$kind" = work ] && ! st_station "$found"; then
+		warn "$label: a free crafting station near the $m (that leg is not tried)" "sit find $fk gave a work spot with no bench type (no crafting menu): $found"
+		return
+	fi
 	if [ -z "$furn" ]; then
 		if [ "$kind" = sit ]; then
-			rig_fault state "$label: a free seat near the $m (set-up)" "sit find $kind: $found"
+			rig_fault state "$label: a free seat near the $m (set-up)" "sit find $fk: $found"
 		else
-			warn "$label: a free crafting station near the $m (that leg is not tried)" "sit find $kind: $found"
+			warn "$label: a free crafting station near the $m (that leg is not tried)" "sit find $fk: $found"
 		fi
 		return
 	fi
@@ -152,11 +175,11 @@ sit_way() {
 	[[ $(dc "$m" "walkto $fx $fy 0.5 $SIT_REACH 30") == walking* ]] && wait_until 35 st_walk_over "$m"
 	still "$m"
 	for ((i = 0; i < SIT_TURNS; i++)); do
-		st_aimed "$m" "$kind" "$furn" && break
+		st_aimed "$m" "$fk" "$furn" && break
 		dc "$m" 'pad stick r 0.5 0 150' >/dev/null; sleep 0.4
 	done
-	if ! st_aimed "$m" "$kind" "$furn"; then
-		rig_fault input "$label: the $m's crosshair on the furniture (set-up)" "$(dc "$m" 'sit find '"$kind"' 600')"
+	if ! st_aimed "$m" "$fk" "$furn"; then
+		rig_fault input "$label: the $m's crosshair on the furniture (set-up)" "$(dc "$m" 'sit find '"$fk"' 600')"
 		return
 	fi
 	k0=$(field eventsKept "$(st_counts "$(dc "$m" sit)")")
@@ -198,6 +221,8 @@ sit_way() {
 	fi
 
 	# 5. up again
+	local c0 c1
+	c0=$(st_counts "$(dc "$w" sit)")
 	if [ "$kind" = work ]; then dc "$m" 'pad button b' >/dev/null; else dc "$m" 'pad stick l 0 1 800' >/dev/null; fi
 	if ! wait_until "$SIT_WAIT" st_out "$m"; then
 		rig_fault input "$label: the $m's player gets up (set-up)" "$(st_ours "$(dc "$m" sit)")"
@@ -205,7 +230,15 @@ sit_way() {
 	fi
 	still "$m"
 	if wait_until "$SIT_WAIT" st_up "$w" "$id"; then
-		pass "$label: the $w's stand-in gets up with its friend" "$(st_counts "$(dc "$w" sit)")"
+		c1=$(st_counts "$(dc "$w" sit)")
+		pass "$label: the $w's stand-in gets up with its friend" "$c1"
+		# The engine's getting up is started in the stand-in's own update (never from the tick): each stand asked for
+		# was written there (standsWritten= rose with stands=). None written is a WARN: it may have been taken out at once.
+		if st_stands_written "$c0" "$c1"; then
+			pass "$label: the $w's stand was written in the stand-in's own update (standsWritten= rose)" "$(field stands "$c0")/$(field standsWritten "$c0") -> $(field stands "$c1")/$(field standsWritten "$c1")"
+		elif [ "$(st_stands_asked "$c0" "$c1")" = 1 ]; then
+			warn "$label: the $w's stand was written in the stand-in's own update (standsWritten= rose)" "stands=$(field stands "$c1") standsWritten=$(field standsWritten "$c1") standsWaiting=$(field standsWaiting "$c1"): asked for, never written (taken out at once? quicks=$(field quicks "$c1"))"
+		fi
 	else
 		fail "$label: the $w's stand-in gets up with its friend" "$(st_sitter "$(dc "$w" sit)" "$id" | cut -c1-220)"
 	fi
@@ -323,10 +356,13 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		dc() { local in part seated found kept st occ k; case "$1 $2" in
 			"vm session status") echo "role=client connection=up welcomed=1 player=2 host=0 players=2" ;;
 			"vm sit find "*)
-				k=sit; [ "$FS_KIND" = work ] && k=work
+				# a seat; a crafting station (bench type 7); a chopping block (a work spot with no bench type, nearer: what
+				# `sit find work` gives, which no player leg may take)
+				local fid=0001A2B3 b=0; k=sit
+				case "$2" in "sit find station"*) k=work; b=7; [ "$FS_MODE" = chop ] && b=0 ;; "sit find work"*) k=work; fid=0001A2B9 ;; esac
 				if [ "$FS_MODE" = nofurn ]; then echo "furniture none"
 				else local aimed=0; [ "$(cat "$FS/turns")" -ge 3 ] && [ "$FS_MODE" != noaim ] && aimed=1
-					echo "furniture id=0001A2B3 base=000BB7C1 kind=$k bench=0 markers=2 dist=300 x=500 y=600 z=0 aimed=$aimed"; fi ;;
+					echo "furniture id=$fid base=000BB7C1 kind=$k bench=$b markers=2 dist=300 x=500 y=600 z=0 aimed=$aimed"; fi ;;
 			"vm walkto "[0-9]*) echo "walking to (500,600)" ;;
 			*" walkto") echo "not walking; last: arrived" ;;
 			"vm pad stick r"*) echo $(( $(cat "$FS/turns") + 1 )) > "$FS/turns"; echo ok ;;
@@ -344,24 +380,33 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 					case "$FS_MODE" in noseat) seated=0; st=0; occ=00000000 ;; wrongfurn) found=0001A2B4 ;; esac
 					part=" | sitter player=2 on=1 kind=$k furn=0001A2B3 base=000BB7C1 found=$found lacked=0 taken=0 near=1 dist=10 here=FF0008AE state=$st occupies=$occ inWanted=$seated inOther=0 seated=$seated held=1 assist=0 rounds=0 tried=activate seatedBy=activate givenUp=0 stands=0 quicks=0 stalls=0 marker=0 markerHere=0 sender=2 handover=0 heard=1"
 				fi
-				echo "ours in=0 state=0 furn=00000000 base=00000000 kind=- marker=255 said=0 sent=0$part | sits sent=0 heard=2 releases=0 eventsKept=0" ;;
+				# after its friend got up: one stand asked for (none for a stand-in never put in), written in its update (nowrite: never)
+				local sa=0 sw=0; [ "$(cat "$FS/was")" = 1 ] && [ "$(cat "$FS/in")" = 0 ] && [ "$FS_MODE" != noseat ] && { sa=1; [ "$FS_MODE" != nowrite ] && sw=1; }
+				echo "ours in=0 state=0 furn=00000000 base=00000000 kind=- marker=255 said=0 sent=0$part | sits sent=0 heard=2 releases=0 stands=$sa standsWritten=$sw standsWaiting=$((sa - sw)) quicks=0 eventsKept=0" ;;
 			*) echo ok ;; esac; }
 		( sit_save() { echo 1 > "$FS/keeps"; }; sit_cell() { echo 2 > "$FS/keeps"; }
 			A_OUT=$d/fs$RANDOM; mkdir -p "$A_OUT"; a_init fs >/dev/null; sit_way vm host "${FS_KIND:-sit}" >/dev/null; cut -f1 "$A_RESULTS" | sort | uniq -c | awk '{printf "%s:%s ", $2, $1}'; echo -n "keeps=$(cat "$FS/keeps")" )
 	}
 	# ok: in it (1), the same furniture (1), events kept (1), up (1); the host watches: no save, a seat: no cell change
-	t "way: all of it works" "$(fake_sit ok)" "PASS:4 keeps=0"
+	t "way: all of it works" "$(fake_sit ok)" "PASS:5 keeps=0"
 	t "way: no seat is the rig's, and nothing else is tried" "$(fake_sit nofurn)" "RIG:1 keeps=0"
 	t "way: a crosshair never on it is the rig's" "$(fake_sit noaim)" "RIG:1 keeps=0"
 	t "way: a mover A does not put in is the rig's" "$(fake_sit nosit)" "RIG:1 keeps=0"
 	# noseat: not in (1), no save or cell (1); the same furniture is still found (1), kept (1), up (1)
 	t "way: a stand-in never put in fails" "$(fake_sit noseat)" "FAIL:2 PASS:3 keeps=0"
-	t "way: a stand-in put in other furniture fails" "$(fake_sit wrongfurn)" "FAIL:1 PASS:3 keeps=0"
-	t "way: no event kept is a WARN" "$(fake_sit nokept)" "PASS:3 WARN:1 keeps=0"
+	t "way: a stand-in put in other furniture fails" "$(fake_sit wrongfurn)" "FAIL:1 PASS:4 keeps=0"
+	t "way: no event kept is a WARN" "$(fake_sit nokept)" "PASS:4 WARN:1 keeps=0"
+	t "way: a stand asked for and never written in the stand-in's update is a WARN" "$(fake_sit nowrite)" "PASS:4 WARN:1 keeps=0"
 	t "way: a stand-in still in after its friend got up fails" "$(fake_sit stuck)" "FAIL:1 PASS:3 keeps=0"
 	t "way: a mover that does not get up is the rig's" "$(fake_sit noup)" "PASS:3 RIG:1 keeps=0"
-	t "way: at a station the watcher changes cell" "$(FS_KIND=work fake_sit ok)" "PASS:4 keeps=2"
+	t "way: at a station the watcher changes cell" "$(FS_KIND=work fake_sit ok)" "PASS:5 keeps=2"
 	t "way: no station is a WARN" "$(FS_KIND=work fake_sit nofurn)" "WARN:1 keeps=0"
+	# chop: the station asked for comes with no bench type (a chopping block from an older plugin): not tried, a WARN
+	t "way: a work spot with no crafting menu is never a player's leg" "$(FS_KIND=work fake_sit chop)" "WARN:1 keeps=0"
+	t "find kind: a player's work leg asks for a station" "$(st_find_kind work) $(st_find_kind sit)" "station sit"
+	t "station: a bench type" "$(st_station 'furniture id=0001A2D0 base=000BAD0C kind=work bench=1 markers=1' && echo yes)" yes
+	t "station: none with no bench type" "$(st_station 'furniture id=0001A2D1 base=000BAD0D kind=work bench=0 markers=1' || echo no)" no
+	t "station: none when nothing found" "$(st_station 'furniture none' || echo no)" no
 
 	# The NPC way, both games faked: the VM runs a person the host shows, its console puts it in furniture, `sit off`
 	# gets it up; the host's copy follows as the plugin would. FN_MODE: ok, noperson (the rig's), nofurn (the rig's for a

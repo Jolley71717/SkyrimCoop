@@ -16,7 +16,8 @@
 // update hooks (Held); while the engine gets it in or up, the engine's own update runs for it (Assisted). Graph events
 // the engine's furniture play sends an actor's graph are never sent (EngineOwnsEvents): every game plays its own.
 //
-// Main thread, but Held, Assisted and EngineOwnsEvents (the update and graph event hooks, on the game's job threads).
+// Main thread, but Held, Assisted, BeforeUpdate and EngineOwnsEvents (the update and graph event hooks, on the game's job
+// threads).
 namespace Furniture
 {
 	using SendFn = std::function<void(std::vector<std::uint8_t>, bool)>;
@@ -39,6 +40,10 @@ namespace Furniture
 	[[nodiscard]] bool Held(const RE::Actor* a_actor);
 	// Whether the engine's own update runs for a_actor now: it is getting in or getting up (any thread).
 	[[nodiscard]] bool Assisted(const RE::Actor* a_actor);
+	// In a_actor's own update, before it runs (the update hook, on the thread that updates it): a getting up this game
+	// asked for (SitRules::Act::kStand) is started, its sit state set to want-to-stand or want-to-wake. Its sit state
+	// shares a word with its life, knock and fly states, which its update writes: never written from the tick.
+	void BeforeUpdate(RE::Actor* a_actor);
 	// Whether a graph event a_actor's graph takes now is the engine's furniture play, never sent (any thread; counted).
 	[[nodiscard]] bool EngineOwnsEvents(RE::Actor* a_actor);
 	// Developer channel `sit`: ours (in furniture or not, its state, the furniture, its kind and marker, the sits said),
@@ -47,9 +52,12 @@ namespace Furniture
 	// that shows it here, its sit state and what its process names (occupies=), in it (seated=), held, assisted, the
 	// rounds and ways tried and the way that took (seatedBy=), given up, the times it was stood up (stands=) or taken out
 	// at once (quicks=), entries that stalled (stalls=), the marker said and the one it took here (markerHere=), whether it
-	// waits for a new runner (handover=); and the counts. `sit find <sit|sleep|lean|work|perch|any> [radius] [markers]`:
-	// the nearest furniture of that kind no one is in within radius (default 3000) of our player, with its markers,
-	// distance and place, and whether the crosshair is on it (aimed=), for the rig; invisible marker furniture (the idle
-	// spots only NPCs use) only with `markers`. `sit off <id>`: an NPC this game runs gets up (set-up).
+	// waits for a new runner (handover=); and the counts (scans=: walks of a cell for furniture; standsWritten=,
+	// standsWaiting=: get-ups written in an actor's update and still to be; heldNow=, assistedNow=: actors in the sets).
+	// `sit find <sit|sleep|lean|work|station|perch|any> [radius] [markers]`: the nearest furniture of that kind no one is
+	// in within radius (default 3000) of our player, with its markers, bench type, distance and place, and whether the
+	// crosshair is on it (aimed=), for the rig; station is a work spot with a bench type (it opens a crafting menu: what a
+	// player uses with no tool); invisible marker furniture (the idle spots only NPCs use) only with `markers`.
+	// `sit off <id>`: an NPC this game runs gets up (set-up).
 	[[nodiscard]] std::string Command(std::string_view a_args);
 }

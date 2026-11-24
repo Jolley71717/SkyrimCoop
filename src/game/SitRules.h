@@ -29,9 +29,11 @@
 //   that stalls getting in is taken out (quick) and the rounds go on; 3 rounds 5 s apart, then given up. Out of it (its
 //   friend got up, or it is in other furniture): first the engine's own getting up (want-to-stand or want-to-wake, its
 //   update assisting), then, if it is not up after STAND_WAIT, at once (the engine's quick stop).
-// - Held: an actor in furniture, getting in or out, or near the furniture its friend is in, is not placed by its
-//   friend's states (they would stand it on the chair), nor told its walk: it stays where it stood as they sat down when
-//   no way in takes.
+// - Held: an actor in furniture, getting in or out, or near (HOLD_RADIUS) the furniture its friend is in, is not placed
+//   by its friend's states (they would stand it on the chair), nor told its walk: it stays where it stood as they sat
+//   down when no way in takes. Which actor is held or assisted is kept per sit (Marks), so none stays so once it goes.
+// - Out: the engine's getting up is started by the actor's sit state, written in its own update (StandState), never
+//   from the tick: the word it is in holds the actor's life, knock and fly states, which its update writes too.
 // - Events: a graph event an actor's graph takes while the engine has it in furniture, getting in or out (and not on a
 //   mount, whose sit state is the same) is the engine's own: it is never sent, as every game plays it itself.
 // No game here: tests/SitTests.cpp.
@@ -215,8 +217,87 @@ namespace SitRules
 	}
 
 	// The actor is held (not placed by its friend's or runner's states) within this of the furniture they are in. A long
-	// bench's or a bed's far end is some way off its reference.
-	inline constexpr float NEAR = 256.0f;
+	// bench's or a bed's far end is some way off its reference. (Not NEAR: windows.h makes NEAR, near, FAR and far empty.)
+	inline constexpr float HOLD_RADIUS = 256.0f;
+
+	// Furniture of that record near where they said is looked for (a walk of the cell's references) at most this often
+	// for one actor: the reference they named, or the one found before while it is usable there, needs no walk.
+	inline constexpr auto RESCAN_EVERY = 1s;
+	[[nodiscard]] inline bool ScanDue(const std::optional<Clock::time_point>& a_last, Clock::time_point a_now)
+	{
+		return !a_last || a_now - *a_last >= RESCAN_EVERY;
+	}
+
+	// A crafting station: furniture with a bench type, which opens a crafting menu (a forge, a grindstone, a workbench, an
+	// enchanter, an alchemy lab, a cooking pot, a tanning rack, a smelter). A work spot with none (a chopping block, an ore
+	// vein) needs a tool a player may not carry: the rig's player legs take stations only (`sit find station`).
+	[[nodiscard]] constexpr bool IsStation(std::uint8_t a_benchType) { return a_benchType != 0; }
+
+	// The sit state the engine's own getting up is started with, from in it: want-to-wake from a bed, want-to-stand from
+	// the rest; none when it is not settled in it (getting in, getting up already, or up). Written in the actor's own
+	// update, on the thread that updates it (the same word holds its life, knock and fly states).
+	[[nodiscard]] constexpr std::optional<SitState> StandState(SitState a_state)
+	{
+		if (a_state == SitState::kIsSleeping) {
+			return SitState::kWantToWake;
+		}
+		if (a_state == SitState::kIsSitting) {
+			return SitState::kWantToStand;
+		}
+		return std::nullopt;
+	}
+
+	// Which actor a sit has marked held or assisted in the update hooks' sets, so none stays marked: an actor that
+	// changes (a stand-in made again, a copy now another's) or goes (its friend left, its runner went, the NPC is ours)
+	// is unmarked as it does, and a sit with no actor here holds and assists none (so an ended one is let go of).
+	class Marks
+	{
+	public:
+		struct Change
+		{
+			std::uint32_t id = 0;
+			bool          held = false;
+			bool          assisted = false;
+			bool          dropped = false;  // no longer this sit's actor: anything else waiting for it (a stand) goes too
+			auto operator<=>(const Change&) const = default;
+		};
+
+		// This tick: the actor that shows it here (0: none) and whether it is held and assisted. Returns what the sets are
+		// told: the old actor's unmarking first, then the actor's own marks.
+		std::vector<Change> Set(std::uint32_t a_id, bool a_held, bool a_assisted)
+		{
+			std::vector<Change> out;
+			if (id != 0 && id != a_id) {
+				out.push_back({ .id = id, .dropped = true });
+			}
+			id = a_id;
+			holding = a_id != 0 && a_held;
+			assisting = a_id != 0 && a_assisted;
+			if (a_id != 0) {
+				out.push_back({ .id = a_id, .held = holding, .assisted = assisting });
+			}
+			return out;
+		}
+		// The sit is forgotten (it ended, or its NPC is ours now): its actor unmarked.
+		std::optional<Change> Drop()
+		{
+			if (id == 0) {
+				return std::nullopt;
+			}
+			const Change out{ .id = id, .dropped = true };
+			*this = {};
+			return out;
+		}
+
+		[[nodiscard]] std::uint32_t Id() const { return id; }
+		[[nodiscard]] bool          Holding() const { return holding; }
+		[[nodiscard]] bool          Assisting() const { return assisting; }
+
+	private:
+		std::uint32_t id = 0;
+		bool          holding = false;
+		bool          assisting = false;
+	};
 
 	// Not placed by its states, nor told its walk: in furniture or getting in or out as the engine has it, or near the
 	// furniture its friend is said to be in (waiting for a way in, or none took: it stays where it stood as they sat).
@@ -385,6 +466,7 @@ namespace SitRules
 					return Act::kNone;
 				}
 				++stands;
+				assist = true;  // the stand is written in its own update (the caller's), which the engine runs in full
 				return Act::kStand;
 			}
 			if (standTried && a_now - *outSince < STAND_WAIT && (GettingUp(a_state) || Settled(a_state))) {

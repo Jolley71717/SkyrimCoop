@@ -625,3 +625,76 @@ TEST("sit acts: each try has a name for the developer channel")
 		CHECK(SitRules::ActName(act) != "?");
 	}
 }
+
+TEST("sit marks: an actor that goes or changes is let go of, and a sit with no actor here holds none (its end is forgotten)")
+{
+	using Change = SitRules::Marks::Change;
+	SitRules::Marks marks;
+	// Getting in: held and assisted.
+	auto changes = marks.Set(0xFF000801, true, true);
+	CHECK(changes.size() == 1u);
+	CHECK((changes[0] == Change{ .id = 0xFF000801, .held = true, .assisted = true }));
+	CHECK(marks.Holding());
+	CHECK(marks.Assisting());
+	// Its runner left: no actor shows it here. The old one is let go of (and a stand waiting for it), none is held.
+	changes = marks.Set(0, false, false);
+	CHECK(changes.size() == 1u);
+	CHECK((changes[0] == Change{ .id = 0xFF000801, .dropped = true }));
+	CHECK(marks.Id() == 0u);
+	CHECK(!marks.Holding());
+	CHECK(!marks.Assisting());
+	// Nothing left to let go of when the NPC is handed to us next.
+	CHECK(!marks.Drop());
+	CHECK(marks.Set(0, true, true).empty());
+	CHECK(!marks.Holding());
+
+	// A stand-in made again (a new actor): the old one unmarked first, then the new one marked.
+	SitRules::Marks other;
+	(void)other.Set(0xFF000900, true, false);
+	changes = other.Set(0xFF000901, true, false);
+	CHECK(changes.size() == 2u);
+	CHECK((changes[0] == Change{ .id = 0xFF000900, .dropped = true }));
+	CHECK((changes[1] == Change{ .id = 0xFF000901, .held = true }));
+	// The same actor, up: unmarked, not dropped (it is still this sit's).
+	changes = other.Set(0xFF000901, false, false);
+	CHECK(changes.size() == 1u);
+	CHECK((changes[0] == Change{ .id = 0xFF000901 }));
+	// Forgotten (the end, or the NPC is ours now): let go of, once.
+	const auto dropped = other.Drop();
+	CHECK((dropped && *dropped == Change{ .id = 0xFF000901, .dropped = true }));
+	CHECK(!other.Drop());
+}
+
+TEST("sit find: a cell is walked for furniture at most once a second; a station is one with a bench type")
+{
+	const auto t = Steady::now();
+	CHECK(SitRules::ScanDue(std::nullopt, t));
+	CHECK(!SitRules::ScanDue(t, t + 500ms));
+	CHECK(!SitRules::ScanDue(t, t + SitRules::RESCAN_EVERY - 1ms));
+	CHECK(SitRules::ScanDue(t, t + SitRules::RESCAN_EVERY));
+	CHECK(!SitRules::IsStation(0));  // a chopping block, an ore vein: a work spot with no menu
+	for (std::uint8_t bench = 1; bench <= 7; ++bench) {
+		CHECK(SitRules::IsStation(bench));  // a forge, a grindstone, an enchanter, an alchemy lab, a workbench
+	}
+	// Both are work spots to the others: the kind said is the same.
+	CHECK(SitRules::KindOf(State::kNormal, 0, 0) == Kind::kWork);
+	CHECK(SitRules::KindOf(State::kNormal, 0, 1) == Kind::kWork);
+	CHECK(SitRules::HOLD_RADIUS > SitRules::MATCH_RADIUS);
+}
+
+TEST("sit stand: the getting up is written from in it only, want-to-wake from a bed; the engine's update runs from the stand")
+{
+	CHECK(SitRules::StandState(State::kIsSitting) == State::kWantToStand);
+	CHECK(SitRules::StandState(State::kIsSleeping) == State::kWantToWake);
+	for (const auto state : { State::kNormal, State::kWantToSit, State::kWaitingForSitAnim, State::kWantToStand, State::kWantToSleep, State::kWaitingForSleepAnim,
+			 State::kWantToWake }) {
+		CHECK(!SitRules::StandState(state));  // getting in, getting up already, or up: nothing written over it
+	}
+	const auto     t = Steady::now();
+	SitRules::Seat seat;
+	CHECK(seat.Step({ .wanted = true, .ready = true, .state = State::kIsSitting, .inWanted = true }, t) == Act::kNone);
+	CHECK(seat.Step({ .wanted = false, .state = State::kIsSitting, .inWanted = true }, t + 1s) == Act::kStand);
+	CHECK(seat.Assist());  // the stand is written in its update, which runs in full from that frame
+	CHECK(seat.Step({ .wanted = false, .state = State::kWantToStand, .inWanted = true }, t + 1100ms) == Act::kNone);
+	CHECK(seat.Assist());
+}

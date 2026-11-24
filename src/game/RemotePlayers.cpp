@@ -587,6 +587,9 @@ namespace RemotePlayers
 
 		void UpdateHook(RE::Actor* a_this, float a_delta)
 		{
+			// A getting up asked for by the furniture tick is started here, in the actor's own update, on its thread (its
+			// sit state shares a word with states the update writes): every actor kind, stand-in or copy (Furniture.h).
+			Furniture::BeforeUpdate(a_this);
 			if (!Watching()) {
 				originalUpdate(a_this, a_delta);
 				return;

@@ -39,8 +39,10 @@ namespace Furniture
 			std::optional<Clock::time_point> readySince;   // actor and furniture both here with their 3D, and near
 			RideRules::Handover              handover;     // an NPC's sit while its runner changes
 			bool                             held = false;  // kept as it was for its new runner to say (`sit`: handover=1)
+			SitRules::Marks                  marks;         // the actor that shows it here, held or assisted in the sets
+			RE::ObjectRefHandle              cached;        // the furniture found here for this sit (no walk while usable)
+			std::optional<Clock::time_point> lastScan;      // the last walk of the cell for it (SitRules::RESCAN_EVERY)
 			// What was found and seen, last tick (for `sit`).
-			RE::FormID                       actorId = 0;
 			RE::FormID                       found = 0;     // the furniture here (0: none found)
 			bool                             taken = false;  // our player is in it, at that marker
 			bool                             nearBy = false;
@@ -49,8 +51,6 @@ namespace Furniture
 			RE::FormID                       occupies = 0;  // what its process names
 			bool                             inWanted = false;
 			bool                             inOther = false;
-			bool                             holding = false;
-			bool                             assisting = false;
 			std::uint32_t                    markerHere = Protocol::NO_MARKER;
 			bool                             saidLacked = false;  // said once in the log
 			bool                             saidTaken = false;   // said once in the log
@@ -59,29 +59,33 @@ namespace Furniture
 		std::map<Rider, Wanted> wanted;
 		SitRules::Said          said;
 
-		// The actors held and assisted this tick (any thread reads them).
+		// The actors held and assisted this tick, and those to be stood up in their next update (any thread reads them).
 		std::mutex                     setLock;
 		std::unordered_set<RE::FormID> heldIds;
 		std::unordered_set<RE::FormID> assistedIds;
-		// Whether either set holds any actor: the update hooks ask for every actor every frame, and skip the lock when none.
+		std::unordered_set<RE::FormID> standIds;
+		// Whether each set holds any actor: the update hooks ask for every actor every frame, and skip the lock when none.
 		std::atomic<bool> anyHeld{ false };
 		std::atomic<bool> anyAssisted{ false };
+		std::atomic<bool> anyStand{ false };
 
 		// After a change to the sets (setLock held).
 		void Published()
 		{
 			anyHeld.store(!heldIds.empty(), std::memory_order_release);
 			anyAssisted.store(!assistedIds.empty(), std::memory_order_release);
+			anyStand.store(!standIds.empty(), std::memory_order_release);
 		}
 
 		struct Counts
 		{
-			std::uint64_t sent = 0, heard = 0, notBelieved = 0, lacked = 0, taken = 0;
+			std::uint64_t sent = 0, heard = 0, notBelieved = 0, lacked = 0, taken = 0, scans = 0;
 			std::uint64_t activates = 0, consoles = 0, stands = 0, quicks = 0, releases = 0, handedToUs = 0;
 		};
 		Counts                     counts;
-		std::atomic<std::uint64_t> eventsKept{ 0 };    // graph events of ours not sent: the engine's furniture play
-		std::atomic<std::uint64_t> assistFrames{ 0 };  // updates the engine ran in full for an actor getting in or up
+		std::atomic<std::uint64_t> eventsKept{ 0 };     // graph events of ours not sent: the engine's furniture play
+		std::atomic<std::uint64_t> assistFrames{ 0 };   // updates the engine ran in full for an actor getting in or up
+		std::atomic<std::uint64_t> standsWritten{ 0 };  // stands written in the actor's own update (kStand)
 
 		std::string KeyText(const Key& a_key)
 		{
@@ -104,13 +108,34 @@ namespace Furniture
 
 		void SetIn(std::unordered_set<RE::FormID>& a_set, RE::FormID a_id, bool a_in)
 		{
-			std::scoped_lock l{ setLock };
 			if (a_in) {
 				a_set.insert(a_id);
 			} else {
 				a_set.erase(a_id);
 			}
+		}
+
+		// What a sit's marks tell the sets (SitRules::Marks): an actor no longer its own is let go of, a stand waiting
+		// for it too.
+		void Apply(const std::vector<SitRules::Marks::Change>& a_changes)
+		{
+			if (a_changes.empty()) {
+				return;
+			}
+			std::scoped_lock l{ setLock };
+			for (const auto& change : a_changes) {
+				SetIn(heldIds, change.id, change.held);
+				SetIn(assistedIds, change.id, change.assisted);
+				if (change.dropped) {
+					standIds.erase(change.id);
+				}
+			}
 			Published();
+		}
+
+		void Mark(SitRules::Marks& a_marks, RE::FormID a_id, bool a_held, bool a_assisted)
+		{
+			Apply(a_marks.Set(a_id, a_held, a_assisted));
 		}
 
 		bool GettingOnOrOffMount(const RE::Actor* a_actor)
@@ -249,14 +274,17 @@ namespace Furniture
 		}
 
 		// The furniture here that the sit names, near a_actor: the reference when this game has it, else one of that base
-		// where it stands (SitRules::Pick). Looked for only when the actor is within 2 x NEAR of where it stands.
-		RE::NiPointer<RE::TESObjectREFR> Find(const Protocol::Sit& a_sit, RE::Actor* a_actor)
+		// where it stands (SitRules::Pick). Looked for only when the actor is within 2 x HOLD_RADIUS of where it stands.
+		// The reference named is a lookup; one found before is kept while it is usable there; only else is the cell
+		// walked for one of that base, at most once a second (SitRules::RESCAN_EVERY).
+		RE::NiPointer<RE::TESObjectREFR> Find(Wanted& a_wanted, RE::Actor* a_actor, Clock::time_point a_now)
 		{
-			const RE::NiPoint3 at{ a_sit.x, a_sit.y, a_sit.z };
-			if (Distance(a_actor->GetPosition(), at) > 2.0f * SitRules::NEAR) {
+			const auto&        sit = a_wanted.sit;
+			const RE::NiPoint3 at{ sit.x, sit.y, sit.z };
+			if (Distance(a_actor->GetPosition(), at) > 2.0f * SitRules::HOLD_RADIUS) {
 				return {};
 			}
-			std::vector<SitRules::Candidate>               candidates;
+			std::vector<SitRules::Candidate>                        candidates;
 			std::map<RE::FormID, RE::NiPointer<RE::TESObjectREFR>> refs;
 			const auto add = [&](RE::TESObjectREFR* a_ref) {
 				if (!a_ref || refs.contains(a_ref->GetFormID())) {
@@ -272,37 +300,74 @@ namespace Furniture
 					.usable = furniture && !a_ref->IsDisabled() && !a_ref->IsDeleted() });
 				refs.emplace(a_ref->GetFormID(), RE::NiPointer<RE::TESObjectREFR>{ a_ref });
 			};
-			if (a_sit.furniture != 0) {
-				add(RE::TESForm::LookupByID<RE::TESObjectREFR>(a_sit.furniture));
-			}
-			if (a_sit.base != 0) {
-				if (const auto tes = RE::TES::GetSingleton()) {
-					const float radius = Distance(a_actor->GetPosition(), at) + SitRules::MATCH_RADIUS;
-					tes->ForEachReferenceInRange(a_actor, radius, [&](RE::TESObjectREFR* a_ref) {
-						if (a_ref && a_ref->GetBaseObject() && a_ref->GetBaseObject()->GetFormID() == a_sit.base) {
-							add(a_ref);
-						}
-						return RE::BSContainer::ForEachResult::kContinue;
-					});
+			const auto pickOf = [&]() {
+				const auto pick = SitRules::Pick(sit, candidates);
+				return pick ? refs[*pick] : RE::NiPointer<RE::TESObjectREFR>{};
+			};
+			const auto restart = [&]() {
+				candidates.clear();
+				refs.clear();
+			};
+			// The reference named, when this game has it: no walk.
+			if (sit.furniture != 0) {
+				add(RE::TESForm::LookupByID<RE::TESObjectREFR>(sit.furniture));
+				if (auto named = pickOf()) {
+					return named;
 				}
 			}
-			const auto pick = SitRules::Pick(a_sit, candidates);
-			return pick ? refs[*pick] : RE::NiPointer<RE::TESObjectREFR>{};
+			// The one found before, while it is there and usable, of that base and where they said.
+			if (const auto before = a_wanted.cached.get()) {
+				restart();
+				add(before.get());
+				if (auto kept = pickOf()) {
+					return kept;
+				}
+				a_wanted.cached = {};
+			}
+			if (sit.base == 0 || !SitRules::ScanDue(a_wanted.lastScan, a_now)) {
+				return {};
+			}
+			a_wanted.lastScan = a_now;
+			++counts.scans;
+			restart();
+			if (const auto tes = RE::TES::GetSingleton()) {
+				const float radius = Distance(a_actor->GetPosition(), at) + SitRules::MATCH_RADIUS;
+				tes->ForEachReferenceInRange(a_actor, radius, [&](RE::TESObjectREFR* a_ref) {
+					if (a_ref && a_ref->GetBaseObject() && a_ref->GetBaseObject()->GetFormID() == sit.base) {
+						add(a_ref);
+					}
+					return RE::BSContainer::ForEachResult::kContinue;
+				});
+			}
+			auto found = pickOf();
+			if (found) {
+				a_wanted.cached = found->GetHandle();
+			}
+			return found;
 		}
 
 		void Tend(const Rider& a_rider, Wanted& a_wanted, Clock::time_point a_now)
 		{
 			const auto actor = ActorFor(a_rider);
 			const auto believed = StillBelieved(a_rider, a_wanted);
+			const RE::FormID id = actor ? actor->GetFormID() : 0;
 			// An NPC's sit said by a game that runs it no more: kept as it is a moment, for its new runner to say it.
 			a_wanted.held = a_rider.player == 0 && a_wanted.sit.on && a_wanted.handover.Holds(!believed, a_now);
-			a_wanted.actorId = actor ? actor->GetFormID() : 0;
-			if (a_wanted.held || !actor) {
+			if (!actor) {
+				// No actor shows it here (its friend left, its runner went): the one that did is let go of, none is held.
 				a_wanted.readySince.reset();
+				Mark(a_wanted.marks, 0, false, false);
+				return;
+			}
+			if (a_wanted.held) {
+				// Kept where it is (held as it was, when it is the same actor), but the engine's full update no longer runs
+				// for it: its new runner says what comes next.
+				a_wanted.readySince.reset();
+				Mark(a_wanted.marks, id, a_wanted.marks.Id() == id && a_wanted.marks.Holding(), false);
 				return;
 			}
 			const bool saidIn = a_wanted.sit.on && believed;
-			auto       furniture = saidIn ? Find(a_wanted.sit, actor.get()) : RE::NiPointer<RE::TESObjectREFR>{};
+			auto       furniture = saidIn ? Find(a_wanted, actor.get(), a_now) : RE::NiPointer<RE::TESObjectREFR>{};
 			a_wanted.found = furniture ? furniture->GetFormID() : 0;
 			if (saidIn && !furniture && !a_wanted.saidLacked) {
 				a_wanted.saidLacked = true;
@@ -329,7 +394,7 @@ namespace Furniture
 			const auto     occupies = OccupiedBy(actor.get());
 			const RE::NiPoint3 spot{ a_wanted.sit.x, a_wanted.sit.y, a_wanted.sit.z };
 			a_wanted.dist = furniture ? Distance(actor->GetPosition(), furniture->GetPosition()) : Distance(actor->GetPosition(), spot);
-			a_wanted.nearBy = a_wanted.dist <= SitRules::NEAR;
+			a_wanted.nearBy = a_wanted.dist <= SitRules::HOLD_RADIUS;
 			const bool ready = furniture && a_wanted.nearBy && actor->Is3DLoaded() && furniture->Is3DLoaded() && !actor->IsDead();
 			if (ready) {
 				a_wanted.readySince = a_wanted.readySince.value_or(a_now);
@@ -361,8 +426,11 @@ namespace Furniture
 			case SitRules::Act::kStand:
 				++counts.stands;
 				logs::info("Furniture: {} gets up from {:08X}", RiderText(a_rider), a_wanted.occupies);
-				if (const auto actorState = actor->AsActorState()) {
-					actorState->actorState1.sitSleepState = SitRules::Sleeping(state) ? RE::SIT_SLEEP_STATE::kWantToWake : RE::SIT_SLEEP_STATE::kWantToStand;
+				{
+					// Written in its own update (BeforeUpdate), on the thread that updates it: never from here.
+					std::scoped_lock l{ setLock };
+					standIds.insert(id);
+					Published();
 				}
 				break;
 			case SitRules::Act::kQuick:
@@ -374,17 +442,13 @@ namespace Furniture
 				break;
 			}
 			a_wanted.markerHere = a_wanted.seat.Seated() ? MarkerOf(actor.get()) : Protocol::NO_MARKER;
-			a_wanted.holding = SitRules::Held(saidIn, a_wanted.nearBy, state, occupies != nullptr);
-			a_wanted.assisting = a_wanted.seat.Assist();
-			SetIn(heldIds, actor->GetFormID(), a_wanted.holding);
-			SetIn(assistedIds, actor->GetFormID(), a_wanted.assisting);
+			Mark(a_wanted.marks, id, SitRules::Held(saidIn, a_wanted.nearBy, state, occupies != nullptr), a_wanted.seat.Assist());
 		}
 
-		void Forget(const Wanted& a_wanted)
+		void Forget(Wanted& a_wanted)
 		{
-			if (a_wanted.actorId != 0) {
-				SetIn(heldIds, a_wanted.actorId, false);
-				SetIn(assistedIds, a_wanted.actorId, false);
+			if (const auto change = a_wanted.marks.Drop()) {
+				Apply({ *change });
 			}
 		}
 
@@ -428,9 +492,11 @@ namespace Furniture
 		{
 			const auto player = RE::PlayerCharacter::GetSingleton();
 			const auto tes = RE::TES::GetSingleton();
-			const auto kind = KindNamed(a_kind);
+			// station: a work spot that opens a crafting menu (a bench type), the only kind a player uses with no tool.
+			const bool station = a_kind == "station";
+			const auto kind = station ? std::optional{ Protocol::SitKind::kWork } : KindNamed(a_kind);
 			if (!player || !tes || (!kind && a_kind != "any")) {
-				return "usage: sit find <sit|sleep|lean|work|perch|any> [radius] [markers]";
+				return "usage: sit find <sit|sleep|lean|work|station|perch|any> [radius] [markers]";
 			}
 			const auto                       inUse = InUse();
 			const auto                       at = player->GetPosition();
@@ -447,7 +513,7 @@ namespace Furniture
 					return RE::BSContainer::ForEachResult::kContinue;
 				}
 				const auto itsKind = SitRules::KindOf(SitState::kNormal, furniture->furnFlags.underlying(), furniture->workBenchData.benchType.underlying());
-				if (kind && itsKind != *kind) {
+				if ((kind && itsKind != *kind) || (station && !SitRules::IsStation(furniture->workBenchData.benchType.underlying()))) {
 					return RE::BSContainer::ForEachResult::kContinue;
 				}
 				const float d = Distance(a_ref->GetPosition(), at);
@@ -538,7 +604,7 @@ namespace Furniture
 		for (auto it = wanted.begin(); it != wanted.end();) {
 			Tend(it->first, it->second, now);
 			// An end, once its actor is out of furniture (or not here), is forgotten.
-			if (!it->second.sit.on && !it->second.holding && !it->second.assisting) {
+			if (!it->second.sit.on && !it->second.marks.Holding() && !it->second.marks.Assisting()) {
 				Forget(it->second);
 				it = wanted.erase(it);
 			} else {
@@ -578,6 +644,8 @@ namespace Furniture
 				want.seat = {};
 				want.saidLacked = false;
 				want.saidTaken = false;
+				want.cached = {};
+				want.lastScan.reset();
 			}
 			want.sit = sit;
 			want.sender = a_msg.sender;
@@ -608,6 +676,7 @@ namespace Furniture
 			std::scoped_lock l{ setLock };
 			heldIds.clear();
 			assistedIds.clear();
+			standIds.clear();
 			Published();
 		}
 		active = false;
@@ -619,11 +688,14 @@ namespace Furniture
 		for (auto& [rider, want] : wanted) {
 			want.seat = {};
 			want.readySince.reset();
-			want.actorId = 0;
+			want.marks = {};
+			want.cached = {};
+			want.lastScan.reset();
 		}
 		std::scoped_lock l{ setLock };
 		heldIds.clear();
 		assistedIds.clear();
+		standIds.clear();
 		Published();
 	}
 
@@ -639,7 +711,31 @@ namespace Furniture
 		std::scoped_lock l{ setLock };
 		heldIds.erase(a_actor->GetFormID());
 		assistedIds.erase(a_actor->GetFormID());
+		standIds.erase(a_actor->GetFormID());
 		Published();
+	}
+
+	void BeforeUpdate(RE::Actor* a_actor)
+	{
+		if (!a_actor || !anyStand.load(std::memory_order_acquire)) {
+			return;
+		}
+		{
+			std::scoped_lock l{ setLock };
+			if (standIds.erase(a_actor->GetFormID()) == 0) {
+				return;
+			}
+			Published();
+		}
+		const auto actorState = a_actor->AsActorState();
+		if (!actorState || a_actor->IsOnMount() || GettingOnOrOffMount(a_actor)) {
+			return;
+		}
+		const auto now = SitRules::StateOf(static_cast<std::uint32_t>(std::to_underlying(actorState->GetSitSleepState())));
+		if (const auto to = SitRules::StandState(now)) {
+			actorState->actorState1.sitSleepState = static_cast<RE::SIT_SLEEP_STATE>(std::to_underlying(*to));
+			standsWritten.fetch_add(1, std::memory_order_relaxed);
+		}
 	}
 
 	bool Held(const RE::Actor* a_actor)
@@ -708,13 +804,23 @@ namespace Furniture
 				" | sitter {} on={} kind={} furn={:08X} base={:08X} found={:08X} lacked={} taken={} near={} dist={:.0f} here={:08X} state={} occupies={:08X} inWanted={} inOther={} "
 				"seated={} held={} assist={} rounds={} tried={} seatedBy={} givenUp={} stands={} quicks={} stalls={} marker={} markerHere={} sender={} handover={} heard={}",
 				RiderText(rider), sit.on ? 1 : 0, SitRules::KindName(sit.kind), sit.furniture, sit.base, want.found, sit.on && want.found == 0 ? 1 : 0, want.taken ? 1 : 0,
-				want.nearBy ? 1 : 0, want.dist, want.actorId, want.state, want.occupies, want.inWanted ? 1 : 0, want.inOther ? 1 : 0, want.seat.Seated() ? 1 : 0,
-				want.holding ? 1 : 0, want.assisting ? 1 : 0, want.seat.Rounds(), SitRules::ActName(want.seat.LastTried()), SitRules::ActName(want.seat.SeatedBy()),
+				want.nearBy ? 1 : 0, want.dist, want.marks.Id(), want.state, want.occupies, want.inWanted ? 1 : 0, want.inOther ? 1 : 0, want.seat.Seated() ? 1 : 0,
+				want.marks.Holding() ? 1 : 0, want.marks.Assisting() ? 1 : 0, want.seat.Rounds(), SitRules::ActName(want.seat.LastTried()), SitRules::ActName(want.seat.SeatedBy()),
 				want.seat.GivenUp() ? 1 : 0, want.seat.Stands(), want.seat.Quicks(), want.seat.Stalls(), sit.marker, want.markerHere, want.sender, want.held ? 1 : 0, want.heard);
 		}
-		out += std::format(" | sits sent={} heard={} notBelieved={} lacked={} taken={} activates={} consoles={} stands={} quicks={} releases={} handedToUs={} assistFrames={} eventsKept={}",
-			counts.sent, counts.heard, counts.notBelieved, counts.lacked, counts.taken, counts.activates, counts.consoles, counts.stands, counts.quicks, counts.releases,
-			counts.handedToUs, assistFrames.load(std::memory_order_relaxed), eventsKept.load(std::memory_order_relaxed));
+		std::size_t heldNow = 0, assistedNow = 0, standsWaiting = 0;
+		{
+			std::scoped_lock l{ setLock };
+			heldNow = heldIds.size();
+			assistedNow = assistedIds.size();
+			standsWaiting = standIds.size();
+		}
+		out += std::format(
+			" | sits sent={} heard={} notBelieved={} lacked={} taken={} scans={} activates={} consoles={} stands={} standsWritten={} standsWaiting={} quicks={} releases={} "
+			"handedToUs={} heldNow={} assistedNow={} assistFrames={} eventsKept={}",
+			counts.sent, counts.heard, counts.notBelieved, counts.lacked, counts.taken, counts.scans, counts.activates, counts.consoles, counts.stands,
+			standsWritten.load(std::memory_order_relaxed), standsWaiting, counts.quicks, counts.releases, counts.handedToUs, heldNow, assistedNow,
+			assistFrames.load(std::memory_order_relaxed), eventsKept.load(std::memory_order_relaxed));
 		return out;
 	}
 }
