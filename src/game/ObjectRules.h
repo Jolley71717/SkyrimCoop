@@ -104,6 +104,205 @@ namespace ObjectRules
 		bool operator==(const Pose&) const = default;
 	};
 
+	// ---- the reference's own place ----
+	//
+	// A put moves the reference (its place and angles, which the save, a cell's reload and the game's own sync of its 3D
+	// use) and its body with it. The body lies at a fixed offset in the reference's frame (the node that holds its
+	// collision may sit off the root), so the reference's place for a body's pose comes from that offset, measured here
+	// before the put (OffsetOf, RefFor). Two engine conventions are learnt from the objects themselves rather than
+	// assumed (SenseVotes): how a NiMatrix3 (the 3D's world rotation) and a Havok quaternion (the body's) map onto each
+	// other, and how a reference's angles make its 3D's rotation (NiMatrix3::SetEulerAnglesXYZ, or its transpose).
+
+	// A NiMatrix3's entries, entry[row][col].
+	struct Mat3
+	{
+		float m[3][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } };
+	};
+
+	[[nodiscard]] inline Mat3 Transposed(const Mat3& a_m)
+	{
+		Mat3 out;
+		for (int r = 0; r < 3; ++r) {
+			for (int c = 0; c < 3; ++c) {
+				out.m[r][c] = a_m.m[c][r];
+			}
+		}
+		return out;
+	}
+
+	// The largest difference between two matrices' entries.
+	[[nodiscard]] inline float Differ(const Mat3& a_a, const Mat3& a_b)
+	{
+		float most = 0.0f;
+		for (int r = 0; r < 3; ++r) {
+			for (int c = 0; c < 3; ++c) {
+				const float d = std::fabs(a_a.m[r][c] - a_b.m[r][c]);
+				if (!std::isfinite(d)) {
+					return 1e9f;
+				}
+				most = (std::max)(most, d);
+			}
+		}
+		return most;
+	}
+
+	// The rotation of a quaternion as a matrix that turns column vectors (v' = M v): Rotate(q, v) is M v.
+	[[nodiscard]] inline Mat3 MatOf(const Quat& a_q)
+	{
+		const auto  q = Normalized(a_q);
+		const float x = q.x, y = q.y, z = q.z, w = q.w;
+		Mat3        out;
+		out.m[0][0] = 1 - 2 * (y * y + z * z);
+		out.m[0][1] = 2 * (x * y - z * w);
+		out.m[0][2] = 2 * (x * z + y * w);
+		out.m[1][0] = 2 * (x * y + z * w);
+		out.m[1][1] = 1 - 2 * (x * x + z * z);
+		out.m[1][2] = 2 * (y * z - x * w);
+		out.m[2][0] = 2 * (x * z - y * w);
+		out.m[2][1] = 2 * (y * z + x * w);
+		out.m[2][2] = 1 - 2 * (x * x + y * y);
+		return out;
+	}
+
+	// MatOf undone (Shepperd's: from the largest of the four).
+	[[nodiscard]] inline Quat QuatOf(const Mat3& a_m)
+	{
+		const auto& m = a_m.m;
+		const float trace = m[0][0] + m[1][1] + m[2][2];
+		Quat        q;
+		if (trace > 0.0f) {
+			const float s = std::sqrt(trace + 1.0f) * 2.0f;
+			q = { (m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25f * s };
+		} else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+			const float s = std::sqrt(1.0f + m[0][0] - m[1][1] - m[2][2]) * 2.0f;
+			q = { 0.25f * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s };
+		} else if (m[1][1] > m[2][2]) {
+			const float s = std::sqrt(1.0f + m[1][1] - m[0][0] - m[2][2]) * 2.0f;
+			q = { (m[0][1] + m[1][0]) / s, 0.25f * s, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s };
+		} else {
+			const float s = std::sqrt(1.0f + m[2][2] - m[0][0] - m[1][1]) * 2.0f;
+			q = { (m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25f * s, (m[1][0] - m[0][1]) / s };
+		}
+		return Normalized(q);
+	}
+
+	// NiMatrix3::SetEulerAnglesXYZ: a reference's angles (x, y, z, radians) as the engine turns them into a matrix.
+	[[nodiscard]] inline Mat3 FromAnglesXYZ(const Vec& a_angles)
+	{
+		const float sx = std::sin(a_angles.x), cx = std::cos(a_angles.x);
+		const float sy = std::sin(a_angles.y), cy = std::cos(a_angles.y);
+		const float sz = std::sin(a_angles.z), cz = std::cos(a_angles.z);
+		Mat3        out;
+		out.m[0][0] = cy * cz;
+		out.m[0][1] = cy * sz;
+		out.m[0][2] = -sy;
+		out.m[1][0] = sx * sy * cz - cx * sz;
+		out.m[1][1] = sx * sy * sz + cx * cz;
+		out.m[1][2] = sx * cy;
+		out.m[2][0] = cx * sy * cz + sx * sz;
+		out.m[2][1] = cx * sy * sz - sx * cz;
+		out.m[2][2] = cx * cy;
+		return out;
+	}
+
+	// FromAnglesXYZ undone: x and z in [-pi, pi], y in [-pi/2, pi/2] (straight up or down, z is 0).
+	[[nodiscard]] inline Vec AnglesXYZ(const Mat3& a_m)
+	{
+		const auto& m = a_m.m;
+		const float sy = std::clamp(-m[0][2], -1.0f, 1.0f);
+		const float y = std::asin(sy);
+		if (std::fabs(sy) < 0.99999f) {
+			return { std::atan2(m[1][2], m[2][2]), y, std::atan2(m[0][1], m[0][0]) };
+		}
+		// cos y is 0: with z 0, m[1][0] is sin x sin y and m[1][1] is cos x.
+		return { std::atan2(m[1][0] * sy, m[1][1]), y, 0.0f };
+	}
+
+	enum class Sense : std::uint8_t
+	{
+		kUnknown,
+		kSame,        // the matrix is the one expected
+		kTransposed,  // the matrix is the expected one's transpose
+	};
+
+	inline constexpr float SENSE_EPSILON = 0.02f;  // a matrix within this of one expected is that one
+	inline constexpr float SENSE_APART = 0.2f;     // a matrix this near its own transpose tells nothing (barely turned)
+
+	// Which of a_expected and its transpose a_m is; unknown when it is near both or neither.
+	[[nodiscard]] inline Sense SenseOf(const Mat3& a_expected, const Mat3& a_m)
+	{
+		if (Differ(a_expected, Transposed(a_expected)) < SENSE_APART) {
+			return Sense::kUnknown;
+		}
+		const bool same = Differ(a_expected, a_m) <= SENSE_EPSILON;
+		const bool transposed = Differ(Transposed(a_expected), a_m) <= SENSE_EPSILON;
+		return same == transposed ? Sense::kUnknown : (same ? Sense::kSame : Sense::kTransposed);
+	}
+
+	// An engine convention, learnt from objects: settled once one sense has SENSE_VOTES looks and the other at most a
+	// tenth of them (an object whose reference lags its 3D says the wrong one now and then).
+	class SenseVotes
+	{
+	public:
+		static constexpr std::uint32_t SENSE_VOTES = 3;
+		static constexpr std::uint32_t DONE_AFTER = 100;
+
+		void Vote(Sense a_sense)
+		{
+			if (a_sense == Sense::kSame) {
+				++same;
+			} else if (a_sense == Sense::kTransposed) {
+				++transposed;
+			}
+		}
+		[[nodiscard]] Sense Settled() const
+		{
+			if (same >= SENSE_VOTES && transposed * 10 <= same) {
+				return Sense::kSame;
+			}
+			if (transposed >= SENSE_VOTES && same * 10 <= transposed) {
+				return Sense::kTransposed;
+			}
+			return Sense::kUnknown;
+		}
+		// Settled for good: no more looks are needed.
+		[[nodiscard]] bool Done() const { return Settled() != Sense::kUnknown && same + transposed >= DONE_AFTER; }
+		void               Clear() { same = transposed = 0; }
+
+		std::uint32_t same = 0, transposed = 0;
+	};
+
+	// a_m in the sense a_sense says (kTransposed: its transpose).
+	[[nodiscard]] inline Mat3 InSense(const Mat3& a_m, Sense a_sense) { return a_sense == Sense::kTransposed ? Transposed(a_m) : a_m; }
+
+	// Where a body (a_body) lies in its reference's frame (a_ref): both in the body's terms (game units, the Havok
+	// quaternion's sense).
+	[[nodiscard]] inline Pose OffsetOf(const Pose& a_ref, const Pose& a_body)
+	{
+		const auto inverse = Conj(Normalized(a_ref.rot));
+		return { Rotate(inverse, a_body.at - a_ref.at), Normalized(Mul(inverse, a_body.rot)) };
+	}
+
+	// OffsetOf undone: the reference's pose for its body at a_body.
+	[[nodiscard]] inline Pose RefFor(const Pose& a_body, const Pose& a_offset)
+	{
+		const auto rot = Normalized(Mul(Normalized(a_body.rot), Conj(Normalized(a_offset.rot))));
+		return { a_body.at - Rotate(rot, a_offset.at), rot };
+	}
+
+	// A 3D's world rotation in the body's terms: a_body says how a NiMatrix3 maps onto a Havok quaternion (kSame: the
+	// matrix is MatOf(q)).
+	[[nodiscard]] inline Quat RotOf(const Mat3& a_world, Sense a_body) { return QuatOf(InSense(a_world, a_body)); }
+
+	// RotOf undone: the 3D's world rotation for a rotation in the body's terms.
+	[[nodiscard]] inline Mat3 WorldOf(const Quat& a_rot, Sense a_body) { return InSense(MatOf(a_rot), a_body); }
+
+	// A reference's angles for its 3D's world rotation: a_angles says how angles make it (kSame: FromAnglesXYZ).
+	[[nodiscard]] inline Vec AnglesFor(const Mat3& a_world, Sense a_angles) { return AnglesXYZ(InSense(a_world, a_angles)); }
+
+	// AnglesFor undone: the 3D's world rotation a reference's angles give it.
+	[[nodiscard]] inline Mat3 WorldOfAngles(const Vec& a_angles, Sense a_sense) { return InSense(FromAnglesXYZ(a_angles), a_sense); }
+
 	// ---- the holder's frame ----
 
 	// What our player (standing at a_holder, facing a_heading) holds at a_object, in their frame.
@@ -177,6 +376,7 @@ namespace ObjectRules
 		bool          runtime = false;   // made as the game ran (FF): no other game has it
 		bool          actor = false;     // an actor (alive or dead: bodies are the ragdolls' business)
 		bool          transient = false;  // a projectile, an explosion, a hazard
+		bool          fixedKind = false;  // a static, a tree, grass, flora, a door, furniture or a container: never loose
 		bool          enabled = true;
 		bool          has3D = false;
 		bool          inAlias = false;   // a quest alias holds it
@@ -186,7 +386,7 @@ namespace ObjectRules
 
 	[[nodiscard]] constexpr bool Movable(const Facts& a_facts)
 	{
-		return !a_facts.runtime && !a_facts.actor && !a_facts.transient && a_facts.enabled && a_facts.has3D && !a_facts.inAlias && a_facts.bodies == 1 &&
+		return !a_facts.runtime && !a_facts.actor && !a_facts.transient && !a_facts.fixedKind && a_facts.enabled && a_facts.has3D && !a_facts.inAlias && a_facts.bodies == 1 &&
 		       Loose(a_facts.motion);
 	}
 

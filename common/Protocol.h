@@ -831,8 +831,9 @@ namespace Protocol
 	inline constexpr std::size_t MAX_OBJECT_HOLDS = 4;
 	// The fastest a let-go may fly, in units a second (the sister project's HavokGuard cap).
 	inline constexpr float MAX_OBJECT_SPEED = 5000.0f;
-	// How far from its holder a held object may be (the grab holds it a few units ahead; telekinesis further).
-	inline constexpr float MAX_HOLD_REACH = 512.0f;
+	// How far from its holder a held object may be (the grab holds it a few units ahead; telekinesis pulls it from as far
+	// as its range reaches, and is drawn all the way in).
+	inline constexpr float MAX_HOLD_REACH = 4096.0f;
 
 	// What names a loose object. kRef: a reference of the load order (its form id, translated at the edge). kDrop: a
 	// dropped item's copy by its drop id (the drops' change on the other line), refused until the two meet.

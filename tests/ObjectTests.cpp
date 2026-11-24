@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <string>
 #include <vector>
@@ -544,7 +545,7 @@ TEST("object frames: a hold in the holder's frame is drawn at the same place bef
 	CHECK(Near(ObjectRules::Angle(q, Protocol::Quat{ -q.x, -q.y, -q.z, -q.w }), 0.0f));
 }
 
-TEST("object class: a loaded, enabled reference of the load order with one loose body; never an actor, a projectile, a runtime one, an alias's, many bodies or a keyframed one")
+TEST("object class: a loaded, enabled reference of the load order with one loose body; never an actor, a projectile, a static or door, a runtime one, an alias's, many bodies or a keyframed one")
 {
 	ObjectRules::Facts clutter;
 	clutter.has3D = true;
@@ -569,6 +570,9 @@ TEST("object class: a loaded, enabled reference of the load order with one loose
 	CHECK(!ObjectRules::Movable(f));
 	f = clutter;
 	f.transient = true;
+	CHECK(!ObjectRules::Movable(f));
+	f = clutter;
+	f.fixedKind = true;
 	CHECK(!ObjectRules::Movable(f));
 	f = clutter;
 	f.enabled = false;
@@ -825,4 +829,121 @@ TEST("object waiting: the session's places wait until put; a pickup ends one; at
 	CHECK(waiting.Size() == ObjectRules::Waiting::MAX_WAITING - 1);
 	waiting.Clear();
 	CHECK(waiting.Size() == 0u);
+}
+
+TEST("object reference: matrices and quaternions agree; angles round trip, even straight up; the transpose is told apart only when the object is turned")
+{
+	using namespace ObjectRules;
+	const auto q = Normalized(Mul(Turn({ 0, 0, 1 }, 0.7f), Turn({ 1, 0.3f, 0 }, 0.4f)));
+	const auto m = MatOf(q);
+	const Vec  v{ 3.0f, -2.0f, 5.0f };
+	const Vec  mv{ m.m[0][0] * v.x + m.m[0][1] * v.y + m.m[0][2] * v.z, m.m[1][0] * v.x + m.m[1][1] * v.y + m.m[1][2] * v.z,
+        m.m[2][0] * v.x + m.m[2][1] * v.y + m.m[2][2] * v.z };
+	CHECK(Near(mv, Rotate(q, v), 0.001f));
+	CHECK(Near(QuatOf(m), q));
+	for (const float turn : { 0.1f, 1.5f, 2.9f, -2.9f }) {  // every branch of QuatOf
+		const auto r = Normalized(Mul(Turn({ 0.2f, -1, 0.4f }, turn), Turn({ 1, 0, 0 }, turn * 0.5f)));
+		CHECK(Near(QuatOf(MatOf(r)), r));
+	}
+
+	for (const Vec angles : { Vec{ 0.3f, -0.4f, 2.0f }, Vec{ -1.2f, 0.9f, -3.0f }, Vec{ 0.0f, 0.0f, 1.0f } }) {
+		const auto back = AnglesXYZ(FromAnglesXYZ(angles));
+		CHECK(Differ(FromAnglesXYZ(back), FromAnglesXYZ(angles)) < 0.001f);
+		CHECK(Near(back, angles, 0.001f));
+	}
+	const Vec up{ 0.5f, std::numbers::pi_v<float> / 2.0f, 0.0f };  // gimbal: y is a quarter turn
+	CHECK(Differ(FromAnglesXYZ(AnglesXYZ(FromAnglesXYZ(up))), FromAnglesXYZ(up)) < 0.001f);
+
+	// A heading alone: the transpose turns the other way, so it is told apart; no turn at all tells nothing.
+	const auto turned = FromAnglesXYZ({ 0.0f, 0.0f, 1.0f });
+	CHECK(SenseOf(turned, turned) == Sense::kSame);
+	CHECK(SenseOf(turned, Transposed(turned)) == Sense::kTransposed);
+	CHECK(SenseOf(turned, FromAnglesXYZ({ 0.0f, 0.0f, 2.0f })) == Sense::kUnknown);
+	CHECK(SenseOf(FromAnglesXYZ({ 0.0f, 0.0f, 0.01f }), Mat3{}) == Sense::kUnknown);
+	Mat3 bad;
+	bad.m[1][1] = std::numeric_limits<float>::quiet_NaN();
+	CHECK(SenseOf(turned, bad) == Sense::kUnknown);
+}
+
+TEST("object reference: a convention is settled after SENSE_VOTES looks one way, and not while the other way has more than a tenth")
+{
+	using namespace ObjectRules;
+	SenseVotes votes;
+	votes.Vote(Sense::kSame);
+	votes.Vote(Sense::kUnknown);
+	votes.Vote(Sense::kSame);
+	CHECK(votes.Settled() == Sense::kUnknown);
+	votes.Vote(Sense::kSame);
+	CHECK(votes.Settled() == Sense::kSame);
+	votes.Vote(Sense::kTransposed);  // 1 against 3
+	CHECK(votes.Settled() == Sense::kUnknown);
+	for (int i = 0; i < 7; ++i) {
+		votes.Vote(Sense::kSame);
+	}
+	CHECK(votes.Settled() == Sense::kSame);  // 1 against 10
+	CHECK(!votes.Done());
+	for (std::uint32_t i = 0; i < SenseVotes::DONE_AFTER; ++i) {
+		votes.Vote(Sense::kSame);
+	}
+	CHECK(votes.Done());
+	votes.Clear();
+	for (int i = 0; i < 3; ++i) {
+		votes.Vote(Sense::kTransposed);
+	}
+	CHECK(votes.Settled() == Sense::kTransposed);
+}
+
+TEST("object reference: a body off its reference's root keeps its offset when put; the reference's angles give back its 3D's rotation in either convention")
+{
+	using namespace ObjectRules;
+	// The reference here, and its body lying off it (a collision node off the root, turned).
+	const Pose ref{ { 1000.0f, 2000.0f, 50.0f }, Turn({ 0, 0, 1 }, 0.8f) };
+	const Pose offset{ { 10.0f, -4.0f, 6.0f }, Turn({ 1, 0, 0 }, 0.3f) };
+	const Pose body{ ref.at + Rotate(ref.rot, offset.at), Normalized(Mul(ref.rot, offset.rot)) };
+	const auto measured = OffsetOf(ref, body);
+	CHECK(Near(measured.at, offset.at, 0.01f));
+	CHECK(Near(measured.rot, offset.rot));
+	CHECK(Near(RefFor(body, measured).at, ref.at, 0.01f));
+
+	// A friend's rest of the body, tipped over a metre on: the reference goes where its body is at that offset.
+	const Pose rest{ { 1100.0f, 2000.0f, 20.0f }, Normalized(Mul(Turn({ 0, 1, 0 }, 1.4f), Turn({ 0, 0, 1 }, -2.0f))) };
+	const auto to = RefFor(rest, measured);
+	const auto again = OffsetOf(to, rest);
+	CHECK(Near(again.at, offset.at, 0.01f));
+	CHECK(Near(again.rot, offset.rot));
+
+	// And its angles, in both conventions each way: the 3D they give is the one the body's rotation says.
+	for (const auto bodySense : { Sense::kSame, Sense::kTransposed }) {
+		for (const auto angleSense : { Sense::kSame, Sense::kTransposed }) {
+			const auto world = WorldOf(to.rot, bodySense);
+			CHECK(Near(RotOf(world, bodySense), to.rot));
+			const auto angles = AnglesFor(world, angleSense);
+			CHECK(Finite(angles));
+			CHECK(Differ(WorldOfAngles(angles, angleSense), world) < 0.001f);
+		}
+	}
+}
+
+TEST("object book: past MAX_MOVES the moves that are over are forgotten; while every one is live a new object is refused")
+{
+	const auto      t = Steady::now();
+	ObjectBook::Book book;
+	for (std::uint32_t i = 0; i < ObjectBook::MAX_MOVES; ++i) {
+		CHECK(book.Hold(1, HoldOf(0x00800000 + i), t).Passes());
+	}
+	CHECK(book.Moves() == ObjectBook::MAX_MOVES);
+	CHECK(book.Hold(2, HoldOf(TANKARD), t + 100ms).verdict == Verdict::kRefused);
+	CHECK(book.counts.movesFull == 1u);
+	CHECK(book.Hold(1, HoldOf(0x00800000), t + 100ms).Passes());  // a move it has is still answered
+	// Their holds lapse: the next new object makes room.
+	CHECK(book.Hold(2, HoldOf(TANKARD), t + 100ms + ObjectBook::HOLD_TIMEOUT).Passes());
+	CHECK(book.Moves() == 1u);
+	CHECK(book.counts.movesForgotten == ObjectBook::MAX_MOVES);
+	// A throw in flight is kept until THROW_HOLD.
+	CHECK(book.Rest(2, RestAt(TANKARD, RestKind::kLetGo), t + 3s).Passes());
+	for (std::uint32_t i = 1; i < ObjectBook::MAX_MOVES; ++i) {
+		(void)book.Hold(1, HoldOf(0x00900000 + i), t + 3s);
+	}
+	CHECK(book.Hold(1, HoldOf(BUCKET), t + 3s + ObjectBook::HOLD_TIMEOUT).Passes());
+	CHECK(book.Moves() == 2u);  // the throw and the bucket
 }

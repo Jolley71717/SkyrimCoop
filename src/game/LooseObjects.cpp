@@ -15,7 +15,6 @@
 #include <map>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <unordered_map>
 #include <utility>
 #include <xmmintrin.h>
@@ -63,15 +62,14 @@ namespace LooseObjects
 		};
 		struct Hit
 		{
-			RE::FormID                       target = 0;
-			RE::NiPointer<RE::TESObjectREFR> cause;
-			Clock::time_point                when{};
+			RE::FormID          target = 0;
+			RE::ObjectRefHandle cause;
+			Clock::time_point   when{};
 		};
 		std::mutex                     recordLock;
 		std::vector<Blast>             blasts;
 		std::vector<Hit>               hits;
 		std::vector<RE::FormID>        pickups;
-		std::set<const RE::Explosion*> blastsSeen;  // forces applied, recorded once
 		std::atomic<std::uint64_t>     blastsHeard{ 0 }, hitsHeard{ 0 }, pickupsHeard{ 0 };
 
 		using ExplosionUpdateFn = void (*)(RE::Explosion*, float);
@@ -100,10 +98,11 @@ namespace LooseObjects
 			if (!data.flags.any(RE::Explosion::Flags::kForcesApplied)) {
 				return;
 			}
-			// The moment it pushed what it reached: where, how far, and who set it off.
+			// The moment it pushed what it reached (the update whose start found its forces not applied yet, so once an
+			// explosion: no address is kept, a later explosion often reuses a freed one's): where, how far, who set it off.
 			const auto at = a_this->GetPosition();
 			std::scoped_lock l{ recordLock };
-			if (blasts.size() < MAX_RECORDED && blastsSeen.insert(a_this).second) {
+			if (blasts.size() < MAX_RECORDED) {
 				blasts.push_back({ { at.x, at.y, at.z }, data.radius, data.actorOwner, Clock::now() });
 				blastsHeard.fetch_add(1, std::memory_order_relaxed);
 			}
@@ -121,7 +120,7 @@ namespace LooseObjects
 				}
 				std::scoped_lock l{ recordLock };
 				if (hits.size() < MAX_RECORDED) {
-					hits.push_back({ a_event->target->GetFormID(), a_event->cause, Clock::now() });
+					hits.push_back({ a_event->target->GetFormID(), a_event->cause->GetHandle(), Clock::now() });
 					hitsHeard.fetch_add(1, std::memory_order_relaxed);
 				}
 				return RE::BSEventNotifyControl::kContinue;
@@ -168,6 +167,7 @@ namespace LooseObjects
 			Clock::time_point    heard{};
 			std::optional<Pose>  drawn;
 			bool                 keyframed = false;  // we made our copy keyframed
+			std::optional<RE::COL_LAYER> layer;      // and took it out of collisions: the layer it had
 		};
 		// Our player's let-go, said LET_GO_AFTER after it.
 		struct LetGo
@@ -210,7 +210,7 @@ namespace LooseObjects
 			std::uint64_t restsSaid = 0, restsSent = 0, restsHeard = 0, restsApplied = 0, restsLeft = 0, answers = 0, catchUps = 0;
 			std::uint64_t placesApplied = 0, goneSent = 0, goneHeard = 0;
 			std::uint64_t scans = 0, started = 0, notOurs = 0, hushed = 0, followOns = 0, lost = 0, gaveUp = 0;
-			std::uint64_t badPoses = 0, writes = 0, writeFails = 0, keyframes = 0, releases = 0;
+			std::uint64_t badPoses = 0, writes = 0, writeFails = 0, refWrites = 0, refUnwritten = 0, keyframes = 0, releases = 0;
 		};
 		Counts counts;
 
@@ -220,6 +220,7 @@ namespace LooseObjects
 		struct Bodies
 		{
 			RE::bhkRigidBody* first = nullptr;
+			RE::NiAVObject*   node = nullptr;  // the node that holds the first one's collision
 			std::uint32_t     count = 0;
 		};
 		void FindBodies(RE::NiAVObject* a_node, Bodies& a_out, int a_depth)
@@ -232,6 +233,7 @@ namespace LooseObjects
 					if (const auto body = niCollision->body ? netimmerse_cast<RE::bhkRigidBody*>(niCollision->body.get()) : nullptr) {
 						if (!a_out.first) {
 							a_out.first = body;
+							a_out.node = a_node;
 						}
 						++a_out.count;
 					}
@@ -275,6 +277,28 @@ namespace LooseObjects
 			}
 		}
 
+		// A base that is never loose (a static, a tree, grass, flora, a door, furniture, a container): skipped before its
+		// 3D is walked, so a city's buildings cost the four looks a second nothing.
+		bool FixedKind(const RE::TESObjectREFR* a_ref)
+		{
+			const auto base = a_ref->GetBaseObject();
+			if (!base) {
+				return true;
+			}
+			switch (base->GetFormType()) {
+			case RE::FormType::Static:
+			case RE::FormType::Tree:
+			case RE::FormType::Grass:
+			case RE::FormType::Flora:
+			case RE::FormType::Door:
+			case RE::FormType::Furniture:
+			case RE::FormType::Container:
+				return true;
+			default:
+				return false;
+			}
+		}
+
 		// The one rigid body of a loose object of the class (ObjectRules::Movable), or none.
 		RE::bhkRigidBody* LooseBody(RE::TESObjectREFR* a_ref)
 		{
@@ -287,7 +311,8 @@ namespace LooseObjects
 			facts.transient = Transient(a_ref);
 			facts.enabled = !a_ref->IsDisabled() && !a_ref->IsDeleted();
 			facts.has3D = a_ref->Is3DLoaded();
-			if (facts.runtime || facts.actor || facts.transient || !facts.enabled || !facts.has3D) {
+			facts.fixedKind = !facts.actor && FixedKind(a_ref);
+			if (facts.runtime || facts.actor || facts.transient || facts.fixedKind || !facts.enabled || !facts.has3D) {
 				return nullptr;
 			}
 			facts.inAlias = a_ref->extraList.HasType(RE::ExtraDataType::kAliasInstanceArray);
@@ -323,10 +348,91 @@ namespace LooseObjects
 			return pose;
 		}
 
-		// Writes a pose and a velocity (units a second) to a loose object's body, under its world's lock.
-		bool Write(RE::TESObjectREFR* a_ref, RE::bhkRigidBody* a_body, const Pose& a_pose, const Vec& a_velocity)
+		ObjectRules::Mat3 MatFrom(const RE::NiMatrix3& a_m)
 		{
-			if (!a_ref || !a_body || !ObjectRules::Finite(a_velocity)) {
+			ObjectRules::Mat3 out;
+			for (int r = 0; r < 3; ++r) {
+				for (int c = 0; c < 3; ++c) {
+					out.m[r][c] = a_m.entry[r][c];
+				}
+			}
+			return out;
+		}
+
+		// The engine's two conventions (ObjectRules, "the reference's own place"), learnt from the loose objects looked at.
+		ObjectRules::SenseVotes bodySense;   // a node's world rotation against its body's quaternion
+		ObjectRules::SenseVotes angleSense;  // a reference's angles against its 3D's world rotation
+
+		void Learn(RE::TESObjectREFR* a_ref, const Bodies& a_bodies)
+		{
+			if (!bodySense.Done() && a_bodies.first && a_bodies.node) {
+				RE::hkQuaternion rot;
+				a_bodies.first->GetRotation(rot);
+				alignas(16) float q[4];
+				_mm_store_ps(q, rot.vec.quad);
+				bodySense.Vote(ObjectRules::SenseOf(ObjectRules::MatOf({ q[0], q[1], q[2], q[3] }), MatFrom(a_bodies.node->world.rotate)));
+			}
+			const auto root = a_ref->Get3D();
+			if (!angleSense.Done() && root) {
+				// Only a reference whose place is its 3D's (it has not moved since its 3D did): its angles are then the 3D's too.
+				const auto& t = root->world.translate;
+				const auto  at = a_ref->GetPosition();
+				if (ObjectRules::Distance({ t.x, t.y, t.z }, { at.x, at.y, at.z }) <= 1.0f) {
+					const auto angle = a_ref->GetAngle();
+					angleSense.Vote(ObjectRules::SenseOf(ObjectRules::FromAnglesXYZ({ angle.x, angle.y, angle.z }), MatFrom(root->world.rotate)));
+				}
+			}
+		}
+
+		const char* SenseName(ObjectRules::Sense a_sense)
+		{
+			switch (a_sense) {
+			case ObjectRules::Sense::kSame:
+				return "same";
+			case ObjectRules::Sense::kTransposed:
+				return "transposed";
+			default:
+				return "unknown";
+			}
+		}
+
+		// Puts a loose object at a pose with a velocity (units a second; the pose is its body's): the reference first (its
+		// place and angles, then its 3D and collision moved with them, as the engine moves a reference: what the save, a
+		// cell's reload and the game's own drawing use), then its body, kept in step and given the velocity. A body moved
+		// alone, asleep, would collide where its mesh is not, and the reference would go back to its old place on a reload.
+		bool Write(RE::TESObjectREFR* a_ref, const Pose& a_pose, const Vec& a_velocity)
+		{
+			const auto bodies = a_ref ? BodiesOf(a_ref) : Bodies{};
+			if (!a_ref || bodies.count != 1 || !ObjectRules::Finite(a_velocity)) {
+				++counts.writeFails;
+				return false;
+			}
+			const auto here = PoseOf(bodies.first);
+			const auto root = a_ref->Get3D();
+			const auto senseOfBody = bodySense.Settled();
+			const auto senseOfAngles = angleSense.Settled();
+			if (here && root && senseOfBody != ObjectRules::Sense::kUnknown && senseOfAngles != ObjectRules::Sense::kUnknown) {
+				const auto& t = root->world.translate;
+				const Pose  rootNow{ { t.x, t.y, t.z }, ObjectRules::RotOf(MatFrom(root->world.rotate), senseOfBody) };
+				// Where the body lies in the reference's frame (its collision may sit off the root), and so where the
+				// reference goes for the body to lie at a_pose.
+				const auto refPose = ObjectRules::RefFor(a_pose, ObjectRules::OffsetOf(rootNow, *here));
+				const auto angles = ObjectRules::AnglesFor(ObjectRules::WorldOf(refPose.rot, senseOfBody), senseOfAngles);
+				if (ObjectRules::Writable(refPose, rootNow.at) && ObjectRules::Finite(angles)) {
+					a_ref->SetPosition(RE::NiPoint3{ refPose.at.x, refPose.at.y, refPose.at.z });
+					a_ref->SetAngle(RE::NiPoint3{ angles.x, angles.y, angles.z });
+					a_ref->Update3DPosition(true);
+					++counts.refWrites;
+				} else {
+					++counts.badPoses;
+				}
+			} else {
+				++counts.refUnwritten;  // the conventions are not learnt yet (no loose object looked at): the body alone
+			}
+			// The body, found again (the 3D's update may have warped it), written exactly and set moving, under its world's
+			// lock.
+			const auto body = BodiesOf(a_ref).first;
+			if (!body) {
 				++counts.writeFails;
 				return false;
 			}
@@ -339,13 +445,13 @@ namespace LooseObjects
 			const auto          world = cell ? cell->GetbhkWorld() : nullptr;
 			if (world) {
 				RE::BSWriteLockGuard guard{ world->worldLock };
-				a_body->SetPositionAndRotation(at, rot);
-				a_body->SetLinearVelocity(velocity);
-				a_body->SetAngularVelocity(RE::hkVector4{ 0.0f });
+				body->SetPositionAndRotation(at, rot);
+				body->SetLinearVelocity(velocity);
+				body->SetAngularVelocity(RE::hkVector4{ 0.0f });
 			} else {
-				a_body->SetPositionAndRotation(at, rot);
-				a_body->SetLinearVelocity(velocity);
-				a_body->SetAngularVelocity(RE::hkVector4{ 0.0f });
+				body->SetPositionAndRotation(at, rot);
+				body->SetLinearVelocity(velocity);
+				body->SetAngularVelocity(RE::hkVector4{ 0.0f });
 			}
 			a_ref->AddChange(static_cast<std::uint32_t>(RE::TESObjectREFR::ChangeFlags::kHavokMoved));
 			++counts.writes;
@@ -435,6 +541,11 @@ namespace LooseObjects
 			}
 			a_hold.keyframed = false;
 			if (const auto ref = LoadedRef(a_id)) {
+				if (const auto layer = std::exchange(a_hold.layer, std::nullopt)) {
+					if (const auto node = BodiesOf(ref).node) {
+						node->SetCollisionLayer(*layer);
+					}
+				}
 				ref->SetMotionType(RE::hkpMotion::MotionType::kDynamic, true);
 				++counts.releases;
 			}
@@ -466,6 +577,13 @@ namespace LooseObjects
 			}
 			if (refusedGrab && *refusedGrab != id) {
 				refusedGrab.reset();
+			}
+			if (body && friendHolds.contains(id) && !(refusedGrab && *refusedGrab == id)) {
+				// Our player grabbed what a friend holds: the server would refuse it, so it is never asked; our player lets go.
+				a_player->DestroyMouseSprings();
+				refusedGrab = id;
+				++counts.grabsDropped;
+				logs::info("Objects: player {} holds {:08X}; our player's grab of it was let go", friendHolds[id].holder, id);
 			}
 			if (!body || (refusedGrab && *refusedGrab == id) || friendHolds.contains(id)) {
 				return;
@@ -522,16 +640,14 @@ namespace LooseObjects
 				takenBlasts.swap(blasts);
 				takenHits.swap(hits);
 				takenPickups.swap(pickups);
-				if (blastsSeen.size() > 4 * MAX_RECORDED) {
-					blastsSeen.clear();  // only to tell one explosion's first push from its next updates: old ones are over
-				}
 			}
 			for (const auto& blast : takenBlasts) {
 				const auto owner = blast.owner.get();
 				AddCause(blast.at, blast.at, blast.radius + ObjectRules::BLAST_MARGIN, ObjectRules::Strength::kStrike, WhoseActor(owner.get()), blast.when + ObjectRules::BLAST_HOLD);
 			}
 			for (const auto& hit : takenHits) {
-				AddCause({}, {}, 0.0f, ObjectRules::Strength::kStrike, WhoseRef(hit.cause.get()), hit.when + ObjectRules::HIT_HOLD, hit.target);
+				const auto cause = hit.cause.get();
+			AddCause({}, {}, 0.0f, ObjectRules::Strength::kStrike, WhoseRef(cause.get()), hit.when + ObjectRules::HIT_HOLD, hit.target);
 			}
 			for (const auto id : takenPickups) {
 				watches.erase(id);
@@ -610,6 +726,9 @@ namespace LooseObjects
 
 			for (const auto& one : nearBy) {
 				const auto id = one.ref->GetFormID();
+				if (!bodySense.Done() || !angleSense.Done()) {
+					Learn(one.ref, BodiesOf(one.ref));
+				}
 				const auto pose = PoseOf(one.body);
 				if (!pose) {
 					continue;
@@ -718,9 +837,14 @@ namespace LooseObjects
 					ref->SetMotionType(RE::hkpMotion::MotionType::kKeyframed, true);
 					hold.keyframed = true;
 					++counts.keyframes;
+					// Out of collisions while it is drawn, as the grab takes its object out of the holder's way: keyframed, it
+					// has no mass to give, and would shove our player and the clutter it passes.
+					if (const auto node = BodiesOf(ref).node) {
+						hold.layer = node->GetCollisionLayer();
+						node->SetCollisionLayer(RE::COL_LAYER::kNonCollidable);
+					}
 				}
-				Bodies bodies = BodiesOf(ref);
-				if (bodies.count == 1 && Write(ref, bodies.first, *hold.drawn, {})) {
+				if (Write(ref, *hold.drawn, {})) {
 					++counts.holdsDrawn;
 				}
 			}
@@ -746,15 +870,16 @@ namespace LooseObjects
 				return true;  // nothing to put it on here, or too far: not tried again
 			}
 			watches.erase(id);
+			followOns.erase(id);  // a friend's word on it ends ours
 			if (a_rest.kind == Protocol::RestKind::kLetGo) {
-				if (Write(ref, body, pose, { a_rest.vx, a_rest.vy, a_rest.vz })) {
+				if (Write(ref, pose, { a_rest.vx, a_rest.vy, a_rest.vz })) {
 					++counts.letGosApplied;
 				}
 				quiet.Hush(id, a_now + ObjectRules::FRIEND_FLIGHT);
 				return true;
 			}
 			if (ObjectRules::NeedsPut(*here, pose)) {
-				if (Write(ref, body, pose, {})) {
+				if (Write(ref, pose, {})) {
 					++(a_sender != 0 ? counts.restsApplied : counts.placesApplied);
 				}
 			} else {
@@ -820,6 +945,21 @@ namespace LooseObjects
 			if (pose) {
 				out += std::format(" body=({:.1f},{:.1f},{:.1f}) rot=({:.4f},{:.4f},{:.4f},{:.4f})", pose->at.x, pose->at.y, pose->at.z, pose->rot.x, pose->rot.y, pose->rot.z,
 					pose->rot.w);
+			}
+			if (const auto root = ref->Get3D()) {
+				// After a put the reference, its 3D and its body agree: refTo3D near 0, anglesTo3D near 0 (once learnt).
+				const auto& t = root->world.translate;
+				const auto  angle = ref->GetAngle();
+				out += std::format(" angle=({:.4f},{:.4f},{:.4f}) 3d=({:.1f},{:.1f},{:.1f}) refTo3D={:.2f}", angle.x, angle.y, angle.z, t.x, t.y, t.z,
+					ObjectRules::Distance(at, { t.x, t.y, t.z }));
+				if (angleSense.Settled() != ObjectRules::Sense::kUnknown) {
+					out += std::format(" anglesTo3D={:.4f}",
+						ObjectRules::Differ(ObjectRules::WorldOfAngles({ angle.x, angle.y, angle.z }, angleSense.Settled()), MatFrom(root->world.rotate)));
+				}
+				if (bodies.node && pose) {
+					const auto& n = bodies.node->world.translate;
+					out += std::format(" bodyTo3D={:.2f}", ObjectRules::Distance(pose->at, { n.x, n.y, n.z }));
+				}
 			}
 			const auto key = Key{ Protocol::ObjectKind::kRef, *id };
 			out += std::format(" watched={} heldByFriend={} ours={} waiting={} quiet={}", watches.contains(*id) ? 1 : 0, friendHolds.contains(*id) ? 1 : 0,
@@ -1019,7 +1159,6 @@ namespace LooseObjects
 		blasts.clear();
 		hits.clear();
 		pickups.clear();
-		blastsSeen.clear();
 	}
 
 	void ForgetWorld()
@@ -1041,7 +1180,6 @@ namespace LooseObjects
 		blasts.clear();
 		hits.clear();
 		pickups.clear();
-		blastsSeen.clear();
 	}
 
 	void BeforeSave()
@@ -1077,10 +1215,12 @@ namespace LooseObjects
 			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} | letGos sent={} heard={} applied={} | "
 			"rests said={} sent={} heard={} applied={} left={} answers={} placesApplied={} catchUps={} waiting={} waitingRefused={} | gone sent={} heard={} | "
 			"scans={} started={} notOurs={} hushed={} followOns={} lost={} gaveUp={} watched={} seen={} causes={} paced={} pacedDropped={} echoStopped={} | "
-			"blasts={} hits={} pickups={} | writes={} writeFails={} badPoses={}",
+			"blasts={} hits={} pickups={} | writes={} refWrites={} refUnwritten={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
 			active.load() ? 1 : 0, explosionHooked ? 1 : 0, c.holdsSent, c.holdsHeard, c.holdsDrawn, c.holdsRefused, c.grabsDropped, c.holdsEnded, c.keyframes, c.releases,
 			c.letGosSent, c.letGosHeard, c.letGosApplied, c.restsSaid, c.restsSent, c.restsHeard, c.restsApplied, c.restsLeft, c.answers, c.placesApplied, c.catchUps,
 			waiting.Size(), waiting.refused, c.goneSent, c.goneHeard, c.scans, c.started, c.notOurs, c.hushed, c.followOns, c.lost, c.gaveUp, watches.size(), seen.Size(),
-			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), c.writes, c.writeFails, c.badPoses);
+			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), c.writes, c.refWrites, c.refUnwritten,
+			c.writeFails, c.badPoses, SenseName(bodySense.Settled()), bodySense.same, bodySense.transposed, SenseName(angleSense.Settled()), angleSense.same,
+			angleSense.transposed);
 	}
 }

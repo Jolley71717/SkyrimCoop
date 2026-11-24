@@ -25,6 +25,8 @@
 //   push out the host's. A kGone ends the object's place.
 // - Owed: a let-go or a rest past a player's budget is kept (MAX_OWED a player, the oldest dropped and counted) and
 //   passed on from the server's loop once the budget has room: an object's rest is never lost to a burst.
+// - Moves: what is held or thrown now, at most MAX_MOVES; past that the ones whose hold and throw are over are
+//   forgotten, and a new object past it is refused and counted (a move that never gets its rest is not kept for ever).
 // No game and no network here: tests/ObjectTests.cpp.
 namespace ObjectBook
 {
@@ -38,6 +40,7 @@ namespace ObjectBook
 	inline constexpr std::size_t MAX_PLACES = 2048;
 	inline constexpr std::size_t MAX_NEW_PLACES_PER_PLAYER = 512;
 	inline constexpr std::size_t MAX_OWED = 256;
+	inline constexpr std::size_t MAX_MOVES = 1024;
 
 	enum class Verdict
 	{
@@ -67,7 +70,11 @@ namespace ObjectBook
 			if (a_player == 0 || a_hold.key.kind != Protocol::ObjectKind::kRef || !Protocol::ObjectHoldHolds(a_hold)) {
 				return Refuse();
 			}
-			auto& move = moves[a_hold.key];
+			const auto found = MoveOf(a_hold.key, a_now);
+			if (!found) {
+				return Refuse();
+			}
+			auto& move = *found;
 			if (HeldByOther(move, a_player, a_now)) {
 				++counts.refusedHolds;
 				return Answer{ .verdict = Verdict::kHeld, .hold = move.lastHold, .holder = move.holder };
@@ -85,7 +92,21 @@ namespace ObjectBook
 			if (a_player == 0 || a_rest.key.kind != Protocol::ObjectKind::kRef || !Protocol::ObjectRestHolds(a_rest)) {
 				return Refuse();
 			}
-			auto& move = moves[a_rest.key];
+			if (a_rest.kind == Protocol::RestKind::kGone) {
+				if (const auto it = moves.find(a_rest.key); it != moves.end() && HeldByOther(it->second, a_player, a_now)) {
+					++counts.refusedRests;
+					return Answer{ .verdict = Verdict::kHeld };
+				}
+				Forget(a_rest.key);
+				moves.erase(a_rest.key);
+				++counts.gone;
+				return Answer{ .verdict = Verdict::kPass };
+			}
+			const auto found = MoveOf(a_rest.key, a_now);
+			if (!found) {
+				return Refuse();
+			}
+			auto& move = *found;
 			if (HeldByOther(move, a_player, a_now)) {
 				++counts.refusedRests;
 				return Answer{ .verdict = Verdict::kHeld };
@@ -98,10 +119,6 @@ namespace ObjectBook
 				++counts.letGos;
 				return Answer{ .verdict = Verdict::kPass };
 			case Protocol::RestKind::kGone:
-				Forget(a_rest.key);
-				moves.erase(a_rest.key);
-				++counts.gone;
-				return Answer{ .verdict = Verdict::kPass };
 			case Protocol::RestKind::kRest:
 				break;
 			}
@@ -186,6 +203,7 @@ namespace ObjectBook
 		}
 
 		[[nodiscard]] std::size_t Places() const { return places.size(); }
+		[[nodiscard]] std::size_t Moves() const { return moves.size(); }
 		[[nodiscard]] std::optional<Protocol::ObjectRest> PlaceOf(const Key& a_key) const
 		{
 			const auto it = places.find(a_key);
@@ -201,7 +219,7 @@ namespace ObjectBook
 		struct Counts
 		{
 			std::uint64_t holds = 0, letGos = 0, rests = 0, gone = 0, refusedHolds = 0, refusedRests = 0, refused = 0;
-			std::uint64_t forgotten = 0, notKept = 0, owedDropped = 0;
+			std::uint64_t forgotten = 0, notKept = 0, owedDropped = 0, movesForgotten = 0, movesFull = 0;
 		};
 		Counts counts;
 
@@ -225,6 +243,28 @@ namespace ObjectBook
 		{
 			++counts.refused;
 			return Answer{ .verdict = Verdict::kRefused };
+		}
+
+		// The move of a_key, made if new: past MAX_MOVES the moves that are over (no live hold, no throw in flight) are
+		// forgotten first; none when it is still full.
+		Move* MoveOf(const Key& a_key, Clock::time_point a_now)
+		{
+			if (const auto it = moves.find(a_key); it != moves.end()) {
+				return &it->second;
+			}
+			if (moves.size() >= MAX_MOVES) {
+				counts.movesForgotten += std::erase_if(moves, [&](const auto& a_entry) {
+					const auto& move = a_entry.second;
+					const bool held = move.holder != 0 && a_now - move.lastHoldAt < HOLD_TIMEOUT;
+					const bool thrown = move.thrower != 0 && a_now - move.thrownAt < THROW_HOLD;
+					return !held && !thrown;
+				});
+				if (moves.size() >= MAX_MOVES) {
+					++counts.movesFull;
+					return nullptr;
+				}
+			}
+			return &moves[a_key];
 		}
 
 		static bool HeldByOther(const Move& a_move, std::uint32_t a_player, Clock::time_point a_now)
