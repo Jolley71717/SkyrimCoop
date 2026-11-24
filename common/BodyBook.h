@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <vector>
@@ -13,12 +14,16 @@
 // a rest is passed on only from the game that runs the NPC (or from any game while nobody does: the runner let go of a
 // body it left behind), and only while the session has the NPC dead. The last rest of each body is kept for whoever
 // joins or loads later (at most MAX_KEPT, the one laid longest ago forgotten first); a body the session has alive again
-// (raised, revived) is never sent, and forgotten. No game and no network here: tests/BodyTests.cpp.
+// (raised, revived) is never sent, and forgotten. The game that said a body's fall may say its rest even if the NPC
+// changed hands while it settled (FellBy: at most MAX_KEPT remembered, each until its rest). A body past a game's budget
+// is owed (at most MAX_OWED a game, the oldest dropped and counted) and passed on once the budget has room: a big
+// fight's rests are never lost to a burst. No game and no network here: tests/BodyTests.cpp.
 namespace BodyBook
 {
 	using Clock = std::chrono::steady_clock;
 
 	inline constexpr std::size_t MAX_KEPT = 512;
+	inline constexpr std::size_t MAX_OWED = 256;
 
 	enum class Verdict
 	{
@@ -47,9 +52,15 @@ namespace BodyBook
 				return Verdict::kAlive;
 			}
 			if (a_body.kind == Protocol::BodyKind::kFall) {
+				if (fellBy.size() >= MAX_KEPT && !fellBy.contains(a_body.key)) {
+					const auto oldest = std::min_element(fellBy.begin(), fellBy.end(), [](const auto& a_a, const auto& a_b) { return a_a.second.at < a_b.second.at; });
+					fellBy.erase(oldest);
+				}
+				fellBy[a_body.key] = Faller{ a_player, a_now };
 				++counts.falls;
 				return Verdict::kPass;
 			}
+			fellBy.erase(a_body.key);
 			auto it = kept.find(a_body.key);
 			if (it == kept.end()) {
 				if (kept.size() >= MAX_KEPT) {
@@ -81,13 +92,58 @@ namespace BodyBook
 			return out;
 		}
 
-		void                      Forget(const Protocol::NpcKey& a_key) { kept.erase(a_key); }
-		void                      Clear() { kept.clear(); }
+		// Whether a_player's game said a_key's fall (and not its rest yet): its rest is still its word, whoever runs the
+		// NPC now.
+		[[nodiscard]] bool FellBy(const Protocol::NpcKey& a_key, std::uint32_t a_player) const
+		{
+			const auto it = fellBy.find(a_key);
+			return a_player != 0 && it != fellBy.end() && it->second.player == a_player;
+		}
+
+		// Past a player's budget: kept for the loop (Owes, NextOwed), the oldest dropped past MAX_OWED.
+		void Owe(std::uint32_t a_player, const Protocol::Body& a_body)
+		{
+			auto& list = owed[a_player];
+			if (list.size() >= MAX_OWED) {
+				list.pop_front();
+				++counts.owedDropped;
+			}
+			list.push_back(a_body);
+		}
+		[[nodiscard]] bool Owes(std::uint32_t a_player) const
+		{
+			const auto it = owed.find(a_player);
+			return it != owed.end() && !it->second.empty();
+		}
+		bool NextOwed(std::uint32_t a_player, Protocol::Body& a_out)
+		{
+			const auto it = owed.find(a_player);
+			if (it == owed.end() || it->second.empty()) {
+				return false;
+			}
+			a_out = it->second.front();
+			it->second.pop_front();
+			return true;
+		}
+		// A player left: what they owed goes, and so does their word on the falls they said.
+		void Leave(std::uint32_t a_player)
+		{
+			owed.erase(a_player);
+			std::erase_if(fellBy, [&](const auto& a_entry) { return a_entry.second.player == a_player; });
+		}
+
+		void Forget(const Protocol::NpcKey& a_key) { kept.erase(a_key); }
+		void Clear()
+		{
+			kept.clear();
+			fellBy.clear();
+			owed.clear();
+		}
 		[[nodiscard]] std::size_t Size() const { return kept.size(); }
 
 		struct Counts
 		{
-			std::uint64_t falls = 0, rests = 0, notRun = 0, alive = 0, refused = 0, forgotten = 0;
+			std::uint64_t falls = 0, rests = 0, notRun = 0, alive = 0, refused = 0, forgotten = 0, owedDropped = 0;
 		};
 		Counts counts;
 
@@ -107,6 +163,14 @@ namespace BodyBook
 			}
 		}
 
-		std::map<Protocol::NpcKey, Kept> kept;
+		struct Faller
+		{
+			std::uint32_t     player = 0;
+			Clock::time_point at{};
+		};
+
+		std::map<Protocol::NpcKey, Kept>                    kept;
+		std::map<Protocol::NpcKey, Faller>                  fellBy;
+		std::map<std::uint32_t, std::deque<Protocol::Body>> owed;
 	};
 }

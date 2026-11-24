@@ -148,6 +148,7 @@ namespace NpcSync
 		std::set<Key>                    hitApplied;      // NPCs we run whose health goes out at once (a friend's hit applied)
 		std::map<Key, Protocol::NpcDeath> sessionDead;    // every NPC the session has dead (its runner's word), and how
 		std::set<Key>                    ourDeaths;       // of those, the ones this game said
+		std::vector<Key>                 deathsSaid;      // said since Bodies last took them (TakeDeathsSaid)
 		std::unordered_set<RE::FormID>   killedOnLoad;    // actors killed for the session's word since the world loaded
 
 		// Counts for the developer channel.
@@ -1287,6 +1288,9 @@ namespace NpcSync
 						deaths.deaths.push_back(death);
 						sessionDead[key] = death;
 						ourDeaths.insert(key);
+						if (deathsSaid.size() < 256) {
+							deathsSaid.push_back(key);
+						}
 						logs::info("NPCs: {:08X}{} died here (killer: player {}{})", key.id, key.IsSpawn() ? std::format(" (player {}'s spawn)", key.spawner) : "", death.killer,
 							killMove ? ", a kill move" : "");
 					}
@@ -1526,6 +1530,7 @@ namespace NpcSync
 		hitApplied.clear();
 		sessionDead.clear();
 		ourDeaths.clear();
+		deathsSaid.clear();
 		killedOnLoad.clear();
 	}
 
@@ -2088,6 +2093,13 @@ namespace NpcSync
 		std::scoped_lock l{ copyLock };
 		const auto       it = copies.find(a_key);
 		return it != copies.end() ? it->second.buffer.sender.At(a_sentMs) : std::nullopt;
+	}
+
+	std::vector<Protocol::NpcKey> TakeDeathsSaid()
+	{
+		std::vector<Protocol::NpcKey> out;
+		out.swap(deathsSaid);
+		return out;
 	}
 
 	std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> RunActors()

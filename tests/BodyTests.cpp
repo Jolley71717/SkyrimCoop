@@ -253,6 +253,44 @@ TEST("body book: only the runner's word (or anyone's while nobody runs it), only
 	CHECK(book.Size() == 0u);
 }
 
+TEST("body book: the game that said a fall may say its rest after the NPC changed hands, until that rest; a leaver's word goes; owed bodies come back in order, the oldest dropped past MAX_OWED")
+{
+	BodyBook::Book book;
+	const auto     t = Steady::now();
+	CHECK(!book.FellBy(SOLDIER, 1));
+	CHECK(book.Take(1, Fall(), true, true, t) == Verdict::kPass);
+	CHECK(book.FellBy(SOLDIER, 1));
+	CHECK(!book.FellBy(SOLDIER, 2));
+	CHECK(!book.FellBy(SOLDIER, 0));
+	CHECK(book.Take(1, Rest(), true, true, t + 1s) == Verdict::kPass);
+	CHECK(!book.FellBy(SOLDIER, 1));  // said: the next is the runner's again
+	CHECK(book.Take(2, Fall(INNKEEPER), true, true, t) == Verdict::kPass);
+	CHECK(book.Take(2, Fall(INNKEEPER), false, true, t) == Verdict::kNotRun);  // refused falls are not remembered
+	book.Leave(2);
+	CHECK(!book.FellBy(INNKEEPER, 2));
+
+	for (std::uint32_t i = 0; i < BodyBook::MAX_KEPT + 3; ++i) {
+		(void)book.Take(1, Fall({ 0x00400000 + i, 0 }), true, true, t + std::chrono::milliseconds(i));
+	}
+	CHECK(!book.FellBy({ 0x00400000, 0 }, 1));  // the oldest went
+	CHECK(book.FellBy({ 0x00400000 + BodyBook::MAX_KEPT + 2, 0 }, 1));
+
+	CHECK(!book.Owes(1));
+	for (std::uint32_t i = 0; i < BodyBook::MAX_OWED + 2; ++i) {
+		book.Owe(1, Rest({ 0x00500000 + i, 0 }));
+	}
+	CHECK(book.counts.owedDropped == 2u);
+	Body next;
+	REQUIRE(book.NextOwed(1, next));
+	CHECK(next.key == Protocol::NpcKey{ 0x00500002, 0 });
+	CHECK(!book.NextOwed(2, next));
+	book.Leave(1);
+	CHECK(!book.Owes(1));
+	book.Owe(1, Rest());
+	book.Clear();
+	CHECK(!book.Owes(1));
+}
+
 TEST("body server: a runner's fall and rest go to the others with its sender named; another game's, or an alive NPC's, do not; joiners and askers get every body")
 {
 	Fixture f;
@@ -312,27 +350,52 @@ TEST("body names: a hash of the node's name whatever its case, never 0; differen
 	CHECK(BodyRules::NameHash("NPC Head [Head]") != 0u);
 }
 
-TEST("body bones: each name once, finite, at most MAX_BONES, the pelvis kept first when there are too many")
+TEST("body bones: a body is sent whole or not at all: none for more than MAX_BONES, a bone unnamed, not finite or named twice")
 {
-	std::vector<Bone> bones;
-	for (std::uint32_t b = 0; b < Protocol::MAX_BONES + 8; ++b) {
-		bones.push_back(BoneAt("bone " + std::to_string(b), 1000.0f));
+	CHECK(BodyRules::Whole(Skeleton()) == Skeleton());
+	std::vector<Bone> big;
+	for (std::uint32_t b = 0; b < Protocol::MAX_BONES; ++b) {
+		big.push_back(BoneAt("bone " + std::to_string(b), 1000.0f));
 	}
-	bones.push_back(BoneAt("NPC Pelvis [Pelv]", 1000.0f));
-	bones.push_back(BoneAt("bone 3", 1500.0f));  // a second of a name
-	auto nan = BoneAt("bad", 1000.0f);
-	nan.y = std::nanf("");
-	bones.insert(bones.begin(), nan);
-	const auto picked = BodyRules::Pick(bones, BodyRules::NameHash("NPC Pelvis [Pelv]"));
-	REQUIRE(picked.size() == Protocol::MAX_BONES);
-	CHECK(picked.front().name == BodyRules::NameHash("NPC Pelvis [Pelv]"));
-	CHECK(picked[1].name == BodyRules::NameHash("bone 0"));
-	CHECK(std::count_if(picked.begin(), picked.end(), [](const Bone& a_bone) { return a_bone.name == BodyRules::NameHash("bone 3"); }) == 1);
-	CHECK(std::none_of(picked.begin(), picked.end(), [](const Bone& a_bone) { return a_bone.name == BodyRules::NameHash("bad"); }));
+	CHECK(BodyRules::Whole(big));  // a dragon's: every bone
+	big.push_back(BoneAt("one more", 1000.0f));
+	CHECK(!BodyRules::Whole(big));
+	auto twice = Skeleton();
+	twice.push_back(BoneAt("NPC Spine [Spn0]", 1500.0f));
+	CHECK(!BodyRules::Whole(twice));
+	auto nan = Skeleton();
+	nan[2].y = std::nanf("");
+	CHECK(!BodyRules::Whole(nan));
+	auto unnamed = Skeleton();
+	unnamed[1].name = 0;
+	CHECK(!BodyRules::Whole(unnamed));
+	CHECK(!BodyRules::Whole({}));
 
 	CHECK(!BodyRules::RestOf(SOLDIER, CELL, 0, { 1000.0f, 0.0f, 0.0f }, {}));  // no bones: nothing said
+	CHECK(!BodyRules::RestOf(SOLDIER, CELL, 0, { 1000.0f, -2000.0f, 0.0f }, twice));
 	CHECK(!BodyRules::RestOf(SOLDIER, CELL, 0, { 1000.0f + 2.0f * Protocol::MAX_BONE_REACH, -2000.0f, 0.0f }, Skeleton()));
-	CHECK(BodyRules::RestOf(SOLDIER, CELL, 0, { 1000.0f, -2000.0f, 0.0f }, Skeleton()));
+	const auto rest = BodyRules::RestOf(SOLDIER, CELL, 0, { 1000.0f, -2000.0f, 0.0f }, Skeleton());
+	REQUIRE(rest);
+	CHECK(rest->bones == Skeleton());
+}
+
+TEST("body bones: a copy is laid only when every ragdoll bone it has is named once in the rest; a rest may name bones it lacks")
+{
+	const auto there = Skeleton(2000.0f);
+	CHECK(BodyRules::LaysWhole(Skeleton(), there));
+	auto fewer = Skeleton();
+	fewer.pop_back();
+	CHECK(BodyRules::LaysWhole(fewer, there));  // the other game's skeleton has a bone this one lacks
+	auto more = Skeleton();
+	more.push_back(BoneAt("NPC Tail1 [Tal1]", 1000.0f));
+	CHECK(!BodyRules::LaysWhole(more, there));  // its tail would be left where it lies
+	auto twiceHere = Skeleton();
+	twiceHere.push_back(twiceHere.front());
+	CHECK(!BodyRules::LaysWhole(twiceHere, there));
+	auto twiceThere = there;
+	twiceThere.push_back(there.front());
+	CHECK(!BodyRules::LaysWhole(Skeleton(), twiceThere));
+	CHECK(!BodyRules::LaysWhole({}, there));
 }
 
 TEST("body laying: a copy more than CORPSE_SLACK off is laid; a closer one, or one with no bone named in both, is left")

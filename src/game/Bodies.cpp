@@ -10,7 +10,6 @@
 #include <format>
 #include <map>
 #include <optional>
-#include <set>
 #include <string>
 #include <xmmintrin.h>
 
@@ -27,7 +26,10 @@ namespace Bodies
 		constexpr auto        WATCH_EVERY = 250ms;
 		constexpr auto        LAY_EVERY = 500ms;
 		constexpr std::size_t MAX_WATCHED = 64;
-		constexpr std::size_t MAX_NODES = 256;  // a skeleton walked no further than this
+		// A skeleton is walked whole: the cap is only against a 3D gone wrong, far past any real skeleton (an extended
+		// skeleton has several hundred nodes). A walk cut short would leave bones out, and a body is laid whole or not.
+		constexpr std::size_t MAX_NODES = 8192;
+		constexpr int         MAX_DEPTH = 96;
 
 		std::uint32_t ourId = 0;
 		bool          active = false;
@@ -44,7 +46,7 @@ namespace Bodies
 			BodyRules::Settle settle;
 		};
 
-		std::set<Key>                     aliveRun;   // NPCs this game runs, seen alive
+		std::map<Key, Clock::time_point>  dying;      // deaths this game said, their fall not read yet: since when
 		std::map<Key, Watch>              watches;    // our NPCs' bodies settling
 		std::map<Key, Clock::time_point>  deadSince;  // copies with a rest waiting: when first seen dead here
 		BodyRules::Waiting                waiting;
@@ -54,8 +56,9 @@ namespace Bodies
 
 		struct Counts
 		{
-			std::uint64_t deaths = 0, fallsSent = 0, restsSent = 0, gaveUp = 0, noBones = 0, lost = 0;
-			std::uint64_t fallsHeard = 0, restsHeard = 0, catchUps = 0, fallsPushed = 0, laid = 0, left = 0, ours = 0, tooFar = 0, badPoses = 0;
+			std::uint64_t deaths = 0, fallsSent = 0, fallsEarly = 0, restsSent = 0, gaveUp = 0, notWhole = 0, lost = 0, unwatched = 0, handedOver = 0;
+			std::uint64_t fallsHeard = 0, restsHeard = 0, catchUps = 0, fallsPushed = 0, laid = 0, left = 0, ours = 0, tooFar = 0, partial = 0, moved = 0;
+			std::uint64_t restored = 0, badPoses = 0;
 		};
 		Counts counts;
 
@@ -63,7 +66,7 @@ namespace Bodies
 
 		void FindBones(RE::NiAVObject* a_node, std::vector<BoneBody>& a_out, std::size_t& a_seen, int a_depth)
 		{
-			if (!a_node || a_depth > 48 || ++a_seen > MAX_NODES) {
+			if (!a_node || a_depth > MAX_DEPTH || ++a_seen > MAX_NODES) {
 				return;
 			}
 			if (const auto collision = a_node->collisionObject.get()) {
@@ -189,23 +192,43 @@ namespace Bodies
 
 		// ---- ours ----
 
+		// Whether an actor's ragdoll has started: the engine says so, or its pelvis is a body physics moves.
+		bool Ragdolling(RE::Actor* a_actor, const BoneBody* a_pelvis)
+		{
+			if (a_actor->IsInRagdollState()) {
+				return true;
+			}
+			const auto hk = a_pelvis && a_pelvis->body ? a_pelvis->body->GetRigidBody() : nullptr;
+			return hk && ObjectRules::Loose(static_cast<ObjectRules::Motion>(hk->motion.type.underlying()));
+		}
+
+		// Every death this game said (NpcSync: one it ran as it died, and one that died here while nobody ran it, said once
+		// its claim was granted): its fall once its ragdoll starts (the blow's velocity, not the death animation's), or
+		// FALL_READ_WAIT after the death; its rest once it settles.
 		void WatchOurs(Clock::time_point a_now)
 		{
-			for (const auto& [key, actor] : NpcSync::RunActors()) {
-				if (!actor || !actor->Is3DLoaded()) {
-					continue;
-				}
-				if (!actor->IsDead()) {
-					aliveRun.insert(key);
-					continue;
-				}
-				if (!aliveRun.erase(key)) {
-					continue;  // dead already when we began to run it: the session has its body from whoever saw it fall
-				}
-				// It died now: its fall at once, its rest once its ragdoll settles.
+			for (const auto& key : NpcSync::TakeDeathsSaid()) {
 				++counts.deaths;
+				dying.try_emplace(key, a_now);
+			}
+			for (auto it = dying.begin(); it != dying.end();) {
+				const auto key = it->first;
+				const auto actor = NpcSync::ActorOf(key);
+				if (!actor || !actor->Is3DLoaded() || !actor->IsDead()) {
+					++counts.lost;  // unloaded or raised before it fell
+					it = dying.erase(it);
+					continue;
+				}
 				const auto bones = BonesOf(actor.get());
 				const auto pelvis = Pelvis(actor.get(), bones);
+				const bool started = Ragdolling(actor.get(), pelvis);
+				if (!started && a_now - it->second < BodyRules::FALL_READ_WAIT) {
+					++it;
+					continue;
+				}
+				if (!started) {
+					++counts.fallsEarly;  // no ragdoll yet: what its pelvis has now
+				}
 				const auto [cell, worldspace] = SpaceOf(actor.get());
 				const auto fall = BodyRules::FallOf(key, cell, worldspace, At(actor.get()), pelvis ? VelocityOf(pelvis->body) : Vec{});
 				if (Protocol::BodyHolds(fall)) {
@@ -214,22 +237,28 @@ namespace Bodies
 				}
 				if (watches.size() < MAX_WATCHED) {
 					watches[key] = Watch{ BodyRules::Settle{ JustBones(bones), a_now } };
+				} else {
+					++counts.unwatched;
 				}
-			}
-			if (aliveRun.size() > 4096) {
-				aliveRun.clear();  // stale keys of NPCs long gone: the next frame sees the living again
+				it = dying.erase(it);
 			}
 		}
 
+		// Our bodies settling: said once at rest, even if the NPC changed hands meanwhile (the server takes the rest from
+		// the game that said its fall).
 		void SettleOurs(Clock::time_point a_now)
 		{
 			for (auto it = watches.begin(); it != watches.end();) {
 				const auto& key = it->first;
-				const auto  actor = NpcSync::RunnerOf(key) == ourId ? NpcSync::ActorOf(key) : RE::NiPointer<RE::Actor>{};
+				const auto  actor = NpcSync::ActorOf(key);
 				if (!actor || !actor->Is3DLoaded() || !actor->IsDead()) {
-					++counts.lost;  // handed over, unloaded or raised: not ours to say
+					++counts.lost;  // unloaded or raised: nothing to say
 					it = watches.erase(it);
 					continue;
+				}
+				if (!it->second.handedOver && NpcSync::RunnerOf(key) != ourId) {
+					it->second.handedOver = true;
+					++counts.handedOver;  // still ours to say: we said its fall
 				}
 				const auto bones = BonesOf(actor.get());
 				if (!it->second.settle.Look(JustBones(bones), a_now)) {
@@ -239,13 +268,12 @@ namespace Bodies
 				if (it->second.settle.GaveUp()) {
 					++counts.gaveUp;
 				}
-				const auto pelvis = Pelvis(actor.get(), bones);
 				const auto [cell, worldspace] = SpaceOf(actor.get());
-				if (const auto rest = BodyRules::RestOf(key, cell, worldspace, At(actor.get()), JustBones(bones), pelvis ? pelvis->bone.name : 0)) {
+				if (const auto rest = BodyRules::RestOf(key, cell, worldspace, At(actor.get()), JustBones(bones))) {
 					outbox.push_back(*rest);
 					++counts.restsSent;
 				} else {
-					++counts.noBones;
+					++counts.notWhole;  // more than MAX_BONES, a bone named twice or gone wrong: never sent in part
 				}
 				it = watches.erase(it);
 			}
@@ -307,31 +335,59 @@ namespace Bodies
 				return false;
 			}
 			deadSince.erase(a_rest.key);
-			if (!BodyRules::NeedsLaying(JustBones(bones), a_rest.bones)) {
+			const auto here = JustBones(bones);
+			if (!BodyRules::NeedsLaying(here, a_rest.bones)) {
 				++counts.left;
 				return true;
 			}
+			// Whole or not at all: every ragdoll body here is named in the rest once.
+			if (!BodyRules::LaysWhole(here, a_rest.bones)) {
+				++counts.partial;
+				logs::info("Bodies: {:08X}'s rest names {} bones, this game's ragdoll has {} not all named in it: left as it lies", a_rest.key.id, a_rest.bones.size(),
+					bones.size());
+				return true;
+			}
+			std::vector<const Protocol::Bone*> targets;
+			targets.reserve(bones.size());
 			for (const auto& one : bones) {
 				const auto it = std::find_if(a_rest.bones.begin(), a_rest.bones.end(), [&](const Protocol::Bone& a_bone) { return a_bone.name == one.bone.name; });
-				if (it != a_rest.bones.end() && ObjectRules::Distance(BodyRules::At(*it), BodyRules::At(one.bone)) > ObjectRules::WRITE_JUMP) {
+				if (ObjectRules::Distance(BodyRules::At(*it), BodyRules::At(one.bone)) > ObjectRules::WRITE_JUMP) {
 					++counts.tooFar;
 					return true;  // a report never pulls a body across the map
 				}
+				targets.push_back(&*it);
 			}
-			Locked(actor.get(), [&] {
-				for (const auto& one : bones) {
-					const auto it = std::find_if(a_rest.bones.begin(), a_rest.bones.end(), [&](const Protocol::Bone& a_bone) { return a_bone.name == one.bone.name; });
-					if (it == a_rest.bones.end()) {
-						continue;
+			// The reference first, to where the runner's lies: loot, activation, a cell's reload and the save follow it, not
+			// its bones.
+			if (ObjectRules::Distance(At(actor.get()), there) > BodyRules::REF_SLACK) {
+				actor->SetPosition(RE::NiPoint3{ there.x, there.y, there.z });
+				++counts.moved;
+			}
+			const auto write = [&](const std::vector<BoneBody>& a_bones, const std::vector<const Protocol::Bone*>& a_to) {
+				Locked(actor.get(), [&] {
+					for (std::size_t i = 0; i < a_bones.size(); ++i) {
+						auto             at = ToHavok(BodyRules::At(*a_to[i]));
+						RE::hkQuaternion rot;
+						rot.vec = RE::hkVector4{ a_to[i]->rot.x, a_to[i]->rot.y, a_to[i]->rot.z, a_to[i]->rot.w };
+						a_bones[i].body->SetPositionAndRotation(at, rot);
+						a_bones[i].body->SetLinearVelocity(RE::hkVector4{ 0.0f });
+						a_bones[i].body->SetAngularVelocity(RE::hkVector4{ 0.0f });
 					}
-					auto             at = ToHavok(BodyRules::At(*it));
-					RE::hkQuaternion rot;
-					rot.vec = RE::hkVector4{ it->rot.x, it->rot.y, it->rot.z, it->rot.w };
-					one.body->SetPositionAndRotation(at, rot);
-					one.body->SetLinearVelocity(RE::hkVector4{ 0.0f });
-					one.body->SetAngularVelocity(RE::hkVector4{ 0.0f });
+				});
+			};
+			write(bones, targets);
+			// Read back: a bone that came out not finite (or is gone) puts every bone back where it lay.
+			if (BonesOf(actor.get()).size() != bones.size()) {
+				std::vector<const Protocol::Bone*> before;
+				before.reserve(bones.size());
+				for (const auto& one : bones) {
+					before.push_back(&one.bone);
 				}
-			});
+				write(bones, before);
+				++counts.restored;
+				logs::warn("Bodies: {:08X} laid where its runner's lies read back wrong: every bone put back where it lay", a_rest.key.id);
+				return true;
+			}
 			actor->AddChange(static_cast<std::uint32_t>(RE::TESObjectREFR::ChangeFlags::kHavokMoved));
 			++counts.laid;
 			return true;
@@ -429,7 +485,7 @@ namespace Bodies
 	void Clear()
 	{
 		active = false;
-		aliveRun.clear();
+		dying.clear();
 		watches.clear();
 		deadSince.clear();
 		waiting.Clear();
@@ -440,7 +496,7 @@ namespace Bodies
 
 	void ForgetWorld()
 	{
-		aliveRun.clear();
+		dying.clear();
 		watches.clear();
 		deadSince.clear();
 		outbox.clear();
@@ -457,9 +513,11 @@ namespace Bodies
 		}
 		const auto& c = counts;
 		return std::format(
-			"bodies active={} | ours deaths={} fallsSent={} restsSent={} gaveUp={} noBones={} lost={} watched={} | theirs fallsHeard={} restsHeard={} catchUps={} "
-			"fallsPushed={} fallsLate={} laid={} left={} ours={} far={} waitingRests={} waitingFalls={} waitingRefused={} | badPoses={}",
-			active ? 1 : 0, c.deaths, c.fallsSent, c.restsSent, c.gaveUp, c.noBones, c.lost, watches.size(), c.fallsHeard, c.restsHeard, c.catchUps, c.fallsPushed,
-			waiting.late, c.laid, c.left, c.ours, c.tooFar, waiting.Rests(), waiting.Falls(), waiting.refused, c.badPoses);
+			"bodies active={} | ours deaths={} fallsSent={} fallsEarly={} restsSent={} gaveUp={} notWhole={} lost={} unwatched={} handedOver={} dying={} watched={} | "
+			"theirs fallsHeard={} restsHeard={} catchUps={} fallsPushed={} fallsLate={} laid={} moved={} left={} partial={} restored={} ours={} far={} waitingRests={} "
+			"waitingFalls={} waitingRefused={} | badPoses={}",
+			active ? 1 : 0, c.deaths, c.fallsSent, c.fallsEarly, c.restsSent, c.gaveUp, c.notWhole, c.lost, c.unwatched, c.handedOver, dying.size(), watches.size(),
+			c.fallsHeard, c.restsHeard, c.catchUps, c.fallsPushed, waiting.late, c.laid, c.moved, c.left, c.partial, c.restored, c.ours, c.tooFar, waiting.Rests(),
+			waiting.Falls(), waiting.refused, c.badPoses);
 	}
 }

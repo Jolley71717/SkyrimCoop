@@ -86,6 +86,9 @@ namespace NpcSync
 	[[nodiscard]] std::optional<Protocol::NpcKey>                                  KeyOf(RE::Actor* a_actor);
 	[[nodiscard]] std::uint32_t                                                    RunnerOf(const Protocol::NpcKey& a_key);
 	[[nodiscard]] std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> RunActors();
+	// For bodies (src/game/Bodies.h), main thread: the NPCs whose deaths this game said since the last call (every one:
+	// one it ran as it died, and one that died here while nobody ran it, said once its claim was granted).
+	[[nodiscard]] std::vector<Protocol::NpcKey>                                    TakeDeathsSaid();
 	// For projectiles (src/game/Shots.h): whether a_actor is a copy this game moves by its runner's states now (any
 	// thread: the projectile hook asks), and the moment on this game's clock its runner's a_sentMs was (none: not known).
 	[[nodiscard]] bool                                                             Mirrored(const RE::Actor* a_actor);

@@ -10,11 +10,15 @@
 #include <map>
 #include <optional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Bodies of the dead, the rules (docs/DESIGN.md, "Bodies"; the game's side is src/game/Bodies.cpp, the server's
 // common/BodyBook.h):
 // - Bones are named by a hash of their node's name (NameHash): the skeleton is the race's, the same in every game.
+// - A body is sent and laid whole or not at all (Whole, LaysWhole): a ragdoll some of whose bones are moved far from the
+//   others is pulled back together by its constraints with huge impulses (it tears itself apart, the class of the
+//   sister project's NaN ragdoll that froze a host's physics).
 // - The runner's body settles once no bone moved more than MOVE_EPSILON for STILL_FOR (never before MIN_FALL after the
 //   death), or GIVE_UP after it (a body on a slope that slides for ever).
 // - A copy is laid where the runner's lies only when it is more than CORPSE_SLACK off (two games' ragdolls rarely fall
@@ -35,6 +39,8 @@ namespace BodyRules
 	inline constexpr float APPLY_RANGE = 4096.0f;
 	inline constexpr auto  DEAD_FOR = 2s;
 	inline constexpr auto  FALL_WAIT = 3s;  // a fall heard before the copy died here waits this long for its death
+	inline constexpr auto  FALL_READ_WAIT = 1s;  // the runner's fall is read once its ragdoll starts, or this long after the death
+	inline constexpr float REF_SLACK = 8.0f;     // a copy's reference this far from the runner's is moved there with its bones
 	inline constexpr std::size_t MAX_WAITING = 512;
 
 	// FNV-1a over the name, lower-cased (a node's name is the same in every game; its case is not worth trusting).
@@ -51,32 +57,44 @@ namespace BodyRules
 
 	[[nodiscard]] inline Vec At(const Protocol::Bone& a_bone) { return { a_bone.x, a_bone.y, a_bone.z }; }
 
-	// The bones a body sends: named, finite, at most MAX_BONES, each name once (the first), the pelvis kept when there are
-	// too many (a_first: its name, 0 for none).
-	[[nodiscard]] inline std::vector<Protocol::Bone> Pick(const std::vector<Protocol::Bone>& a_bones, std::uint32_t a_first = 0)
+	// Whether no two bones share a name (a bone named twice can't be told from its twin: the body is not laid).
+	[[nodiscard]] inline bool Distinct(const std::vector<Protocol::Bone>& a_bones)
 	{
-		std::vector<Protocol::Bone> out;
-		const auto usable = [&](const Protocol::Bone& a_bone) {
-			return a_bone.name != 0 && Protocol::InWorld(a_bone.x) && Protocol::InWorld(a_bone.y) && Protocol::InWorld(a_bone.z) && Protocol::QuatHolds(a_bone.rot) &&
-			       std::none_of(out.begin(), out.end(), [&](const Protocol::Bone& a_out) { return a_out.name == a_bone.name; });
-		};
-		if (a_first != 0) {
-			for (const auto& bone : a_bones) {
-				if (bone.name == a_first && usable(bone)) {
-					out.push_back(bone);
-					break;
+		for (std::size_t i = 0; i < a_bones.size(); ++i) {
+			for (std::size_t j = i + 1; j < a_bones.size(); ++j) {
+				if (a_bones[i].name == a_bones[j].name) {
+					return false;
 				}
 			}
 		}
+		return true;
+	}
+
+	// The bones a body sends: every one or none. None when there are none, more than MAX_BONES, one unnamed or not
+	// finite, or two of one name.
+	[[nodiscard]] inline std::optional<std::vector<Protocol::Bone>> Whole(const std::vector<Protocol::Bone>& a_bones)
+	{
+		if (a_bones.empty() || a_bones.size() > Protocol::MAX_BONES || !Distinct(a_bones)) {
+			return std::nullopt;
+		}
 		for (const auto& bone : a_bones) {
-			if (out.size() >= Protocol::MAX_BONES) {
-				break;
-			}
-			if (usable(bone)) {
-				out.push_back(bone);
+			if (bone.name == 0 || !Protocol::InWorld(bone.x) || !Protocol::InWorld(bone.y) || !Protocol::InWorld(bone.z) || !Protocol::QuatHolds(bone.rot)) {
+				return std::nullopt;
 			}
 		}
-		return out;
+		return a_bones;
+	}
+
+	// Whether a copy whose ragdoll has a_here can be laid from a rest of a_there: every bone here is named in it once (a
+	// rest may name more: another game's skeleton can have bones this one lacks), and no two here share a name.
+	[[nodiscard]] inline bool LaysWhole(const std::vector<Protocol::Bone>& a_here, const std::vector<Protocol::Bone>& a_there)
+	{
+		if (a_here.empty() || !Distinct(a_here)) {
+			return false;
+		}
+		return std::all_of(a_here.begin(), a_here.end(), [&](const Protocol::Bone& a_bone) {
+			return std::count_if(a_there.begin(), a_there.end(), [&](const Protocol::Bone& a_other) { return a_other.name == a_bone.name; }) == 1;
+		});
 	}
 
 	// The farthest any bone named in both lies from its other (none named in both: none).
@@ -166,10 +184,15 @@ namespace BodyRules
 		return body;
 	}
 
-	// A rest: none when no bone is left to send (or one lies past MAX_BONE_REACH: a body that does not hold is never said).
+	// A rest: none when the body can't be sent whole (Whole), or a bone lies past MAX_BONE_REACH (a body that does not
+	// hold is never said).
 	[[nodiscard]] inline std::optional<Protocol::Body> RestOf(const Protocol::NpcKey& a_key, std::uint32_t a_cell, std::uint32_t a_worldspace, const Vec& a_at,
-		const std::vector<Protocol::Bone>& a_bones, std::uint32_t a_first = 0)
+		const std::vector<Protocol::Bone>& a_bones)
 	{
+		auto whole = Whole(a_bones);
+		if (!whole) {
+			return std::nullopt;
+		}
 		Protocol::Body body;
 		body.key = a_key;
 		body.kind = Protocol::BodyKind::kRest;
@@ -178,7 +201,7 @@ namespace BodyRules
 		body.x = a_at.x;
 		body.y = a_at.y;
 		body.z = a_at.z;
-		body.bones = Pick(a_bones, a_first);
+		body.bones = std::move(*whole);
 		if (!Protocol::BodyHolds(body)) {
 			return std::nullopt;
 		}

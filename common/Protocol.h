@@ -2378,8 +2378,9 @@ namespace Protocol
 	// once its ragdoll settled, where its bones lie (kRest: each bone named by a hash of its node's name, the skeleton
 	// being the race's and the same in every game). A copy's body falls the same way and is laid the same.
 
-	// At most this many bones of a body (a person's ragdoll has about 15, a dragon's more; past it the first are sent).
-	inline constexpr std::size_t MAX_BONES = 32;
+	// At most this many bones of a body (a person's ragdoll has about 15, a dragon's several times that; a body with more is
+	// never sent: a body is laid whole or not at all).
+	inline constexpr std::size_t MAX_BONES = 96;
 	// At most this many bodies in one message.
 	inline constexpr std::size_t MAX_BODIES = 4;
 	// A bone farther than this from its body's place does not hold (a dragon's wings reach far, a body never this far).
@@ -2541,7 +2542,7 @@ namespace Protocol
 	inline constexpr std::size_t BONE_BYTES = 4 + 3 * 4 + 4 * 4;
 	inline constexpr std::size_t BODY_BYTES = 8 + 1 + 4 + 4 + 3 * 4 + 3 * 4 + 1;  // and its bones
 	inline constexpr std::size_t MAX_BODIES_SIZE = 1 + 4 + 1 + 1 + MAX_BODIES * (BODY_BYTES + MAX_BONES * BONE_BYTES);
-	static_assert(MAX_BONES <= 0xFF && MAX_BODIES <= 0xFF && MAX_BODIES_SIZE <= 8192, "a message of bodies stays small");
+	static_assert(MAX_BONES <= 0xFF && MAX_BODIES <= 0xFF && MAX_BODIES_SIZE <= 16384, "a message of bodies stays small");
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

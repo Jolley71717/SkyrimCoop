@@ -79,9 +79,8 @@ namespace
 		TokenBucket objectHoldBudget{ 20.0, 20.0 };
 		TokenBucket objectRestBudget{ 24.0, 6.0 };
 		// Bodies of the dead (common/BodyBook.h): a burst of 16, then 4 a second (a game says each death's fall and its
-		// rest once); past it dropped and said once.
+		// rest once); past it kept and owed, never dropped.
 		TokenBucket bodyBudget{ 16.0, 4.0 };
-		bool        toldBodiesDropped = false;
 		bool        toldUnknown = false;
 	};
 
@@ -281,6 +280,21 @@ void Server::Run()
 		}
 	};
 	const auto deadBodies = [&]() { return bodies.All([&](const Protocol::NpcKey& a_npc) { return fates.IsDead(a_npc); }); };
+	// A game's bodies within its budget: only from the NPC's runner (or anyone's while nobody runs it, or the game that said
+	// its fall, for its rest) and while the session has it dead, to the others with the sender named; a rest kept.
+	const auto judgeBodies = [&](const PeerKey& a_key, const Peer& a_peer, std::vector<Protocol::Body> a_bodies, Clock::time_point a_now) {
+		std::erase_if(a_bodies, [&](const Protocol::Body& a_body) {
+			const auto owner = npcs.Owner(a_body.key);
+			const bool mayTell = owner == 0 || owner == a_peer.playerId || (a_body.kind == Protocol::BodyKind::kRest && bodies.FellBy(a_body.key, a_peer.playerId));
+			return bodies.Take(a_peer.playerId, a_body, mayTell, fates.IsDead(a_body.key), a_now) != BodyBook::Verdict::kPass;
+		});
+		for (std::size_t first = 0; first < a_bodies.size(); first += Protocol::MAX_BODIES) {
+			Protocol::Bodies msg{ .sender = a_peer.playerId };
+			const auto       end = (std::min)(a_bodies.size(), first + Protocol::MAX_BODIES);
+			msg.bodies.assign(a_bodies.begin() + static_cast<std::ptrdiff_t>(first), a_bodies.begin() + static_cast<std::ptrdiff_t>(end));
+			broadcast(Protocol::Encode(msg), true, &a_key);
+		}
+	};
 	// A player's let-gos and rests judged by the book (common/ObjectBook.h): those that stand go to the others (the
 	// sender named), and a rest that came second is answered with the one that stands, to its game alone.
 	const auto judgeObjectRests = [&](const PeerKey& a_key, const Peer& a_peer, const std::vector<Protocol::ObjectRest>& a_rests, Clock::time_point a_now) {
@@ -330,6 +344,7 @@ void Server::Run()
 		}
 		// What they held or threw is nobody's now (the others' games end a hold that stops coming).
 		objects.Leave(a_peer.playerId);
+		bodies.Leave(a_peer.playerId);
 	};
 
 	const auto onHello = [&](const PeerKey& a_key, Peer& a_peer, std::span<const std::uint8_t> a_data) {
@@ -789,23 +804,16 @@ void Server::Run()
 			// A body's fall and rest, only from its NPC's runner (or anyone's while nobody runs it) and while the session has
 			// it dead: to the others with the sender named, a rest kept for joiners.
 			if (auto msg = Protocol::DecodeBodies(a_data); msg && !msg->full) {
-				const auto now = Clock::now();
-				std::erase_if(msg->bodies, [&](const Protocol::Body& a_body) {
-					if (!a_peer.bodyBudget.Take(now)) {
-						if (!a_peer.toldBodiesDropped) {
-							a_peer.toldBodiesDropped = true;
-							log(std::format("server: player {} says bodies faster than they are passed on: the rest are dropped (said once)", a_peer.playerId));
-						}
-						return true;
+				const auto                  now = Clock::now();
+				std::vector<Protocol::Body> due;
+				for (const auto& body : msg->bodies) {
+					if (!bodies.Owes(a_peer.playerId) && a_peer.bodyBudget.Take(now)) {
+						due.push_back(body);
+					} else {
+						bodies.Owe(a_peer.playerId, body);
 					}
-					const auto owner = npcs.Owner(a_body.key);
-					const bool mayTell = owner == 0 || owner == a_peer.playerId;
-					return bodies.Take(a_peer.playerId, a_body, mayTell, fates.IsDead(a_body.key), now) != BodyBook::Verdict::kPass;
-				});
-				if (!msg->bodies.empty()) {
-					msg->sender = a_peer.playerId;
-					broadcast(Protocol::Encode(*msg), true, &a_key);
 				}
+				judgeBodies(a_key, a_peer, std::move(due), now);
 			}
 			break;
 		case MT::kShots:
@@ -916,6 +924,16 @@ void Server::Run()
 				}
 				if (!due.empty()) {
 					judgeObjectRests(key, peer, due, now);
+				}
+			}
+			if (peer.joined && bodies.Owes(peer.playerId)) {
+				std::vector<Protocol::Body> due;
+				Protocol::Body              body;
+				while (due.size() < Protocol::MAX_BODIES && bodies.Owes(peer.playerId) && peer.bodyBudget.Take(now) && bodies.NextOwed(peer.playerId, body)) {
+					due.push_back(body);
+				}
+				if (!due.empty()) {
+					judgeBodies(key, peer, std::move(due), now);
 				}
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {
