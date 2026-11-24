@@ -16,6 +16,7 @@
 #include "game/WorldClock.h"
 #include "game/Conversations.h"
 #include "game/DropSync.h"
+#include "game/Pickups.h"
 #include "game/LootSync.h"
 #include "game/QuestSync.h"
 #include "game/WorldObjects.h"
@@ -187,6 +188,9 @@ namespace
 		if (!DropSync::Install()) {
 			logs::warn("Drops: dropped items are not given in this game; a session still runs");
 		}
+		if (!Pickups::Install()) {
+			logs::warn("Pickups: what players take from the world is not shared in this game; a session still runs");
+		}
 		if (!Conversations::Install()) {
 			logs::warn("Talk: conversations are not shared in this game; a session still runs");
 		}
@@ -238,6 +242,7 @@ namespace
 			Conversations::AfterLoad();  // ... and our conversation, read afresh
 			LootSync::AfterLoad();       // ... and its loot: the save's ledger, the session's moves it lacks asked for
 			DropSync::AfterLoad();       // ... and its dropped items: the save's record, told to the session
+			Pickups::AfterLoad();        // ... and what players took from the world: the session's asked for again
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
@@ -250,6 +255,7 @@ namespace
 			Conversations::AfterLoad();
 			LootSync::AfterLoad();
 			DropSync::NewGame();
+			Pickups::NewGame();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:
