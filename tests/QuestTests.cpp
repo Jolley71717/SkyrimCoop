@@ -1713,6 +1713,8 @@ TEST("server: a game's quest report sent before it heard the host's reset is dro
 	news = EntriesIn(f.fake->TakeThrough(1, Type(MT::kRemoteQuests)));
 	REQUIRE(news.size() == 1);
 	CHECK(news[0].second == Stage(0x41, 4));
+	REQUIRE(f.fake->Settle());
+	f.fake->Take(3);  // its own reports' news, heard back
 	f.fake->Deliver(1, Protocol::Encode(QuestReset{}, false));
 	f.fake->Deliver(1, Report({ Stage(0x42, 1) }));
 	news = EntriesIn(f.fake->TakeThrough(3, Type(MT::kRemoteQuests)));
