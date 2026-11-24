@@ -111,7 +111,8 @@ namespace RemotePlayers
 			Clock::time_point       nextCheck{};
 			Clock::time_point       redressAfter{};
 			StandInRules::DrawFix   drawFix;  // its weapon drawn or put away as its friend's is (the game's own way)
-			std::uint64_t           drawsFinished = 0;  // updates that told it again, as the game's own update would (under lock)
+			// Frames (not asks) that told it again, as the game's own update would: one slow draw counts dozens (under lock).
+			std::uint64_t           drawsFinished = 0;
 		};
 
 		// The game's weapon states, as StandInRules reads them.

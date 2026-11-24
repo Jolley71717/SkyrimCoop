@@ -514,7 +514,10 @@ namespace StandInRules
 				return Ask::kNone;
 			}
 			if (TowardDrawn(a_state) == a_wanted) {
-				since.reset();  // there, or on its way there (the game finishes a want: AskAgain)
+				// There, or on its way there (the game finishes a want: AskAgain), told or by its friend's own events:
+				// remembered as told, so its friend's next change is told at once and not left to the grace.
+				asked = a_wanted;
+				since.reset();
 				return Ask::kNone;
 			}
 			if (asked != a_wanted) {

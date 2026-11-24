@@ -515,6 +515,22 @@ TEST("stand-in rules: a stand-in placed while its friend has a weapon out draws 
 	CHECK(fix.asks == 2);
 }
 
+TEST("stand-in rules: a stand-in that followed its friend by events is told at once on the friend's next change")
+{
+	using W = StandInRules::Weapon;
+	using A = StandInRules::DrawFix::Ask;
+	StandInRules::DrawFix fix;
+	const auto            t = Steady::now();
+	CHECK(fix.Due(true, W::kSheathed, true, t) == A::kFirst);  // its friend draws: told
+	CHECK(fix.Due(true, W::kDrawn, true, t + 1s) == A::kNone);
+	// Its friend puts it away and the stand-in follows by its friend's own events before it is told.
+	CHECK(fix.Due(false, W::kSheathed, true, t + 2s) == A::kNone);
+	// Its friend draws again and the graph turns the events away: told at once, not after the grace, and not a fix.
+	CHECK(fix.Due(true, W::kSheathed, true, t + 3s) == A::kFirst);
+	CHECK(fix.asks == 2);
+	CHECK(fix.fixes == 0);
+}
+
 TEST("stand-in rules: a draw that went back is told again after the grace, never while under way, not again too soon")
 {
 	using W = StandInRules::Weapon;
