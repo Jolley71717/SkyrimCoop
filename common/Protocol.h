@@ -63,7 +63,13 @@ namespace Protocol
 	//    talk with an NPC someone else talks with is closed. Written on top of 12 (quest runs) beside 12, 13 and 14 (riding,
 	//    projectiles and furniture, another branch): the number is above both lines' and is renumbered at merge; its messages
 	//    (59-62) clash with neither line's.
-	inline constexpr std::uint16_t VERSION = 15;
+	// 16: what a mechanism's use did (UseEffects; docs/DESIGN.md "Doors, locks and mechanisms", "What a use did"): a use
+	//    (Activation) carries its number in the user's game and the items the mechanism's own scripts name that the user
+	//    held (a claw, a key), lent to the stand-in that makes the use in the other games; the user's game then says what
+	//    the use did near the mechanism (the animations played on activators, the references enabled or disabled), and
+	//    each other game makes what its own stand-in's use did not. Written on top of 15 (conversations): the number is
+	//    above both lines' and is renumbered at merge; its messages (63, 64) clash with neither line's.
+	inline constexpr std::uint16_t VERSION = 16;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -144,6 +150,8 @@ namespace Protocol
 		kRemoteLine = 60,  // server -> the others: that player's line (never kept: a joiner hears only what is said after)
 		kTalk = 61,        // client -> server, reliable: our player talks with this NPC (again every few seconds), or no longer
 		kTalkAnswer = 62,  // server -> the asker alone: who talks with that NPC (the asker: it is theirs)
+		kUseEffects = 63,        // client -> server, reliable: what our player's use of a mechanism did near it (a batch)
+		kRemoteUseEffects = 64,  // server -> the others: what that player's use did, for them to make what theirs did not
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -361,13 +369,63 @@ namespace Protocol
 		return a_known;
 	}
 
+	// An item lent with a use: its base form (in the session's numbering) and how many the user held (at most 0xFFFF).
+	struct LentItem
+	{
+		std::uint32_t base = 0;
+		std::uint16_t count = 0;
+		bool operator==(const LentItem&) const = default;
+	};
+	// The most items one use lends: what a mechanism's scripts name is a claw, a key, a gem or two.
+	inline constexpr std::size_t MAX_LENT = 16;
+
 	// A player used a mechanism: an activator such as a lever, a pull chain, a button, a rotating pillar or a claw door's
-	// keyhole. refId in the session's numbering; playerId set by the server (kRemoteActivate), none in kActivate.
+	// keyhole. refId in the session's numbering; playerId set by the server (kRemoteActivate), none in kActivate. seq is
+	// the user's game's number for the use (from 1, rising), which its effects (UseEffects) name. lent: the items the
+	// mechanism's own scripts name that the user held (a claw door's claw, a key, a soul gem), each at most once: the
+	// stand-in that makes the use in another game holds them while it does, so a script that checks what its user carries
+	// finds them there too.
 	struct Activation
 	{
-		std::uint32_t refId = 0;
-		std::uint32_t playerId = 0;
+		std::uint32_t         refId = 0;
+		std::uint32_t         playerId = 0;
+		std::uint32_t         seq = 0;
+		std::vector<LentItem> lent;
 		bool operator==(const Activation&) const = default;
+	};
+
+	// What a use did near its mechanism in the user's game, one thing each: an animation event played on a reference (an
+	// activator's: the claw door's rings and its fall, a pillar's turn, a gate an activator raises), or a reference
+	// enabled or disabled (a wall that opens a hidden way, a bridge put there). atMs: when, after the use, in the user's
+	// game (at most 0xFFFF). event: the animation event's name (kAnim only; none otherwise).
+	struct UseEffect
+	{
+		enum What : std::uint8_t
+		{
+			kAnim = 0,
+			kEnable = 1,
+			kDisable = 2,
+		};
+		std::uint32_t ref = 0;
+		std::uint8_t  what = kAnim;
+		std::uint16_t atMs = 0;
+		std::string   event;
+		bool operator==(const UseEffect&) const = default;
+	};
+	inline constexpr std::uint8_t USE_EFFECT_MAX = UseEffect::kDisable;
+	inline constexpr std::size_t  MAX_USE_EFFECTS = 32;  // in one message (a use's go in as many as it takes)
+	inline constexpr std::size_t  MAX_ANIM_EVENT = 64;   // bytes of an animation event's name
+
+	// A batch of what one use did (kUseEffects from the user's game, playerId 0; kRemoteUseEffects from the server, the
+	// user's player id): the use's number (Activation::seq), its mechanism (0: one the reader lacks), and 1 to
+	// MAX_USE_EFFECTS effects, in the order they happened.
+	struct UseEffects
+	{
+		std::uint32_t          playerId = 0;
+		std::uint32_t          seq = 0;
+		std::uint32_t          mechanism = 0;
+		std::vector<UseEffect> effects;
+		bool operator==(const UseEffects&) const = default;
 	};
 
 	// The server's answer to a report it did not take (kRefRefused), to the reporter alone: every report is answered, so
@@ -1360,13 +1418,21 @@ namespace Protocol
 		return msg;
 	}
 
-	// kActivate: refId. kRemoteActivate: refId, then playerId.
+	// kActivate: refId, seq, a count (0 to MAX_LENT), then each lent item: base, count. kRemoteActivate: refId, playerId,
+	// then the same. None for a lent item of no base or no count, or past MAX_LENT.
 	inline std::vector<std::uint8_t> Encode(const Activation& a_msg, MessageType a_type)
 	{
 		Writer w{ a_type };
 		w.U32(a_msg.refId);
 		if (a_type == MessageType::kRemoteActivate) {
 			w.U32(a_msg.playerId);
+		}
+		w.U32(a_msg.seq);
+		const auto count = (std::min)(a_msg.lent.size(), MAX_LENT);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			w.U32(a_msg.lent[i].base);
+			w.U16(a_msg.lent[i].count);
 		}
 		return w.Data();
 	}
@@ -1384,6 +1450,79 @@ namespace Protocol
 		msg.refId = r.U32();
 		if (type == MessageType::kRemoteActivate) {
 			msg.playerId = r.U32();
+		}
+		msg.seq = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_LENT) {
+			return std::nullopt;
+		}
+		for (std::uint8_t i = 0; i < count; ++i) {
+			LentItem item;
+			item.base = r.U32();
+			item.count = r.U16();
+			if (item.base == 0 || item.count == 0) {
+				return std::nullopt;
+			}
+			msg.lent.push_back(item);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kUseEffects: seq, mechanism, a count (1 to MAX_USE_EFFECTS), then each effect: ref, what, atMs, event (a string,
+	// kAnim only). kRemoteUseEffects: playerId first. None for no effect, an effect of no reference, a kind not known, an
+	// animation of no event, or another kind with one.
+	inline std::vector<std::uint8_t> Encode(const UseEffects& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		if (a_type == MessageType::kRemoteUseEffects) {
+			w.U32(a_msg.playerId);
+		}
+		w.U32(a_msg.seq);
+		w.U32(a_msg.mechanism);
+		const auto count = (std::min)(a_msg.effects.size(), MAX_USE_EFFECTS);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& effect = a_msg.effects[i];
+			w.U32(effect.ref);
+			w.U8(effect.what);
+			w.U16(effect.atMs);
+			w.Str(effect.what == UseEffect::kAnim ? std::string_view{ effect.event } : std::string_view{}, MAX_ANIM_EVENT);
+		}
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const UseEffects& a_msg) { return Encode(a_msg, MessageType::kUseEffects); }
+
+	inline std::optional<UseEffects> DecodeUseEffects(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kUseEffects && type != MessageType::kRemoteUseEffects) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		UseEffects msg;
+		if (type == MessageType::kRemoteUseEffects) {
+			msg.playerId = r.U32();
+		}
+		msg.seq = r.U32();
+		msg.mechanism = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count == 0 || count > MAX_USE_EFFECTS) {
+			return std::nullopt;
+		}
+		for (std::uint8_t i = 0; i < count; ++i) {
+			UseEffect effect;
+			effect.ref = r.U32();
+			effect.what = r.U8();
+			effect.atMs = r.U16();
+			effect.event = r.Str(MAX_ANIM_EVENT);
+			if (!r.Ok() || effect.ref == 0 || effect.what > USE_EFFECT_MAX || (effect.what == UseEffect::kAnim) == effect.event.empty()) {
+				return std::nullopt;
+			}
+			msg.effects.push_back(std::move(effect));
 		}
 		if (!r.AtEnd()) {
 			return std::nullopt;

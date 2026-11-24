@@ -57,6 +57,11 @@ namespace LootSync
 	// The session ended. The ledger and the moves still waiting stay (they are this world's).
 	void Clear();
 
+	// Whether our player's put of a_item into a_holder would be the session's (reported, and made in every other game's
+	// copy of the holder), as this game reads the two: WorldObjects asks it of a lent item a stand-in's run of a
+	// mechanism's script put there, which the user's game reports as its own put (src/game/UseRules.h, LentWent).
+	[[nodiscard]] bool SharesPut(std::uint32_t a_holder, std::uint32_t a_item);
+
 	// The co-save: the ledger (the log's id and the first number this world lacks) and the moves still waiting for their
 	// holder. Read before kPostLoadGame; a load whose save has none starts this world with no ledger.
 	inline constexpr std::uint32_t COSAVE_LOOT = 0x544C4B53;  // "SKLT"

@@ -35,6 +35,13 @@ namespace WorldObjects
 	// From the session: its word on a reference (kRemoteRefState), and a friend's use of a mechanism (kRemoteActivate).
 	void Heard(const Protocol::RefState& a_state);
 	void Used(const Protocol::Activation& a_use);
+	// ... and what a friend's use did in their game (kRemoteUseEffects): made here where our stand-in's use did not
+	// (docs/DESIGN.md, "What a use did"; the rules are src/game/UseRules.h).
+	void HeardEffects(const Protocol::UseEffects& a_effects);
+
+	// SKSE's kSaveGame, before the game writes the save (and before the stand-ins are taken out): the items lent to
+	// stand-ins for friends' uses are taken back.
+	void BeforeSave();
 
 	// From the session: a report of ours it did not take (kRefRefused). It is no longer out; a busy one goes again.
 	void Refused(const Protocol::RefRefusal& a_refusal);
@@ -46,11 +53,16 @@ namespace WorldObjects
 	// The session ended.
 	void Clear();
 
-	// Developer channel: `refs` (counts), `refs near [radius]` (this class's loaded references near our player), `ref
+	// Developer channel: `refs` (counts), `refs near [radius]` (this class's loaded references near our player), `refs
+	// refuse <on|off>` (friends' uses refused here, the rig's stand-in for a script that does nothing for a stand-in), `ref
 	// <hex id>` (one reference), `use <hex id>` (our player uses it, as the activate key does).
 	[[nodiscard]] std::string Command(std::string_view a_args);
 	[[nodiscard]] std::string One(std::string_view a_args);
 	[[nodiscard]] std::string Use(std::string_view a_args);
 	// `script <hex id>`: the Papyrus scripts bound to it, each one's state and whole-number and true/false variables.
 	[[nodiscard]] std::string Scripts(std::string_view a_args);
+	// `anims <hex id>`: the animation events read on it lately (a friend's use's made here marked *), the last one.
+	[[nodiscard]] std::string Anims(std::string_view a_args);
+	// `enables <hex id> [radius]`: the references near it a use's effect can enable or disable, and which are disabled.
+	[[nodiscard]] std::string Enables(std::string_view a_args);
 }

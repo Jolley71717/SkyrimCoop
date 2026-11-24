@@ -255,6 +255,7 @@ namespace
 		case SKSE::MessagingInterface::kSaveGame:
 			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
+			WorldObjects::BeforeSave();  // what was lent to a stand-in for a friend's use is taken back first
 			RemotePlayers::BeforeSave();
 			WorldClock::BeforeSave();  // ... and our own timescale goes into it, not the session's
 			DropSync::BeforeSave();    // ... and no copy of a dropped item is in it

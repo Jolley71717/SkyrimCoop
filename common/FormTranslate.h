@@ -43,6 +43,9 @@
 // - a conversation's line (kLine, kRemoteLine) whose speaker or info has no ID becomes 0 there (with the info its response
 //   number): the reader shows it by the speaker's name, as text; a talk with an NPC (kTalk) or its answer (kTalkAnswer)
 //   whose NPC has none is not sent (kDrop): that NPC is that game's own.
+// - an item lent with a mechanism's use (kActivate, kRemoteActivate) whose base has no ID is left out (the reader can't
+//   lend what it lacks); what a use did (kUseEffects, kRemoteUseEffects): an effect whose reference has none is left out,
+//   the mechanism becomes 0, and a batch left with no effect is not sent (kDrop).
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -109,6 +112,8 @@ namespace FormTranslate
 		case MT::kRemoteLine:
 		case MT::kTalk:
 		case MT::kTalkAnswer:
+		case MT::kUseEffects:
+		case MT::kRemoteUseEffects:
 			return true;
 		case MT::kClaimDrop:  // drop numbers, no forms
 		case MT::kDropGone:
@@ -431,6 +436,60 @@ namespace FormTranslate
 			}
 		}
 
+		// A mechanism's use, written back with its own type: the mechanism, or 0 when it has none on the other side; each
+		// lent item whose base has none there is left out.
+		inline void ApplyActivation(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeActivation(a_packet);
+			if (!msg) {
+				return;
+			}
+			a_ctx.Detail(msg->refId);
+			std::vector<Protocol::LentItem> kept;
+			kept.reserve(msg->lent.size());
+			for (auto item : msg->lent) {
+				if (a_ctx.Key(item.base)) {
+					kept.push_back(item);
+				}
+			}
+			const auto left = msg->lent.size() - kept.size();
+			a_ctx.out.entries += static_cast<std::uint32_t>(left);
+			if (a_ctx.changed || left != 0) {
+				msg->lent = std::move(kept);
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
+		// What a use did, written back with its own type: the effects whose reference has an ID on the other side (none
+		// left is kDrop: a batch with no effect can't be read); the mechanism, or 0.
+		inline void ApplyUseEffects(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeUseEffects(a_packet);
+			if (!msg) {
+				return;
+			}
+			a_ctx.Detail(msg->mechanism);
+			std::vector<Protocol::UseEffect> kept;
+			kept.reserve(msg->effects.size());
+			for (auto& effect : msg->effects) {
+				if (a_ctx.Key(effect.ref)) {
+					kept.push_back(std::move(effect));
+				}
+			}
+			const auto left = msg->effects.size() - kept.size();
+			a_ctx.out.entries += static_cast<std::uint32_t>(left);
+			if (kept.empty()) {
+				a_ctx.out.kind = Result::Kind::kDrop;
+				return;
+			}
+			if (a_ctx.changed || left != 0) {
+				msg->effects = std::move(kept);
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
 		// A talk with an NPC (kTalk) and its answer (kTalkAnswer): kDrop when the NPC has no ID on the other side. That NPC
 		// is the game's own (a mod's some game lacks): nobody else can talk with it in their game, so no talk of it is
 		// kept, and a game that hears no answer talks on.
@@ -503,7 +562,7 @@ namespace FormTranslate
 			break;
 		case MT::kActivate:
 		case MT::kRemoteActivate:
-			detail::ApplyRef<Protocol::Activation>(a_packet, ctx, *type, Protocol::DecodeActivation);
+			detail::ApplyActivation(a_packet, ctx, *type);
 			break;
 		case MT::kRefRefused:
 			detail::ApplyRef<Protocol::RefRefusal>(a_packet, ctx, *type, Protocol::DecodeRefRefusal);
@@ -540,6 +599,10 @@ namespace FormTranslate
 		case MT::kTalk:
 		case MT::kTalkAnswer:
 			detail::ApplyTalk(a_packet, ctx, *type);
+			break;
+		case MT::kUseEffects:
+		case MT::kRemoteUseEffects:
+			detail::ApplyUseEffects(a_packet, ctx, *type);
 			break;
 		default:
 			break;

@@ -277,6 +277,11 @@ namespace Session
 					WorldObjects::Used(*msg);
 				}
 				break;
+			case Protocol::MessageType::kRemoteUseEffects:
+				if (const auto msg = Protocol::DecodeUseEffects(a_data); msg && welcomed && msg->playerId != playerId) {
+					WorldObjects::HeardEffects(*msg);
+				}
+				break;
 			case Protocol::MessageType::kRemoteQuests:
 				if (const auto msg = Protocol::DecodeQuestBatch(a_data); msg && welcomed) {
 					QuestSync::Heard(*msg);
