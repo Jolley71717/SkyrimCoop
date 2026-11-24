@@ -166,7 +166,7 @@ namespace NpcSync
 		std::set<Key>                    hitApplied;      // NPCs we run whose health goes out at once (a friend's hit applied)
 		std::map<Key, Protocol::NpcDeath> sessionDead;    // every NPC the session has dead (its runner's word), and how
 		std::set<Key>                    ourDeaths;       // of those, the ones this game said
-		std::unordered_set<RE::FormID>   killedOnLoad;    // actors killed for the session's word since the world loaded
+		CopyHealth::DeadHere             deadHere;        // the session's dead killed here, since the world loaded
 
 		// Counts for the developer channel.
 		struct Counts
@@ -1049,17 +1049,48 @@ namespace NpcSync
 				const auto owner = owners.find(key);
 				const bool ours = owner != owners.end() && owner->second == ourId;
 				// The session has it dead (a death said while it was not loaded here, or before we joined) and it lives
-				// here: killed, not asked for (CopyHealth::KillsOnLoad: the host's game keeps its own save's word).
-				if (!actor->IsDead() && sessionDead.contains(key) && CopyHealth::KillsOnLoad(ourId == hostId, ourDeaths.contains(key))) {
+				// here: killed, not asked for (CopyHealth::KillsOnLoad: the host's game keeps its own save's word). A kill
+				// that does not take is tried again, the engine's kill then the one that ignores the essential flag; one seen
+				// dead here that lives again (this game's respawn of its cell, a raise here alone) is killed again
+				// (CopyHealth::DeadHere).
+				if (sessionDead.contains(key) && CopyHealth::KillsOnLoad(ourId == hostId, ourDeaths.contains(key))) {
+					const bool alive = !actor->IsDead();
 					// (one in a kill move is left to the move, and killed after it if it lives)
-					if (!actor->IsInKillMove() && killedOnLoad.insert(npc.id).second) {
-						++counts.killsOnLoad;
-						const auto& death = sessionDead[key];
-						const auto  by = RemotePlayers::StandInOf(death.killer);
-						logs::info("NPCs: {:08X} is dead in the session (player {}'s kill) and lives here: killed as it loaded", key.id, death.killer);
-						actor->KillImpl(by.get(), 0.0f, true, false);
+					if (!alive || !actor->IsInKillMove()) {
+						const auto risenBefore = deadHere.risen;
+						switch (deadHere.Look(npc.id, alive, a_now)) {
+						case CopyHealth::DeadDo::kKill:
+							{
+								++counts.killsOnLoad;
+								const auto& death = sessionDead[key];
+								const auto  by = RemotePlayers::StandInOf(death.killer);
+								const auto  tries = deadHere.Tries(npc.id);
+								if (tries == 1) {
+									logs::info("NPCs: {:08X} is dead in the session (player {}'s kill) and lives here{}: killed", key.id, death.killer,
+										deadHere.risen != risenBefore ? " again (it rose here after it died)" : " as it loaded");
+								} else {
+									logs::warn("NPCs: {:08X} is dead in the session and still lives here: killed again (try {} of {})", key.id, tries, CopyHealth::KILL_TRIES);
+								}
+								if (tries % 2 == 1) {
+									actor->KillImpl(by.get(), 0.0f, true, false);
+								} else {
+									actor->KillImmediate();
+								}
+								break;
+							}
+						case CopyHealth::DeadDo::kGiveUp:
+							logs::warn("NPCs: {:08X} is dead in the session but this game keeps it alive after {} kills: left alive here, never run (is it essential here only?)", key.id,
+								CopyHealth::KILL_TRIES);
+							break;
+						case CopyHealth::DeadDo::kNothing:
+							break;
+						}
 					}
-					continue;
+					if (alive) {
+						continue;
+					}
+				} else {
+					deadHere.Forget(npc.id);
 				}
 				// A body is nobody's to run, unless we ran it as it died (its death is ours to say), or it died here while
 				// nobody ran it, after this game saw it alive this session (whoever's blow it was: our player's, an NPC's we
@@ -1849,7 +1880,7 @@ namespace NpcSync
 		hitApplied.clear();
 		sessionDead.clear();
 		ourDeaths.clear();
-		killedOnLoad.clear();
+		deadHere.Clear();
 	}
 
 	void Owners(const Protocol::NpcOwners& a_msg)
@@ -2199,7 +2230,7 @@ namespace NpcSync
 		madeEnding.clear();
 		loaded.clear();
 		// The new world's actors are new ones: the session's dead are killed again as they load; our hits were on the old.
-		killedOnLoad.clear();
+		deadHere.Clear();
 		hitApplied.clear();
 		std::scoped_lock f{ fightLock };
 		ourHits.clear();
@@ -2262,13 +2293,13 @@ namespace NpcSync
 				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} letGo={} graphsReset={} statesSent={} statesIn={} "
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
 				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
-				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={} "
+				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} deadRisen={} deadGivenUp={} saveKills={} revived={} healthSets={} dead={} "
 				"pairActionsSent={} heldActionsDropped={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
 				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
-				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad,
+				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad, deadHere.risen, deadHere.givenUp,
 				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size(), pairActionsSent, heldActionsDropped.load());
 		}
 		// One line per NPC: `npcs list`, or `npcs <form id>` for one. Its local form id, who runs it, its kind, where its

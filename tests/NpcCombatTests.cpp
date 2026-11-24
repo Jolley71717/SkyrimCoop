@@ -979,3 +979,57 @@ TEST("npc combat server: a death from the game that let go of its NPC a moment a
 	REQUIRE(f.fake->Settle());
 	CHECK(f.fake->Take(2).empty());
 }
+
+TEST("npc combat rules: the session's dead that live here are killed, a kill that did not take tried again then given up once, and one that rises here killed again")
+{
+	using CopyHealth::DeadDo;
+	CopyHealth::DeadHere dead;
+	const auto           t = Steady::now();
+
+	// Loaded alive: killed at once, not again before KILL_AGAIN, then again while it lives.
+	CHECK(dead.Look(1, true, t) == DeadDo::kKill);
+	CHECK(dead.Tries(1) == 1);
+	CHECK(dead.Look(1, true, t + 100ms) == DeadDo::kNothing);
+	CHECK(dead.Look(1, true, t + CopyHealth::KILL_AGAIN) == DeadDo::kKill);
+	CHECK(dead.Tries(1) == 2);
+
+	// It died: nothing more; left dead it is left alone.
+	CHECK(dead.Look(1, false, t + 3s) == DeadDo::kNothing);
+	CHECK(dead.Look(1, false, t + 10s) == DeadDo::kNothing);
+	CHECK(dead.Tries(1) == 0);
+
+	// It rises here (this game's respawn, a raise here alone): killed again at once, counted.
+	CHECK(dead.Look(1, true, t + 20s) == DeadDo::kKill);
+	CHECK(dead.risen == 1u);
+
+	// One that never dies here: KILL_TRIES kills, then given up once, then nothing.
+	auto at = t;
+	int  kills = 0;
+	for (int i = 0; i < 200; ++i, at += 500ms) {
+		switch (dead.Look(2, true, at)) {
+		case DeadDo::kKill:
+			++kills;
+			break;
+		case DeadDo::kGiveUp:
+			CHECK(kills == CopyHealth::KILL_TRIES);
+			break;
+		case DeadDo::kNothing:
+			break;
+		}
+	}
+	CHECK(kills == CopyHealth::KILL_TRIES);
+	CHECK(dead.givenUp == 1u);
+
+	// Given up, it still gets another round if it dies and rises again.
+	CHECK(dead.Look(2, false, at) == DeadDo::kNothing);
+	CHECK(dead.Look(2, true, at + 1s) == DeadDo::kKill);
+	CHECK(dead.risen == 2u);
+
+	// Seen dead first (a body as it loads): nothing to do; forgotten, a later rise is a first load again.
+	CHECK(dead.Look(3, false, t) == DeadDo::kNothing);
+	dead.Forget(3);
+	CHECK(dead.Look(3, true, t + 1s) == DeadDo::kKill);
+	CHECK(dead.risen == 2u);
+	dead.Clear();
+	CHECK(dead.Size() == 0u);
+}

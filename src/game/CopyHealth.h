@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <vector>
 
@@ -373,4 +374,83 @@ namespace CopyHealth
 	{
 		return !(a_weAreHost && a_weReportedIt);
 	}
+
+	// The session's dead that live here (KillsOnLoad), each looked at as it is loaded here: killed; a kill the game did not
+	// take tried again every KILL_AGAIN, up to KILL_TRIES (then given up, said once: this game keeps it from dying, an
+	// essential flag the runner's game had off); and killed again whenever one seen dead here lives again (this game's own
+	// respawn of its cell, which each game times from its own last visit, or a script's or a spell's raise in this game
+	// alone). The session's word is that it is dead: a body risen in a friend's game and fought there would be run alive and
+	// raise it in every game. (A raise by its runner is the session's: its health said again ends the session's death,
+	// and Forget with it.)
+	inline constexpr auto KILL_AGAIN = 2s;
+	inline constexpr int  KILL_TRIES = 5;
+
+	enum class DeadDo : std::uint8_t
+	{
+		kNothing,
+		kKill,    // kill it (the first, or another try: Tries says which)
+		kGiveUp,  // the last try did not take: say so, once
+	};
+
+	class DeadHere
+	{
+	public:
+		// a_alive: it lives here now. Only for one the session has dead and this game kills (KillsOnLoad).
+		[[nodiscard]] DeadDo Look(std::uint32_t a_id, bool a_alive, Clock::time_point a_now)
+		{
+			auto& s = states[a_id];
+			if (!a_alive) {
+				s.sawDead = true;
+				s.tries = 0;
+				s.toldGiveUp = false;
+				return DeadDo::kNothing;
+			}
+			if (s.sawDead) {
+				s.sawDead = false;
+				++risen;
+			}
+			if (s.tries >= KILL_TRIES) {
+				if (s.toldGiveUp) {
+					return DeadDo::kNothing;
+				}
+				s.toldGiveUp = true;
+				++givenUp;
+				return DeadDo::kGiveUp;
+			}
+			if (s.tries == 0 || a_now - s.last >= KILL_AGAIN) {
+				++s.tries;
+				s.last = a_now;
+				++kills;
+				return DeadDo::kKill;
+			}
+			return DeadDo::kNothing;
+		}
+
+		// The tries so far on a_id since it was last seen dead (1 after the first kill).
+		[[nodiscard]] int Tries(std::uint32_t a_id) const
+		{
+			const auto it = states.find(a_id);
+			return it != states.end() ? it->second.tries : 0;
+		}
+
+		// Not dead for the session any more, or not this game's to kill.
+		void Forget(std::uint32_t a_id) { states.erase(a_id); }
+		// A load or the session's end: the world's actors are new ones.
+		void Clear() { states.clear(); }
+		[[nodiscard]] std::size_t Size() const { return states.size(); }
+
+		std::uint64_t kills = 0;
+		std::uint64_t risen = 0;
+		std::uint64_t givenUp = 0;
+
+	private:
+		struct State
+		{
+			int               tries = 0;
+			Clock::time_point last{};
+			bool              sawDead = false;
+			bool              toldGiveUp = false;
+		};
+		std::map<std::uint32_t, State> states;
+	};
 }
