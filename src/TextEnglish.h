@@ -31,5 +31,9 @@ namespace Text
 		// language of the player who sets it ---
 		{ "steam.status_hosting", "Hosting Skyrim co-op" },
 		{ "steam.status_playing", "Playing Skyrim co-op" },
+
+		// --- A friend's name as their stand-in shows it, over its head and where the crosshair names it, with their
+		// health when hurt (src/game/Party.cpp, Tag) ---
+		{ "party.tag_hurt", "{name} ({health}%)" },
 	};
 }

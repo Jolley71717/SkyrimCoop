@@ -10,3 +10,5 @@ reject.mods = Ваши моды отличаются от модов хоста.
 
 steam.status_hosting = Проводит кооперативную игру в Skyrim
 steam.status_playing = Играет в Skyrim в кооперативе
+
+party.tag_hurt = {name} ({health}%)

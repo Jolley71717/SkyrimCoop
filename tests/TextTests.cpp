@@ -304,7 +304,17 @@ TEST("text: every language file holds every key and only the mod's, with the pla
 			// And it is translated: a text with words that is the English as it stands was copied, not translated.
 			for (const auto& [key, translated] : table) {
 				const auto english = Text::GetEnglish(key);
-				if (translated == english && std::ranges::count_if(english, [](char a_c) { return std::isalpha(static_cast<unsigned char>(a_c)); }) > 3) {
+				// Its own words, without its placeholders: a text that is only placeholders and marks ("{name} ({health}%)")
+				// is the same in every language.
+				std::string words;
+				for (bool inside = false; const char c : english) {
+					if (c == '{' || c == '}') {
+						inside = c == '{';
+					} else if (!inside) {
+						words += c;
+					}
+				}
+				if (translated == english && std::ranges::count_if(words, [](char a_c) { return std::isalpha(static_cast<unsigned char>(a_c)); }) > 3) {
 					Test::Fail(__FILE__, __LINE__, std::format("{}: '{}' is still the English text", name, key));
 				}
 			}
@@ -356,7 +366,8 @@ TEST("text: no player-facing text is a bare English literal in the code")
 	const auto root = SourceTree::Root();
 	REQUIRE(root);
 	// Each call that puts text in front of a player, and which of its arguments holds the text. The game's
-	// notification and message box, a name shown over an actor, Steam's status line, and the server's refusals.
+	// notification and message box, a name shown over an actor (its name, or a text field of a menu: the name over a
+	// friend's head), Steam's status line, and the server's refusals.
 	struct Shown
 	{
 		std::string_view call;
@@ -368,6 +379,7 @@ TEST("text: no player-facing text is a bare English literal in the code")
 		{ "ShowHUDMessage(", 0 },
 		{ "SetDisplayName(", 0 },
 		{ "SetOverrideName(", 0 },
+		{ "SetMember(", 1 },  // a Flash text field's text (FriendMarkers: the name over a friend's head)
 		{ "refuse(", 1 },
 	};
 	int         found = 0;

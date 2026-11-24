@@ -85,6 +85,16 @@ namespace RemotePlayers
 	[[nodiscard]] std::optional<std::chrono::steady_clock::time_point> SenderTime(std::uint32_t a_playerId, std::uint32_t a_sentMs);
 	// Each friend's newest state, as it came (their place, for who is nearest an NPC).
 	[[nodiscard]] std::vector<Protocol::PlayerState> FriendStates();
+	// Each friend who joined: their id, name, newest state (none yet: none came) and stand-in (none: not placed here),
+	// for the compass, the maps and the name over their head (FriendMarkers). Main thread.
+	struct Friend
+	{
+		std::uint32_t                        id = 0;
+		std::string                          name;
+		std::optional<Protocol::PlayerState> state;
+		RE::ActorHandle                      standIn;
+	};
+	[[nodiscard]] std::vector<Friend> Friends();
 	// Whether a form id is one of this game's stand-ins, or one of ours on its way out of the world, and whether there is
 	// any: with no lock, for the engine hooks on any thread (StandInPeace.h, PeaceRules::IdSet).
 	[[nodiscard]] bool IsStandInId(RE::FormID a_id);

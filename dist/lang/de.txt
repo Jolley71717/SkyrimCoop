@@ -10,3 +10,5 @@ reject.mods = Deine Mods unterscheiden sich von denen des Hosts.
 
 steam.status_hosting = Hostet Skyrim im Koop
 steam.status_playing = Spielt Skyrim im Koop
+
+party.tag_hurt = {name} ({health}%)

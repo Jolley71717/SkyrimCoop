@@ -10,3 +10,5 @@ reject.mods = Seus mods são diferentes dos do anfitrião.
 
 steam.status_hosting = Hospedando Skyrim co-op
 steam.status_playing = Jogando Skyrim co-op
+
+party.tag_hurt = {name} ({health}%)

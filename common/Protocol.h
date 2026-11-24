@@ -59,7 +59,11 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	inline constexpr std::uint16_t VERSION = 24;
+	// 25: each player's status (kPlayerStatus, kRemoteStatus: message types 77-78): their health, whether a door or a fast
+	//    travel is taking them away, the place they are in and, inside, the way in on the map, so the others show them on
+	//    the compass and the maps and put their health on the name over their head. (As with 21: renumbered when it
+	//    lands; 24 is the kill moves' change.)
+	inline constexpr std::uint16_t VERSION = 25;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -130,6 +134,8 @@ namespace Protocol
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
 		// 59-75: the other changes' messages (each in its own change).
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
+		kPlayerStatus = 77,  // client -> server, reliable: our player's health, travel and place on the map, when it changes
+		kRemoteStatus = 78,  // server -> the others (and to a joiner, each one there): that player's status
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2217,6 +2223,117 @@ namespace Protocol
 		}
 		return msg;
 	}
+
+	// ---- player status (protocol 25) ------------------------------------------------------------------------------
+
+	enum StatusFlags : std::uint8_t
+	{
+		kStatusTravelling = 1 << 0,  // a load door, a fast travel or a loading screen is taking them away from where they stand
+		kStatusInside = 1 << 1,      // in an interior: the map spot is the way in (mapWorld 0: no way in known)
+	};
+	inline constexpr std::uint8_t kStatusAllFlags = kStatusTravelling | kStatusInside;
+
+	// A player's status: what the others need beside the 20 states a second to show them where the states can't (the
+	// compass and the maps, while far or inside) and to put their health on the name over their head. Sent reliably when
+	// it changes (StatusRules::Worth), kept by the server for a joiner.
+	// health: percent, 0 to 100. location: the place (BGSLocation) they are in, none 0. mapWorld, mapX/Y/Z: inside, the
+	// way in on the map (the worldspace and where they were last outside, or the door out of where they are); outside,
+	// none (their states say where they are). A form the reader lacks reads 0.
+	struct PlayerStatus
+	{
+		std::uint8_t  health = 100;
+		std::uint8_t  flags = 0;
+		std::uint32_t location = 0;
+		std::uint32_t mapWorld = 0;
+		float         mapX = 0, mapY = 0, mapZ = 0;
+		bool operator==(const PlayerStatus&) const = default;
+	};
+
+	struct RemoteStatus
+	{
+		std::uint32_t playerId = 0;
+		PlayerStatus  status;
+		bool operator==(const RemoteStatus&) const = default;
+	};
+
+	// Whether a status can be: a health of at most 100, known flags, a map spot a game can hold and none when there is no
+	// map world.
+	[[nodiscard]] inline bool StatusHolds(const PlayerStatus& a_status)
+	{
+		const bool spot = InWorld(a_status.mapX) && InWorld(a_status.mapY) && InWorld(a_status.mapZ);
+		const bool none = a_status.mapWorld != 0 || (a_status.mapX == 0.0f && a_status.mapY == 0.0f && a_status.mapZ == 0.0f);
+		return a_status.health <= 100 && (a_status.flags & ~kStatusAllFlags) == 0 && spot && none;
+	}
+
+	inline void WriteStatus(Writer& a_writer, const PlayerStatus& a_status)
+	{
+		a_writer.U8(a_status.health);
+		a_writer.U8(a_status.flags);
+		a_writer.U32(a_status.location);
+		a_writer.U32(a_status.mapWorld);
+		for (const auto v : { a_status.mapX, a_status.mapY, a_status.mapZ }) {
+			a_writer.F32(v);
+		}
+	}
+
+	inline std::optional<PlayerStatus> ReadStatus(Reader& a_reader)
+	{
+		PlayerStatus status;
+		status.health = a_reader.U8();
+		status.flags = a_reader.U8();
+		status.location = a_reader.U32();
+		status.mapWorld = a_reader.U32();
+		for (auto* v : { &status.mapX, &status.mapY, &status.mapZ }) {
+			*v = a_reader.F32();
+		}
+		if (!a_reader.Ok() || !StatusHolds(status)) {
+			return std::nullopt;
+		}
+		return status;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const PlayerStatus& a_msg)
+	{
+		Writer w{ MessageType::kPlayerStatus };
+		WriteStatus(w, a_msg);
+		return w.Data();
+	}
+
+	// None for a status that does not hold (StatusHolds).
+	inline std::optional<PlayerStatus> DecodePlayerStatus(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		auto status = ReadStatus(r);
+		if (!status || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		return status;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const RemoteStatus& a_msg)
+	{
+		Writer w{ MessageType::kRemoteStatus };
+		w.U32(a_msg.playerId);
+		WriteStatus(w, a_msg.status);
+		return w.Data();
+	}
+
+	inline std::optional<RemoteStatus> DecodeRemoteStatus(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		RemoteStatus msg;
+		msg.playerId = r.U32();
+		auto status = ReadStatus(r);
+		if (!status || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		msg.status = *status;
+		return msg;
+	}
+
+	inline constexpr std::size_t STATUS_BYTES = 1 + 1 + 4 + 4 + 3 * 4;
 
 	inline constexpr std::size_t PAIR_BYTES = 2 * (4 + 8) + 4 + 4 + 1 + MAX_EVENT_NAME + 1 + 4 * 4;
 	inline constexpr std::size_t MAX_PAIRS_SIZE = 1 + 4 + 1 + MAX_PAIRS * PAIR_BYTES;
