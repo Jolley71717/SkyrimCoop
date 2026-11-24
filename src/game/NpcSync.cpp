@@ -111,6 +111,7 @@ namespace NpcSync
 			bool                  geared = false;
 			std::size_t           gearLacks = 0;  // what its last dressing counted missing (PlanGear)
 			std::optional<NpcRules::GearShown> wears;  // its gear read back after it was dressed (none: not yet)
+			NpcRules::Dressing    dressing;  // a body is not dressed; dressed again once it stands
 			Clock::time_point     nextWearCheck{};
 			bool                  saidLook = false;
 			Protocol::PlayerState lastDrawn;
@@ -1376,9 +1377,11 @@ namespace NpcSync
 					}
 					copy.mirror = mirror;
 					if (actor) {
-						if (copy.gear && !copy.geared) {
+						// A body keeps what its own game's death scripts put on it (NpcRules::Dressing).
+						const bool dress = copy.dressing.Allowed(Up(actor), copy.geared);
+						if (dress && copy.gear && !copy.geared) {
 							work.push_back({ .key = key });
-						} else if (copy.gear && a_now >= copy.nextWearCheck) {
+						} else if (dress && copy.gear && a_now >= copy.nextWearCheck) {
 							copy.nextWearCheck = a_now + WEAR_CHECK_EVERY;
 							work.push_back({ .key = key, .check = true });
 						}

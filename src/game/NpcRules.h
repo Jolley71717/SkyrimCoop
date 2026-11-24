@@ -462,6 +462,36 @@ namespace NpcRules
 
 	// ---- its gear ----
 
+	// Whether a copy is dressed in its runner's gear now. A body is not: each game's own death scripts change what a body
+	// wears in that game, at their own time (a dragon's, as its soul is absorbed by the player there: its skin taken off,
+	// its bones put on; docs/DESIGN.md, "Dragon souls and word walls"), and its runner's gear, sent as its runner's own
+	// scripts change it, would put a dragon's skin back on in a game whose player already took its soul (or take it off
+	// in one whose player has not come near yet). A copy that stands again (raised in its runner's game, or a corpse
+	// raised here) is dressed again, whatever it wore as a body.
+	class Dressing
+	{
+	public:
+		// a_up: the copy stands (alive, or raised). True: its runner's gear may be put on and checked now. A copy back up
+		// from a body has its a_geared cleared, so it is dressed again.
+		bool Allowed(bool a_up, bool& a_geared)
+		{
+			if (!a_up) {
+				down = true;
+				return false;
+			}
+			if (down) {
+				down = false;
+				a_geared = false;
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool Down() const { return down; }
+
+	private:
+		bool down = false;
+	};
+
 	// What a copy takes off and puts on to wear and hold what its runner's NPC does. A copy of a load-order NPC is a real
 	// NPC of this game, which goes into its saves: it equips only what it carries already, and nothing is ever added to it
 	// (a corpse holds only its own game's roll). A spawn's copy is this game's own and never saved
