@@ -56,7 +56,10 @@ namespace Protocol
 	// 21: an NPC's gear says its voice too (NpcGear::voice: the shout or power it has ready), so a copy readies what its
 	//    runner's NPC has, as it holds the spells in its hands. (The two lines of changes waiting to land each numbered
 	//    their own; this one is renumbered when it lands.)
-	inline constexpr std::uint16_t VERSION = 21;
+	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
+	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
+	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
+	inline constexpr std::uint16_t VERSION = 24;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -125,6 +128,8 @@ namespace Protocol
 		// 56: the quest runs' (in its own change).
 		kShots = 57,  // both ways, reliable: projectiles our player and the NPCs a game runs launched; the server names the sender
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
+		// 59-75: the other changes' messages (each in its own change).
+		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -803,6 +808,73 @@ namespace Protocol
 		std::vector<Sit> sits;
 		bool operator==(const Sits&) const = default;
 	};
+
+	// ---- paired animations (docs/DESIGN.md, "Kill moves and paired animations") ----
+	// A paired animation is one the engine plays on two actors at once, the second placed against the first: every kill
+	// move (a weapon's, a sneak kill, an unarmed one, a creature's, a dragon's, a werewolf's or a vampire lord's) and a
+	// vampire's feeding. The game that runs the actor that begins one (its player, or an NPC it runs) says it once; every
+	// other game plays the same pair on the actors that show both there. The server passes on only a player's own and an
+	// NPC's runner's.
+
+	// At most this many in one message (a game sends what a tick saw).
+	inline constexpr std::size_t MAX_PAIRS = 16;
+
+	enum PairFlags : std::uint8_t
+	{
+		kPairKill = 1 << 0,   // a kill move: the second actor dies of it (in the game that runs it)
+		kPairSneak = 1 << 1,  // begun sneaking (a sneak kill)
+	};
+	inline constexpr std::uint8_t kPairAllFlags = kPairKill | kPairSneak;
+
+	// One side of a pair: a player (player != 0; the attacker, from a game, is its own player, which the server checks),
+	// or an NPC (npc.id != 0) as the session names it.
+	struct PairSide
+	{
+		std::uint32_t player = 0;
+		NpcKey        npc;
+		bool operator==(const PairSide&) const = default;
+	};
+
+	// One paired animation. attacker: the actor that began it (the idle is played on it); victim: the one placed against
+	// it. idle: its idle record (0: one the reader lacks, found by its event then); event: the idle's animation event (how
+	// a game finds the idle when the record is none, and what the log and the rig say). x y z heading: where the attacker
+	// began it, in the sender's world.
+	struct Pair
+	{
+		PairSide      attacker;
+		PairSide      victim;
+		std::uint32_t sentMs = 0;
+		std::uint32_t idle = 0;
+		std::string   event;
+		std::uint8_t  flags = 0;
+		float         x = 0, y = 0, z = 0;
+		float         heading = 0;
+		bool operator==(const Pair&) const = default;
+	};
+
+	// sender: 0 from a game; the server names the game that sent them.
+	struct Pairs
+	{
+		std::uint32_t     sender = 0;
+		std::vector<Pair> pairs;
+		bool operator==(const Pairs&) const = default;
+	};
+
+	[[nodiscard]] inline bool PairSideHolds(const PairSide& a_side)
+	{
+		return a_side.player != 0 ? a_side.npc == NpcKey{} : a_side.npc.id != 0;
+	}
+
+	// Whether a pair can be: each side one actor, not the same one twice, an event of printable text, known flags, a place
+	// a game can hold and a heading within a turn either way.
+	[[nodiscard]] inline bool PairHolds(const Pair& a_pair)
+	{
+		const bool sides = PairSideHolds(a_pair.attacker) && PairSideHolds(a_pair.victim) && !(a_pair.attacker == a_pair.victim);
+		const bool event = !a_pair.event.empty() && a_pair.event.size() <= MAX_EVENT_NAME &&
+		                   std::ranges::none_of(a_pair.event, [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7F; });
+		return sides && event && (a_pair.flags & ~kPairAllFlags) == 0 && InWorld(a_pair.x) && InWorld(a_pair.y) && InWorld(a_pair.z) &&
+		       std::isfinite(a_pair.heading) && std::fabs(a_pair.heading) <= 7.0f;
+	}
 
 	// Whether a sit can be: one actor (a player and no NPC, or an NPC of id != 0), a known kind, a place a game can hold,
 	// and for an end no furniture.
@@ -2076,6 +2148,79 @@ namespace Protocol
 	inline constexpr std::size_t SIT_BYTES = 4 + 8 + 4 + 4 + 3 * 4 + 3;
 	inline constexpr std::size_t MAX_SITS_SIZE = 1 + 4 + 1 + 1 + MAX_SITS * SIT_BYTES;
 	static_assert(MAX_SITS <= 0xFF && MAX_SITS_SIZE <= 2048, "a message of sits stays small");
+
+	inline void WritePairSide(Writer& a_writer, const PairSide& a_side)
+	{
+		a_writer.U32(a_side.player);
+		WriteKey(a_writer, a_side.player != 0 ? NpcKey{} : a_side.npc);  // a player's side names no NPC
+	}
+
+	inline PairSide ReadPairSide(Reader& a_reader)
+	{
+		PairSide side;
+		side.player = a_reader.U32();
+		side.npc = ReadKey(a_reader);
+		return side;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const Pairs& a_msg)
+	{
+		Writer     w{ MessageType::kPairs };
+		const auto count = (std::min)(a_msg.pairs.size(), MAX_PAIRS);
+		w.U32(a_msg.sender);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& pair = a_msg.pairs[i];
+			WritePairSide(w, pair.attacker);
+			WritePairSide(w, pair.victim);
+			w.U32(pair.sentMs);
+			w.U32(pair.idle);
+			w.Str(pair.event, MAX_EVENT_NAME);
+			w.U8(pair.flags);
+			for (const auto v : { pair.x, pair.y, pair.z, pair.heading }) {
+				w.F32(v);
+			}
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_PAIRS, or a pair that does not hold (PairHolds).
+	inline std::optional<Pairs> DecodePairs(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Pairs msg;
+		msg.sender = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_PAIRS) {
+			return std::nullopt;
+		}
+		msg.pairs.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			Pair pair;
+			pair.attacker = ReadPairSide(r);
+			pair.victim = ReadPairSide(r);
+			pair.sentMs = r.U32();
+			pair.idle = r.U32();
+			pair.event = r.Str(MAX_EVENT_NAME);
+			pair.flags = r.U8();
+			for (auto* v : { &pair.x, &pair.y, &pair.z, &pair.heading }) {
+				*v = r.F32();
+			}
+			if (r.Ok() && !PairHolds(pair)) {
+				return std::nullopt;
+			}
+			msg.pairs.push_back(std::move(pair));
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t PAIR_BYTES = 2 * (4 + 8) + 4 + 4 + 1 + MAX_EVENT_NAME + 1 + 4 * 4;
+	inline constexpr std::size_t MAX_PAIRS_SIZE = 1 + 4 + 1 + MAX_PAIRS * PAIR_BYTES;
+	static_assert(MAX_PAIRS <= 0xFF && MAX_PAIRS_SIZE <= 2048, "a message of pairs stays small");
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

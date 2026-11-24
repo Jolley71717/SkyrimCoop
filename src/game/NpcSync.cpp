@@ -4,6 +4,8 @@
 #include "FormIds.h"
 #include "game/CopyHealth.h"
 #include "game/Furniture.h"
+#include "game/PairRules.h"
+#include "game/Pairs.h"
 #include "game/Gait.h"
 #include "game/Gear.h"
 #include "game/LocalPlayer.h"
@@ -147,6 +149,8 @@ namespace NpcSync
 		std::vector<Heard>            heard;
 		std::atomic<std::size_t>      recording{ 0 };
 		std::atomic<std::uint64_t>    eventsLost{ 0 };
+		std::atomic<std::uint64_t>    heldActionsDropped{ 0 };  // a copy's runner's actions dropped while a pair held it (Pairs::Held)
+		std::uint64_t                 pairActionsSent = 0;      // events of a pair's (PairRules::PairEvent) sent as an NPC's actions: none should be
 
 		// The last moment our player fought each actor: a blow either way, or its combat target was our player (any thread).
 		std::mutex                                   fightLock;
@@ -240,8 +244,13 @@ namespace NpcSync
 			}
 			std::scoped_lock l{ eventLock };
 			// The engine's furniture play (sitting down, the idle, getting up) is not sent: each game plays its own
-			// (Furniture.h; it takes no lock).
-			if (runIds.contains(id) && !Furniture::EngineOwnsEvents(static_cast<RE::Actor*>(ref))) {
+			// (Furniture.h; it takes no lock). Nor is a paired animation's (a kill move): its beginning is said as a pair, and
+			// every game plays the whole pair itself (Pairs.h; its lock is taken after this one, never before).
+			const auto actor = static_cast<RE::Actor*>(ref);
+			if (runIds.contains(id)) {
+				Pairs::Noted(actor, name);
+			}
+			if (runIds.contains(id) && !Furniture::EngineOwnsEvents(actor) && !Pairs::EventsStay(actor)) {
 				if (heard.size() < MAX_PENDING_EVENTS) {
 					heard.push_back({ id, Protocol::SentMs(Clock::now()), std::string{ name } });
 				} else {
@@ -1198,6 +1207,7 @@ namespace NpcSync
 				if (SpellRules::CastEvent(event.event)) {
 					++loaded[key->second].castsSent;
 				}
+				pairActionsSent += PairRules::PairEvent(event.event) ? 1 : 0;  // (Pairs::EventsStay keeps them: the rig reads 0)
 				actions.actions.push_back({ key->second, event.sentMs, std::move(event.event) });
 				if (actions.actions.size() >= Protocol::MAX_NPC_ACTIONS) {
 					counts.actionsSent += actions.actions.size();
@@ -2087,7 +2097,20 @@ namespace NpcSync
 		}
 		// Getting in or out of furniture (Furniture.h), the engine's own update runs for it (its sit procedure is the AI's),
 		// for a few seconds at most. In it, or waiting by furniture another actor is in, it is not placed, its walk not told.
+		// The same in a paired animation played here (Pairs.h: a kill move): the engine's pairing places both actors.
 		if (Furniture::Assisted(a_actor)) {
+			return false;
+		}
+		// Its runner's actions meanwhile are dropped: they are its walk and its fight from before the pair, and played once
+		// it is let go they would pull it out of the pair's end (its death, or where the pairing left it).
+		if (Pairs::Held(a_actor)) {
+			std::scoped_lock l{ copyLock };
+			if (const auto byActor = copyByActor.find(a_actor); byActor != copyByActor.end()) {
+				if (const auto it = copies.find(byActor->second); it != copies.end() && it->second.actorId == a_actor->GetFormID()) {
+					heldActionsDropped.fetch_add(it->second.actions.Size(), std::memory_order_relaxed);
+					it->second.actions.Clear();
+				}
+			}
 			return false;
 		}
 		const bool seated = Riding::Seated(a_actor) || Furniture::Held(a_actor);
@@ -2239,13 +2262,14 @@ namespace NpcSync
 				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} letGo={} graphsReset={} statesSent={} statesIn={} "
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
 				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
-				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={}",
+				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={} "
+				"pairActionsSent={} heldActionsDropped={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
 				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
 				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad,
-				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size());
+				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size(), pairActionsSent, heldActionsDropped.load());
 		}
 		// One line per NPC: `npcs list`, or `npcs <form id>` for one. Its local form id, who runs it, its kind, where its
 		// actor is here (at=) and, for a copy, where its runner's state puts it (target=) and how far apart they are.

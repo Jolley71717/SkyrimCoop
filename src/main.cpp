@@ -16,6 +16,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Pairs.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
 #include "game/VirtualPad.h"
@@ -184,6 +185,7 @@ namespace
 			logs::warn("NPCs: copies of the NPCs this game runs show no actions in the others' games (the graph notify is not hooked)");
 		}
 		Shots::Install();  // every projectile an actor launches, said and shown (says why if not)
+		Pairs::Install();  // the load order's paired idles, by their events (kill moves said and played)
 		PlayerActions::Install();  // our player's attacks, casts and shouts, for the others' stand-in of us (says why if not)
 		LocalPlayer::NoteDefaultName();
 		NoFirstRunPrompts();
@@ -218,6 +220,7 @@ namespace
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
 			Riding::ForgetWorld();
 			Furniture::ForgetWorld();
+			Pairs::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
@@ -232,6 +235,7 @@ namespace
 			logs::info("Load: a new game started");
 			Riding::ForgetWorld();
 			Furniture::ForgetWorld();
+			Pairs::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
@@ -240,6 +244,7 @@ namespace
 		case SKSE::MessagingInterface::kSaveGame:
 			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
+			Pairs::BeforeSave();    // actors held by a pair let go: placed by their states again
 			Shots::BeforeSave();    // our launches ended first: none is in the save
 			NpcSync::BeforeSave();  // copies of spawns first: the stand-ins' save guard names them
 			RemotePlayers::BeforeSave();
@@ -277,6 +282,7 @@ namespace
 	{
 		Riding::ForgetWorld();
 		Furniture::ForgetWorld();
+		Pairs::ForgetWorld();
 		Shots::ForgetWorld();
 		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();

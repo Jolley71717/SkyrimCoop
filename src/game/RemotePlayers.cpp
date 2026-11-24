@@ -11,6 +11,7 @@
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
 #include "game/Furniture.h"
+#include "game/Pairs.h"
 #include "game/PeaceRules.h"
 #include "game/Retire.h"
 #include "game/Riding.h"
@@ -736,7 +737,7 @@ namespace RemotePlayers
 			// turned or told its walk (its actions still play: a mounted swing, a bow from the saddle).
 			// The same in furniture (Furniture.h): in it, getting in or out, or waiting by the furniture its friend is in,
 			// the engine and the furniture's marker place it, not its friend's states.
-			const bool                          seated = Riding::Seated(a_this) || Furniture::Held(a_this);
+			const bool                          seated = Riding::Seated(a_this) || Furniture::Held(a_this) || Pairs::Held(a_this);
 			{
 				std::scoped_lock l{ lock };
 				if (const auto gone = retiring.find(a_this); gone != retiring.end() && gone->second == a_this->GetFormID()) {
@@ -791,7 +792,7 @@ namespace RemotePlayers
 			}
 			// Getting in or out of furniture, the engine's own update runs for it (its sit procedure is the AI's), for a few
 			// seconds at most (SitRules::ENTRY_MAX, STAND_WAIT).
-			if (Furniture::Assisted(a_this)) {
+			if (Furniture::Assisted(a_this) || Pairs::Held(a_this)) {
 				originalUpdate(a_this, a_delta);
 			} else {
 				a_this->UpdateNoAI(a_delta);
@@ -869,6 +870,8 @@ namespace RemotePlayers
 			Riding::Release(a_actor);
 			// And out of its furniture (Furniture.h), for the same reason.
 			Furniture::Release(a_actor);
+			// And out of any paired animation playing here (Pairs.h): the other actor is let go with it.
+			Pairs::Release(a_actor);
 			// The co-save names the preset even for one standing on a copy of it: it has the preset back before any save
 			// (PutPresetBack), and a load looks for an actor of that base.
 			const auto base = a_actor->GetObjectReference();
@@ -1590,7 +1593,7 @@ namespace RemotePlayers
 				{
 					std::scoped_lock l{ lock };
 					step = Gait::Next(remote.shown, sample->state, sample->held, SwimsAsMode(actor.get()));
-					if (Riding::Seated(actor.get()) || Furniture::Held(actor.get())) {
+					if (Riding::Seated(actor.get()) || Furniture::Held(actor.get()) || Pairs::Held(actor.get())) {
 						step.events.clear();  // in the saddle (Riding.h) or furniture (Furniture.h): its walk is told again once it is out
 					} else {
 						remote.shown = step.shown;

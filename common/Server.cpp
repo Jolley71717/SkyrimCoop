@@ -71,6 +71,10 @@ namespace
 		// is dropped, never kept: its flight is over by the time a budget would let it go.
 		TokenBucket shotBudget{ 96.0, 48.0 };
 		bool        toldShotsDropped = false;
+		// Paired animations passed on (kPairs): a burst of 16, then 8 a second (a kill move takes seconds; a fight's NPCs
+		// begin a few at a time). Past it one is dropped, never kept: the pair is over by the time a budget would let it go.
+		TokenBucket pairBudget{ 16.0, 8.0 };
+		bool        toldPairsDropped = false;
 		bool        toldUnknown = false;
 	};
 
@@ -682,6 +686,30 @@ void Server::Run()
 					log(std::format("server: player {} sends shots faster than they are passed on: the rest are dropped (said once)", a_peer.playerId));
 				}
 				if (!msg->shots.empty()) {
+					msg->sender = a_peer.playerId;
+					broadcast(Protocol::Encode(*msg), true, &a_key);
+				}
+			}
+			break;
+		case MT::kPairs:
+			// To the others, the sender named: a pair its own player began, or an NPC its game runs. A player on the other
+			// side is the sender's own (an NPC of its game's on its player): in its game every other player is a stand-in no
+			// actor fights. Each within the sender's budget (past it dropped, said once).
+			if (auto msg = Protocol::DecodePairs(a_data)) {
+				const auto now = Clock::now();
+				const auto ours = [&](const Protocol::PairSide& a_side) {
+					return a_side.player != 0 ? a_side.player == a_peer.playerId : npcs.Runs(a_peer.playerId, a_side.npc);
+				};
+				std::erase_if(msg->pairs, [&](const Protocol::Pair& a_pair) {
+					return !ours(a_pair.attacker) || (a_pair.victim.player != 0 && a_pair.victim.player != a_peer.playerId);
+				});
+				const auto believed = msg->pairs.size();
+				std::erase_if(msg->pairs, [&](const Protocol::Pair&) { return !a_peer.pairBudget.Take(now); });
+				if (msg->pairs.size() < believed && !a_peer.toldPairsDropped) {
+					a_peer.toldPairsDropped = true;
+					log(std::format("server: player {} sends paired animations faster than they are passed on: the rest are dropped (said once)", a_peer.playerId));
+				}
+				if (!msg->pairs.empty()) {
 					msg->sender = a_peer.playerId;
 					broadcast(Protocol::Encode(*msg), true, &a_key);
 				}
