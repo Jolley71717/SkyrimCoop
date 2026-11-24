@@ -57,6 +57,11 @@ namespace NpcSync
 	void HitAnswers(const Protocol::NpcHitAnswers& a_msg);
 	void Healths(const Protocol::NpcHealths& a_msg);
 	void Deaths(const Protocol::NpcDeaths& a_msg);
+	// Run-time NPCs (docs/DESIGN.md, "Run-time NPCs"): what made the NPCs a friend's game made as it ran (kept, so a
+	// copy of one is kept as ours when its maker lets go of it here), and the server's answers to ours: shared as our
+	// spawn, the twin of a friend's (ours shows theirs), or no room yet.
+	void Mades(const Protocol::NpcMades& a_msg);
+	void MadeAnswers(const Protocol::NpcMadeAnswers& a_msg);
 
 	// From the Character update hook, for an actor that is no stand-in: true when it is a copy this game moves now (its
 	// AI is not run); false: the game's own update runs.
@@ -73,8 +78,10 @@ namespace NpcSync
 	// is), `npcs <form id>` (one NPC), `npcs spells [<form id>]` (the spells and voices of copies and of the NPCs this
 	// game runs: SpellRules.h), and for the rig `npcs spells find <aimed|self|summon|power>`, `npcs spells arm <local id>
 	// <right|left|voice> <spell id | 0>` (an NPC this game runs given a spell, the set-up of the step `npcspells`),
-	// `npcs spells knows <local id> <spell id>` (whether an actor knows it: the step takes back only what it taught) and
-	// `npcs spells refuse <on|off>`.
+	// `npcs spells knows <local id> <spell id>` (whether an actor knows it: the step takes back only what it taught),
+	// `npcs spells refuse <on|off>`, `npcs made` (the NPCs this game made as it ran and the friends' it heard of: what
+	// made each, shared, twin or kept from a friend) and `npcs made quests [<from>]` (quests that create an NPC at an
+	// alias, for the rig's step `made`).
 	[[nodiscard]] std::string Describe(std::string_view a_args);
 	// Developer channel `swim` (the copies' part, after ours and the stand-ins': Water::Command): how many copies' runners
 	// have them swimming and under water, how many are shown swimming, the swim events their graphs took and turned

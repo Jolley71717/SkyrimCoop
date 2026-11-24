@@ -59,7 +59,12 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	inline constexpr std::uint16_t VERSION = 24;
+	// 34: NPCs a game made as it ran that nobody commands (a quest's created alias, a world encounter, a script's
+	//    PlaceAtMe: most dragons, bandits, ambushes, patrols) are shared as spawns, with what made them (kNpcMades,
+	//    kNpcMadeAnswers: message types 89-90): the server pairs the one each game made of the same thing, and a friend's
+	//    game shows the maker's through its own (docs/DESIGN.md, "Run-time NPCs"). (As with 21: renumbered when it lands;
+	//    25-33 and types 77-88 are other changes'; 32 and 85 are claimed twice there already.)
+	inline constexpr std::uint16_t VERSION = 34;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -130,6 +135,10 @@ namespace Protocol
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
 		// 59-75: the other changes' messages (each in its own change).
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
+		// 77-88: the other changes' messages (each in its own change).
+		kNpcMades = 89,        // client -> server, reliable: NPCs our game made as it ran, and what made them; server -> the
+		                       // others: each one shared (to a joiner: every one), the maker named
+		kNpcMadeAnswers = 90,  // server -> the maker alone, reliable: each made NPC shared, the twin of another game's, or refused
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2221,6 +2230,213 @@ namespace Protocol
 	inline constexpr std::size_t PAIR_BYTES = 2 * (4 + 8) + 4 + 4 + 1 + MAX_EVENT_NAME + 1 + 4 * 4;
 	inline constexpr std::size_t MAX_PAIRS_SIZE = 1 + 4 + 1 + MAX_PAIRS * PAIR_BYTES;
 	static_assert(MAX_PAIRS <= 0xFF && MAX_PAIRS_SIZE <= 2048, "a message of pairs stays small");
+
+	// ---- run-time NPCs (kNpcMades, kNpcMadeAnswers; docs/DESIGN.md "Run-time NPCs") ----
+
+	// At most this many in one message (a game's scan finds a few at a time; a joiner's list goes in several).
+	inline constexpr std::size_t MAX_NPC_MADES = 32;
+
+	enum MadeFlags : std::uint8_t
+	{
+		kMadeByAlias = 1 << 0,  // a quest's alias created it (quest, alias name it); else a script or the engine placed it
+		kMadeGone = 1 << 1,     // from its maker: it is gone from its world (deleted or disabled), not only unloaded
+	};
+	inline constexpr std::uint8_t kMadeAllFlags = kMadeByAlias | kMadeGone;
+
+	// What made an NPC a game made as it ran, as every game can name it, and where it stands. quest and alias: the quest
+	// whose "create reference" alias holds it (0 when the reader lacks the quest's plugin), with kMadeByAlias. made: what
+	// it was made as (the alias's created object, or the NPC or leveled NPC a script placed: the same in every game, its
+	// leveled roll aside); pick: the NPC its game rolled (what a copy is placed from); body: its race, or
+	// BODY_PERSON for any person (people of every race move alike). Any of the three may be 0 (not known, or a form the
+	// reader lacks). cell, worldspace, x y z: where it stands (as a PlayerState's place: both 0, nowhere the reader has).
+	struct MadeSource
+	{
+		std::uint8_t  flags = 0;
+		std::uint32_t quest = 0;
+		std::uint32_t alias = 0;
+		std::uint32_t made = 0;
+		std::uint32_t pick = 0;
+		std::uint32_t body = 0;
+		std::uint32_t cell = 0;
+		std::uint32_t worldspace = 0;
+		float         x = 0, y = 0, z = 0;
+
+		[[nodiscard]] bool ByAlias() const { return (flags & kMadeByAlias) != 0; }
+		[[nodiscard]] bool Gone() const { return (flags & kMadeGone) != 0; }
+		bool operator==(const MadeSource&) const = default;
+	};
+
+	// Skyrim.esm's ActorTypeNPC keyword: as a body, any person.
+	inline constexpr std::uint32_t BODY_PERSON = 0x00013794;
+
+	// key: the NPC as its maker's game keys it (a spawn: its own id, spawner the maker).
+	struct NpcMade
+	{
+		NpcKey     key;
+		MadeSource source;
+		bool operator==(const NpcMade&) const = default;
+	};
+
+	// sender: 0 from a game; the server names the maker. full: every one shared (a joiner's first).
+	struct NpcMades
+	{
+		std::uint32_t        sender = 0;
+		bool                 full = false;
+		std::vector<NpcMade> mades;
+		bool operator==(const NpcMades&) const = default;
+	};
+
+	enum class MadeVerdict : std::uint8_t
+	{
+		kShared = 0,   // the maker runs it, shared as its spawn: the server has granted it (kNpcOwners said so first)
+		kTwin = 1,     // another game made the same one first (twin names it): the maker's shows that one
+		kFull = 2,     // past the maker's or the session's number of made NPCs: asked again later
+		kRefused = 3,  // not the maker's spawn to say
+	};
+	inline constexpr std::uint8_t MADE_VERDICT_COUNT = 4;
+
+	struct NpcMadeAnswer
+	{
+		NpcKey      key;
+		MadeVerdict verdict = MadeVerdict::kShared;
+		NpcKey      twin;  // kTwin: the one it shows; else none
+		bool operator==(const NpcMadeAnswer&) const = default;
+	};
+
+	struct NpcMadeAnswers
+	{
+		std::vector<NpcMadeAnswer> answers;
+		bool operator==(const NpcMadeAnswers&) const = default;
+	};
+
+	// Whether a made NPC can be: a spawn (no other game has it), known flags, an alias only with its flag, a place a game
+	// can hold.
+	[[nodiscard]] inline bool MadeHolds(const NpcMade& a_made)
+	{
+		const auto& s = a_made.source;
+		return a_made.key.id != 0 && a_made.key.IsSpawn() && (s.flags & ~kMadeAllFlags) == 0 && (s.ByAlias() || (s.quest == 0 && s.alias == 0)) && InWorld(s.x) &&
+		       InWorld(s.y) && InWorld(s.z);
+	}
+
+	inline void WriteMadeSource(Writer& a_writer, const MadeSource& a_source)
+	{
+		a_writer.U8(a_source.flags);
+		for (const auto v : { a_source.quest, a_source.alias, a_source.made, a_source.pick, a_source.body, a_source.cell, a_source.worldspace }) {
+			a_writer.U32(v);
+		}
+		for (const auto v : { a_source.x, a_source.y, a_source.z }) {
+			a_writer.F32(v);
+		}
+	}
+
+	inline MadeSource ReadMadeSource(Reader& a_reader)
+	{
+		MadeSource source;
+		source.flags = a_reader.U8();
+		for (auto* v : { &source.quest, &source.alias, &source.made, &source.pick, &source.body, &source.cell, &source.worldspace }) {
+			*v = a_reader.U32();
+		}
+		for (auto* v : { &source.x, &source.y, &source.z }) {
+			*v = a_reader.F32();
+		}
+		return source;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcMades& a_msg)
+	{
+		Writer     w{ MessageType::kNpcMades };
+		const auto count = (std::min)(a_msg.mades.size(), MAX_NPC_MADES);
+		w.U32(a_msg.sender);
+		w.U8(a_msg.full ? 1 : 0);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.mades[i].key);
+			WriteMadeSource(w, a_msg.mades[i].source);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_MADES, or a made NPC that does not hold (MadeHolds).
+	inline std::optional<NpcMades> DecodeNpcMades(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcMades msg;
+		msg.sender = r.U32();
+		const auto full = r.U8();
+		const auto count = r.U8();
+		if (!r.Ok() || full > 1 || count > MAX_NPC_MADES) {
+			return std::nullopt;
+		}
+		msg.full = full == 1;
+		msg.mades.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			NpcMade made;
+			made.key = ReadKey(r);
+			made.source = ReadMadeSource(r);
+			if (r.Ok() && !MadeHolds(made)) {
+				return std::nullopt;
+			}
+			msg.mades.push_back(made);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcMadeAnswers& a_msg)
+	{
+		Writer     w{ MessageType::kNpcMadeAnswers };
+		const auto count = (std::min)(a_msg.answers.size(), MAX_NPC_MADES);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& answer = a_msg.answers[i];
+			WriteKey(w, answer.key);
+			w.U8(static_cast<std::uint8_t>(answer.verdict));
+			WriteKey(w, answer.verdict == MadeVerdict::kTwin ? answer.twin : NpcKey{});
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_MADES, an answer of no spawn, an unknown verdict, or a twin that is no other spawn.
+	inline std::optional<NpcMadeAnswers> DecodeNpcMadeAnswers(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_NPC_MADES) {
+			return std::nullopt;
+		}
+		NpcMadeAnswers msg;
+		msg.answers.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			NpcMadeAnswer answer;
+			answer.key = ReadKey(r);
+			const auto verdict = r.U8();
+			answer.twin = ReadKey(r);
+			if (!r.Ok()) {
+				break;
+			}
+			if (!answer.key.IsSpawn() || answer.key.id == 0 || verdict >= MADE_VERDICT_COUNT) {
+				return std::nullopt;
+			}
+			answer.verdict = static_cast<MadeVerdict>(verdict);
+			const bool twin = answer.verdict == MadeVerdict::kTwin;
+			if (twin ? (!answer.twin.IsSpawn() || answer.twin.id == 0 || answer.twin.spawner == answer.key.spawner) : answer.twin != NpcKey{}) {
+				return std::nullopt;
+			}
+			msg.answers.push_back(answer);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t MADE_BYTES = 8 + 1 + 7 * 4 + 3 * 4;
+	inline constexpr std::size_t MAX_NPC_MADES_SIZE = 1 + 4 + 1 + 1 + MAX_NPC_MADES * MADE_BYTES;
+	static_assert(MAX_NPC_MADES <= 0xFF && MAX_NPC_MADES_SIZE <= 2048, "a message of made NPCs stays small");
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

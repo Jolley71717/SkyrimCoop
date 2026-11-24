@@ -292,6 +292,16 @@ namespace Session
 					NpcSync::Owners(*msg);
 				}
 				break;
+			case Protocol::MessageType::kNpcMades:
+				if (const auto msg = Protocol::DecodeNpcMades(a_data); msg && msg->sender != playerId) {
+					NpcSync::Mades(*msg);
+				}
+				break;
+			case Protocol::MessageType::kNpcMadeAnswers:
+				if (const auto msg = Protocol::DecodeNpcMadeAnswers(a_data)) {
+					NpcSync::MadeAnswers(*msg);
+				}
+				break;
 			case Protocol::MessageType::kNpcStates:
 				if (const auto msg = Protocol::DecodeNpcStates(a_data); msg && msg->runner != playerId) {
 					NpcSync::States(*msg);
