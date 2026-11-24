@@ -14,3 +14,9 @@ steam.status_playing = Грає в Skyrim у кооперативі
 party.tag_hurt = {name} ({health}%)
 
 map.found = {player}: відкрито місце «{place}»
+
+travel.offer = {player}: подорож до «{place}». Натисніть {key}, щоб вирушити слідом.
+travel.offer_somewhere = {player}: подорож. Натисніть {key}, щоб вирушити слідом.
+travel.refused_combat = Не можна вирушити слідом під час бою.
+travel.refused_weight = Завеликий вантаж, щоб вирушити слідом.
+travel.refused_now = Зараз не можна вирушити слідом.

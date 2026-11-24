@@ -14,3 +14,9 @@ steam.status_playing = Gra w Skyrim w trybie co-op
 party.tag_hurt = {name} ({health}%)
 
 map.found = {player} odkrywa: {place}
+
+travel.offer = {player} – podróż do: {place}. Naciśnij {key}, aby podążyć.
+travel.offer_somewhere = {player} – podróż. Naciśnij {key}, aby podążyć.
+travel.refused_combat = Nie można podążyć podczas walki.
+travel.refused_weight = Masz zbyt duże obciążenie, aby podążyć.
+travel.refused_now = Teraz nie można podążyć.

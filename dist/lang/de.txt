@@ -14,3 +14,9 @@ steam.status_playing = Spielt Skyrim im Koop
 party.tag_hurt = {name} ({health}%)
 
 map.found = {player} hat {place} entdeckt
+
+travel.offer = {player} reist nach {place}. Drücke {key}, um zu folgen.
+travel.offer_somewhere = {player} reist ab. Drücke {key}, um zu folgen.
+travel.refused_combat = Im Kampf kannst du nicht folgen.
+travel.refused_weight = Du trägst zu viel, um zu folgen.
+travel.refused_now = Du kannst gerade nicht folgen.

@@ -88,6 +88,7 @@ namespace FormTranslate
 		case MT::kPlayerStatus:
 		case MT::kRemoteStatus:
 		case MT::kMapMarkers:
+		case MT::kTrip:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -456,6 +457,14 @@ namespace FormTranslate
 		case MT::kMapMarkers:
 			detail::Apply<Protocol::MapMarkers>(a_packet, ctx, Protocol::DecodeMapMarkers, [&](Protocol::MapMarkers& a_msg) {
 				ctx.Entries(a_msg.markers, [&](Protocol::MapMarker& a_marker) { return ctx.Key(a_marker.ref); });
+			});
+			break;
+		// A trip: a destination the reader lacks reads none, which the reader refuses (nowhere to follow to); a place it
+		// lacks reads nowhere (no one there is near).
+		case MT::kTrip:
+			detail::Apply<Protocol::Trip>(a_packet, ctx, Protocol::DecodeTrip, [&](Protocol::Trip& a_trip) {
+				ctx.Detail(a_trip.destination);
+				ctx.Place(a_trip.fromCell, a_trip.fromWorld);
 			});
 			break;
 		default:

@@ -235,6 +235,19 @@ namespace MapShare
 		baselined = false;
 	}
 
+	const std::vector<std::uint32_t>& Places()
+	{
+		if (!scanned) {
+			Scan();
+		}
+		return markers;
+	}
+
+	std::string PlaceName(std::uint32_t a_ref)
+	{
+		return PlaceOf(a_ref);
+	}
+
 	std::string Command(std::string_view)
 	{
 		std::size_t visible = 0;

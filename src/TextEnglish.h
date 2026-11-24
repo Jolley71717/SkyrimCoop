@@ -38,5 +38,13 @@ namespace Text
 
 		// --- A friend discovered a place: it is now on our map too, ready for fast travel (src/game/MapShare.cpp) ---
 		{ "map.found", "{player} discovered {place}" },
+
+		// --- Fast travel together: a friend near us fast travelled or took a carriage, and we may follow; why following was
+		// refused (src/game/TravelTogether.cpp) ---
+		{ "travel.offer", "{player} is traveling to {place}. Press {key} to follow." },
+		{ "travel.offer_somewhere", "{player} is traveling. Press {key} to follow." },
+		{ "travel.refused_combat", "You can't follow while in combat." },
+		{ "travel.refused_weight", "You are carrying too much to follow." },
+		{ "travel.refused_now", "You can't follow right now." },
 	};
 }

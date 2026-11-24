@@ -66,7 +66,10 @@ namespace Protocol
 	// 30: the map markers a player discovers (kMapMarkers, message type 83): each game says the markers its player gains
 	//    while in the session, the server keeps them and passes on what is new, and a game puts them on its own map. (As
 	//    with 21: renumbered when it lands; 29 and types 81-82 are another change's.)
-	inline constexpr std::uint16_t VERSION = 30;
+	// 31: fast travel together (kTrip, message type 84): a player's fast travel or carriage ride is said with where they
+	//    left from and the marker they go to, so a friend who was near them may follow. (As with 21: renumbered when it
+	//    lands.)
+	inline constexpr std::uint16_t VERSION = 31;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -141,6 +144,7 @@ namespace Protocol
 		kRemoteStatus = 80,  // server -> the others (and to a joiner, each one there): that player's status
 		// 81-82: another change's.
 		kMapMarkers = 83,  // both ways, reliable: map markers a player discovered; the server names the finder (0: the session's book)
+		kTrip = 84,        // both ways, reliable: a player's fast travel or carriage ride began; the server names the traveller
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2414,6 +2418,61 @@ namespace Protocol
 	}
 
 	inline constexpr std::size_t MAX_MAP_MARKERS_SIZE = 1 + 4 + 2 + MAX_MARKERS * (4 + 1);
+
+	// ---- fast travel together (protocol 31) -----------------------------------------------------------------------
+
+	// A player's trip began (docs/DESIGN.md, "Fast travel together"): the reference they travel to (a map marker, or the
+	// marker a carriage takes them to) and where they left from, so a friend near there may follow. Sent by a game with
+	// traveller 0; the server passes it on with the traveller's player id. Not kept: an offer to follow is for then.
+	struct Trip
+	{
+		std::uint32_t traveller = 0;
+		std::uint32_t destination = 0;
+		std::uint32_t fromCell = 0;
+		std::uint32_t fromWorld = 0;
+		float         x = 0, y = 0, z = 0;
+		bool operator==(const Trip&) const = default;
+	};
+
+	// A trip goes somewhere and left from a spot a game can hold (a place the reader lacks reads none: no one is near it).
+	[[nodiscard]] inline bool TripHolds(const Trip& a_trip)
+	{
+		return a_trip.destination != 0 && InWorld(a_trip.x) && InWorld(a_trip.y) && InWorld(a_trip.z);
+	}
+
+	inline std::vector<std::uint8_t> Encode(const Trip& a_msg)
+	{
+		Writer w{ MessageType::kTrip };
+		w.U32(a_msg.traveller);
+		w.U32(a_msg.destination);
+		w.U32(a_msg.fromCell);
+		w.U32(a_msg.fromWorld);
+		for (const auto v : { a_msg.x, a_msg.y, a_msg.z }) {
+			w.F32(v);
+		}
+		return w.Data();
+	}
+
+	// None for a trip that does not hold (TripHolds).
+	inline std::optional<Trip> DecodeTrip(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Trip msg;
+		msg.traveller = r.U32();
+		msg.destination = r.U32();
+		msg.fromCell = r.U32();
+		msg.fromWorld = r.U32();
+		for (auto* v : { &msg.x, &msg.y, &msg.z }) {
+			*v = r.F32();
+		}
+		if (!r.Ok() || !r.AtEnd() || !TripHolds(msg)) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t TRIP_SIZE = 1 + 4 * 4 + 3 * 4;
 	static_assert(MAX_MARKERS <= 0xFFFF && MAX_MAP_MARKERS_SIZE <= 2048, "a message of map markers stays small");
 
 	inline constexpr std::size_t PAIR_BYTES = 2 * (4 + 8) + 4 + 4 + 1 + MAX_EVENT_NAME + 1 + 4 * 4;

@@ -21,6 +21,7 @@
 #include "game/Party.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
+#include "game/TravelTogether.h"
 #include "game/Water.h"
 #include "net/FormsCommand.h"
 #include "net/Identity.h"
@@ -298,6 +299,11 @@ namespace Session
 					MapShare::Heard(*msg);
 				}
 				break;
+			case Protocol::MessageType::kTrip:
+				if (const auto msg = Protocol::DecodeTrip(a_data); msg && msg->traveller != playerId) {
+					TravelTogether::Heard(*msg);
+				}
+				break;
 			case Protocol::MessageType::kRemoteActions:
 				if (const auto msg = Protocol::DecodeRemoteActions(a_data); msg && msg->playerId != playerId) {
 					RemotePlayers::Acted(msg->playerId, msg->actions);
@@ -540,6 +546,7 @@ namespace Session
 		Party::Clear();
 		FriendMarkers::Clear();
 		MapShare::Clear();
+		TravelTogether::Clear();
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -584,6 +591,7 @@ namespace Session
 			Pairs::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Party::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			MapShare::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			TravelTogether::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 		StandInPeace::Frame();  // after the stand-ins are placed: actors fighting one told to stop
