@@ -13,6 +13,7 @@
 #include "game/LootSync.h"
 #include "game/Pickups.h"
 #include "game/QuestSync.h"
+#include "game/Traps.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "game/WorldClock.h"
@@ -269,6 +270,12 @@ namespace DevCommands
 			return Pickups::Command(a_args);
 		}
 
+		// traps [near [radius] | pick <kind> [armed|spent] [radius] | ref <ref> | use <ref>]: world traps (Traps)
+		std::string TrapsCommand(std::string_view a_args)
+		{
+			return Traps::Command(a_args);
+		}
+
 		// talk [status] | talk pick [n] | talk subs: conversations, one player's seen and heard by the others (Conversations)
 		std::string TalkCommand(std::string_view a_args)
 		{
@@ -306,6 +313,7 @@ namespace DevCommands
 			{ "loot", LootCommand },
 			{ "drops", DropsCommand },
 			{ "pickups", PickupsCommand },
+			{ "traps", TrapsCommand },
 			{ "talk", TalkCommand },
 		};
 	}
@@ -322,7 +330,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | mainmenu | refs [near [radius] | refuse <on|off>] | ref <hex> | use <hex> | script <hex> | anims <hex> | enables <hex> [radius] | quests [pick [n] | runpick <radiant|shared> [n] [plain|loc|event] | run <id> | start <id> [here | at <location>]] | quest <editor id or hex> | clock [pick <clear|cloudy|rain|snow> [n] | weather <hex> | release] | loot [near [radius] | inv <hex> | take <holder> <item> <n> | put <holder> <item> <n> | find <book|key|weapon|misc>] | drops [list | drop <item hex> <n> | take <drop id> | count <item hex> | ref <ref hex>] | pickups [near [radius] | pick <item|book|key|flora> [radius] | ref <ref hex> | take <ref hex>] | talk [pick [n] | subs]";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | strays | graph <player> [...] | pad ... | walkto ... | console <command> | mainmenu | refs [near [radius] | refuse <on|off>] | ref <hex> | use <hex> | script <hex> | anims <hex> | enables <hex> [radius] | quests [pick [n] | runpick <radiant|shared> [n] [plain|loc|event] | run <id> | start <id> [here | at <location>]] | quest <editor id or hex> | clock [pick <clear|cloudy|rain|snow> [n] | weather <hex> | release] | loot [near [radius] | inv <hex> | take <holder> <item> <n> | put <holder> <item> <n> | find <book|key|weapon|misc>] | drops [list | drop <item hex> <n> | take <drop id> | count <item hex> | ref <ref hex>] | pickups [near [radius] | pick <item|book|key|flora> [radius] | ref <ref hex> | take <ref hex>] | traps [near [radius] | pick <tripwire|hinge|rockfall|breakaway|bear|soulgem|oneshot|any> [armed|spent] [radius] | ref <ref hex> | use <ref hex>] | talk [pick [n] | subs]";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

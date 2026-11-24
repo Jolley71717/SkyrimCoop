@@ -6,6 +6,7 @@
 #include "LootLog.h"
 #include "Name.h"
 #include "PickupBook.h"
+#include "TrapBook.h"
 #include "QuestBook.h"
 #include "QuestRuns.h"
 #include "Redact.h"
@@ -117,6 +118,13 @@ namespace
 		TokenBucket   pickupAskBudget{ 2.0, 0.2 };
 		bool          pickupAsksOwed = false;
 		std::uint64_t pickupsDropped = 0;
+		// World traps (docs/DESIGN.md, "Traps"): batches, a burst of 16 then 4 a second (a game sends at most four a second,
+		// and a dungeon's traps go off a few at a time); past it dropped (said once, counted). Asks for every kept one again,
+		// as for pickups: owed past the budget.
+		TokenBucket   trapBudget{ 16.0, 4.0 };
+		TokenBucket   trapAskBudget{ 2.0, 0.2 };
+		bool          trapAsksOwed = false;
+		std::uint64_t trapsDropped = 0;
 		bool        toldNotHost = false;
 		bool        toldUnknown = false;
 	};
@@ -248,6 +256,9 @@ void Server::Run()
 	// What players took from the world (common/PickupBook.h), in the table's numbering: a new session starts it empty.
 	PickupBook pickups;
 	bool       pickupsFullSaid = false;
+	// What became of the world's traps (common/TrapBook.h), in the table's numbering: a new session starts it empty.
+	TrapBook traps;
+	bool     trapsFullSaid = false;
 
 	const auto send = [&](const PeerKey& a_to, const std::vector<std::uint8_t>& a_packet, bool a_reliable) {
 		transports[a_to.first]->Send(a_to.second, a_packet, a_reliable);
@@ -335,6 +346,13 @@ void Server::Run()
 	// session's clock, marked a catch-up.
 	const auto sendPickups = [&](const PeerKey& a_to, std::uint32_t a_playerId) {
 		for (const auto& packet : Protocol::PickupBatches(pickups.For(a_playerId, sessionDay()), MT::kRemotePickups, true)) {
+			send(a_to, packet, true);
+		}
+	};
+
+	// Every kept trap not that player's own to one game (a joiner, or one that loaded a save), marked a catch-up.
+	const auto sendTraps = [&](const PeerKey& a_to, std::uint32_t a_playerId) {
+		for (const auto& packet : Protocol::TrapBatches(traps.For(a_playerId), MT::kRemoteTraps, true)) {
 			send(a_to, packet, true);
 		}
 	};
@@ -445,6 +463,8 @@ void Server::Run()
 			talks.Clear();  // ... and who talked with whom
 			pickups.Clear();  // ... and what was taken from its world
 			pickupsFullSaid = false;
+			traps.Clear();  // ... and what became of its traps
+			trapsFullSaid = false;
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -496,6 +516,7 @@ void Server::Run()
 		sendRefs(a_key);
 		sendQuests(a_key);  // ... and its quests: the stages done, the objectives, the ends
 		sendPickups(a_key, a_peer.playerId);  // ... and what the others took from the world (theirs is in their world)
+		sendTraps(a_key, a_peer.playerId);    // ... and the traps the others set off or disarmed
 		// ... and its clock, while the game that said it still owns it (a report is at most a few seconds old)
 		if (sessionClock && sessionClock->playerId != a_peer.playerId && sessionClock->playerId == clockOwner()) {
 			send(a_key, Protocol::Encode(*sessionClock, MT::kRemoteClock), true);
@@ -655,6 +676,49 @@ void Server::Run()
 					sendPickups(a_key, a_peer.playerId);
 				} else {
 					a_peer.pickupAsksOwed = true;  // answered from the loop once the budget has room: never dropped
+				}
+			}
+			break;
+		case MT::kTraps:
+			// Each entry new to the session is kept and goes to the others (never back to its reporter: its world spent the
+			// trap); the rest are what the session holds already. Never answered: a game paces itself well under the budget,
+			// and one past it is dropped (said once, counted).
+			if (const auto batch = Protocol::DecodeTrapBatch(a_data)) {
+				if (!a_peer.trapBudget.Take(Clock::now())) {
+					if (a_peer.trapsDropped++ == 0) {
+						log(std::format("server: player {} says what became of its traps faster than the server passes it on; dropped (counted after this)", a_peer.playerId));
+					}
+					break;
+				}
+				std::vector<Protocol::Trap> news;
+				for (const auto& entry : batch->entries) {
+					Protocol::Trap out;
+					switch (traps.Report(entry, a_peer.playerId, out)) {
+					case TrapBook::Take::kNews:
+						news.push_back(out);
+						break;
+					case TrapBook::Take::kFull:
+						if (!std::exchange(trapsFullSaid, true)) {
+							log(std::format("server: the session keeps {} traps, its most; a new one is not kept or passed on", traps.Size()));
+						}
+						break;
+					case TrapBook::Take::kSame:
+					case TrapBook::Take::kRefused:
+						break;
+					}
+				}
+				for (const auto& packet : Protocol::TrapBatches(news, MT::kRemoteTraps)) {
+					broadcast(packet, true, &a_key);
+				}
+			}
+			break;
+		case MT::kAskTraps:
+			if (a_data.size() == 1) {
+				if (a_peer.trapAskBudget.Take(Clock::now())) {
+					a_peer.trapAsksOwed = false;
+					sendTraps(a_key, a_peer.playerId);
+				} else {
+					a_peer.trapAsksOwed = true;  // answered from the loop once the budget has room: never dropped
 				}
 			}
 			break;
@@ -1044,6 +1108,10 @@ void Server::Run()
 			if (peer.joined && peer.pickupAsksOwed && peer.pickupAskBudget.Take(now)) {
 				peer.pickupAsksOwed = false;
 				sendPickups(key, peer.playerId);
+			}
+			if (peer.joined && peer.trapAsksOwed && peer.trapAskBudget.Take(now)) {
+				peer.trapAsksOwed = false;
+				sendTraps(key, peer.playerId);
 			}
 			if (peer.joined && peer.clockOwed && sessionClock && sessionClock->playerId == peer.playerId && peer.clockBudget.Take(now)) {
 				peer.clockOwed = false;
