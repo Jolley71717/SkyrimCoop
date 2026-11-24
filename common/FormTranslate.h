@@ -24,7 +24,8 @@
 // - a place (a player state's cell and worldspace, as a pair) becomes "nowhere this game has" (both 0), so the reader
 //   shows no one there rather than someone in the wrong cell;
 // - an entry of a list is left out: a worn item;
-// - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has);
+// - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has); a
+//   clock's worldspace and weather (a weather of a worldspace with none goes with it: nothing is forced from it);
 // - the reference a door's state or a mechanism's use is about becomes 0, which no game applies and the server keeps
 //   nothing of: a door of a plugin some game lacks is that game's own;
 // - an entry of a quest batch whose quest has no ID is left out (a mod's quest some game lacks is that game's own); a
@@ -81,6 +82,8 @@ namespace FormTranslate
 		case MT::kQuests:
 		case MT::kRemoteQuests:
 		case MT::kQuestAnswer:
+		case MT::kClock:
+		case MT::kRemoteClock:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -236,6 +239,29 @@ namespace FormTranslate
 			}
 		}
 
+		// A clock, written back with its own type (kClock or kRemoteClock): its worldspace and its weather, each none (0)
+		// when it has no ID on the other side. A weather is said only for a worldspace: with the worldspace gone, the
+		// weather goes too (a mod's worldspace another game lacks says nothing of that game's skies).
+		inline void ApplyClock(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeClockState(a_packet);
+			if (!msg) {
+				return;
+			}
+			a_ctx.Detail(msg->worldspace);
+			if (msg->worldspace == 0 && msg->weather != 0) {
+				msg->weather = 0;
+				++a_ctx.out.fields;
+				a_ctx.changed = true;
+			} else {
+				a_ctx.Detail(msg->weather);
+			}
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
@@ -283,6 +309,10 @@ namespace FormTranslate
 		case MT::kRemoteQuests:
 		case MT::kQuestAnswer:
 			detail::ApplyQuests(a_packet, ctx, *type);
+			break;
+		case MT::kClock:
+		case MT::kRemoteClock:
+			detail::ApplyClock(a_packet, ctx, *type);
 			break;
 		default:
 			break;

@@ -63,6 +63,12 @@ namespace
 		TokenBucket questAskBudget{ 2.0, 0.2 };
 		bool        questAsksOwed = false;
 		std::uint64_t questsDropped = 0;
+		// The clock (docs/DESIGN.md, "Time and weather"): every game says its own every 5 s and on a change; only the
+		// clock owner's is passed on, a burst of 4 then one a second. Past the budget the newest is kept and owed, as looks.
+		Clock::time_point joinedAt{};
+		TokenBucket       clockBudget{ 4.0, 1.0 };
+		bool              clockOwed = false;
+		bool              toldNotClockOwner = false;
 		bool        toldNotHost = false;
 		bool        toldUnknown = false;
 	};
@@ -172,6 +178,8 @@ void Server::Run()
 	// session, and cleared when the host's game says its world is new (kQuestReset).
 	QuestBook quests;
 	bool      questsFullSaid = false;
+	// The session's clock: the clock owner's last report, kept for whoever joins (a new session starts with none).
+	std::optional<Protocol::ClockState> sessionClock;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -201,6 +209,24 @@ void Server::Run()
 		if (a_peer.playerId == hostId) {
 			hostId = 0;
 		}
+	};
+
+	// Whose clock is the session's: the host's game while it is in, else the player in the session longest (a dedicated
+	// server's session, or the host gone), the lower player id on a tie; 0 with nobody in. As the sister project's.
+	const auto clockOwner = [&]() -> std::uint32_t {
+		const Peer* longest = nullptr;
+		for (const auto& [key, peer] : peers) {
+			if (!peer.joined) {
+				continue;
+			}
+			if (hostId != 0 && peer.playerId == hostId) {
+				return hostId;
+			}
+			if (!longest || peer.joinedAt < longest->joinedAt || (peer.joinedAt == longest->joinedAt && peer.playerId < longest->playerId)) {
+				longest = &peer;
+			}
+		}
+		return longest ? longest->playerId : 0;
 	};
 
 	// Every kept door state to one game, the session's word (player id 0), in the order first reported.
@@ -273,6 +299,7 @@ void Server::Run()
 			refsFullSaid = false;
 			quests.Clear();        // ... and the quests
 			questsFullSaid = false;
+			sessionClock.reset();  // ... and its clock was another world's
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -305,6 +332,8 @@ void Server::Run()
 		a_peer.identity = hello->identity;
 		a_peer.name = Name::Shown(hello->name, a_peer.playerId);
 		a_peer.anyState = false;
+		a_peer.joinedAt = Clock::now();
+		a_peer.clockOwed = false;
 		if (options.hostIdentity != 0 && hello->identity == options.hostIdentity && transports[a_key.first]->IsLocal(a_key.second)) {
 			hostId = a_peer.playerId;
 		}
@@ -321,6 +350,10 @@ void Server::Run()
 		// The session's doors, after the players: what was opened, closed, locked and picked before they came.
 		sendRefs(a_key);
 		sendQuests(a_key);  // ... and its quests: the stages done, the objectives, the ends
+		// ... and its clock, while the game that said it still owns it (a report is at most a few seconds old)
+		if (sessionClock && sessionClock->playerId != a_peer.playerId && sessionClock->playerId == clockOwner()) {
+			send(a_key, Protocol::Encode(*sessionClock, MT::kRemoteClock), true);
+		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
 		log(std::format("server: player {} joined from {}{} ({} in the session)", a_peer.playerId, transports[a_key.first]->Describe(a_key.second),
@@ -502,6 +535,27 @@ void Server::Run()
 				broadcast(Protocol::Encode(Protocol::QuestReset{ a_peer.playerId }, true), true, &a_key);
 			}
 			break;
+		case MT::kClock:
+			// Every game says its clock; only the owner's is the session's (kept, and passed on to the others). The
+			// others' are read and dropped, said once for each connection: a friend's wait, sleep or console never moves
+			// anyone else's time, and their game is brought back to the owner's.
+			if (auto said = Protocol::DecodeClockState(a_data)) {
+				if (const auto owner = clockOwner(); a_peer.playerId != owner) {
+					if (!std::exchange(a_peer.toldNotClockOwner, true)) {
+						log(std::format("server: player {} does not keep the session's clock (player {} does): its clock is not passed on", a_peer.playerId, owner));
+					}
+					break;
+				}
+				said->playerId = a_peer.playerId;
+				sessionClock = *said;
+				if (a_peer.clockBudget.Take(Clock::now())) {
+					a_peer.clockOwed = false;
+					broadcast(Protocol::Encode(*said, MT::kRemoteClock), true, &a_key);
+				} else {
+					a_peer.clockOwed = true;  // the newest goes once the budget allows
+				}
+			}
+			break;
 		case MT::kHeartbeat:
 			if (const auto beat = Protocol::DecodeHeartbeat(a_data); beat && a_peer.heartbeats.Take(Clock::now())) {
 				// Unreliable, as the heartbeat itself is sent: a resend would measure the resend, not the connection.
@@ -560,6 +614,10 @@ void Server::Run()
 			if (peer.joined && peer.asksOwed && peer.askBudget.Take(now)) {
 				peer.asksOwed = false;
 				sendRefs(key);
+			}
+			if (peer.joined && peer.clockOwed && sessionClock && sessionClock->playerId == peer.playerId && peer.clockBudget.Take(now)) {
+				peer.clockOwed = false;
+				broadcast(Protocol::Encode(*sessionClock, MT::kRemoteClock), true, &key);
 			}
 			if (peer.joined && peer.questAsksOwed && peer.questAskBudget.Take(now)) {
 				peer.questAsksOwed = false;

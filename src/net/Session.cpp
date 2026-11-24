@@ -10,6 +10,7 @@
 #include "game/LocalPlayer.h"
 #include "game/QuestSync.h"
 #include "game/RemotePlayers.h"
+#include "game/WorldClock.h"
 #include "game/WorldObjects.h"
 #include "net/FormsCommand.h"
 #include "net/Identity.h"
@@ -221,6 +222,7 @@ namespace Session
 					nextState = nextLooks = nextBeat = Clock::now();
 					WorldObjects::Welcomed(playerId);  // the session's doors follow the welcome
 					QuestSync::Welcomed(playerId, playerId == hostId);  // ... and its quests (the host's game says its own)
+					WorldClock::Welcomed(playerId);  // ... and its clock: lined up afresh with the owner's
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -239,6 +241,7 @@ namespace Session
 			case Protocol::MessageType::kPlayerLeft:
 				if (const auto msg = Protocol::DecodePlayerLeft(a_data)) {
 					RemotePlayers::Left(msg->playerId);
+					WorldClock::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -280,6 +283,11 @@ namespace Session
 			case Protocol::MessageType::kQuestReset:
 				if (const auto msg = Protocol::DecodeQuestReset(a_data, true); msg && welcomed && msg->playerId != playerId) {
 					QuestSync::HostReset(msg->playerId);
+				}
+				break;
+			case Protocol::MessageType::kRemoteClock:
+				if (const auto msg = Protocol::DecodeClockState(a_data); msg && welcomed) {
+					WorldClock::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -418,6 +426,7 @@ namespace Session
 		RemotePlayers::Clear();
 		WorldObjects::Clear();
 		QuestSync::Clear();
+		WorldClock::Clear();
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -455,6 +464,7 @@ namespace Session
 			SendOurs(Clock::now());
 			WorldObjects::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			QuestSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
+			WorldClock::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 		}
 		RemotePlayers::Frame();
 	}
