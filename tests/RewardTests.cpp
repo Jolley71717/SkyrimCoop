@@ -195,6 +195,7 @@ TEST("reward judge: a key is the door's, not a reward; anything else a player ca
 TEST("reward judge: an item a stage of the quest made here from the session's word just gave is that stage's, not our reward")
 {
 	auto talk = Talking();
+	talk.dialogue = T0 + 5s;  // still talking
 	talk.madeAt = T0 + 1s;  // another player's step made here as we talk: its fragment gave this
 	CHECK(Judge(talk, T0 + 1500ms, ItemKind::kMisc) == Why::kMade);
 	CHECK(Judge(talk, T0 + 1s + MADE_GRACE, ItemKind::kMisc) == Why::kMade);
