@@ -7,6 +7,7 @@
 #include "Redact.h"
 #include "Server.h"
 #include "game/Face.h"
+#include "game/Bodies.h"
 #include "game/Furniture.h"
 #include "game/LooseObjects.h"
 #include "game/FaceRules.h"
@@ -241,6 +242,7 @@ namespace Session
 					Riding::Started(playerId);
 					Furniture::Started(playerId);
 					LooseObjects::Started(playerId);
+					Bodies::Started(playerId);
 					Shots::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
@@ -344,6 +346,11 @@ namespace Session
 			case Protocol::MessageType::kObjectRests:
 				if (const auto msg = Protocol::DecodeObjectRests(a_data); msg && (msg->sender == 0 || msg->sender != playerId)) {
 					LooseObjects::Rests(*msg);
+				}
+				break;
+			case Protocol::MessageType::kBodies:
+				if (const auto msg = Protocol::DecodeBodies(a_data); msg && (msg->sender == 0 || msg->sender != playerId)) {
+					Bodies::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kShots:
@@ -522,6 +529,7 @@ namespace Session
 		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
 		Furniture::Clear();  // and sitters out of their furniture
 		LooseObjects::Clear();  // what friends held falls
+		Bodies::Clear();
 		NpcSync::Clear();
 		RemotePlayers::Clear();
 		Reset();
@@ -566,6 +574,7 @@ namespace Session
 			Furniture::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			LooseObjects::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Bodies::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 	}
