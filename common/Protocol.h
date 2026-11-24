@@ -59,11 +59,11 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	// 25: an NPC's state carries its graph's flight values (NpcGraph: TurnDelta, PitchDelta, TargetSpeed), which the
+	// 26: an NPC's state carries its graph's flight values (NpcGraph: TurnDelta, PitchDelta, TargetSpeed), which the
 	//    engine feeds a graph from the actor's movement and a copy has none of, so a copied dragon banks, climbs and
 	//    dives as its runner's does; and whether it is a body that died flying and still crashes (NpcGraph::crash).
-	//    (As with 21: renumbered when it lands.)
-	inline constexpr std::uint16_t VERSION = 25;
+	//    (As with 21: renumbered when it lands; 25 is another change's.)
+	inline constexpr std::uint16_t VERSION = 26;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;

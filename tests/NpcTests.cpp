@@ -94,7 +94,7 @@ TEST("npc protocol: claims, owners, states, actions and gear read back as they w
 
 	const Protocol::NpcStates states{ .runner = 2, .npcs = { { GUARD, 0x00013BBF, StateAt(5, 10.0f) }, { ATRONACH_OF_1, 0x000204C0, StateAt(9, -40.0f) } } };
 	CHECK(Protocol::DecodeNpcStates(Protocol::Encode(states)) == states);
-	// A dragon's, its flight values with it (protocol 25), and a body that died flying and still crashes.
+	// A dragon's, its flight values with it (protocol 26), and a body that died flying and still crashes.
 	const Protocol::NpcGraph flight{ .turnDelta = -1234, .pitchDelta = 567, .targetSpeed = 1800 };
 	const Protocol::NpcGraph crash{ .turnDelta = 12, .pitchDelta = -3, .targetSpeed = 0, .crash = true };
 	const Protocol::NpcStates dragons{ .runner = 2, .npcs = { { WOLF, 0x000F77F8, StateAt(3, 20.0f), flight }, { GUARD, 0x000F77F8, StateAt(4, 20.0f), crash } } };
