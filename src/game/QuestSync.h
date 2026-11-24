@@ -20,8 +20,8 @@ namespace SKSE
 // (TESQuestStartStopEvent), and, polled every second, the objectives and ends of the shared quests that run and the
 // references and locations their aliases hold. Each is reported when the session doesn't know it yet. The session's
 // word is made here where this game is behind, by the game's own console commands (setstage, SetObjectiveDisplayed,
-// SetObjectiveCompleted, CompleteQuest), a stage at a time, so each quest's own scripts run here as they ran in the game
-// that did the step. The host's game says its world's quests at its welcome and after each load (kQuestReset, then its
+// SetObjectiveCompleted, SetObjectiveFailed, CompleteQuest; a failed end by the quest's own flag), a stage at a time,
+// so each quest's own scripts run here as they ran in the game that did the step. The host's game says its world's quests at its welcome and after each load (kQuestReset, then its
 // runs and its snapshot): the host's save is the world.
 //
 // Runs: the host's game says each shared quest and radiant job it starts (kQuestRun) with the references and locations

@@ -114,7 +114,8 @@ namespace QuestSync
 			std::uint64_t stopped = 0;     // ... of a quest this game stopped part way without ending: not started again
 			std::uint64_t parked = 0;      // ... the session's past on a quest it ended and this game never started: put aside
 			std::uint64_t parkedQuests = 0;  // quests started here whose word put aside was given back to be made (Unpark)
-			std::uint64_t failedKept = 0;  // ... an objective failed or a quest failed: not made (no console for it)
+			std::uint64_t failedKept = 0;  // ... an objective failed this game has no command for, or a quest failed that completed here: not made
+			std::uint64_t failedMade = 0;  // ... a quest failed: made by its flag (its stages did not fail it here)
 			std::uint64_t answered = 0;    // our entries the server answered (not news)
 			std::uint64_t busy = 0;        // ... of them busy: sent again
 			std::uint64_t refused = 0;     // ... refused or full: kept as this game's own, not offered again
@@ -871,6 +872,50 @@ namespace QuestSync
 		StartStopSink startStopSink;
 		bool installed = false;
 
+		// A failed objective is made by the game's own SetObjectiveFailed (the script command beside GetObjectiveFailed,
+		// as SetObjectiveCompleted makes a completed one), when this game's command table has it with the parameters
+		// SetObjectiveCompleted takes (a quest, an objective, a flag): read once at Install, and said in the log.
+		bool canFailObjective = false;
+
+		bool FailObjectiveCommand()
+		{
+			const auto fail = RE::SCRIPT_FUNCTION::LocateScriptCommand("SetObjectiveFailed");
+			const auto complete = RE::SCRIPT_FUNCTION::LocateScriptCommand("SetObjectiveCompleted");
+			const auto sameParams = [&] {
+				if (!fail || !complete || !fail->executeFunction || fail->numParams != complete->numParams || fail->numParams != 3 || !fail->params ||
+					!complete->params) {
+					return false;
+				}
+				for (std::uint16_t i = 0; i < fail->numParams; ++i) {
+					if (fail->params[i].paramType.get() != complete->params[i].paramType.get()) {
+						return false;
+					}
+				}
+				return fail->params[0].paramType.get() == RE::SCRIPT_PARAM_TYPE::kQuest;
+			}();
+			if (sameParams) {
+				logs::info("Quests: the game's SetObjectiveFailed takes a quest, an objective and a flag: a failed objective is made here");
+			} else {
+				logs::warn("Quests: the game's SetObjectiveFailed is {} (parameters: {}); a failed objective is counted, not made (failedKept=)",
+					fail ? "not as SetObjectiveCompleted" : "not there", fail ? fail->numParams : 0);
+			}
+			return sameParams;
+		}
+
+		// A failed end: the console has no command for it (a quest fails by its stage's log entry, which `setstage` runs as
+		// it ran where it failed), so a quest the session's word has failed and whose stages did not fail here (one held
+		// far and given up, a branch this game took another way) is failed by the engine's own flag, saved as the quest's
+		// flags are (its change flag set). Never on a quest that completed here: its end was the other way.
+		bool FailHere(RE::TESQuest* a_quest)
+		{
+			if (a_quest->IsCompleted()) {
+				return false;
+			}
+			a_quest->data.flags.set(RE::QuestFlag::kFailed);
+			a_quest->AddChange(RE::TESQuest::ChangeFlags::kQuestFlags);
+			return true;
+		}
+
 		// The console commands are run from the tick, which until the frame hook runs on SKSE's task queue (as the doors'
 		// writes are: WorldObjects.cpp): counted when off the main thread, said once.
 		void NoteThread()
@@ -1021,7 +1066,11 @@ namespace QuestSync
 					if (make.end == 1) {
 						ran = Run(std::format("setobjectivecompleted {} {} 1", name, a_entry.index)) || ran;
 					} else if (make.end == 2) {
-						++counts.failedKept;  // no console command fails one objective: the quest's own stage does
+						if (canFailObjective) {
+							ran = Run(std::format("setobjectivefailed {} {} 1", name, a_entry.index)) || ran;
+						} else {
+							++counts.failedKept;  // this game's command table has no SetObjectiveFailed as expected (said at Install)
+						}
 					}
 					if (ran) {
 						++counts.made;
@@ -1041,7 +1090,17 @@ namespace QuestSync
 				}
 				break;
 			case Entry::kFailed:
-				++counts.failedKept;  // a failure is its stage's (a fail-quest stage): made as a stage, not on its own
+				NoteThread();
+				if (FailHere(quest)) {
+					++counts.made;
+					++counts.failedMade;
+					lastMade = std::format("{} failed", name);
+					logs::info("Quests: failed {} here (the session's word; its stages did not fail it here)", name);
+					CheckLater(a_entry);
+				} else {
+					++counts.failedKept;
+					logs::info("Quests: {} failed in the session's word but completed here: kept as it is", name);
+				}
 				break;
 			default:
 				break;
@@ -1385,6 +1444,7 @@ namespace QuestSync
 		}
 		events->AddEventSink<RE::TESQuestStageEvent>(&sink);
 		events->AddEventSink<RE::TESQuestStartStopEvent>(&startStopSink);
+		canFailObjective = FailObjectiveCommand();
 		installed = true;
 		logs::info("Quests: watching quest stages (stage events), starts and stops (events), objectives, ends and aliases (polled)");
 		return true;
@@ -2120,7 +2180,7 @@ namespace QuestSync
 			const auto look = [](const Entry& a_e, std::uint32_t a_r) { return Look(a_e, a_r); };
 			return std::format("installed={} host={} quests={} shared={} own={} radiant={} misc={} untyped={} noname={} doneBit={} session={}/{} outstanding={} "
 							   "based={} kept={} wants={} inflight={} held={} events={} sent={} heard={} made={} has={} missing={} nothere={} ownStages={} farPast={} farHeld={} farLeft={} farWaited={} "
-							   "passed={} notStarted={} stopped={} parked={}/{} parkedNow={}/{} unparked={} failedKept={} answered={} busy={} refused={} stuck={} lastStuck={} asks={} "
+							   "passed={} notStarted={} stopped={} parked={}/{} parkedNow={}/{} unparked={} failedKept={} failedMade={} failObjective={} answered={} busy={} refused={} stuck={} lastStuck={} asks={} "
 							   "resets={} resetsSeen={} reportsDropped={} rebases={} beforeReset={} resetsOut={} echoMissed={} snapshots={}/{} snapshotEnded={} "
 							   "apart={} lastApart={} apartStages={} apartHeld={} moved={} lastMoved={} lastMade={} unmade={} lastUnmade={} wantsDropped={} "
 							   "eventsDropped={} offmain={} norun={} runs={} runsSent={} runsHeard={} runsStarted={} runsAdopted={} runsGaveUp={} forced={} "
@@ -2131,7 +2191,7 @@ namespace QuestSync
 				!bit ? "unread" : bit->trusted ? "trusted" : "untrusted", view.Quests(), view.Entries(), view.Outstanding(), view.Based(), view.Kept(), maker.Size(),
 				maker.InFlight(), maker.Held(look, Clock::now()), Counted(counts.events), Counted(counts.sent), Counted(counts.heard), Counted(counts.made), Counted(counts.has),
 				Counted(counts.missing), Counted(counts.notHere), Counted(counts.own), Counted(counts.farPast), Counted(counts.farHeld), Counted(counts.farLeft), Counted(counts.farWaited), Counted(counts.passed), Counted(counts.notStarted), Counted(counts.stopped),
-				Counted(counts.parked), Counted(counts.parkedQuests), maker.Parked(), maker.ParkedQuests(), Counted(maker.Unparked()), Counted(counts.failedKept), Counted(counts.answered), Counted(counts.busy), Counted(counts.refused), Counted(maker.Stuck()),
+				Counted(counts.parked), Counted(counts.parkedQuests), maker.Parked(), maker.ParkedQuests(), Counted(maker.Unparked()), Counted(counts.failedKept), Counted(counts.failedMade), canFailObjective ? 1 : 0, Counted(counts.answered), Counted(counts.busy), Counted(counts.refused), Counted(maker.Stuck()),
 				maker.LastStuck() ? std::format("{:08X}:{}", maker.LastStuck()->questId, maker.LastStuck()->index) : "none"s, Counted(counts.asks),
 				Counted(counts.resets), Counted(counts.resetsSeen), Counted(counts.reportsDropped), Counted(counts.rebases), Counted(counts.beforeReset), resetsOut, Counted(counts.echoMissed), Counted(counts.snapshots), Counted(counts.snapshotEntries), Counted(counts.snapshotEnded),
 				Counted(apart.Quests()),
