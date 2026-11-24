@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Protocol.h"
+#include "game/GaitDrive.h"
 
 namespace SKSE
 {
@@ -61,6 +62,21 @@ namespace RemotePlayers
 
 	[[nodiscard]] std::size_t Count();
 
+	// For the copies of other games' NPCs (NpcSync), which go through the same hooks:
+	// Whether an actor is one of this game's stand-ins, or an actor of ours on its way out of the world.
+	[[nodiscard]] bool IsOurs(const RE::Actor* a_actor);
+	// Each friend's newest state, as it came (their place, for who is nearest an NPC).
+	[[nodiscard]] std::vector<Protocol::PlayerState> FriendStates();
+	// How many copies NpcSync moves: while any, the actor update hook asks NpcSync::UpdateCopy about every Character
+	// that is not a stand-in, and the leg channels look actors up.
+	void SetCopies(std::size_t a_count);
+	// What a copy's graph is given for Speed and Direction from now on (GaitDrive.h), and no more.
+	void DriveLegs(RE::Actor* a_actor, GaitDrive::Values a_values);
+	void StopLegs(RE::Actor* a_actor);
+	// An actor this game placed (a copy of a spawn) goes out of the world as a stand-in does: disabled, then deleted
+	// (Retire.h), its AI off meanwhile, taken out before a save and named in the co-save until it is gone.
+	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
+
 	// Developer channel: `standins` (one line each), `strays` (placed actors of a preset base in the loaded game:
 	// 0 outside a session means nothing of a session was saved), `graph <player> [event <name> | vars]`.
 	[[nodiscard]] std::string Describe();
@@ -69,5 +85,5 @@ namespace RemotePlayers
 
 	// The co-save record's type: "SKST" (stand-ins).
 	inline constexpr std::uint32_t COSAVE_STANDINS = 0x54534B53;
-	inline constexpr std::uint32_t COSAVE_STANDINS_VERSION = 1;
+	inline constexpr std::uint32_t COSAVE_STANDINS_VERSION = 2;  // 2: each actor's base too (copies of spawns are in it)
 }

@@ -11,6 +11,7 @@
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
+#include "game/NpcSync.h"
 #include "game/RemotePlayers.h"
 #include "game/VirtualPad.h"
 #include "net/Session.h"
@@ -172,6 +173,9 @@ namespace
 		if (!RemotePlayers::Install()) {
 			logs::warn("Players: no stand-ins in this game (the Character update is not hooked); a session still runs");
 		}
+		if (!NpcSync::Install()) {
+			logs::warn("NPCs: copies of the NPCs this game runs show no actions in the others' games (the graph notify is not hooked)");
+		}
 		LocalPlayer::NoteDefaultName();
 		NoFirstRunPrompts();
 		RunInBackground();  // before the first tick: the main menu must not stall either
@@ -203,6 +207,7 @@ namespace
 		case SKSE::MessagingInterface::kPreLoadGame:
 			// Which save is loaded: the line a report of "an old save" is read by.
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
+			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
@@ -213,12 +218,14 @@ namespace
 			break;
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
+			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:
 			// Sent before the game writes the save: no stand-in is in the world while it does.
 			logs::info("Save: saving \"{}\"", MessageText(a_msg));
+			NpcSync::BeforeSave();  // copies of spawns first: the stand-ins' save guard names them
 			RemotePlayers::BeforeSave();
 			break;
 		case SKSE::MessagingInterface::kDeleteGame:
@@ -252,6 +259,7 @@ namespace
 
 	void OnRevert(SKSE::SerializationInterface*)
 	{
+		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();
 	}
 

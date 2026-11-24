@@ -6,8 +6,10 @@
 #include "game/GaitDrive.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
+#include "game/NpcSync.h"
 #include "game/Retire.h"
 #include "game/StateBuffer.h"
+#include "game/VtableHook.h"
 
 #include <Windows.h>
 
@@ -58,6 +60,14 @@ namespace RemotePlayers
 		std::unordered_map<RE::Actor*, RE::FormID>    retiring;  // stand-ins on their way out -> their form id
 		std::atomic<std::size_t>                  standIns{ 0 };
 		std::atomic<std::size_t>                  watched{ 0 };  // byActor and retiring: the hook looks only when some
+		// Copies of other games' NPCs this game shows (NpcSync): while there are some, the hook asks NpcSync about every
+		// other Character, and the leg channels look them up.
+		std::atomic<std::size_t> copies{ 0 };
+
+		bool Watching()
+		{
+			return watched.load(std::memory_order_relaxed) != 0 || copies.load(std::memory_order_relaxed) != 0;
+		}
 
 		void CountWatched()  // under lock
 		{
@@ -71,6 +81,7 @@ namespace RemotePlayers
 		{
 			RE::ActorHandle                  actor;
 			RE::FormID                       id = 0;
+			RE::FormID                       base = 0;    // what it was placed from: a load only removes an actor of that base
 			Clock::time_point                placedAt{};  // long ago for one this game did not place
 			std::optional<Clock::time_point> disabledAt;
 			std::uint64_t                    disabledTick = 0;
@@ -79,10 +90,16 @@ namespace RemotePlayers
 		};
 		std::vector<Grave> graveyard;
 
-		// Stand-ins taken out of the world for the save being written (their form ids), for the co-save; and those the
-		// co-save of a loaded save named, removed once the load is done.
-		std::vector<RE::FormID> takenForSave;
-		std::vector<RE::FormID> namedByLoad;
+		// Actors this game placed (stand-ins, and copies of other games' spawns) taken out of the world for the save being
+		// written, for the co-save: each one's form id and its base's; and those the co-save of a loaded save named,
+		// removed once the load is done if the id still names an actor of that base.
+		struct Taken
+		{
+			RE::FormID id = 0;
+			RE::FormID base = 0;  // 0: a record of version 1, which named stand-ins only (any preset base)
+		};
+		std::vector<Taken>      takenForSave;
+		std::vector<Taken>      namedByLoad;
 		bool                    hooked = false;         // the Character update is ours: without it, no stand-in is placed
 		bool                    placedThisRun = false;  // a stand-in was placed since the game started
 		bool                    coSaveRecord = false;   // the loaded save's co-save has a stand-ins record
@@ -160,11 +177,11 @@ namespace RemotePlayers
 		std::atomic<std::uint64_t> speedsDriven{ 0 };
 		std::atomic<std::uint64_t> directionsDriven{ 0 };
 
-		// The values to give a channel's actor, if it is a stand-in this game moves. The polls run as graphs update, on
-		// the game's job threads: only the table's own lock is taken (GaitDrive.h), never the players' one.
+		// The values to give a channel's actor, if it is a stand-in or an NPC copy this game moves. The polls run as graphs
+		// update, on the game's job threads: only the table's own lock is taken (GaitDrive.h), never the players' one.
 		std::optional<GaitDrive::Values> DrivenFor(void* a_channel)
 		{
-			if (watched.load(std::memory_order_relaxed) == 0) {
+			if (!Watching()) {
 				return std::nullopt;
 			}
 			const auto actor = *reinterpret_cast<RE::Actor* const*>(static_cast<std::byte*>(a_channel) + CHANNEL_ACTOR);
@@ -194,24 +211,10 @@ namespace RemotePlayers
 			}
 		}
 
-		// Puts a_hook in a vtable's slot when the function there is the game's own: in its image, not another plugin's
-		// hook (whose own original we would call twice) or junk. a_original holds the function the slot held before the
-		// slot changes (a job thread may call the hook at once); false: not hooked, a_original left as it was.
 		template <class Fn>
 		bool HookSlot(std::uintptr_t a_vtable, std::size_t a_index, Fn a_hook, Fn& a_original, std::string_view a_what)
 		{
-			const auto slot = a_vtable + sizeof(void*) * a_index;
-			const auto current = *reinterpret_cast<const std::uintptr_t*>(slot);
-			const auto image = reinterpret_cast<std::uintptr_t>(REX::W32::GetModuleHandleW(nullptr));
-			MEMORY_BASIC_INFORMATION info{};
-			if (!::VirtualQuery(reinterpret_cast<void*>(current), &info, sizeof(info)) || reinterpret_cast<std::uintptr_t>(info.AllocationBase) != image) {
-				logs::error("Players: the {} slot holds {:#x}, outside the game's image: not hooked", a_what, current);
-				return false;
-			}
-			a_original = reinterpret_cast<Fn>(current);
-			REL::safe_write(slot, reinterpret_cast<std::uintptr_t>(a_hook));
-			logs::info("Players: hooked the {} (game+{:X})", a_what, current - image);
-			return true;
+			return VtableHook::Slot(a_vtable, a_index, a_hook, a_original, "Players", a_what);
 		}
 
 		// Sends a step's events to a stand-in's graph and keeps the count of those taken and turned away. One turned away
@@ -256,7 +259,7 @@ namespace RemotePlayers
 
 		void UpdateHook(RE::Actor* a_this, float a_delta)
 		{
-			if (watched.load(std::memory_order_relaxed) == 0) {
+			if (!Watching()) {
 				originalUpdate(a_this, a_delta);
 				return;
 			}
@@ -290,7 +293,11 @@ namespace RemotePlayers
 				}
 			}
 			if (!ours) {
-				originalUpdate(a_this, a_delta);
+				// A copy of an NPC another game runs, moved by its runner's states (NpcSync); any other actor, or a copy
+				// left to its own AI, gets the game's own update.
+				if (copies.load(std::memory_order_relaxed) == 0 || !NpcSync::UpdateCopy(a_this, a_delta)) {
+					originalUpdate(a_this, a_delta);
+				}
 				return;
 			}
 			// Its own AI never runs: no packages, no combat, no greetings. Where its friend is, the engine's no-AI update
@@ -354,7 +361,8 @@ namespace RemotePlayers
 			if (InGraveyard(id)) {
 				return;
 			}
-			graveyard.push_back({ .actor = a_actor->GetHandle(), .id = id, .placedAt = a_placedAt });
+			const auto base = a_actor->GetObjectReference();
+			graveyard.push_back({ .actor = a_actor->GetHandle(), .id = id, .base = base ? base->GetFormID() : 0, .placedAt = a_placedAt });
 			std::scoped_lock l{ lock };
 			retiring[a_actor] = id;
 			CountWatched();
@@ -384,7 +392,7 @@ namespace RemotePlayers
 					return true;
 				}
 				if (a_save) {
-					takenForSave.push_back(a_grave.id);
+					takenForSave.push_back({ a_grave.id, a_grave.base });
 				}
 				if (a_grave.deleted) {
 					return false;  // held until the game frees it, so the hook never runs its AI meanwhile
@@ -755,10 +763,14 @@ namespace RemotePlayers
 			logs::warn("Co-save: could not open the stand-ins record");
 			return;
 		}
+		// Version 2: the count, then each actor's form id and its base's.
 		const auto count = static_cast<std::uint32_t>(takenForSave.size());
 		a_intf->WriteRecordData(&count, sizeof(count));
-		a_intf->WriteRecordData(takenForSave.data(), static_cast<std::uint32_t>(takenForSave.size() * sizeof(RE::FormID)));
-		logs::info("Co-save: {} stand-in id(s) written, to be removed should a load bring any back", count);
+		for (const auto& taken : takenForSave) {
+			a_intf->WriteRecordData(&taken.id, sizeof(taken.id));
+			a_intf->WriteRecordData(&taken.base, sizeof(taken.base));
+		}
+		logs::info("Co-save: {} placed actor id(s) written (stand-ins, copies of spawns), to be removed should a load bring any back", count);
 		takenForSave.clear();
 	}
 
@@ -766,26 +778,36 @@ namespace RemotePlayers
 	{
 		namedByLoad.clear();
 		coSaveRecord = true;
-		std::uint32_t count = 0;
-		if (a_version != COSAVE_STANDINS_VERSION || a_length < sizeof(count) || a_intf->ReadRecordData(&count, sizeof(count)) != sizeof(count) ||
-			count > 1024 || a_length != sizeof(count) + count * sizeof(RE::FormID)) {
+		// Version 1 (before NPC copies): the ids alone, all stand-ins. Version 2: id and base, each.
+		const std::uint32_t each = a_version == 1 ? sizeof(RE::FormID) : 2 * sizeof(RE::FormID);
+		std::uint32_t       count = 0;
+		if ((a_version != 1 && a_version != COSAVE_STANDINS_VERSION) || a_length < sizeof(count) || a_intf->ReadRecordData(&count, sizeof(count)) != sizeof(count) ||
+			count > 1024 || a_length != sizeof(count) + count * each) {
 			logs::warn("Co-save: a stand-ins record that can't be read (version {}, {} bytes); the load's sweep still runs", a_version, a_length);
 			return;
 		}
-		namedByLoad.resize(count);
-		const auto bytes = count * static_cast<std::uint32_t>(sizeof(RE::FormID));
-		if (const auto read = a_intf->ReadRecordData(namedByLoad.data(), bytes); read != bytes) {
-			logs::warn("Co-save: the stand-ins record gave {} of {} bytes; the load's sweep still runs", read, bytes);
+		for (std::uint32_t i = 0; i < count; ++i) {
+			Taken taken;
+			if (a_intf->ReadRecordData(&taken.id, sizeof(taken.id)) != sizeof(taken.id) ||
+				(a_version != 1 && a_intf->ReadRecordData(&taken.base, sizeof(taken.base)) != sizeof(taken.base))) {
+				logs::warn("Co-save: the stand-ins record ended after {} of {} actors; the load's sweep still runs", i, count);
+				break;
+			}
+			namedByLoad.push_back(taken);
 		}
-		logs::info("Co-save: this save was written with {} stand-in(s) taken out", count);
+		logs::info("Co-save: this save was written with {} placed actor(s) taken out", count);
 	}
 
 	void AfterLoad()
 	{
 		std::size_t named = 0;
-		for (const auto id : namedByLoad) {
-			const auto actor = RE::TESForm::LookupByID<RE::Actor>(id);
-			if (actor && IsStandInBase(actor->GetObjectReference()) && !actor->IsDeleted()) {
+		for (const auto& taken : namedByLoad) {
+			// Only an actor of the base it was placed from (a record of version 1: any preset base): the save's form ids
+			// are its own, and one this game placed holds the id it was saved with.
+			const auto actor = RE::TESForm::LookupByID<RE::Actor>(taken.id);
+			const auto base = actor ? actor->GetObjectReference() : nullptr;
+			const bool ours = base && (taken.base != 0 ? base->GetFormID() == taken.base : IsStandInBase(base));
+			if (ours && !actor->IsDeleted()) {
 				SendOut(actor, {});
 				++named;
 			}
@@ -809,6 +831,49 @@ namespace RemotePlayers
 	std::size_t Count()
 	{
 		return players.size();
+	}
+
+	bool IsOurs(const RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return false;
+		}
+		std::scoped_lock l{ lock };
+		const auto       actor = const_cast<RE::Actor*>(a_actor);
+		return byActor.contains(actor) || retiring.contains(actor);
+	}
+
+	std::vector<Protocol::PlayerState> FriendStates()
+	{
+		std::vector<Protocol::PlayerState> out;
+		std::scoped_lock                   l{ lock };
+		for (const auto& [id, remote] : players) {
+			if (!remote.buffer.snapshots.empty()) {
+				out.push_back(remote.buffer.snapshots.back().state);
+			}
+		}
+		return out;
+	}
+
+	void SetCopies(std::size_t a_count)
+	{
+		copies.store(a_count, std::memory_order_relaxed);
+	}
+
+	void DriveLegs(RE::Actor* a_actor, GaitDrive::Values a_values)
+	{
+		drive.Set(a_actor, a_actor->GetFormID(), a_values, Clock::now());
+	}
+
+	void StopLegs(RE::Actor* a_actor)
+	{
+		drive.Erase(a_actor);
+	}
+
+	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt)
+	{
+		drive.Erase(a_actor);
+		SendOut(a_actor, a_placedAt);
 	}
 
 	std::string Describe()

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <compare>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -30,7 +31,11 @@ namespace Protocol
 	// 3: a hello carries a whole Skyrim load order (MAX_PLUGINS names, in at most MAX_PLUGIN_LIST_BYTES), not 512 names.
 	// 4: form ids on the wire are the session's (PluginTable, kPluginTable): a form is named by its plugin's file name,
 	//    never by a game's load order, so games whose mods are in another order, or differ, play together.
-	inline constexpr std::uint16_t VERSION = 4;
+	// 5: doors, locks and mechanisms are shared (message types 13-17, in their own change).
+	// 6: NPCs are shared: one game runs each (kNpcClaims, kNpcOwners) and the others show a copy of it (kNpcStates,
+	//    kNpcActions, kNpcGear: message types 18-22); a state's kFlying. Of the doors' change and this one, whichever
+	//    lands second takes the number after the other's.
+	inline constexpr std::uint16_t VERSION = 6;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -79,6 +84,12 @@ namespace Protocol
 		kPlayerLooks = 10,  // client -> server, reliable: what my character looks like (again whenever it changes)
 		kRemoteLooks = 11,  // server -> the others (and each one there, to the one who joined): that player's looks
 		kPluginTable = 12,  // server -> client, reliable: the session's plugin table, before the welcome and when it grows
+		// 13-17: the doors' messages (protocol 5).
+		kNpcClaims = 18,    // client -> server, reliable: NPCs this game asks to run, or lets go of
+		kNpcOwners = 19,    // server -> client, reliable: who runs each NPC (every one to a joiner, then each change)
+		kNpcStates = 20,    // both ways, on the state channel: where the NPCs a game runs are (the server names the runner)
+		kNpcActions = 21,   // both ways, reliable: the graph events of the NPCs a game runs, for their copies to play
+		kNpcGear = 22,      // both ways, reliable: what an NPC wears and holds, from the game that runs it
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -96,6 +107,7 @@ namespace Protocol
 		kJumping = 1 << 3,  // in the air: jumped, or falling
 		kSwimming = 1 << 4,
 		kMounted = 1 << 5,
+		kFlying = 1 << 6,  // an NPC in flight (a dragon): its height and pitch are its own, not the ground's
 	};
 
 	// A player's transform and movement, sampled on the owning client.
@@ -244,6 +256,142 @@ namespace Protocol
 		std::uint32_t playerId = 0;
 		PlayerLooks   looks;
 		bool operator==(const RemoteLooks&) const = default;
+	};
+
+	// ---- NPCs (docs/DESIGN.md, "NPCs") ----------------------------------------------
+	// Each NPC near a player is run by one game, its AI included; the others show a copy of it, moved by the runner's
+	// states, its graph's events and its gear. The server keeps who runs each (common/NpcBook.h).
+
+	// At most this many claims in one kNpcClaims, states in one kNpcStates (a batch of about 1 KB, so one lost packet
+	// loses little), events in one kNpcActions, and NPCs run in a session at once (the server refuses claims past it).
+	inline constexpr std::size_t MAX_NPC_CLAIMS = 128;
+	inline constexpr std::size_t MAX_NPC_STATES = 20;
+	inline constexpr std::size_t MAX_NPC_ACTIONS = 64;
+	inline constexpr std::size_t MAX_NPCS = 4096;
+	// A graph event's name: Skyrim's are short ("attackStart", "bowAttackStart", "FlyStartCruise").
+	inline constexpr std::size_t MAX_EVENT_NAME = 48;
+
+	// An NPC as every game names it. spawner 0: a reference of the load order (id in the session's numbering: two games
+	// that both have it agree on it). Else id is a reference that player's game made as it ran (FF: a summoned atronach,
+	// a conjured familiar), which no other game has: the others place a copy of it from its base, and only that player's
+	// game ever runs it. Never 0.
+	struct NpcKey
+	{
+		std::uint32_t id = 0;
+		std::uint32_t spawner = 0;
+
+		[[nodiscard]] bool IsSpawn() const { return spawner != 0; }
+		auto operator<=>(const NpcKey&) const = default;
+	};
+
+	enum class ClaimWhy : std::uint8_t
+	{
+		kHave = 0,      // loaded here and nobody runs it: ours if nobody else has asked first
+		kFight = 1,     // our player fights or talks to it: ours unless it changed hands or its runner fought it lately
+		kRelease = 2,   // we let go of it (unloaded here, or our player went far): someone else's to claim
+		kFollower = 3,  // it follows our player: ours, unless it also follows its runner's player
+	};
+	inline constexpr std::uint8_t CLAIM_WHY_COUNT = 4;
+
+	struct NpcClaim
+	{
+		NpcKey   key;
+		ClaimWhy why = ClaimWhy::kHave;
+		bool operator==(const NpcClaim&) const = default;
+	};
+
+	struct NpcClaims
+	{
+		std::vector<NpcClaim> claims;
+		bool operator==(const NpcClaims&) const = default;
+	};
+
+	// owner 0: nobody runs it now.
+	struct NpcOwner
+	{
+		NpcKey        key;
+		std::uint32_t owner = 0;
+		bool operator==(const NpcOwner&) const = default;
+	};
+
+	// full: every NPC someone runs (a joiner's first): a game forgets owners the list doesn't name. Else changes only.
+	struct NpcOwners
+	{
+		bool                  full = false;
+		std::vector<NpcOwner> owners;
+		bool operator==(const NpcOwners&) const = default;
+	};
+
+	// One NPC's state: base is the NPC its game made it of (its leveled pick's, for one placed from a leveled list; 0
+	// when not known), which a spawn's copy is placed from and a copy's look is checked against. state.sequence counts
+	// that NPC's states.
+	struct NpcState
+	{
+		NpcKey        key;
+		std::uint32_t base = 0;
+		PlayerState   state;
+		bool operator==(const NpcState&) const = default;
+	};
+
+	// runner: 0 from a game; the server names the game that sent them.
+	struct NpcStates
+	{
+		std::uint32_t         runner = 0;
+		std::vector<NpcState> npcs;
+		bool operator==(const NpcStates&) const = default;
+	};
+
+	// An event its runner's graph took, when (the runner's clock, as PlayerState::sentMs), for a copy to play at the
+	// same point of its states.
+	struct NpcAction
+	{
+		NpcKey        key;
+		std::uint32_t sentMs = 0;
+		std::string   event;
+		bool operator==(const NpcAction&) const = default;
+	};
+
+	struct NpcActions
+	{
+		std::uint32_t          runner = 0;
+		std::vector<NpcAction> actions;
+		bool operator==(const NpcActions&) const = default;
+	};
+
+	// An item an NPC wears: its base form and the body slots it covers (BGSBipedObjectForm's mask), so that a game whose
+	// copy lacks the form still knows which of the copy's own items it stands for.
+	struct WornItem
+	{
+		std::uint32_t id = 0;
+		std::uint32_t slots = 0;
+		bool operator==(const WornItem&) const = default;
+		auto operator<=>(const WornItem&) const = default;
+	};
+
+	// NpcGear::unnamed: a hand (or the quiver) holds something the runner's game could not name to this one (a form made
+	// as that game ran, or a mod's this game lacks), which is not the same as holding nothing: the copy keeps its own.
+	enum GearUnnamed : std::uint8_t
+	{
+		kRightUnnamed = 1 << 0,
+		kLeftUnnamed = 1 << 1,
+		kAmmoUnnamed = 1 << 2,
+		kAllUnnamed = kRightUnnamed | kLeftUnnamed | kAmmoUnnamed,
+	};
+
+	// What an NPC wears (armor, at most MAX_WORN) and holds: each hand's weapon, spell, shield or torch, and its
+	// ammunition; 0 for none. unnamedSlots: the body slots of worn items left out (none named to this game), so a copy
+	// keeps what it wears there.
+	struct NpcGear
+	{
+		std::uint32_t         runner = 0;
+		NpcKey                key;
+		std::vector<WornItem> worn;
+		std::uint32_t         right = 0;
+		std::uint32_t         left = 0;
+		std::uint32_t         ammo = 0;
+		std::uint8_t          unnamed = 0;  // GearUnnamed
+		std::uint32_t         unnamedSlots = 0;
+		bool operator==(const NpcGear&) const = default;
 	};
 
 	// ---- serialization -------------------------------------------------------------
@@ -756,6 +904,241 @@ namespace Protocol
 		}
 		return PluginTable{ std::move(*plugins) };
 	}
+
+	inline void WriteKey(Writer& a_writer, const NpcKey& a_key)
+	{
+		a_writer.U32(a_key.id);
+		a_writer.U32(a_key.spawner);
+	}
+
+	inline NpcKey ReadKey(Reader& a_reader)
+	{
+		NpcKey key;
+		key.id = a_reader.U32();
+		key.spawner = a_reader.U32();
+		return key;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcClaims& a_msg)
+	{
+		Writer     w{ MessageType::kNpcClaims };
+		const auto count = (std::min)(a_msg.claims.size(), MAX_NPC_CLAIMS);
+		w.U16(static_cast<std::uint16_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.claims[i].key);
+			w.U8(static_cast<std::uint8_t>(a_msg.claims[i].why));
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_CLAIMS, a claim of no NPC (id 0) or a reason this version does not know.
+	inline std::optional<NpcClaims> DecodeNpcClaims(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		const auto count = r.U16();
+		if (!r.Ok() || count > MAX_NPC_CLAIMS) {
+			return std::nullopt;
+		}
+		NpcClaims msg;
+		msg.claims.reserve(count);
+		for (std::uint16_t i = 0; i < count && r.Ok(); ++i) {
+			NpcClaim claim;
+			claim.key = ReadKey(r);
+			const auto why = r.U8();
+			if (claim.key.id == 0 || why >= CLAIM_WHY_COUNT) {
+				return std::nullopt;
+			}
+			claim.why = static_cast<ClaimWhy>(why);
+			msg.claims.push_back(claim);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcOwners& a_msg)
+	{
+		Writer     w{ MessageType::kNpcOwners };
+		const auto count = (std::min)(a_msg.owners.size(), MAX_NPCS);
+		w.U8(a_msg.full ? 1 : 0);
+		w.U16(static_cast<std::uint16_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.owners[i].key);
+			w.U32(a_msg.owners[i].owner);
+		}
+		return w.Data();
+	}
+
+	inline std::optional<NpcOwners> DecodeNpcOwners(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		const auto full = r.U8();
+		const auto count = r.U16();
+		if (!r.Ok() || full > 1 || count > MAX_NPCS) {
+			return std::nullopt;
+		}
+		NpcOwners msg;
+		msg.full = full == 1;
+		msg.owners.reserve(count);
+		for (std::uint16_t i = 0; i < count && r.Ok(); ++i) {
+			NpcOwner owner;
+			owner.key = ReadKey(r);
+			owner.owner = r.U32();
+			if (owner.key.id == 0) {
+				return std::nullopt;
+			}
+			msg.owners.push_back(owner);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcStates& a_msg)
+	{
+		Writer     w{ MessageType::kNpcStates };
+		const auto count = (std::min)(a_msg.npcs.size(), MAX_NPC_STATES);
+		w.U32(a_msg.runner);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.npcs[i].key);
+			w.U32(a_msg.npcs[i].base);
+			WriteState(w, a_msg.npcs[i].state);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_STATES, an NPC of id 0 or a place no game could be at.
+	inline std::optional<NpcStates> DecodeNpcStates(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcStates msg;
+		msg.runner = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_NPC_STATES) {
+			return std::nullopt;
+		}
+		msg.npcs.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			NpcState npc;
+			npc.key = ReadKey(r);
+			npc.base = r.U32();
+			npc.state = ReadState(r);
+			if (r.Ok() && (npc.key.id == 0 || !npc.state.IsFinite())) {
+				return std::nullopt;
+			}
+			msg.npcs.push_back(npc);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcActions& a_msg)
+	{
+		Writer     w{ MessageType::kNpcActions };
+		const auto count = (std::min)(a_msg.actions.size(), MAX_NPC_ACTIONS);
+		w.U32(a_msg.runner);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.actions[i].key);
+			w.U32(a_msg.actions[i].sentMs);
+			w.Str(a_msg.actions[i].event, MAX_EVENT_NAME);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_ACTIONS, an NPC of id 0, or an empty or too long event name.
+	inline std::optional<NpcActions> DecodeNpcActions(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcActions msg;
+		msg.runner = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_NPC_ACTIONS) {
+			return std::nullopt;
+		}
+		msg.actions.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			NpcAction action;
+			action.key = ReadKey(r);
+			action.sentMs = r.U32();
+			action.event = r.Str(MAX_EVENT_NAME);
+			if (r.Ok() && (action.key.id == 0 || action.event.empty())) {
+				return std::nullopt;
+			}
+			msg.actions.push_back(std::move(action));
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcGear& a_msg)
+	{
+		Writer w{ MessageType::kNpcGear };
+		w.U32(a_msg.runner);
+		WriteKey(w, a_msg.key);
+		const auto count = (std::min)(a_msg.worn.size(), MAX_WORN);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			w.U32(a_msg.worn[i].id);
+			w.U32(a_msg.worn[i].slots);
+		}
+		w.U32(a_msg.right);
+		w.U32(a_msg.left);
+		w.U32(a_msg.ammo);
+		w.U8(a_msg.unnamed);
+		w.U32(a_msg.unnamedSlots);
+		return w.Data();
+	}
+
+	// None for more than MAX_WORN worn items, or an unknown unnamed bit. An NPC of id 0 reads: the translation left it
+	// out (FormTranslate.h), and the reader skips it.
+	inline std::optional<NpcGear> DecodeNpcGear(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcGear msg;
+		msg.runner = r.U32();
+		msg.key = ReadKey(r);
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_WORN) {
+			return std::nullopt;
+		}
+		msg.worn.reserve(count);
+		for (std::uint8_t i = 0; i < count; ++i) {
+			const auto id = r.U32();
+			msg.worn.push_back({ id, r.U32() });
+		}
+		msg.right = r.U32();
+		msg.left = r.U32();
+		msg.ammo = r.U32();
+		msg.unnamed = r.U8();
+		msg.unnamedSlots = r.U32();
+		if (!r.AtEnd() || (msg.unnamed & ~kAllUnnamed) != 0) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// The most bytes each NPC message can be, every list at its longest (the tests encode those): each fits one message.
+	inline constexpr std::size_t KEY_BYTES = 8;
+	inline constexpr std::size_t STATE_BYTES = 4 + 4 + 4 + 4 * 5 + 1 + 4 + 1 + 1;
+	inline constexpr std::size_t MAX_NPC_OWNERS_SIZE = 1 + 1 + 2 + MAX_NPCS * (KEY_BYTES + 4);
+	inline constexpr std::size_t MAX_NPC_STATES_SIZE = 1 + 4 + 1 + MAX_NPC_STATES * (KEY_BYTES + 4 + STATE_BYTES);
+	inline constexpr std::size_t MAX_NPC_ACTIONS_SIZE = 1 + 4 + 1 + MAX_NPC_ACTIONS * (KEY_BYTES + 4 + 1 + MAX_EVENT_NAME);
+	static_assert(MAX_NPC_OWNERS_SIZE <= MAX_MESSAGE_SIZE && MAX_NPC_ACTIONS_SIZE <= MAX_MESSAGE_SIZE);
+	static_assert(MAX_NPC_STATES_SIZE <= 1200, "a batch of NPC states stays about one datagram");
+	static_assert(MAX_NPCS <= 0xFFFF && MAX_NPC_CLAIMS <= 0xFFFF && MAX_NPC_STATES <= 0xFF && MAX_NPC_ACTIONS <= 0xFF);
 
 	// ---- load orders ---------------------------------------------------------------
 
