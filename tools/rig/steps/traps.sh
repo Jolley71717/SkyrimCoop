@@ -12,33 +12,49 @@
 # a trap reads: kind=, look= armed|going|fired|disarmed|busy|unknown, disabled=, and the session's word waiting on it) and
 # `traps use <ref>` (our player's activation of it, as the activate key does, refused out of reach); `refs` gives the
 # mechanism uses sent, made and refused; `where` our player's place):
-#   1. God mode on in both games (`console tgm`, said; off again at the end, whatever happened): a trap that goes off
-#      hits whoever walked into it, and a player killed mid-step would end the run.
+#   1. God mode on in both games (`console tgm`, said; off again at the end, whatever happened, and toggled back in the
+#      game already switched when the other's fails): a trap that goes off hits whoever walked into it, and a player
+#      killed mid-step would end the run.
 #   2. Both players are put in each of TRAPS_CELLS in turn (coc: console placement, said) until each finds an armed
 #      tripwire (or breakaway floor) that the other's world holds armed too.
 #   3. A one-shot trap each way (host to VM, then VM to host): the walker walks up near it (walkto, real movement), then
 #      on through it, TRAPS_PAST units past it (walkto x y: real movement, never placed). Its own world reads it spent and
-#      told the session (sent= up). Within TRAPS_WAIT the other's world reads it spent too (gone off, or broken: disabled).
+#      told the session (sent= up). The other's game heard the word (heard= up) and made it (verdicts= live or quiet up),
+#      and its world reads the trap spent within TRAPS_WAIT. The walker's stand-in walks the same path there, and a
+#      stand-in sets off a trap as a player does: when it did so before the word came (verdicts= nothing up), the trap
+#      reading spent there proves nothing of the word, so that is a WARN, never a PASS. The other's game never tells that
+#      set-off as its own (sent= unchanged there): the session credits the trap to the walker.
 #   4. A taker's friend loads: the VM saves, the host sets one off, the VM loads its save (from before): the VM asks the
-#      session again (asks= up) and the trap reads spent in its world again.
+#      session again (asks= up), makes the word quietly (verdicts= quiet up) and the trap reads spent in its world again.
+#      Only the word can spend it there: the host's stand-in stands past it after the load.
 #   5. A taker's own load: the VM saves, sets one off, loads its save: the trap reads armed in its world again (the save's:
 #      the VM's to set off again) and stays so for TRAPS_WAIT (the session never sends a player its own); the host's still
-#      reads spent.
+#      reads spent. The host never told the VM's stand-in's set-off as its own (leg 3's check), so this is not a race.
 #   6. Joining again: the VM leaves, the host sets one off, the VM joins again: the trap reads spent in the VM's world (the
-#      welcome's catch-up, catchUps= up).
+#      welcome's catch-up, catchUps= up, verdicts= quiet up). Only the word can spend it there: no stand-in while away.
 #   7. A bear trap each way, in each of TRAPS_BEAR_CELLS in turn (coc) until both find one open: the user walks up to it
 #      and activates it (snapped shut: disarmed, as a player does), and it reads shut in the other's world within
 #      TRAPS_WAIT; it activates it again (set open), and it reads open in the other's. Neither use goes as a mechanism's
-#      (refs uses= sent by the user, made by the other: unchanged): a trap's word says what became of it.
-#   8. God mode off in both, both put back in the harness's cell (coc).
+#      (refs uses= sent by the user, made by the other: unchanged), and the other never told either change as its own
+#      (its stand-in of the user stood at the trap): a trap's word says what became of it.
+#   8. A magic trap's soul gem each way, in each of TRAPS_GEM_CELLS in turn (coc) until both find one in its trap: the
+#      taker walks up to it and activates it (taken, as a player does: its controller goes "disarmed" and the gem is
+#      disabled in one call). Its game told the session (sent= up, read as the gem left the world); the other's heard it
+#      and made it (verdicts= live or quiet up), and its gem reads "disarmed" (the state whose start stops the trap's
+#      casting), not just gone. A stand-in never takes a gem, so only the word can do this: the leg that proves a word's
+#      own making (live when the other stands near).
+#   9. God mode off in both, both put back in the harness's cell (coc).
 # One way only, by the rig's rules: legs 4, 5 and 6 save, load, leave or rejoin, which only the VM may do; the host is the
 # other side of each.
+# The cells: WarehouseTraps is the game's own trap test cell (13 tripwires, 3 bear traps, 16 magic traps' soul gems in
+# Skyrim.esm); the others are dungeons that hold the kind too (a read of Skyrim.esm's placed references by script).
 # Not checked here (follow-ups): a trapped chest's or door's hinge (opening one needs a lock the rig can pick), a rigged
-# rockfall set off by its tripwire's link (checked through the tripwire), a magic trap's soul gem, pressure plates and
-# the traps that set themselves again (each game's own), rune traps.
+# rockfall set off by its tripwire's link (checked through the tripwire), pressure plates and the traps that set
+# themselves again (each game's own), rune traps.
 
-TRAPS_CELLS=${TRAPS_CELLS:-"BleakFallsBarrow01 BleakFallsBarrow02 BleakFallsSanctum01"}  # tried in turn for an armed tripwire
-TRAPS_BEAR_CELLS=${TRAPS_BEAR_CELLS:-"BleakFallsBarrow01 Riverwood"}                     # ... and for an open bear trap
+TRAPS_CELLS=${TRAPS_CELLS:-"WarehouseTraps EmbershardMine01 Avanchnzel03"}               # tried in turn for an armed tripwire
+TRAPS_BEAR_CELLS=${TRAPS_BEAR_CELLS:-"WarehouseTraps HonningbrewMeadery02 Irkngthand02"}  # ... for an open bear trap
+TRAPS_GEM_CELLS=${TRAPS_GEM_CELLS:-"WarehouseTraps HobsFallCave01 Valthume02"}           # ... for a soul gem in its trap
 TRAPS_WAIT=${TRAPS_WAIT:-20}      # s: a word is told, passed on and made (four batches a second, read four times a second)
 TRAPS_RADIUS=${TRAPS_RADIUS:-4000}  # how far the walker looks for a trap
 TRAPS_PAST=${TRAPS_PAST:-250}       # u: how far past a tripwire the walker walks on (its trigger is a few units across)
@@ -63,6 +79,10 @@ tr_pos() { sed -n 's/.*pos=(\([-0-9.]*\),\([-0-9.]*\),.*/\1 \2/p' <<<"$1"; }
 tr_past() { awk -v px="$1" -v py="$2" -v tx="$3" -v ty="$4" -v d="$5" 'BEGIN { dx = tx - px; dy = ty - py; l = sqrt(dx * dx + dy * dy); if (l < 1) exit 1; printf "%d %d\n", tx + dx / l * d, ty + dy / l * d }'; }
 # tr_uses <refs reply> <n>: the n-th number of uses= (1 sent, 2 made, 3 refused)
 tr_uses() { field uses "$1" | cut -d/ -f"$2"; }
+# tr_vcount <verdicts= value> <verdict>: how many words were judged so (verdicts=live:1,quiet:2; "-" none: 0)
+tr_vcount() { local n; n=$(tr ',' '\n' <<<"$1" | sed -n "s/^$2://p" | head -1); echo "${n:-0}"; }
+# tr_disarmed_reply <ref reply>: a soul gem found there reads "disarmed" (its trap cleared of it), not only gone
+tr_disarmed_reply() { tr_is "$1" look disarmed; }
 
 # ---- the checks (each reads both games through dc) ----------------------------------------------------------------
 
@@ -71,18 +91,31 @@ tr_ref() { dc "$1" "traps ref $2"; }
 tr_spent() { tr_spent_reply "$(tr_ref "$1" "$2")"; }
 tr_armed() { tr_armed_reply "$(tr_ref "$1" "$2")"; }
 tr_ge() { local n; n=$(tr_count "$1" "$2"); [ "$n" -ge "$3" ] 2>/dev/null; }
+tr_disarmed() { tr_disarmed_reply "$(tr_ref "$1" "$2")"; }
+# tr_verdicts <who>: "live quiet nothing", the words that game judged so far
+tr_verdicts() { local v; v=$(field verdicts "$(dc "$1" traps)"); echo "$(tr_vcount "$v" live) $(tr_vcount "$v" quiet) $(tr_vcount "$v" nothing)"; }
+# tr_judged <who> <live> <quiet> <nothing>: a word was judged there since those counts (any of the three up)
+tr_judged() { local now; read -ra now <<<"$(tr_verdicts "$1")"; [ "${now[0]}" -gt "$2" ] || [ "${now[1]}" -gt "$3" ] || [ "${now[2]}" -gt "$4" ]; } 2>/dev/null
+# tr_quiet_past <who> <quiet>: that game made a word quietly since that count
+tr_quiet_past() { local now; read -ra now <<<"$(tr_verdicts "$1")"; [ "${now[1]}" -gt "$2" ]; } 2>/dev/null
 # tr_stays <s> <check...>: the check holds at every look over that time
 tr_stays() { local i t=$1; shift; for ((i = 0; i < t; i++)); do "$@" || return 1; sleep 1; done; "$@"; }
 
 # tr_god <on|off>: god mode toggled in both games (said); TR_GOD says whether it is on (the rig never leaves it on)
 TR_GOD=0
 tr_god() {
-	local w r
+	local w r d switched=""
 	[ "$1" = on ] && [ "$TR_GOD" = 1 ] && return 0
 	[ "$1" = off ] && [ "$TR_GOD" = 0 ] && return 0
 	for w in host vm; do
 		r=$(dc $w 'console tgm')
-		[ "$r" = ran ] || { rig_broken input "$w: god mode $1 (console tgm)" "'console tgm' replied '$r'"; return 1; }
+		if [ "$r" != ran ]; then
+			# The game already switched goes back, so neither is left in a god mode this step did not finish setting.
+			for d in $switched; do dc "$d" 'console tgm' >/dev/null; done
+			rig_broken input "$w: god mode $1 (console tgm)" "'console tgm' replied '$r'${switched:+; toggled back in$switched}"
+			return 1
+		fi
+		switched="$switched $w"
 	done
 	[ "$1" = on ] && TR_GOD=1 || TR_GOD=0
 	healed "both: god mode $1 for the traps step (console tgm)" "a trap that goes off hits whoever walked into it"
@@ -126,15 +159,33 @@ tr_through() {
 	tr_walked "$who"
 }
 
+# tr_heard_made <o> <what> <ref> <heard before> <live> <quiet> <nothing>: the other's game heard the word (heard= up) and
+# made it: live or quiet up is a PASS; nothing up (the trap read spent there before the word: the stand-in set it off)
+# is a WARN, the word not proven; no verdict is a FAIL
+tr_heard_made() {
+	local o=$1 what=$2 ref=$3 h0=$4 l0=$5 q0=$6 n0=$7 v
+	if is_num "$h0" && wait_until "$TRAPS_WAIT" tr_ge "$o" heard $((h0 + 1)); then pass "$o: heard the word on the $what" "heard=$(tr_count "$o" heard)"
+	else fail "$o: heard the word on the $what" "heard was '$h0': $(dc "$o" traps | cut -c1-300)"; return; fi
+	if ! wait_until "$TRAPS_WAIT" tr_judged "$o" "$l0" "$q0" "$n0"; then
+		fail "$o: made the word on the $what" "no verdict since live/quiet/nothing $l0/$q0/$n0: $(dc "$o" traps | cut -c1-300) | $(tr_ref "$o" "$ref" | cut -c1-160)"
+		return
+	fi
+	read -ra v <<<"$(tr_verdicts "$o")"
+	if [ "${v[0]}" -gt "$l0" ]; then pass "$o: the word on the $what spent it in its world" "made live (its own way: snap, fall, sound)"
+	elif [ "${v[1]}" -gt "$q0" ]; then pass "$o: the word on the $what spent it in its world" "made quiet"
+	else warn "$o: the word on the $what spent it in its world" "it read spent there before the word came (set off by the other's stand-in): the word not proven"; fi
+}
+
 # tr_oneshot <who>: that game's player walks through an armed one-shot trap (TRAPS_KINDS in turn); it reads spent there
-# and told, and spent in the other's within TRAPS_WAIT. TR_REF: the trap (empty when none was set off).
+# and told; the other's game heard the word and made it, reads it spent within TRAPS_WAIT, and never tells it as its
+# own. TR_REF: the trap (empty when none was set off).
 TR_REF=""
 tr_oneshot() {
-	local who=$1 o ref="" kind s0
+	local who=$1 o ref="" kind s0 os0 h0 v0
 	o=$(other "$who"); TR_REF=""
 	for kind in $TRAPS_KINDS; do ref=$(tr_pick "$who" "$kind") && break; done
 	[ -n "$ref" ] || { rig_fault state "$who: finds an armed one-shot trap ($TRAPS_KINDS) that $o's world holds armed too" "$(dc "$who" "traps pick oneshot armed $TRAPS_RADIUS" | cut -c1-200)"; return 1; }
-	s0=$(tr_count "$who" sent)
+	s0=$(tr_count "$who" sent); os0=$(tr_count "$o" sent); h0=$(tr_count "$o" heard); read -ra v0 <<<"$(tr_verdicts "$o")"
 	tr_approach "$who" "$ref" 400 || return 1
 	tr_through "$who" "$ref" || return 1
 	if wait_until 10 tr_spent "$who" "$ref"; then pass "$who: walked through the $kind $ref and set it off" "$(tr_ref "$who" "$ref" | cut -c1-160)"
@@ -142,8 +193,11 @@ tr_oneshot() {
 	TR_REF=$ref
 	if is_num "$s0" && wait_until 5 tr_ge "$who" sent $((s0 + 1)); then pass "$who: told the session the $kind $ref went off" "sent=$(tr_count "$who" sent)"
 	else fail "$who: told the session the $kind $ref went off" "sent was '$s0': $(dc "$who" traps | cut -c1-300)"; fi
+	tr_heard_made "$o" "$kind $ref" "$ref" "$h0" "${v0[0]}" "${v0[1]}" "${v0[2]}"
 	if wait_until "$TRAPS_WAIT" tr_spent "$o" "$ref"; then pass "$o: the $kind $ref the other set off is spent in its world" "$(tr_ref "$o" "$ref" | cut -c1-160)"
 	else fail "$o: the $kind $ref the other set off is spent in its world" "$(tr_ref "$o" "$ref" | cut -c1-160) | $(dc "$o" traps | cut -c1-300)"; fi
+	if is_num "$os0" && [ "$(tr_count "$o" sent)" = "$os0" ]; then pass "$o: never told the $kind $ref as its own (the other's stand-in set it off there)" "sent=$os0 standInNearer=$(tr_count "$o" standInNearer)"
+	else fail "$o: never told the $kind $ref as its own (the other's stand-in set it off there)" "sent was '$os0': $(dc "$o" traps | cut -c1-300)"; fi
 }
 
 # tr_cell <check...>: both players put in each of TRAPS_CELLS in turn until the check holds; 1 when it never does
@@ -176,6 +230,12 @@ tr_load() {
 	[ "${1:-1}" = 0 ] || wait_until 30 welcomed vm || { fail "vm: still in the session after its load" "$(dc vm 'session status' | cut -c1-160)"; return 1; }
 }
 
+# tr_quiet_up <who> <quiet before> <when>: that game made a kept word quietly since (a catch-up: only the word spends it)
+tr_quiet_up() {
+	if is_num "$2" && wait_until "$TRAPS_WAIT" tr_quiet_past "$1" "$2"; then pass "$1: made the session's kept word quietly $3" "verdicts=$(field verdicts "$(dc "$1" traps)")"
+	else fail "$1: made the session's kept word quietly $3" "quiet was '$2': $(dc "$1" traps | cut -c1-300)"; fi
+}
+
 # tr_friend_load: the VM saves, the host sets one off, the VM loads: the trap reads spent in its world again
 tr_friend_load() {
 	local ref q0
@@ -183,10 +243,12 @@ tr_friend_load() {
 	tr_save || return
 	tr_oneshot host || return
 	ref=$TR_REF
-	q0=$(tr_count vm asks)
+	local v0
+	q0=$(tr_count vm asks); read -ra v0 <<<"$(tr_verdicts vm)"
 	tr_load || return
 	if is_num "$q0" && wait_until 10 tr_ge vm asks $((q0 + 1)); then pass "vm: asked the session again after its load" "asks=$(tr_count vm asks)"
 	else fail "vm: asked the session again after its load" "asks was '$q0': $(dc vm traps | cut -c1-300)"; fi
+	tr_quiet_up vm "${v0[1]}" "after its load"
 	if wait_until "$TRAPS_WAIT" tr_spent vm "$ref"; then pass "vm: the trap $ref the host set off is spent in its world again after its load" "$(tr_ref vm "$ref" | cut -c1-160)"
 	else fail "vm: the trap $ref the host set off is spent in its world again after its load" "$(tr_ref vm "$ref" | cut -c1-160) | $(dc vm traps | cut -c1-300)"; fi
 }
@@ -215,11 +277,13 @@ tr_rejoin() {
 	if ! tr_oneshot_alone host; then r=$(vm_join); wait_until 90 joined_both; return; fi
 	ref=$TR_REF
 	if tr_armed vm "$ref"; then pass "vm: the trap $ref is armed in its world while it is out of the session" ""; else fail "vm: the trap $ref is armed in its world while it is out of the session" "$(tr_ref vm "$ref" | cut -c1-160)"; fi
-	c0=$(tr_count vm catchUps)
+	local v0
+	c0=$(tr_count vm catchUps); read -ra v0 <<<"$(tr_verdicts vm)"
 	if r=$(vm_join) && wait_until 90 joined_both; then pass "vm: joins again" "$(dc vm 'session status' | cut -c1-80)"; else fail "vm: joins again" "$r"; return; fi
 	if wait_until "$TRAPS_WAIT" tr_spent vm "$ref"; then pass "vm: the trap $ref the host set off while it was away is spent once it is back" "$(tr_ref vm "$ref" | cut -c1-160)"
 	else fail "vm: the trap $ref the host set off while it was away is spent once it is back" "$(tr_ref vm "$ref" | cut -c1-160) | $(dc vm traps | cut -c1-300)"; fi
 	if is_num "$c0"; then expect_ge "vm: heard the session's catch-up with its welcome" "$(tr_count vm catchUps)" $((c0 + 1)); fi
+	tr_quiet_up vm "${v0[1]}" "after it joined again"
 }
 
 # tr_oneshot_alone <who>: as tr_oneshot, with nobody else in the session (the other's world is not checked): TR_REF
@@ -244,7 +308,8 @@ tr_bear() {
 	local who=$1 o ref s0 u0 m0 r
 	o=$(other "$who")
 	ref=$(tr_pick "$who" bear armed) || { rig_fault state "$who: finds an open bear trap that $o's world holds open too" "$(dc "$who" "traps pick bear armed $TRAPS_RADIUS" | cut -c1-200)"; return 1; }
-	s0=$(tr_count "$who" sent); u0=$(tr_uses "$(dc "$who" refs)" 1); m0=$(tr_uses "$(dc "$o" refs)" 2)
+	local os0
+	s0=$(tr_count "$who" sent); os0=$(tr_count "$o" sent); u0=$(tr_uses "$(dc "$who" refs)" 1); m0=$(tr_uses "$(dc "$o" refs)" 2)
 	tr_approach "$who" "$ref" 100 || return 1
 	r=$(dc "$who" "traps use $ref")
 	[ "$r" = activated ] || { rig_fault walk "$who: snaps the bear trap $ref shut within reach" "'traps use' replied '$r'"; return 1; }
@@ -269,6 +334,28 @@ tr_bear() {
 		if [ "$(tr_uses "$r" 1)" = "$u0" ] && [ "$(tr_uses "$(dc "$o" refs)" 2)" = "$m0" ]; then pass "both: the bear trap's uses went as its word, never as a mechanism's use" "$who uses=$(field uses "$r")"
 		else fail "both: the bear trap's uses went as its word, never as a mechanism's use" "$who uses=$(field uses "$r") (sent was $u0); $o uses=$(field uses "$(dc "$o" refs)") (made was $m0)"; fi
 	fi
+	# The other's game never told either change as its own: its stand-in of the user stood at the trap, nearer than its player.
+	if is_num "$os0" && [ "$(tr_count "$o" sent)" = "$os0" ]; then pass "$o: never told the bear trap $ref's changes as its own" "sent=$os0 standInNearer=$(tr_count "$o" standInNearer)"
+	else fail "$o: never told the bear trap $ref's changes as its own" "sent was '$os0': $(dc "$o" traps | cut -c1-300)"; fi
+}
+
+# tr_gem <who>: that game's player takes a magic trap's soul gem off its trap (an activation); its game tells it (read as
+# the gem left the world); the other's heard and made the word, and its gem reads "disarmed" there (its trap stops)
+tr_gem() {
+	local who=$1 o ref s0 h0 v0 r
+	o=$(other "$who")
+	ref=$(tr_pick "$who" soulgem armed) || { rig_fault state "$who: finds a soul gem in its magic trap that $o's world holds so too" "$(dc "$who" "traps pick soulgem armed $TRAPS_RADIUS" | cut -c1-200)"; return 1; }
+	s0=$(tr_count "$who" sent); h0=$(tr_count "$o" heard); read -ra v0 <<<"$(tr_verdicts "$o")"
+	tr_approach "$who" "$ref" 100 || return 1
+	r=$(dc "$who" "traps use $ref")
+	[ "$r" = activated ] || { rig_fault walk "$who: takes the soul gem $ref within reach" "'traps use' replied '$r'"; return 1; }
+	if wait_until 10 tr_spent "$who" "$ref"; then pass "$who: took the soul gem $ref off its magic trap" "$(tr_ref "$who" "$ref" | cut -c1-160)"
+	else rig_fault input "$who: took the soul gem $ref off its magic trap" "$(tr_ref "$who" "$ref" | cut -c1-160)"; return 1; fi
+	if is_num "$s0" && wait_until 5 tr_ge "$who" sent $((s0 + 1)); then pass "$who: told the session the soul gem $ref was taken (read as it left the world)" "sent=$(tr_count "$who" sent) leftTold=$(tr_count "$who" leftTold)"
+	else fail "$who: told the session the soul gem $ref was taken (read as it left the world)" "sent was '$s0': $(dc "$who" traps | cut -c1-300)"; fi
+	tr_heard_made "$o" "soul gem $ref" "$ref" "$h0" "${v0[0]}" "${v0[1]}" "${v0[2]}"
+	if wait_until "$TRAPS_WAIT" tr_disarmed "$o" "$ref"; then pass "$o: the soul gem $ref the other took is disarmed in its world (its trap stops casting)" "$(tr_ref "$o" "$ref" | cut -c1-160)"
+	else fail "$o: the soul gem $ref the other took is disarmed in its world (its trap stops casting)" "$(tr_ref "$o" "$ref" | cut -c1-160) | pickups $(dc "$o" pickups | tr ' ' '\n' | grep -E '^(takesTrap|trapsLeft|applied)=' | tr '\n' ' ')"; fi
 }
 
 step_traps() {
@@ -307,7 +394,22 @@ step_traps() {
 		rig_unhealed state "both: a cell of TRAPS_BEAR_CELLS with an open bear trap" "$TRAPS_BEAR_CELLS"
 	fi
 
-	for w in host vm; do echo "     $w: $(dc $w traps | tr ' ' '\n' | grep -E '^(offmain|tracked|owned|waiting|made|verdicts|quieted|farToggles|dispatchFailed|refused|watchRefused|overflow)=' | tr '\n' ' ')"; done
+	section "traps: a magic trap's soul gem one player takes is taken in the other's world, and that trap stops"
+	found=""
+	for cell in $TRAPS_GEM_CELLS; do
+		doors_coc "$cell" || continue
+		sleep 3
+		if tr_pick host soulgem >/dev/null && tr_pick vm soulgem >/dev/null; then found=$cell; break; fi
+		warn "both: a soul gem in its magic trap each may take in $cell" "host: $(dc host "traps pick soulgem armed $TRAPS_RADIUS" | cut -c1-120)"
+	done
+	if [ -n "$found" ]; then
+		tr_gem host
+		tr_gem vm
+	else
+		rig_unhealed state "both: a cell of TRAPS_GEM_CELLS with a soul gem in its magic trap" "$TRAPS_GEM_CELLS"
+	fi
+
+	for w in host vm; do echo "     $w: $(dc $w traps | tr ' ' '\n' | grep -E '^(offmain|tracked|owned|waiting|made|verdicts|quieted|farToggles|standInNearer|left|leftTold|dispatchFailed|refused|watchRefused|overflow)=' | tr '\n' ' ')"; done
 
 	section "traps: god mode off, both back in $SMOKE_CELL"
 	tr_god off
@@ -343,40 +445,77 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "past: no line when on it" "$(tr_past 5 5 5 5 250 || echo none)" none
 	t "uses: sent, made, refused" "$(tr_uses 'installed=1 uses=4/2/1 lastRefused=- lent=5' 1),$(tr_uses 'installed=1 uses=4/2/1 lastRefused=-' 2),$(tr_uses 'uses=4/2/1' 3)" 4,2,1
 
-	# Both games faked: traps W1 (a tripwire) and B1 (a bear trap), each armed or spent in each world; SHARE=1 is the mod at
-	# work (a trap set off, snapped or set is so in the other world), 0 a mod that shares nothing; MECH=1 a mod that also
-	# sends a trap's use as a mechanism's (counted in refs). A walk to a point (walkto x y) sets off an armed tripwire in the
-	# walker's world (it walked through it); DEAF=1: it does not (the walk missed it).
+	t "verdict counts: each named, none when absent or '-'" "$(tr_vcount 'live:3,quiet:12,nothing:1' quiet),$(tr_vcount 'live:3,nothing:1' quiet),$(tr_vcount - live),$(tr_vcount '' nothing)" 12,0,0,0
+	t "disarmed: a gem reading disarmed, gone or not" "$(tr_disarmed_reply "$(sed 's/look=fired/look=disarmed/; s/disabled=0/disabled=1/' <<<"$R")" && echo yes)" yes
+	t "disarmed: a gem only disabled (its trap still set) is not" "$(tr_disarmed_reply "$(sed 's/look=fired/look=armed/; s/disabled=0/disabled=1/' <<<"$R")" || echo no)" no
+
+	# Both games faked: traps W1 (a tripwire), B1 (a bear trap) and G1 (a magic trap's soul gem), each armed or spent in
+	# each world. SHARE=1 is the mod at work (a trap set off, snapped, set or taken is so in the other world, heard there and
+	# made live, or judged nothing when it read so already), 0 a mod that shares nothing; MECH=1 a mod that also sends a
+	# trap's use as a mechanism's (counted in refs). A walk to a point (walkto x y) sets off an armed tripwire in the
+	# walker's world (it walked through it); DEAF=1: it does not (the walk missed it). STANDIN=1: the walker's stand-in sets
+	# the tripwire off in the other's world first (as a player would), before any word; TELLS=1: that game then tells it as
+	# its own (the race the stand-in rule closes). GEMPICK=1: a gem taken is only disabled in the other's world, its
+	# controller left set (a pickup's take, not the trap's word). TGMFAIL=<who>: that game's console tgm fails.
 	fake() {
-		FK=$d/fake; rm -rf "$FK"; mkdir -p "$FK"; SHARE=$1; MECH=${2:-0}; F_DEAF=${DEAF:-0}
-		for w in host vm; do echo armed > "$FK/$w.0006A001"; echo armed > "$FK/$w.0001B001"; for c in sent asks catchUps usent umade tgm; do echo 0 > "$FK/$w.$c"; done; done
+		FK=$d/fake; rm -rf "$FK"; mkdir -p "$FK"; SHARE=$1; MECH=${2:-0}; F_DEAF=${DEAF:-0}; F_STANDIN=${STANDIN:-0}; F_TELLS=${TELLS:-0}; F_GEMPICK=${GEMPICK:-0}
+		F_TGMFAIL=${TGMFAIL:-}
+		for w in host vm; do
+			for r in 0006A001 0001B001 0002C001; do echo armed > "$FK/$w.$r"; echo 0 > "$FK/$w.$r.off"; done
+			for c in sent heard live quiet nothing asks catchUps usent umade tgm; do echo 0 > "$FK/$w.$c"; done
+		done
 	}
 	get() { cat "$FK/$1.$2" 2>/dev/null || echo 0; }
 	put() { echo "$3" > "$FK/$1.$2"; }
 	up() { put "$1" "$2" $(( $(get "$1" "$2") + 1 )); }
-	kindof() { case "$1" in 0006A*) echo tripwire ;; *) echo bear ;; esac; }
-	baseof() { case "$1" in 0006A*) echo 0006A4F5 ;; *) echo 0001F2E1 ;; esac; }
+	kindof() { case "$1" in 0006A*) echo tripwire ;; 0002C*) echo soulgem ;; *) echo bear ;; esac; }
+	baseof() { case "$1" in 0006A*) echo 0006A4F5 ;; 0002C*) echo 0002E4F1 ;; *) echo 0001F2E1 ;; esac; }
 	refline() {
 		local s; s=$(get "$1" "$2")
-		echo "ref=$2 found=1 base=$(baseof "$2") kind=$(kindof "$2") look=$s state=- disabled=0 destroyed=0 loaded=1 watched=1 settled=1 waiting=0 word=- attempts=0 x=100 y=200 z=0 dist=150"
+		echo "ref=$2 found=1 base=$(baseof "$2") kind=$(kindof "$2") look=$s state=- disabled=$(get "$1" "$2.off") destroyed=0 loaded=1 watched=1 settled=1 waiting=0 word=- attempts=0 x=100 y=200 z=0 dist=150"
 	}
 	pick() {  # pick <who> <sort> <want>
-		local r; case "$2" in tripwire | oneshot | any) r=0006A001 ;; bear) r=0001B001 ;; *) echo none; return ;; esac
+		local r; case "$2" in tripwire | oneshot | any) r=0006A001 ;; bear) r=0001B001 ;; soulgem) r=0002C001 ;; *) echo none; return ;; esac
 		local s; s=$(get "$1" "$r")
-		if { [ "$3" = armed ] && [ "$s" = armed ]; } || { [ "$3" = spent ] && [ "$s" != armed ]; }; then echo "ref=$r base=$(baseof "$r") kind=$(kindof "$r") look=$s state=- runtime=0 loaded=1 x=100 y=200 z=0 dist=300"; else echo none; fi
+		if { [ "$3" = armed ] && [ "$s" = armed ] && [ "$(get "$1" "$r.off")" = 0 ]; } || { [ "$3" = spent ] && [ "$s" != armed ]; }; then echo "ref=$r base=$(baseof "$r") kind=$(kindof "$r") look=$s state=- runtime=0 loaded=1 x=100 y=200 z=0 dist=300"; else echo none; fi
 	}
-	fset() { put "$1" "$2" "$3"; up "$1" sent; [ "$MECH" = 1 ] && { up "$1" usent; up "$(other "$1")" umade; }; [ "$SHARE" = 1 ] && put "$(other "$1")" "$2" "$3"; }
-	fwalk() { [ "$F_DEAF" = 1 ] && return; [ "$(get "$1" 0006A001)" = armed ] && fset "$1" 0006A001 fired; }
-	fuse() { if [ "$(get "$1" "$2")" = armed ]; then fset "$1" "$2" fired; else fset "$1" "$2" armed; fi; echo activated; }
+	# fset <who> <ref> <look>: so in that world, told; the other's hears it and makes it (live), or judges nothing when it
+	# reads so already
+	fset() {
+		local o; o=$(other "$1")
+		put "$1" "$2" "$3"; up "$1" sent; [ "$MECH" = 1 ] && { up "$1" usent; up "$o" umade; }
+		[ "$SHARE" = 1 ] || return 0
+		up "$o" heard
+		if [ "$(get "$o" "$2")" = "$3" ]; then up "$o" nothing; else put "$o" "$2" "$3"; up "$o" live; fi
+		[ "$(kindof "$2")" = soulgem ] && put "$o" "$2.off" 1
+		return 0
+	}
+	fwalk() {
+		local o; o=$(other "$1")
+		[ "$F_DEAF" = 1 ] && return
+		[ "$(get "$1" 0006A001)" = armed ] || return
+		if [ "$F_STANDIN" = 1 ] && [ "$(get "$o" 0006A001)" = armed ]; then put "$o" 0006A001 fired; [ "$F_TELLS" = 1 ] && up "$o" sent; fi
+		fset "$1" 0006A001 fired
+	}
+	fuse() {
+		if [ "$(kindof "$2")" = soulgem ]; then
+			[ "$(get "$1" "$2")" = armed ] || { echo "error: taken"; return; }
+			put "$1" "$2.off" 1; fset "$1" "$2" disarmed
+			[ "$F_GEMPICK" = 1 ] && { put "$(other "$1")" "$2" armed; put "$(other "$1")" "$2.off" 1; }
+		elif [ "$(get "$1" "$2")" = armed ]; then fset "$1" "$2" fired; else fset "$1" "$2" armed; fi
+		echo activated
+	}
+	fverdicts() { local v=""; for k in live quiet nothing; do [ "$(get "$1" $k)" != 0 ] && v="$v${v:+,}$k:$(get "$1" $k)"; done; echo "${v:--}"; }
 	dc() {
 		local w=$1 c=$2 a; read -ra a <<<"$c"
 		case "$c" in
 			"traps pick "*) pick "$w" "${a[2]}" "${a[3]}" ;;
 			"traps ref "*) refline "$w" "${a[2]}" ;;
 			"traps use "*) fuse "$w" "${a[2]}" ;;
-			traps) echo "installed=1 us=1 session=1 sent=$(get "$w" sent) asks=$(get "$w" asks) catchUps=$(get "$w" catchUps) offmain=0" ;;
+			traps) echo "installed=1 us=1 session=1 left=0 leftTold=0 sent=$(get "$w" sent) heard=$(get "$w" heard) catchUps=$(get "$w" catchUps) asks=$(get "$w" asks) verdicts=$(fverdicts "$w") standInNearer=0 offmain=0" ;;
+			pickups) echo "installed=1 takesTrap=0 trapsLeft=0 applied=0" ;;
 			refs) echo "installed=1 uses=$(get "$w" usent)/$(get "$w" umade)/0 lastRefused=- asks=0" ;;
-			"console tgm") up "$w" tgm; echo ran ;;
+			"console tgm") if [ "$F_TGMFAIL" = "$w" ]; then echo "error: no console"; else up "$w" tgm; echo ran; fi ;;
 			"walkto stop") echo stopped ;;
 			"walkto "*) if [[ ${a[1]} =~ ^[0-9A-F]{8}$ ]]; then echo "walking to ${a[1]}"; else echo "walking to ${a[1]} ${a[2]}"; fwalk "$w"; fi ;;
 			walkto) echo "not walking" ;;
@@ -389,28 +528,47 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	verdicts() { grep -oE '^(PASS|FAIL|WARN|RIG|RIGFAULT|HEAL) ' <<<"$1" | tr -d ' ' | sort | uniq -c | awk '{printf "%s=%s ", $2, $1}'; }
 
 	fake 1; o=$(run 1 eval 'tr_oneshot host; echo "ref=$TR_REF"')
-	t "one-shot: walked through, set off, told, spent in the other's: passes" "$(verdicts "$o")" "PASS=3 "
+	t "one-shot: walked through, set off, told, heard, made live, spent in the other's, not told there: passes" "$(verdicts "$o")" "PASS=6 "
 	t "one-shot: ... its reference" "$(grep -o '^ref=.*' <<<"$o")" ref=0006A001
 	t "one-shot: ... the states" "$(get host 0006A001),$(get vm 0006A001)" fired,fired
 	fake 1; o=$(run 2 tr_oneshot vm)
-	t "one-shot: the VM's way passes too" "$(verdicts "$o")" "PASS=3 "
+	t "one-shot: the VM's way passes too" "$(verdicts "$o")" "PASS=6 "
 	fake 0; o=$(run 3 tr_oneshot host)
-	t "one-shot: a mod that shares nothing fails in the other's world" "$(grep -c '^FAIL vm: the tripwire 0006A001 the other set off is spent' <<<"$o")" 1
+	t "one-shot: a mod that shares nothing fails in the other's world" "$(grep -c '^FAIL vm: the tripwire 0006A001 the other set off is spent' <<<"$o"),$(grep -c '^FAIL vm: heard the word' <<<"$o")" 1,1
+	STANDIN=1 fake 0; o=$(run 3b tr_oneshot host)
+	t "one-shot: a mod that shares nothing fails even when the stand-in set the trap off there (spent, but no word heard)" "$(grep -c '^FAIL vm: heard the word on the tripwire' <<<"$o"),$(grep -c '^PASS vm: the tripwire 0006A001 the other set off is spent' <<<"$o")" 1,1
+	STANDIN=1 fake 1; o=$(run 3c tr_oneshot host)
+	t "one-shot: the stand-in set it off there before the word: a WARN (the word not proven), never a PASS or FAIL" "$(verdicts "$o")" "PASS=5 WARN=1 "
+	STANDIN=1 TELLS=1 fake 1; o=$(run 3d tr_oneshot host)
+	t "one-shot: the other's game telling the stand-in's set-off as its own fails" "$(grep -c '^FAIL vm: never told the tripwire 0006A001 as its own' <<<"$o")" 1
 	fake 1; put vm 0006A001 fired; o=$(run 4 tr_oneshot host)
 	t "one-shot: one the other's world holds spent already is no test (RIG), never FAIL" "$(verdicts "$o" | grep -c FAIL),$(grep -c '^RIG' <<<"$o")" 0,1
 	DEAF=1 fake 1; o=$(run 5 tr_oneshot host)
 	t "one-shot: a walk that missed the trap is the rig's (RIGFAULT), never FAIL" "$(verdicts "$o" | grep -c FAIL),$(grep -cE '^RIG +host: walked through' <<<"$o")" 0,1
 	fake 1; o=$(run 6 tr_bear host)
-	t "bear: snapped, told, shut in the other's, set open, open in the other's, no mechanism use: passes" "$(verdicts "$o")" "PASS=6 "
+	t "bear: snapped, told, shut in the other's, set open, open in the other's, no mechanism use, not told there: passes" "$(verdicts "$o")" "PASS=7 "
 	t "bear: ... the states" "$(get host 0001B001),$(get vm 0001B001)" armed,armed
 	fake 1; o=$(run 7 tr_bear vm)
-	t "bear: the VM's way passes too" "$(verdicts "$o")" "PASS=6 "
+	t "bear: the VM's way passes too" "$(verdicts "$o")" "PASS=7 "
 	fake 0; o=$(run 8 tr_bear host)
 	t "bear: a mod that shares nothing fails in the other's world (its open after proves nothing: not checked)" "$(grep -c '^FAIL vm: the bear trap 0001B001' <<<"$o"),$(grep -c '^PASS vm: the bear trap 0001B001 the other set is open' <<<"$o")" 1,0
 	fake 1 1; o=$(run 9 tr_bear host)
 	t "bear: a trap's use sent as a mechanism's fails" "$(grep -c "^FAIL both: the bear trap's uses went as its word" <<<"$o")" 1
 	fake 1; o=$(run 10 eval 'tr_god on; tr_god on; tr_god off; tr_god off')
 	t "god: toggled once on and once off in each game, said each time" "$(get host tgm),$(get vm tgm),$(grep -c '^HEAL ' <<<"$o")" 2,2,2
+	TGMFAIL=vm fake 1; o=$(run 10b eval 'tr_god on; echo "god=$TR_GOD"')
+	t "god: the VM's fails: the host toggled back (on, then off), the step not left on, said as the rig's" "$(get host tgm),$(grep -o '^god=.*' <<<"$o"),$(grep -c '^FAIL vm: god mode on' <<<"$o")" 2,god=0,1
+	fake 1; o=$(run 11 tr_gem host)
+	t "gem: taken, told, heard, made live, disarmed in the other's: passes" "$(verdicts "$o")" "PASS=5 "
+	t "gem: ... the states" "$(get host 0002C001)/$(get host 0002C001.off),$(get vm 0002C001)/$(get vm 0002C001.off)" disarmed/1,disarmed/1
+	fake 1; o=$(run 12 tr_gem vm)
+	t "gem: the VM's way passes too" "$(verdicts "$o")" "PASS=5 "
+	fake 0; o=$(run 13 tr_gem host)
+	t "gem: a mod that shares nothing fails in the other's world" "$(grep -c '^FAIL vm: heard the word on the soul gem' <<<"$o"),$(grep -c '^FAIL vm: the soul gem 0002C001 the other took is disarmed' <<<"$o")" 1,1
+	GEMPICK=1 fake 0; o=$(run 14 tr_gem host)
+	t "gem: one only taken out of the other's world (its trap still set, casting) fails" "$(grep -c '^FAIL vm: the soul gem 0002C001 the other took is disarmed' <<<"$o")" 1
+	fake 1; put vm 0002C001.off 1; o=$(run 15 tr_gem host)
+	t "gem: one the other's world holds taken already is no test (RIG), never FAIL" "$(verdicts "$o" | grep -c FAIL),$(grep -c '^RIG' <<<"$o")" 0,1
 
 	# the step is wired into the harness: in STEPS before final, a session step, in the default run
 	t "traps is a step, before final" "$(case " $STEPS " in *" traps "*"final "*) echo yes;; esac)" yes

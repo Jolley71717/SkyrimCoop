@@ -824,6 +824,17 @@ namespace RemotePlayers
 		return actor.get();
 	}
 
+	std::vector<RE::Actor*> StandIns()
+	{
+		std::vector<RE::Actor*> out;
+		for (const auto& entry : players) {
+			if (const auto actor = StandInOf(entry.first)) {
+				out.push_back(actor);
+			}
+		}
+		return out;
+	}
+
 	std::string Describe()
 	{
 		std::size_t disabled = 0;

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -26,7 +27,9 @@
 // - TrapBreakAwayBase (a breakaway floor or bridge): armed in "UnBroken"; "Destroyed" once broken.
 // - TrapBear: a toggle, "Open" (armed) and "Closed" (snapped, or disarmed by a player), "busy" between; a player sets a
 //   closed one open again.
-// - trapSoulGemController (a magic trap's soul gem): "waiting" or "inmagictrap" until taken, then "disarmed".
+// - trapSoulGemController (a magic trap's soul gem): "waiting" or "inmagictrap" until taken, then "disarmed" (its begin
+//   state clears the gem from its trap, which stops casting). A player's activation takes it: "disarmed" and disabled in
+//   one call, so a trap is read once more as it leaves the world.
 // Traps that set themselves again (blades, swinging walls, darts, flamethrowers, pressure plates, spring plates) stay each
 // game's own: a friend's stand-in walking onto one sets it off in that game as a player does.
 namespace TrapRules
@@ -46,6 +49,37 @@ namespace TrapRules
 	// Our player within this of a toggle (a bear trap) is the one who changed it: a change with nobody of ours near is a
 	// friend's stand-in's or an NPC's, told by the game where it happened.
 	inline constexpr float TOGGLE_REACH = 1024.0f;
+	// No friend's stand-in in the trap's cell or space (Watch::Read).
+	inline constexpr float NO_STAND_IN = -1.0f;
+	// A move longer than this between two reads is a jump (a load door, a placement, a load): only where it is now counts.
+	inline constexpr float MAX_STEP = 1500.0f;
+
+	struct Point
+	{
+		float x = 0.0f;
+		float y = 0.0f;
+		float z = 0.0f;
+	};
+
+	// How near someone came to a trap at a_at between two reads, from a_from to a_to: the nearest point of that way. Who
+	// set a trap off crossed it between the reads, wherever they stand by the second one (a runner can be 120 units past a
+	// tripwire by then, and a friend walking just behind nearer to it than that).
+	[[nodiscard]] inline float Closest(Point a_at, Point a_from, Point a_to)
+	{
+		const float dx = a_to.x - a_from.x;
+		const float dy = a_to.y - a_from.y;
+		const float dz = a_to.z - a_from.z;
+		const float len2 = dx * dx + dy * dy + dz * dz;
+		float       t = 1.0f;
+		if (len2 > 1e-6f && len2 <= MAX_STEP * MAX_STEP) {
+			t = ((a_at.x - a_from.x) * dx + (a_at.y - a_from.y) * dy + (a_at.z - a_from.z) * dz) / len2;
+			t = (std::clamp)(t, 0.0f, 1.0f);
+		}
+		const float ex = a_from.x + dx * t - a_at.x;
+		const float ey = a_from.y + dy * t - a_at.y;
+		const float ez = a_from.z + dz * t - a_at.z;
+		return std::sqrt(ex * ex + ey * ey + ez * ez);
+	}
 	// Our player within this of a trap the session says went off just now sees and hears it go off here.
 	inline constexpr float LIVE_REACH = 4000.0f;
 	// How many times a word is made on a trap that still reads armed after APPLY_QUIET, before it is given up (counted).
@@ -235,16 +269,21 @@ namespace TrapRules
 	// ---- telling the session ----
 
 	// The traps this game watches, each as it read (Traps.cpp reads them a few times a second while loaded near our
-	// player). A change is told when the trap read the other way for SETTLE first: a one-shot trap set and then spent, a
-	// bear trap snapped or set again with our player near. Never one this game made from a word within APPLY_QUIET.
+	// player, and once more as one leaves the world: a magic trap's gem taken goes "disarmed" and is disabled in one
+	// call). A change is told when the trap read the other way for SETTLE first: a one-shot trap set and then spent, a
+	// bear trap snapped or set again with our player near. Never one this game made from a word within APPLY_QUIET, and
+	// never one with a friend's stand-in nearer to it than our player: that friend set it off (their stand-in walks the
+	// same path here a moment later), and their game tells it, so the session credits it to the one who did.
 	class Watch
 	{
 	public:
 		static constexpr std::size_t MAX = 4096;
 
-		// A read of a_ref, of a_kind, as a_look now, our player a_playerDistance from it (below 0: not in its cell or space).
-		// The word to tell, if the read is news.
-		std::optional<std::uint8_t> Read(std::uint32_t a_ref, Kind a_kind, Look a_look, float a_playerDistance, Clock::time_point a_now)
+		// A read of a_ref, of a_kind, as a_look now; our player came within a_playerDistance of it since the last read, and
+		// the nearest friend's stand-in within a_standInDistance (Closest; either below 0: not in its cell or space). The word
+		// to tell, if the read is news.
+		std::optional<std::uint8_t> Read(std::uint32_t a_ref, Kind a_kind, Look a_look, float a_playerDistance, Clock::time_point a_now,
+			float a_standInDistance = NO_STAND_IN)
 		{
 			const auto side = Armed(a_look);
 			auto       it = seen.find(a_ref);
@@ -286,6 +325,10 @@ namespace TrapRules
 			if (s.appliedAt && a_now - *s.appliedAt < APPLY_QUIET) {
 				++quieted;
 				return std::nullopt;  // ours, made from the session's word
+			}
+			if (StandInNearer(a_playerDistance, a_standInDistance)) {
+				++standInNearer;
+				return std::nullopt;  // a friend's, told by their game
 			}
 			if (Protocol::TrapToggles(a_kind)) {
 				if (a_playerDistance < 0.0f || a_playerDistance > TOGGLE_REACH) {
@@ -329,6 +372,14 @@ namespace TrapRules
 		[[nodiscard]] std::uint64_t Refused() const { return refused; }
 		[[nodiscard]] std::uint64_t Quieted() const { return quieted; }
 		[[nodiscard]] std::uint64_t FarToggles() const { return farToggles; }
+		[[nodiscard]] std::uint64_t StandInsNearer() const { return standInNearer; }
+
+		// Whether a friend's stand-in is nearer to a trap than our player (our player out of its cell or space is farther
+		// than any stand-in in it).
+		[[nodiscard]] static constexpr bool StandInNearer(float a_playerDistance, float a_standInDistance)
+		{
+			return a_standInDistance >= 0.0f && (a_playerDistance < 0.0f || a_standInDistance < a_playerDistance);
+		}
 
 		void Clear() { seen.clear(); }
 
@@ -346,6 +397,7 @@ namespace TrapRules
 		std::uint64_t                           refused = 0;
 		std::uint64_t                           quieted = 0;
 		std::uint64_t                           farToggles = 0;
+		std::uint64_t                           standInNearer = 0;
 	};
 
 	// Our words, paced: a batch at most every PACE. A newer word on a queued trap replaces it.
@@ -590,6 +642,18 @@ namespace TrapRules
 		}
 
 		void Remove(std::uint32_t a_ref) { entries.erase(a_ref); }
+
+		// a_ref left the world here (disabled, or its 3D gone): a word made on it is done, since its making ends in a
+		// disable (a soul gem, a breakaway made quietly); one never made waits for it to be loaded again. Whether one went.
+		bool Left(std::uint32_t a_ref)
+		{
+			const auto it = entries.find(a_ref);
+			if (it == entries.end() || it->second.attempts == 0) {
+				return false;
+			}
+			entries.erase(it);
+			return true;
+		}
 
 		[[nodiscard]] std::size_t   Size() const { return entries.size(); }
 		[[nodiscard]] std::uint64_t Refused() const { return refused; }

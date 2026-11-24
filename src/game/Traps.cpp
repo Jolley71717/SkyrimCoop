@@ -4,6 +4,7 @@
 #include "FormIds.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
+#include "game/RemotePlayers.h"
 #include "game/TrapRules.h"
 #include "net/FormsCommand.h"
 
@@ -55,7 +56,9 @@ namespace Traps
 		struct Tracked
 		{
 			Kind        kind = Kind::kNone;
-			std::string script;  // the trap script's own name: what its state is set on
+			std::string script;            // the trap script's own name: what its state is set on
+			float       distance = -1.0f;  // our player from it at the last read
+			float       standIn = -1.0f;   // ... and the nearest friend's stand-in
 		};
 		std::unordered_map<RE::FormID, Tracked>           tracked;   // traps loaded near our player
 		std::unordered_map<RE::FormID, Clock::time_point> notTraps;  // looked at, no trap script: since when
@@ -65,6 +68,8 @@ namespace Traps
 			std::uint64_t finds = 0;
 			std::uint64_t found = 0;      // traps started being read
 			std::uint64_t reads = 0;
+			std::uint64_t left = 0;       // traps read once more as they left the world here (disabled, 3D gone)
+			std::uint64_t leftTold = 0;   // ... whose last read was news (a soul gem taken)
 			std::uint64_t sent = 0;       // our words told to the session
 			std::uint64_t heard = 0;      // words heard
 			std::uint64_t catchUps = 0;   // catch-up batches heard
@@ -226,6 +231,45 @@ namespace Traps
 			return a_ref && !a_ref->IsDeleted() && !a_ref->IsDisabled() && cell && cell->IsAttached() && a_ref->Is3DLoaded();
 		}
 
+		TrapRules::Point PointOf(const RE::NiPoint3& a_at)
+		{
+			return { a_at.x, a_at.y, a_at.z };
+		}
+
+		// Someone who can set a trap off (our player, a friend's stand-in): where they stand now and stood at the last read.
+		struct Mover
+		{
+			const RE::TESObjectREFR* ref = nullptr;
+			TrapRules::Point         at;
+			TrapRules::Point         was;
+		};
+
+		// Where our player and each stand-in stood at the last read (a load forgets them).
+		std::optional<TrapRules::Point>                lastPlayerAt;
+		std::unordered_map<RE::FormID, TrapRules::Point> lastStandInAt;
+
+		// How near a_mover came to a_ref since the last read (below 0: not in its cell or space).
+		float Reach(const Mover& a_mover, const RE::TESObjectREFR* a_ref)
+		{
+			if (!a_mover.ref || Distance(a_mover.ref, a_ref) < 0.0f) {
+				return -1.0f;
+			}
+			return TrapRules::Closest(PointOf(a_ref->GetPosition()), a_mover.was, a_mover.at);
+		}
+
+		// The nearest any of a_standIns came to a_ref since the last read (below 0: none in its cell or space).
+		float NearestStandIn(const RE::TESObjectREFR* a_ref, const std::vector<Mover>& a_standIns)
+		{
+			float nearest = TrapRules::NO_STAND_IN;
+			for (const auto& mover : a_standIns) {
+				const auto d = Reach(mover, a_ref);
+				if (d >= 0.0f && (nearest < 0.0f || d < nearest)) {
+					nearest = d;
+				}
+			}
+			return nearest;
+		}
+
 		// One step of making a word, on the trap's own script.
 		bool Do(RE::TESObjectREFR* a_ref, const std::string& a_script, const TrapRules::Step& a_step)
 		{
@@ -357,15 +401,67 @@ namespace Traps
 			}
 		}
 
+		// A read of a trap, told to the session if it is news.
+		bool Tell(RE::TESObjectREFR* a_ref, Kind a_kind, Look a_look, float a_distance, float a_standIn, Clock::time_point a_now, bool a_leaving)
+		{
+			const auto id = a_ref->GetFormID();
+			const auto phase = watch.Read(id, a_kind, a_look, a_distance, a_now, a_standIn);
+			const auto base = phase ? a_ref->GetBaseObject() : nullptr;
+			if (!base) {
+				return false;
+			}
+			outbox.Add({ .ref = id, .base = base->GetFormID(), .kind = a_kind, .phase = *phase });
+			++counts.sent;
+			logs::info("Traps: {:08X} ({}) {} in our game{} (our player {:.0f} away); told to the session", id, KindName(a_kind), PhaseName(*phase),
+				a_leaving ? " as it left the world" : "", a_distance);
+			return true;
+		}
+
 		// The traps found, read: our changes told, the session's words made.
 		void Read(Clock::time_point a_now)
 		{
 			const auto player = Player();
+			if (!player) {
+				return;
+			}
+			// Who could have set a trap off since the last read, each with the way they came (who crossed a tripwire is
+			// told by that way, not by where they stand now).
+			const auto playerAt = PointOf(player->GetPosition());
+			const Mover us{ .ref = player, .at = playerAt, .was = lastPlayerAt.value_or(playerAt) };
+			std::vector<Mover> standIns;
+			std::unordered_map<RE::FormID, TrapRules::Point> standInsAt;
+			for (const auto actor : RemotePlayers::StandIns()) {
+				const auto at = PointOf(actor->GetPosition());
+				const auto was = lastStandInAt.find(actor->GetFormID());
+				standIns.push_back({ .ref = actor, .at = at, .was = was != lastStandInAt.end() ? was->second : at });
+				standInsAt.emplace(actor->GetFormID(), at);
+			}
+			lastPlayerAt = playerAt;
+			lastStandInAt = std::move(standInsAt);
+
 			for (auto it = tracked.begin(); it != tracked.end();) {
 				const auto id = it->first;
 				const auto ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(id);
 				const auto distance = ref ? Distance(player, ref) : -1.0f;
 				if (!ref || !Loaded(ref) || distance < 0.0f || distance > FIND_RADIUS * 1.25f) {
+					// Leaving the world here: read once more, so a spend that ends in a disable or a removal is told (a
+					// magic trap's gem taken goes "disarmed" and is disabled in one call, before a read could see it in the
+					// world). Who was near as last read when it has no place now (gone into an inventory).
+					if (ref) {
+						++counts.left;
+						const auto read = ReadScripts(ref);
+						if (read.kind != Kind::kNone && read.kind == it->second.kind) {
+							const bool placed = ref->GetParentCell() != nullptr;
+							const auto reach = placed && distance >= 0.0f ? Reach(us, ref) : it->second.distance;
+							const auto standIn = placed ? NearestStandIn(ref, standIns) : it->second.standIn;
+							if (Tell(ref, read.kind, TrapRules::LookOf(read.kind, read.state), reach, standIn, a_now, true)) {
+								++counts.leftTold;
+							}
+						}
+					}
+					if (ref && ref->IsDisabled()) {
+						waiting.Left(id);  // a word made on it is done: its making ended in a disable
+					}
 					watch.Forget(id);  // read afresh when it is loaded near again
 					it = tracked.erase(it);
 					continue;
@@ -376,17 +472,10 @@ namespace Traps
 				if (!read.script.empty()) {
 					it->second.script = read.script;
 				}
-				const auto look = TrapRules::LookOf(read.kind, read.state);
+				it->second.distance = Reach(us, ref);
+				it->second.standIn = NearestStandIn(ref, standIns);
 				if (read.kind != Kind::kNone) {
-					if (const auto phase = watch.Read(id, read.kind, look, distance, a_now)) {
-						const auto base = ref->GetBaseObject();
-						if (base) {
-							outbox.Add({ .ref = id, .base = base->GetFormID(), .kind = read.kind, .phase = *phase });
-							++counts.sent;
-							logs::info("Traps: {:08X} ({}) {} in our game (our player {:.0f} away); told to the session", id, KindName(read.kind), PhaseName(*phase),
-								distance);
-						}
-					}
+					Tell(ref, read.kind, TrapRules::LookOf(read.kind, read.state), it->second.distance, it->second.standIn, a_now, false);
 				}
 				if (const auto entry = waiting.Find(id)) {
 					Try(*entry, a_now);
@@ -401,6 +490,8 @@ namespace Traps
 			waiting.Clear();
 			tracked.clear();
 			notTraps.clear();
+			lastPlayerAt.reset();
+			lastStandInAt.clear();
 			logged = 0;
 		}
 	}
@@ -704,12 +795,14 @@ namespace Traps
 				std::lock_guard ownGuard{ ownLock };
 				ownedNow = owned.size();
 			}
-			return std::format("installed={} us={} session={} tracked={} owned={} watched={} waiting={} queued={} finds={} found={} reads={} sent={} heard={} "
-							   "catchUps={} asks={} made={} verdicts={} quieted={} farToggles={} dispatchFailed={} refused={} watchRefused={} overflow={} offmain={}",
+			return std::format("installed={} us={} session={} tracked={} owned={} watched={} waiting={} queued={} finds={} found={} reads={} left={} leftTold={} "
+							   "sent={} heard={} catchUps={} asks={} made={} verdicts={} quieted={} farToggles={} standInNearer={} dispatchFailed={} refused={} "
+							   "watchRefused={} overflow={} offmain={}",
 				installed ? 1 : 0, ourId, active ? 1 : 0, tracked.size(), ownedNow, watch.Size(), waiting.Size(), outbox.Size(), Counted(counts.finds),
-				Counted(counts.found), Counted(counts.reads), Counted(counts.sent), Counted(counts.heard), Counted(counts.catchUps), Counted(counts.asks),
-				Counted(counts.made), verdicts.empty() ? std::string{ "-" } : verdicts, Counted(watch.Quieted()), Counted(watch.FarToggles()),
-				Counted(counts.dispatchFailed), Counted(waiting.Refused()), Counted(watch.Refused()), Counted(outbox.Overflow()), Counted(counts.offMain));
+				Counted(counts.found), Counted(counts.reads), Counted(counts.left), Counted(counts.leftTold), Counted(counts.sent), Counted(counts.heard),
+				Counted(counts.catchUps), Counted(counts.asks), Counted(counts.made), verdicts.empty() ? std::string{ "-" } : verdicts, Counted(watch.Quieted()),
+				Counted(watch.FarToggles()), Counted(watch.StandInsNearer()), Counted(counts.dispatchFailed), Counted(waiting.Refused()), Counted(watch.Refused()),
+				Counted(outbox.Overflow()), Counted(counts.offMain));
 		}
 		if (words[0] == "ref") {
 			return RefCommand(words);

@@ -509,6 +509,98 @@ TEST("trap rules: a bear trap is told snapped and set again only with our player
 	CHECK(watch.Read(3, k, Look::kArmed, 200.0f, T0 + 12s).has_value());
 }
 
+TEST("trap rules: a change with a friend's stand-in nearer to the trap than our player is that friend's, told by their game, never here")
+{
+	using TrapRules::Watch;
+	// Who is nearer: a stand-in in the trap's cell or space and nearer than our player, or our player out of it.
+	CHECK(Watch::StandInNearer(900.0f, 120.0f));
+	CHECK(Watch::StandInNearer(-1.0f, 120.0f));
+	CHECK(!Watch::StandInNearer(120.0f, 900.0f));
+	CHECK(!Watch::StandInNearer(120.0f, TrapRules::NO_STAND_IN));
+	CHECK(!Watch::StandInNearer(-1.0f, TrapRules::NO_STAND_IN));
+	CHECK(!Watch::StandInNearer(300.0f, 300.0f));  // a tie: ours (each game tells its own; the session keeps the first)
+
+	// How near someone came between two reads: a runner 120 units past a tripwire by the read crossed it (0), nearer than a
+	// friend standing 100 units off; a jump (a load door) counts only where it ends; standing still, where it stands.
+	using TrapRules::Closest;
+	using TrapRules::Point;
+	const Point trap{ 0.0f, 0.0f, 0.0f };
+	CHECK(Closest(trap, Point{ -60.0f, 0.0f, 0.0f }, Point{ 120.0f, 0.0f, 0.0f }) < 0.01f);
+	CHECK(Closest(trap, Point{ -60.0f, 30.0f, 0.0f }, Point{ 120.0f, 30.0f, 0.0f }) > 29.9f);
+	CHECK(Closest(trap, Point{ -60.0f, 30.0f, 0.0f }, Point{ 120.0f, 30.0f, 0.0f }) < 30.1f);
+	CHECK(Closest(trap, Point{ 100.0f, 0.0f, 0.0f }, Point{ 100.0f, 0.0f, 0.0f }) > 99.9f);
+	CHECK(Closest(trap, Point{ 200.0f, 0.0f, 0.0f }, Point{ 400.0f, 0.0f, 0.0f }) < 200.1f);  // walking away: where it was
+	CHECK(Closest(trap, Point{ 200.0f, 0.0f, 0.0f }, Point{ 400.0f, 0.0f, 0.0f }) > 199.9f);
+	CHECK(Closest(trap, Point{ -5000.0f, 0.0f, 0.0f }, Point{ 3000.0f, 0.0f, 0.0f }) > 2999.0f);  // a jump: where it ended
+
+	// A tripwire the friend's stand-in walked through here, a moment after the friend did in their game: not told here,
+	// so the session holds the friend's word (theirs on a load of their own save; never a coin flip).
+	Watch      watch;
+	const auto k = TrapKind::kTripwire;
+	CHECK(!watch.Read(1, k, Look::kArmed, 800.0f, T0, 2000.0f));
+	CHECK(!watch.Read(1, k, Look::kArmed, 800.0f, T0 + 3s, 1500.0f));
+	CHECK(!watch.Read(1, k, Look::kGoing, 800.0f, T0 + 4s, 60.0f));
+	CHECK(watch.StandInsNearer() == 1);
+	CHECK(!watch.Read(1, k, Look::kFired, 800.0f, T0 + 5s, 300.0f));  // spent since: the same side, never told late
+
+	// Our player walked through it, the friend's stand-in further off: ours, told.
+	CHECK(!watch.Read(2, k, Look::kArmed, 900.0f, T0, 700.0f));
+	CHECK(!watch.Read(2, k, Look::kArmed, 300.0f, T0 + 3s, 700.0f));
+	const auto ours = watch.Read(2, k, Look::kGoing, 80.0f, T0 + 4s, 700.0f);
+	REQUIRE(ours);
+	CHECK(*ours == Trap::kFired);
+
+	// One an NPC set off with no stand-in in its cell or space: told, wherever our player is.
+	CHECK(!watch.Read(3, k, Look::kArmed, 3000.0f, T0));
+	CHECK(!watch.Read(3, k, Look::kArmed, 3000.0f, T0 + 3s));
+	CHECK(watch.Read(3, k, Look::kFired, 3000.0f, T0 + 4s, TrapRules::NO_STAND_IN).has_value());
+
+	// A bear trap the friend's stand-in stands at, our player within TOGGLE_REACH but further off: theirs.
+	const auto b = TrapKind::kBearTrap;
+	CHECK(!watch.Read(4, b, Look::kArmed, 600.0f, T0, 90.0f));
+	CHECK(!watch.Read(4, b, Look::kArmed, 600.0f, T0 + 3s, 90.0f));
+	CHECK(!watch.Read(4, b, Look::kFired, 600.0f, T0 + 4s, 90.0f));
+	CHECK(watch.StandInsNearer() == 2);
+	CHECK(watch.FarToggles() == 0);
+	// ... and set open again by our player, who stands at it now: ours.
+	CHECK(!watch.Read(4, b, Look::kFired, 80.0f, T0 + 7s, 600.0f));
+	CHECK(watch.Read(4, b, Look::kArmed, 80.0f, T0 + 8s, 600.0f).has_value());
+}
+
+TEST("trap rules: a trap read once more as it leaves the world is told when that read is news: a magic trap's gem taken")
+{
+	// Taken by our player, the gem's controller goes "disarmed" and the gem is disabled in one call: the read that finds it
+	// disabled reads "disarmed", the trap's spend.
+	TrapRules::Watch watch;
+	const auto       k = TrapKind::kSoulGem;
+	CHECK(TrapRules::LookOf(k, "inmagictrap") == Look::kArmed);
+	CHECK(TrapRules::LookOf(k, "disarmed") == Look::kDisarmed);
+	CHECK(!watch.Read(1, k, TrapRules::LookOf(k, "inmagictrap"), 400.0f, T0));
+	CHECK(!watch.Read(1, k, TrapRules::LookOf(k, "inmagictrap"), 90.0f, T0 + 3s));
+	const auto taken = watch.Read(1, k, TrapRules::LookOf(k, "disarmed"), 90.0f, T0 + 3s + 250ms);
+	REQUIRE(taken);
+	CHECK(*taken == Trap::kDisarmed);
+	CHECK(TrapRules::StepsFor(k, Verdict::kFireLive) == (std::vector<TrapRules::Step>{ { TrapRules::Step::kGoto, "disarmed" }, { TrapRules::Step::kDisable, {} } }));
+
+	// Made here from a friend's word (its "disarmed" and its disable): the read as it leaves is never told back.
+	CHECK(!watch.Read(2, k, Look::kArmed, 400.0f, T0));
+	CHECK(!watch.Read(2, k, Look::kArmed, 400.0f, T0 + 3s));
+	watch.Applied(2, T0 + 3s);
+	CHECK(!watch.Read(2, k, Look::kDisarmed, 400.0f, T0 + 3s + 250ms));
+	CHECK(watch.Quieted() == 1);
+
+	// The word made on it is done once it left (its making ended in the disable); one never made waits for it to load.
+	TrapRules::Waiting waiting;
+	CHECK(waiting.Add(Word(0x2, k, Trap::kDisarmed), false, T0));
+	CHECK(waiting.Add(Word(0x3, k, Trap::kDisarmed), true, T0));
+	waiting.Find(0x2)->attempts = 1;
+	CHECK(waiting.Left(0x2));
+	CHECK(!waiting.Find(0x2));
+	CHECK(!waiting.Left(0x3));
+	CHECK(waiting.Find(0x3));
+	CHECK(!waiting.Left(0x9));
+}
+
 TEST("trap rules: a word is made only on a loaded, settled trap of its base and kind; live when fresh and near, quiet otherwise")
 {
 	using TrapRules::Judge;

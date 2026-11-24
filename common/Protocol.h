@@ -79,8 +79,9 @@ namespace Protocol
 	// 32: world traps (Trap; docs/DESIGN.md "Traps"): a one-shot trap (a tripwire, a trapped chest's or door's hinge, a
 	//    rigged rockfall, a breakaway floor, a magic trap's soul gem) one game sets off or disarms is spent in every game,
 	//    and a bear trap is snapped or set again in every game; the server keeps them for whoever joins or loads later and
-	//    never sends a player their own. Written on top of 22 (what a player takes) beside 23 to 31 (other branches): the
-	//    number is above every branch's and is renumbered at merge; its messages (85-87) clash with none of theirs.
+	//    never sends a player their own. Written on top of 22 (what a player takes) beside 23 to 34 (other branches). Two
+	//    branches opened before it also use 32 and message 85 (weather magic, knockdowns): this one is renumbered when it
+	//    merges, to the next numbers free then (35 and messages 91-93 today).
 	inline constexpr std::uint16_t VERSION = 32;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
@@ -169,7 +170,7 @@ namespace Protocol
 		kPickups = 71,        // client -> server, reliable: loose items our player picked up, plants and trees it harvested
 		kRemotePickups = 72,  // server -> the others: that player's (and every kept one not theirs, to a joiner and an asker)
 		kAskPickups = 73,     // client -> server, reliable: send me every kept pickup again (after a load)
-		// 74 to 84 are other branches' messages.
+		// 74 to 84 are other branches' messages; 85 is also two other branches' (this one is renumbered at merge).
 		kTraps = 85,        // client -> server, reliable: world traps spent (or a bear trap set again) in our game
 		kRemoteTraps = 86,  // server -> the others: that player's (and every kept one not theirs, to a joiner and an asker)
 		kAskTraps = 87,     // client -> server, reliable: send me every kept trap again (after a load)

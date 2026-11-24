@@ -16,8 +16,10 @@
 // hears every word the session holds that was not its own player's (kRemoteTraps, catchUp; kAskTraps after a load).
 //
 // Traps are read, not hooked: those loaded near our player are found once a second and their script's state read a few
-// times a second. A word on a trap not loaded here waits until it is. A friend's stand-in never makes a use of a trap
-// here (src/game/WorldObjects.cpp asks IsTrap): the trap's word says what became of it.
+// times a second, and once more as one leaves the world (a soul gem taken is disarmed and disabled in one call). A change
+// with a friend's stand-in nearer to the trap than our player is that friend's, told by their game. A word on a trap not
+// loaded here waits until it is. A friend's stand-in never makes a use of a trap here, and a pickup's word never takes
+// one out of the world (src/game/WorldObjects.cpp and Pickups.cpp ask IsTrap): the trap's word says what became of it.
 //
 // From the tick (GameThread) and SKSE's messages: every entry point takes one lock over the state, never while sending.
 namespace Traps
