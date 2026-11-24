@@ -11,6 +11,7 @@
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/LootSync.h"
+#include "game/QuestRewards.h"
 #include "game/QuestSync.h"
 #include "game/RemotePlayers.h"
 #include "game/WorldClock.h"
@@ -225,6 +226,7 @@ namespace Session
 					nextState = nextLooks = nextBeat = Clock::now();
 					WorldObjects::Welcomed(playerId);  // the session's doors follow the welcome
 					QuestSync::Welcomed(playerId, playerId == hostId);  // ... and its quests (the host's game says its own)
+					QuestRewards::Welcomed(playerId);  // ... and its quest rewards: none from before is said or given
 					WorldClock::Welcomed(playerId);  // ... and its clock: lined up afresh with the owner's
 					Conversations::Welcomed(playerId);  // ... and its conversations: a talk under way is said again
 					LootSync::Welcomed(playerId);    // ... and its loot: the moves this world lacks asked for
@@ -298,9 +300,15 @@ namespace Session
 				if (const auto msg = Protocol::DecodeQuestReset(a_data, true); msg && welcomed) {
 					if (msg->playerId != playerId) {
 						QuestSync::HostReset(msg->playerId);
+						QuestRewards::HostReset(msg->playerId);  // ... and the rewards heard from its world before are dropped
 					} else {
 						QuestSync::ResetEchoed();  // our own reset, back from the server after every word it passed on before it
 					}
+				}
+				break;
+			case Protocol::MessageType::kRemoteQuestReward:
+				if (const auto msg = Protocol::DecodeQuestReward(a_data); msg && welcomed && msg->playerId != playerId) {
+					QuestRewards::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kRemoteClock:
@@ -484,6 +492,7 @@ namespace Session
 		RemotePlayers::Clear();
 		WorldObjects::Clear();
 		QuestSync::Clear();
+		QuestRewards::Clear();
 		WorldClock::Clear();
 		Conversations::Clear();
 		LootSync::Clear();
@@ -526,6 +535,7 @@ namespace Session
 			SendOurs(Clock::now());
 			WorldObjects::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			QuestSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
+			QuestRewards::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });  // after the quests: a reward goes after its stage
 			WorldClock::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			Conversations::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 			LootSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });

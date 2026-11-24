@@ -17,6 +17,7 @@
 #include "game/Conversations.h"
 #include "game/DropSync.h"
 #include "game/LootSync.h"
+#include "game/QuestRewards.h"
 #include "game/QuestSync.h"
 #include "game/WorldObjects.h"
 #include "net/Session.h"
@@ -181,6 +182,9 @@ namespace
 		if (!WorldObjects::Install()) {
 			logs::warn("World: doors, locks and mechanisms are not shared in this game; a session still runs");
 		}
+		if (!QuestRewards::Install()) {
+			logs::warn("Rewards: quest rewards are each player's own in this game; a session still runs");
+		}
 		if (!LootSync::Install()) {
 			logs::warn("Loot: containers and loot are not shared in this game; a session still runs");
 		}
@@ -234,6 +238,7 @@ namespace
 			RemotePlayers::AfterLoad();  // any stand-in the save brought back goes
 			WorldObjects::AfterLoad();   // the loaded world's doors are the save's: the session's words are asked for again
 			QuestSync::AfterLoad();      // ... and its quests: the host says them again, a friend asks for the session's
+			QuestRewards::AfterLoad();   // ... and its quest rewards: what our player got before is of another world
 			WorldClock::AfterLoad();     // ... and its clock: the save's day count and timescale, lined up with the owner's again
 			Conversations::AfterLoad();  // ... and our conversation, read afresh
 			LootSync::AfterLoad();       // ... and its loot: the save's ledger, the session's moves it lacks asked for
@@ -246,6 +251,7 @@ namespace
 			Conversations::BeforeLoad();
 			WorldObjects::AfterLoad();
 			QuestSync::AfterLoad();
+			QuestRewards::AfterLoad();
 			WorldClock::AfterLoad();
 			Conversations::AfterLoad();
 			LootSync::AfterLoad();
