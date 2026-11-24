@@ -86,7 +86,7 @@ namespace
 
 TEST("pickups: a game's batch and the server's go there and back as they were; the server's fields never leave a game")
 {
-	CHECK(Protocol::VERSION >= 21);
+	CHECK(Protocol::VERSION >= 22);
 	PickupBatch ours;
 	ours.entries = { Taken(0x0001A2B3), Harvest(0x0003C001), Taken(0x02000D10, DAGGER) };
 	const auto packet = Protocol::Encode(ours);
@@ -529,7 +529,7 @@ TEST("pickup rules: every loose item kind is the session's; keys, books, a quest
 	}
 }
 
-TEST("pickup rules: the receiver takes its own reference out, or knows it gone, held or not loaded; another base, a key or a quest's stays")
+TEST("pickup rules: the receiver takes its own reference out, or knows it gone, parked, held or not loaded; another base, a key or a quest's stays")
 {
 	using PickupRules::Facts;
 	using PickupRules::ItemKind;
@@ -544,7 +544,9 @@ TEST("pickup rules: the receiver takes its own reference out, or knows it gone, 
 	};
 	const auto same = [](Facts&) {};
 	CHECK((with(same) == Judged{ Verdict::kApply, Why::kShared }));
-	CHECK((with([](Facts& a_f) { a_f.disabled = true; }) == Judged{ Verdict::kAlready, Why::kShared }));
+	// Disabled here is no proof it was taken (an enable parent off, a script's disable): parked and watched, never forgotten.
+	CHECK((with([](Facts& a_f) { a_f.disabled = true; }) == Judged{ Verdict::kParked, Why::kShared }));
+	CHECK((with([](Facts& a_f) { a_f.disabled = true; a_f.deleted = true; }) == Judged{ Verdict::kAlready, Why::kShared }));
 	CHECK((with([](Facts& a_f) { a_f.deleted = true; }) == Judged{ Verdict::kAlready, Why::kShared }));
 	CHECK((with([](Facts& a_f) { a_f.inCell = false; }) == Judged{ Verdict::kHeld, Why::kShared }));
 	CHECK((with([](Facts& a_f) { a_f = Facts{}; }) == Judged{ Verdict::kWait, Why::kShared }));
@@ -762,4 +764,165 @@ TEST("pickup rules: the references told or made since the welcome are known, our
 	CHECK(known.Size() == 2);
 	known.Clear();
 	CHECK(!known.Has(0x1));
+}
+
+TEST("pickup rules: a word on a reference removed and heard again is swept once a round, never twice")
+{
+	PickupRules::Waiting waiting;
+	CHECK(waiting.Add(Taken(0x1)));
+	CHECK(waiting.Add(Taken(0x2)));
+	waiting.Remove(0x1);
+	CHECK(waiting.Add(Taken(0x1)));  // its old place in the round is passed over
+	auto swept = waiting.Sweep(10);
+	REQUIRE(swept.size() == 2);
+	CHECK(swept[0].ref == 0x2);
+	CHECK(swept[1].ref == 0x1);
+	for (int round = 0; round < 3; ++round) {
+		swept = waiting.Sweep(10);
+		CHECK(swept.size() == 2);
+		CHECK(std::ranges::count_if(swept, [](const Pickup& a_entry) { return a_entry.ref == 0x1; }) == 1);
+	}
+	// Many removals and new words leave no stale places behind once a round has passed.
+	for (int i = 0; i < 100; ++i) {
+		waiting.Remove(0x2);
+		CHECK(waiting.Add(Taken(0x2)));
+	}
+	swept = waiting.Sweep(1000);
+	CHECK(swept.size() == 2);
+	CHECK(waiting.Sweep(1000).size() == 2);
+}
+
+TEST("pickup rules: watched entries keep their state; those whose cell is loaded are swept on their own, and leave that round when it unloads")
+{
+	using State = PickupRules::Waiting::State;
+	PickupRules::Waiting waiting;
+	CHECK(waiting.Add(Taken(0x1), State::kWaiting, false));
+	CHECK(waiting.Add(Taken(0x2), State::kParked, true));
+	CHECK(waiting.Add(Taken(0x3), State::kMade, true));
+	CHECK(waiting.Size() == 3);
+	CHECK(waiting.Loaded() == 2);
+	CHECK(waiting.Count(State::kWaiting) == 1);
+	CHECK(waiting.Count(State::kParked) == 1);
+	CHECK(waiting.Count(State::kMade) == 1);
+	CHECK(waiting.StateOf(0x2) == State::kParked);
+	CHECK(!waiting.StateOf(0x9));
+
+	auto loaded = waiting.SweepLoaded(10);
+	REQUIRE(loaded.size() == 2);
+	CHECK(loaded[0].ref == 0x2);
+	CHECK(loaded[1].ref == 0x3);
+	CHECK(waiting.Sweep(10).size() == 3);  // the slow round goes round all
+
+	// 0x2's cell unloads (a newer look says so): out of the loaded round; it loads again: back, once.
+	CHECK(waiting.Add(Taken(0x2), State::kParked, false));
+	CHECK(waiting.Loaded() == 1);
+	loaded = waiting.SweepLoaded(10);
+	REQUIRE(loaded.size() == 1);
+	CHECK(loaded[0].ref == 0x3);
+	CHECK(waiting.Add(Taken(0x2), State::kMade, true));
+	CHECK(waiting.Add(Taken(0x2), State::kMade, true));
+	loaded = waiting.SweepLoaded(10);
+	CHECK(loaded.size() == 2);
+	CHECK(std::ranges::count_if(loaded, [](const Pickup& a_entry) { return a_entry.ref == 0x2; }) == 1);
+	CHECK(waiting.StateOf(0x2) == State::kMade);
+
+	waiting.Remove(0x3);
+	CHECK(waiting.Loaded() == 1);
+	CHECK(waiting.SweepLoaded(10).size() == 1);
+	waiting.Clear();
+	CHECK(waiting.Loaded() == 0);
+	CHECK(waiting.SweepLoaded(10).empty());
+}
+
+TEST("pickup rules: a taken reference out of this world is watched (an enable undone), one read disabled is parked, never forgotten; ours is forgotten")
+{
+	using PickupRules::KeepAfter;
+	using PickupRules::Verdict;
+	using State = PickupRules::Waiting::State;
+	constexpr std::uint8_t TAKEN = Pickup::kTaken;
+	constexpr std::uint8_t HARVESTED = Pickup::kHarvested;
+	// Made here: a taken one is watched as made (something may enable it again); a harvest is done (a plant grows back).
+	CHECK(KeepAfter(Verdict::kApply, TAKEN, false, std::nullopt) == State::kMade);
+	CHECK(KeepAfter(Verdict::kApply, TAKEN, false, State::kParked) == State::kMade);
+	CHECK(!KeepAfter(Verdict::kApply, HARVESTED, false, std::nullopt));
+	// Disabled here when heard (the enable parent case): parked, and stays so, until it reads enabled (then kApply).
+	CHECK(KeepAfter(Verdict::kParked, TAKEN, false, std::nullopt) == State::kParked);
+	CHECK(KeepAfter(Verdict::kParked, TAKEN, false, State::kParked) == State::kParked);
+	CHECK(KeepAfter(Verdict::kParked, TAKEN, false, State::kWaiting) == State::kParked);
+	// One this game took out reads disabled on the next look: still made (an enable later is counted as undone).
+	CHECK(KeepAfter(Verdict::kParked, TAKEN, false, State::kMade) == State::kMade);
+	// Our player took it too: ours, never taken out of our world again.
+	CHECK(!KeepAfter(Verdict::kParked, TAKEN, true, std::nullopt));
+	CHECK(!KeepAfter(Verdict::kParked, TAKEN, true, State::kMade));
+	// Its cell unloaded: kept as it was; new: waiting.
+	CHECK(KeepAfter(Verdict::kWait, TAKEN, false, std::nullopt) == State::kWaiting);
+	CHECK(KeepAfter(Verdict::kWait, TAKEN, false, State::kMade) == State::kMade);
+	CHECK(KeepAfter(Verdict::kWait, TAKEN, false, State::kParked) == State::kParked);
+	CHECK(KeepAfter(Verdict::kWait, HARVESTED, false, std::nullopt) == State::kWaiting);
+	// Gone, held or not ours to make: forgotten.
+	CHECK(!KeepAfter(Verdict::kAlready, TAKEN, false, State::kMade));
+	CHECK(!KeepAfter(Verdict::kHeld, TAKEN, false, State::kParked));
+	CHECK(!KeepAfter(Verdict::kSkip, TAKEN, false, State::kWaiting));
+}
+
+TEST("pickup rules: the enable-parent case: a taken item enabled after the word came is taken out, not left for a second take")
+{
+	// The host pulls a chain; a mechanism's outcome enables a hidden item under an enable parent; the host takes it within
+	// a second. The friend's game hears the take before the outcome's enable: the item reads disabled there.
+	using PickupRules::Facts;
+	using PickupRules::ItemKind;
+	using PickupRules::Verdict;
+	using State = PickupRules::Waiting::State;
+	PickupRules::Waiting waiting;
+	const auto           entry = Taken(0x0004F00D);
+	const Facts hidden{ .found = true, .base = SWEETROLL, .item = ItemKind::kPotion, .inCell = true, .attached = true, .disabled = true };
+	auto        judged = PickupRules::Receive(entry, hidden, 240.0f);
+	CHECK(judged.verdict == Verdict::kParked);
+	auto keep = PickupRules::KeepAfter(judged.verdict, entry.kind, false, waiting.StateOf(entry.ref));
+	REQUIRE(keep);
+	CHECK(waiting.Add(entry, *keep, hidden.attached));
+	// Swept while still hidden: still parked.
+	REQUIRE(waiting.SweepLoaded(8).size() == 1);
+	CHECK(PickupRules::Receive(entry, hidden, 240.0f).verdict == Verdict::kParked);
+	// The outcome's enable arrives: the next loaded sweep reads it enabled and takes it out.
+	auto shown = hidden;
+	shown.disabled = false;
+	const auto swept = waiting.SweepLoaded(8);
+	REQUIRE(swept.size() == 1);
+	judged = PickupRules::Receive(swept[0], shown, 240.0f);
+	CHECK(judged.verdict == Verdict::kApply);
+	keep = PickupRules::KeepAfter(judged.verdict, entry.kind, false, waiting.StateOf(entry.ref));
+	CHECK(keep == State::kMade);
+	CHECK(waiting.Add(entry, *keep, true));
+	// Its enable parent turns it on again later: taken out again.
+	CHECK(PickupRules::Receive(entry, shown, 240.0f).verdict == Verdict::kApply);
+	CHECK(waiting.StateOf(entry.ref) == State::kMade);
+}
+
+TEST("pickup rules: a scan reports only a plant seen growing before: never one from the save, nor our own from before a load")
+{
+	PickupRules::Plants plants;
+	plants.Saw(0xB1, false);  // growing as seen
+	plants.Saw(0xB2, true);   // harvested already when first seen (the save's, or ours before the last load)
+	CHECK(plants.SeenGrowing(0xB1));
+	CHECK(!plants.SeenGrowing(0xB2));
+	CHECK(!plants.SeenGrowing(0xB3));  // never seen: never reported
+	plants.Saw(0xB1, true);            // reported (or harvested by the session's word): not again
+	CHECK(!plants.SeenGrowing(0xB1));
+	plants.Saw(0xB2, false);  // grown back here: a harvest after this one is news
+	CHECK(plants.SeenGrowing(0xB2));
+	plants.Saw(0, false);
+	CHECK(plants.Size() == 2);
+	plants.Clear();  // a load: the save's world, seen again
+	CHECK(!plants.SeenGrowing(0xB2));
+
+	for (std::uint32_t i = 1; i <= PickupRules::Plants::MAX; ++i) {
+		plants.Saw(0x100000 + i, false);
+	}
+	CHECK(plants.Size() == PickupRules::Plants::MAX);
+	CHECK(plants.Forgot() == 0);
+	plants.Saw(0x1, false);  // past MAX: all forgotten (the safe side), counted
+	CHECK(plants.Forgot() == 1);
+	CHECK(plants.Size() == 1);
+	CHECK(!plants.SeenGrowing(0x100001));
 }

@@ -69,13 +69,14 @@ namespace Protocol
 	//    the use did near the mechanism (the animations played on activators, the references enabled or disabled), and
 	//    each other game makes what its own stand-in's use did not. Written on top of 15 (conversations): the number is
 	//    above both lines' and is renumbered at merge; its messages (63, 64) clash with neither line's.
-	// 21: what a player takes from the world (Pickup; docs/DESIGN.md "Taken from the world"): a loose item of the load order
+	// 22: what a player takes from the world (Pickup; docs/DESIGN.md "Taken from the world"): a loose item of the load order
 	//    a player picks up is out of every world (disabled there), and a plant or tree a player harvests is harvested in
 	//    every world; the server keeps both for whoever joins or loads later, with who took it and, for a harvest, when by
 	//    the session's clock (a plant grows back on its own schedule), and never sends a player their own. Written on top
-	//    of 16 (what a use did) beside 17 to 20 (loose objects, quests ended, ragdolls, the quest reset: other branches):
-	//    the number is above every branch's and is renumbered at merge; its messages (71-73) clash with none of theirs.
-	inline constexpr std::uint16_t VERSION = 21;
+	//    of 16 (what a use did) beside 17 to 21 (loose objects, quests ended, ragdolls, the quest reset, NPC spells: other
+	//    branches): the number is above every branch's and is renumbered at merge; its messages (71-73) clash with none of
+	//    theirs.
+	inline constexpr std::uint16_t VERSION = 22;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;

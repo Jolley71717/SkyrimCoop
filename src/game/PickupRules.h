@@ -114,6 +114,7 @@ namespace PickupRules
 		bool          plant = false;     // its base is a flora, or a tree with something to harvest
 		bool          questAlias = false;  // a quest alias holds it here
 		bool          inCell = false;    // in a cell (not in an inventory: a persistent item picked up stays itself there)
+		bool          attached = false;  // ... and that cell is attached (loaded around a player here)
 		bool          disabled = false;
 		bool          deleted = false;
 		bool          harvested = false;
@@ -122,7 +123,10 @@ namespace PickupRules
 	enum class Verdict : std::uint8_t
 	{
 		kApply,    // make it here now (take the reference out of the world, or harvest it)
-		kAlready,  // so here already (out of the world, or harvested): nothing to make
+		kAlready,  // so here already (deleted, or harvested): nothing to make
+		kParked,   // taken, and its reference reads disabled here: out of sight now, but a disabled reference is no proof it
+		           // was taken (an enable parent off, a quest's or a script's disable, our own making before): watched, and
+		           // taken out when it reads enabled
 		kHeld,     // in an inventory here (a persistent item someone here picked up): left there
 		kWait,     // not in memory here: made when it loads
 		kSkip,     // not this game's to make (why says why)
@@ -162,8 +166,11 @@ namespace PickupRules
 		if (const auto why = Takeable(a_ref.item, false, a_ref.questAlias); why != Why::kShared) {
 			return { Verdict::kSkip, why };
 		}
-		if (a_ref.deleted || a_ref.disabled) {
+		if (a_ref.deleted) {
 			return { Verdict::kAlready, Why::kShared };
+		}
+		if (a_ref.disabled) {
+			return { Verdict::kParked, Why::kShared };
 		}
 		if (!a_ref.inCell) {
 			return { Verdict::kHeld, Why::kShared };
@@ -343,69 +350,216 @@ namespace PickupRules
 		std::uint64_t      overflow = 0;
 	};
 
-	// The session's entries this game could not make yet (their reference not in memory here: a cell not loaded), by
-	// reference: a newer word on one replaces the older. Tried again when the reference's cell attaches (Pickups.cpp) and
-	// a few at a time in a sweep (Sweep: round the whole list, a_count at a time). At most MAX; past it a new one is
-	// refused (counted).
+	// The session's entries this game keeps watching, by reference: a newer word on one replaces the older.
+	// - kWaiting: its reference is not in memory here (a cell not loaded): made when it loads.
+	// - kParked: a taken reference that reads disabled here (Verdict::kParked): taken out if it ever reads enabled.
+	// - kMade: a taken reference this game took out of its world: taken out again if something enables it again (its
+	//   enable parent, a quest's or a script's Enable).
+	// Tried again when the reference's cell attaches (Pickups.cpp), a few at a time in a sweep round the whole list
+	// (Sweep), and often for those whose cell is loaded here (SweepLoaded: an enable there is undone within a moment). At
+	// most MAX; past it a new one is refused (counted).
 	class Waiting
 	{
 	public:
 		static constexpr std::size_t MAX = Protocol::MAX_PICKUPS;
 
-		bool Add(const Pickup& a_entry)
+		enum class State : std::uint8_t
 		{
-			if (const auto it = known.find(a_entry.ref); it != known.end()) {
-				it->second = a_entry;
-				return true;
+			kWaiting,
+			kParked,
+			kMade,
+		};
+
+		// a_loaded: whether its reference's cell is attached here now (SweepLoaded goes round those).
+		bool Add(const Pickup& a_entry, State a_state = State::kWaiting, bool a_loaded = false)
+		{
+			auto it = slots.find(a_entry.ref);
+			if (it == slots.end()) {
+				if (slots.size() >= MAX) {
+					++refused;
+					return false;
+				}
+				it = slots.emplace(a_entry.ref, Slot{ .entry = a_entry, .state = a_state, .gen = ++gens }).first;
+				order.emplace_back(a_entry.ref, it->second.gen);
+			} else {
+				it->second.entry = a_entry;
+				it->second.state = a_state;
 			}
-			if (known.size() >= MAX) {
-				++refused;
-				return false;
-			}
-			known.emplace(a_entry.ref, a_entry);
-			order.push_back(a_entry.ref);
+			SetLoaded(it->second, a_entry.ref, a_loaded);
 			return true;
 		}
 
 		[[nodiscard]] const Pickup* Find(std::uint32_t a_ref) const
 		{
-			const auto it = known.find(a_ref);
-			return it == known.end() ? nullptr : &it->second;
+			const auto it = slots.find(a_ref);
+			return it == slots.end() ? nullptr : &it->second.entry;
 		}
 
-		void Remove(std::uint32_t a_ref) { known.erase(a_ref); }
-
-		// The next a_count waiting entries, round the list (each once per call at most).
-		std::vector<Pickup> Sweep(std::size_t a_count)
+		[[nodiscard]] std::optional<State> StateOf(std::uint32_t a_ref) const
 		{
-			std::vector<Pickup> out;
-			std::size_t         looked = 0;
-			const auto          limit = order.size();
-			while (out.size() < a_count && looked < limit && !order.empty()) {
-				const auto ref = order.front();
-				order.pop_front();
-				++looked;
-				if (const auto it = known.find(ref); it != known.end()) {
-					out.push_back(it->second);
-					order.push_back(ref);
-				}
-			}
-			return out;
+			const auto it = slots.find(a_ref);
+			return it == slots.end() ? std::nullopt : std::optional<State>{ it->second.state };
 		}
 
-		[[nodiscard]] std::size_t   Size() const { return known.size(); }
+		void Remove(std::uint32_t a_ref)
+		{
+			const auto it = slots.find(a_ref);
+			if (it == slots.end()) {
+				return;
+			}
+			if (it->second.loaded) {
+				--loadedCount;
+			}
+			slots.erase(it);
+		}
+
+		// The next a_count entries, round the list (each once per call at most).
+		std::vector<Pickup> Sweep(std::size_t a_count) { return Round(order, a_count, false); }
+
+		// The next a_count entries whose cell is loaded here, round those (each once per call at most).
+		std::vector<Pickup> SweepLoaded(std::size_t a_count) { return Round(loadedOrder, a_count, true); }
+
+		[[nodiscard]] std::size_t Size() const { return slots.size(); }
+		[[nodiscard]] std::size_t Count(State a_state) const
+		{
+			return static_cast<std::size_t>(std::ranges::count_if(slots, [&](const auto& a_slot) { return a_slot.second.state == a_state; }));
+		}
+		[[nodiscard]] std::size_t   Loaded() const { return loadedCount; }
 		[[nodiscard]] std::uint64_t Refused() const { return refused; }
 
 		void Clear()
 		{
-			known.clear();
+			slots.clear();
 			order.clear();
+			loadedOrder.clear();
+			loadedCount = 0;
 		}
 
 	private:
-		std::unordered_map<std::uint32_t, Pickup> known;
-		std::deque<std::uint32_t>                 order;  // may hold references removed since: passed over by Sweep
-		std::uint64_t                             refused = 0;
+		struct Slot
+		{
+			Pickup        entry{};
+			State         state = State::kWaiting;
+			std::uint64_t gen = 0;        // the slot's own: a place in order left by an older slot of the reference is passed over
+			bool          loaded = false;
+			std::uint64_t loadedGen = 0;  // ... and in loadedOrder, left from an earlier time its cell was loaded
+		};
+		using Place = std::pair<std::uint32_t, std::uint64_t>;  // reference, gen
+
+		void SetLoaded(Slot& a_slot, std::uint32_t a_ref, bool a_loaded)
+		{
+			if (a_slot.loaded == a_loaded) {
+				return;
+			}
+			a_slot.loaded = a_loaded;
+			if (a_loaded) {
+				++loadedCount;
+				a_slot.loadedGen = ++gens;
+				loadedOrder.emplace_back(a_ref, a_slot.loadedGen);
+			} else {
+				--loadedCount;
+			}
+		}
+
+		// Goes round a_order: a place whose slot is gone, or is another's since (a removal, then a new word), or (a_loaded)
+		// no longer loaded, is dropped as it comes up; each reference comes out once per call at most.
+		std::vector<Pickup> Round(std::deque<Place>& a_order, std::size_t a_count, bool a_loaded)
+		{
+			std::vector<Pickup> out;
+			std::size_t         looked = 0;
+			const auto          limit = a_order.size();
+			while (out.size() < a_count && looked < limit && !a_order.empty()) {
+				const auto place = a_order.front();
+				a_order.pop_front();
+				++looked;
+				const auto it = slots.find(place.first);
+				if (it == slots.end()) {
+					continue;
+				}
+				const auto& slot = it->second;
+				if (a_loaded ? (!slot.loaded || slot.loadedGen != place.second) : slot.gen != place.second) {
+					continue;
+				}
+				out.push_back(slot.entry);
+				a_order.push_back(place);
+			}
+			return out;
+		}
+
+		std::unordered_map<std::uint32_t, Slot> slots;
+		std::deque<Place>                       order;        // each slot once (and stale places, passed over)
+		std::deque<Place>                       loadedOrder;  // each loaded slot once (and stale places)
+		std::size_t                             loadedCount = 0;
+		std::uint64_t                           gens = 0;
+		std::uint64_t                           refused = 0;
+	};
+
+	// What this game keeps of an entry after its verdict (Pickups.cpp's Try): the state it is watched under, or none to
+	// forget it. a_ours: our player took it too (ours: never taken out of our world again); a_was: the state it was watched
+	// under before (a reference this game took out stays kMade while it reads disabled, or its cell is not loaded).
+	[[nodiscard]] inline std::optional<Waiting::State> KeepAfter(Verdict a_verdict, std::uint8_t a_kind, bool a_ours,
+		std::optional<Waiting::State> a_was)
+	{
+		using State = Waiting::State;
+		switch (a_verdict) {
+		case Verdict::kApply:
+			return a_kind == Pickup::kTaken ? std::optional<State>{ State::kMade } : std::nullopt;
+		case Verdict::kParked:
+			if (a_ours) {
+				return std::nullopt;
+			}
+			return a_was == State::kMade ? State::kMade : State::kParked;
+		case Verdict::kWait:
+			return a_was ? *a_was : State::kWaiting;
+		case Verdict::kAlready:
+		case Verdict::kHeld:
+		case Verdict::kSkip:
+			break;
+		}
+		return std::nullopt;
+	}
+
+	// The plants this game has seen near our player, and whether each read harvested when last seen (a census of the
+	// plants near our player, and each plant as its cell attaches). A scan for a harvest no activation explains reports only
+	// a plant seen not harvested before that reads harvested now: a harvest since. A plant first seen harvested (in the save
+	// from before the session, our own harvest from before the last load) is never reported by a scan. Past MAX all are
+	// forgotten (counted): a plant not seen again is never reported by a scan (the safe side: each world keeps its own).
+	class Plants
+	{
+	public:
+		static constexpr std::size_t MAX = 16384;
+
+		void Saw(std::uint32_t a_ref, bool a_harvested)
+		{
+			if (a_ref == 0) {
+				return;
+			}
+			if (const auto it = seen.find(a_ref); it != seen.end()) {
+				it->second = a_harvested;
+				return;
+			}
+			if (seen.size() >= MAX) {
+				seen.clear();
+				++forgot;
+			}
+			seen.emplace(a_ref, a_harvested);
+		}
+
+		// Whether a plant was seen not harvested when last seen (one that reads harvested now was harvested since).
+		[[nodiscard]] bool SeenGrowing(std::uint32_t a_ref) const
+		{
+			const auto it = seen.find(a_ref);
+			return it != seen.end() && !it->second;
+		}
+
+		[[nodiscard]] std::size_t   Size() const { return seen.size(); }
+		[[nodiscard]] std::uint64_t Forgot() const { return forgot; }
+
+		void Clear() { seen.clear(); }
+
+	private:
+		std::unordered_map<std::uint32_t, bool> seen;
+		std::uint64_t                           forgot = 0;
 	};
 
 	// The references this game told the session of or made from its word since the welcome or the load: a scan for an
