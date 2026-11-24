@@ -65,9 +65,9 @@ namespace
 
 // ---- the messages ----
 
-TEST("downed protocol: downs and helps read back as written, as messages 77 and 78 of protocol 25, and carry no forms")
+TEST("downed protocol: downs and helps read back as written, as messages 77 and 78 of protocol 27, and carry no forms")
 {
-	static_assert(Protocol::VERSION >= 25);
+	static_assert(Protocol::VERSION >= 27);
 	static_assert(static_cast<std::uint8_t>(MT::kDowned) == 77);
 	static_assert(static_cast<std::uint8_t>(MT::kHelpUp) == 78);
 	static_assert(Protocol::DOWNED_STATES == DownRules::SAID_COUNT);

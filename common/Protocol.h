@@ -59,9 +59,10 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	// 25: a player brought down and helped up (kDowned, kHelpUp, message types 77-78): with a friend in the session a player
-	//    a blow would kill kneels and waits for help; a friend near helps them up. (Renumbered when it lands, as 21 and 24.)
-	inline constexpr std::uint16_t VERSION = 25;
+	// 27: a player brought down and helped up (kDowned, kHelpUp, message types 77-78): with a friend in the session a player
+	//    a blow would kill kneels and waits for help; a friend near helps them up. (Renumbered when it lands, as 21 and 24;
+	//    25 and 26 are other changes'.)
+	inline constexpr std::uint16_t VERSION = 27;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
