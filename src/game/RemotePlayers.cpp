@@ -10,6 +10,7 @@
 #include "game/Gear.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
+#include "game/Furniture.h"
 #include "game/Retire.h"
 #include "game/Riding.h"
 #include "game/StandInRules.h"
@@ -586,6 +587,9 @@ namespace RemotePlayers
 
 		void UpdateHook(RE::Actor* a_this, float a_delta)
 		{
+			// A getting up asked for by the furniture tick is started here, in the actor's own update, on its thread (its
+			// sit state shares a word with states the update writes): every actor kind, stand-in or copy (Furniture.h).
+			Furniture::BeforeUpdate(a_this);
 			if (!Watching()) {
 				originalUpdate(a_this, a_delta);
 				return;
@@ -599,7 +603,9 @@ namespace RemotePlayers
 			const bool                          eventsHere = !eventsFromTick.load(std::memory_order_relaxed);
 			// Seated on the copy of its friend's horse (Riding.h): the engine carries it in the saddle, so it is not placed,
 			// turned or told its walk (its actions still play: a mounted swing, a bow from the saddle).
-			const bool                          seated = Riding::Seated(a_this);
+			// The same in furniture (Furniture.h): in it, getting in or out, or waiting by the furniture its friend is in,
+			// the engine and the furniture's marker place it, not its friend's states.
+			const bool                          seated = Riding::Seated(a_this) || Furniture::Held(a_this);
 			{
 				std::scoped_lock l{ lock };
 				if (const auto gone = retiring.find(a_this); gone != retiring.end() && gone->second == a_this->GetFormID()) {
@@ -652,7 +658,13 @@ namespace RemotePlayers
 				// What its graph's Speed and Direction channels give it from now on (SpeedPoll, DirectionPoll).
 				drive.Set(a_this, a_this->GetFormID(), { step.speed, step.direction }, Clock::now());
 			}
-			a_this->UpdateNoAI(a_delta);
+			// Getting in or out of furniture, the engine's own update runs for it (its sit procedure is the AI's), for a few
+			// seconds at most (SitRules::ENTRY_MAX, STAND_WAIT).
+			if (Furniture::Assisted(a_this)) {
+				originalUpdate(a_this, a_delta);
+			} else {
+				a_this->UpdateNoAI(a_delta);
+			}
 			// In water, at its friend's depth: the water's pull to the surface does not lift it (Gait::Refloat).
 			if (sample) {
 				float      drift = 0.0f;
@@ -722,6 +734,8 @@ namespace RemotePlayers
 			// Off its mount first, or its rider off it (Riding.h): no actor leaves the world, or goes in a save, still
 			// in a ride with one that stays.
 			Riding::Release(a_actor);
+			// And out of its furniture (Furniture.h), for the same reason.
+			Furniture::Release(a_actor);
 			// The co-save names the preset even for one standing on a copy of it: it has the preset back before any save
 			// (PutPresetBack), and a load looks for an actor of that base.
 			const auto base = a_actor->GetObjectReference();
@@ -1443,8 +1457,8 @@ namespace RemotePlayers
 				{
 					std::scoped_lock l{ lock };
 					step = Gait::Next(remote.shown, sample->state, sample->held, SwimsAsMode(actor.get()));
-					if (Riding::Seated(actor.get())) {
-						step.events.clear();  // in the saddle (Riding.h): its walk is told again once it is off
+					if (Riding::Seated(actor.get()) || Furniture::Held(actor.get())) {
+						step.events.clear();  // in the saddle (Riding.h) or furniture (Furniture.h): its walk is told again once it is out
 					} else {
 						remote.shown = step.shown;
 					}
