@@ -12,3 +12,5 @@ steam.status_hosting = 正在主持 Skyrim 联机
 steam.status_playing = 正在玩 Skyrim 联机
 
 party.tag_hurt = {name}（{health}%）
+
+map.found = {player}发现了{place}

@@ -12,3 +12,5 @@ steam.status_hosting = Проводить кооперативну гру в Sky
 steam.status_playing = Грає в Skyrim у кооперативі
 
 party.tag_hurt = {name} ({health}%)
+
+map.found = {player}: відкрито місце «{place}»

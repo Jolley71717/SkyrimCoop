@@ -2,6 +2,7 @@
 
 #include "EnetTransport.h"
 #include "FormIds.h"
+#include "MapBook.h"
 #include "Name.h"
 #include "NpcBook.h"
 #include "NpcFates.h"
@@ -191,6 +192,8 @@ void Server::Run()
 	RideBook::Book rides;
 	// Who is in what furniture (common/SitBook.h), for whoever joins after.
 	SitBook::Book sits;
+	// The map markers the session's players discovered (common/MapBook.h), for whoever joins after.
+	MapBook::Book mapBook;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -408,6 +411,10 @@ void Server::Run()
 		if (auto all = sits.All(); !all.empty()) {
 			sendSits(&a_key, nullptr, std::move(all), true);
 		}
+		// The map markers the session found, as the session's (finder 0: no notice of who found each).
+		for (auto& part : mapBook.All()) {
+			send(a_key, Protocol::Encode(Protocol::MapMarkers{ 0, std::move(part) }), true);
+		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
 		log(std::format("server: player {} joined from {}{} ({} in the session)", a_peer.playerId, transports[a_key.first]->Describe(a_key.second),
@@ -482,6 +489,15 @@ void Server::Run()
 					broadcast(Protocol::Encode(Protocol::RemoteStatus{ a_peer.playerId, *a_peer.status }), true, &a_key);
 				} else {
 					a_peer.statusOwed = true;
+				}
+			}
+			break;
+		case MT::kMapMarkers:
+			// Markers a player discovered (MapBook.h): what is new to the session goes to the others with the finder
+			// named, at most twice a marker (seen, then discovered) whoever sends it; the same again passes nothing.
+			if (const auto msg = Protocol::DecodeMapMarkers(a_data)) {
+				if (auto gained = mapBook.Take(msg->markers); !gained.empty()) {
+					broadcast(Protocol::Encode(Protocol::MapMarkers{ a_peer.playerId, std::move(gained) }), true, &a_key);
 				}
 			}
 			break;

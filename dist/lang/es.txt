@@ -12,3 +12,5 @@ steam.status_hosting = Organizando una partida cooperativa de Skyrim
 steam.status_playing = Jugando a Skyrim cooperativo
 
 party.tag_hurt = {name} ({health}%)
+
+map.found = {player} ha descubierto {place}

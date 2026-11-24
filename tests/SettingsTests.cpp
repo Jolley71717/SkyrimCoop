@@ -40,6 +40,7 @@ TEST("settings: every key is read, with comments, blank lines and either line en
 		"sLanguage = pt-br\n"
 		"sLogLevel = debug\n"
 		"bRunInBackground = false\n"
+		"bShareMap = false\n"
 		"bDevChannel = true\n"
 		"iDevChannelPort = 7795\n";
 	std::vector<std::string> notes;
@@ -59,6 +60,8 @@ TEST("settings: every key is read, with comments, blank lines and either line en
 	CHECK(values.devChannel);
 	CHECK(values.devChannelPort == 7795);
 	CHECK(Settings::Parse("").runInBackground);  // on unless the player turns it off
+	CHECK(!values.shareMap);
+	CHECK(Settings::Parse("").shareMap);  // on unless the player turns it off
 }
 
 TEST("settings: a value that can't be used keeps the default and is said, without the password")

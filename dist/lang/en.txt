@@ -22,3 +22,5 @@ steam.status_hosting = Hosting Skyrim co-op
 steam.status_playing = Playing Skyrim co-op
 
 party.tag_hurt = {name} ({health}%)
+
+map.found = {player} discovered {place}

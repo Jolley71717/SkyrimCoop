@@ -12,3 +12,5 @@ steam.status_hosting = Hostet Skyrim im Koop
 steam.status_playing = Spielt Skyrim im Koop
 
 party.tag_hurt = {name} ({health}%)
+
+map.found = {player} hat {place} entdeckt

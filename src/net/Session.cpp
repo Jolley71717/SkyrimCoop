@@ -12,6 +12,7 @@
 #include "game/FriendMarkers.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
+#include "game/MapShare.h"
 #include "game/NpcSync.h"
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
@@ -246,6 +247,7 @@ namespace Session
 					Shots::Started(playerId);
 					Pairs::Started(playerId);
 					Party::Started();
+					MapShare::Started();
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -289,6 +291,11 @@ namespace Session
 			case Protocol::MessageType::kRemoteStatus:
 				if (const auto msg = Protocol::DecodeRemoteStatus(a_data); msg && msg->playerId != playerId) {
 					Party::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kMapMarkers:
+				if (const auto msg = Protocol::DecodeMapMarkers(a_data); msg && msg->finder != playerId) {
+					MapShare::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kRemoteActions:
@@ -532,6 +539,7 @@ namespace Session
 		StandInPeace::Clear();
 		Party::Clear();
 		FriendMarkers::Clear();
+		MapShare::Clear();
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -575,6 +583,7 @@ namespace Session
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Pairs::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Party::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			MapShare::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 		StandInPeace::Frame();  // after the stand-ins are placed: actors fighting one told to stop

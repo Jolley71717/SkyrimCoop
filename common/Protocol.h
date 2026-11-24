@@ -63,7 +63,10 @@ namespace Protocol
 	//    travel is taking them away, the place they are in and, inside, the way in on the map, so the others show them on
 	//    the compass and the maps and put their health on the name over their head. (As with 21: renumbered when it
 	//    lands; 25 to 27 and types 77-78 are other changes'.)
-	inline constexpr std::uint16_t VERSION = 28;
+	// 30: the map markers a player discovers (kMapMarkers, message type 83): each game says the markers its player gains
+	//    while in the session, the server keeps them and passes on what is new, and a game puts them on its own map. (As
+	//    with 21: renumbered when it lands; 29 and types 81-82 are another change's.)
+	inline constexpr std::uint16_t VERSION = 30;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -136,6 +139,8 @@ namespace Protocol
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
 		kPlayerStatus = 79,  // client -> server, reliable: our player's health, travel and place on the map, when it changes
 		kRemoteStatus = 80,  // server -> the others (and to a joiner, each one there): that player's status
+		// 81-82: another change's.
+		kMapMarkers = 83,  // both ways, reliable: map markers a player discovered; the server names the finder (0: the session's book)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2334,6 +2339,82 @@ namespace Protocol
 	}
 
 	inline constexpr std::size_t STATUS_BYTES = 1 + 1 + 4 + 4 + 3 * 4;
+
+	// ---- map markers (protocol 30) --------------------------------------------------------------------------------
+
+	enum MarkerFlags : std::uint8_t
+	{
+		kMarkerVisible = 1 << 0,  // on the map
+		kMarkerTravel = 1 << 1,   // discovered: it can be fast travelled to
+	};
+	inline constexpr std::uint8_t kMarkerAllFlags = kMarkerVisible | kMarkerTravel;
+	inline constexpr std::size_t  MAX_MARKERS = 256;
+
+	// A map marker (a reference of the load order with a map marker on it) and what a player has of it.
+	struct MapMarker
+	{
+		std::uint32_t ref = 0;
+		std::uint8_t  flags = 0;
+		bool operator==(const MapMarker&) const = default;
+	};
+
+	// Map markers a player gained (docs/DESIGN.md, "Map markers shared"). Sent by a game with finder 0; the server passes
+	// them on with the finder's player id, or 0 for what the session had before (a joiner's whole book).
+	struct MapMarkers
+	{
+		std::uint32_t          finder = 0;
+		std::vector<MapMarker> markers;
+		bool operator==(const MapMarkers&) const = default;
+	};
+
+	// A marker names a reference and has some known flag, and only known flags.
+	[[nodiscard]] inline bool MarkerHolds(const MapMarker& a_marker)
+	{
+		return a_marker.ref != 0 && a_marker.flags != 0 && (a_marker.flags & ~kMarkerAllFlags) == 0;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const MapMarkers& a_msg)
+	{
+		Writer w{ MessageType::kMapMarkers };
+		w.U32(a_msg.finder);
+		const auto count = (std::min)(a_msg.markers.size(), MAX_MARKERS);
+		w.U16(static_cast<std::uint16_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			w.U32(a_msg.markers[i].ref);
+			w.U8(a_msg.markers[i].flags);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_MARKERS markers, or one that does not hold (MarkerHolds).
+	inline std::optional<MapMarkers> DecodeMapMarkers(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		MapMarkers msg;
+		msg.finder = r.U32();
+		const auto count = r.U16();
+		if (!r.Ok() || count > MAX_MARKERS) {
+			return std::nullopt;
+		}
+		msg.markers.reserve(count);
+		for (std::uint16_t i = 0; i < count && r.Ok(); ++i) {
+			MapMarker marker;
+			marker.ref = r.U32();
+			marker.flags = r.U8();
+			if (r.Ok() && !MarkerHolds(marker)) {
+				return std::nullopt;
+			}
+			msg.markers.push_back(marker);
+		}
+		if (!r.Ok() || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t MAX_MAP_MARKERS_SIZE = 1 + 4 + 2 + MAX_MARKERS * (4 + 1);
+	static_assert(MAX_MARKERS <= 0xFFFF && MAX_MAP_MARKERS_SIZE <= 2048, "a message of map markers stays small");
 
 	inline constexpr std::size_t PAIR_BYTES = 2 * (4 + 8) + 4 + 4 + 1 + MAX_EVENT_NAME + 1 + 4 * 4;
 	inline constexpr std::size_t MAX_PAIRS_SIZE = 1 + 4 + 1 + MAX_PAIRS * PAIR_BYTES;

@@ -13,6 +13,7 @@
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
+#include "game/MapShare.h"
 #include "game/NpcSync.h"
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
@@ -228,11 +229,13 @@ namespace
 			Party::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
+			MapShare::AfterLoad();            // no read of our map across the load is news
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 			// data is not a pointer here: it is whether the load worked.
 			logs::info("Load: {}", a_msg->data ? "done" : "failed");
 			RemotePlayers::AfterLoad();  // any stand-in the save brought back goes
+			MapShare::AfterLoad();       // what the session found goes on the loaded save's map
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kNewGame:
@@ -244,6 +247,7 @@ namespace
 			Party::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
+			MapShare::AfterLoad();
 			CheckSteam();
 			break;
 		case SKSE::MessagingInterface::kSaveGame:

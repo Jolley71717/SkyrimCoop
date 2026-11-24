@@ -40,6 +40,9 @@ namespace Settings
 		// While in a session, the game keeps running when its window is not focused (the game's own bAlwaysActive,
 		// put back as it was after the session; src/Background.h).
 		bool runInBackground = true;
+		// Map markers a friend discovers in the session go on our map, ready for fast travel, and ours go on theirs
+		// (src/game/MapShare.h). Off: neither.
+		bool shareMap = true;
 		// The developer channel (DevChannel.h): test tools on this PC drive the game through it. Off for players.
 		bool          devChannel = false;
 		std::uint16_t devChannelPort = DEV_CHANNEL_PORT;
@@ -131,6 +134,9 @@ namespace Settings
 		}
 		if (const auto background = IniFile::GetValue(a_text, "bRunInBackground")) {
 			values.runInBackground = detail::ParseBool(*background, values.runInBackground);
+		}
+		if (const auto share = IniFile::GetValue(a_text, "bShareMap")) {
+			values.shareMap = detail::ParseBool(*share, values.shareMap);
 		}
 		if (const auto dev = IniFile::GetValue(a_text, "bDevChannel")) {
 			values.devChannel = detail::ParseBool(*dev, values.devChannel);
