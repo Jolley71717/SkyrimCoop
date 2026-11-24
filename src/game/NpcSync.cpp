@@ -488,6 +488,10 @@ namespace NpcSync
 		// the AI's. Its weapon is left as it is: a copy's weapon state follows its graph (as a stand-in's does), so the
 		// AI sees it drawn and puts it away itself.
 		std::vector<RE::ActorHandle> letGoPending;  // main thread
+		// When each actor was last let go of: once a second at most, so a hand-over (its copy let go of as the NPC turns
+		// nobody's, and again as it is granted here) resets its graph once, not again over what its own AI just began.
+		std::unordered_map<RE::FormID, Clock::time_point> letGoAt;  // main thread
+		constexpr auto                                     LET_GO_AGAIN = std::chrono::seconds(1);
 
 		void LetCopyGo(RE::Actor* a_actor)
 		{
@@ -495,6 +499,14 @@ namespace NpcSync
 				return;
 			}
 			RemotePlayers::StopLegs(a_actor);
+			const auto now = Clock::now();
+			if (const auto last = letGoAt.find(a_actor->GetFormID()); last != letGoAt.end() && now - last->second < LET_GO_AGAIN) {
+				return;
+			}
+			if (letGoAt.size() >= Protocol::MAX_NPCS) {
+				std::erase_if(letGoAt, [&](const auto& a_entry) { return now - a_entry.second >= LET_GO_AGAIN; });
+			}
+			letGoAt[a_actor->GetFormID()] = now;
 			++counts.letGo;
 			if (letGoPending.size() < Protocol::MAX_NPCS) {
 				letGoPending.push_back(a_actor->GetHandle());
@@ -508,7 +520,7 @@ namespace NpcSync
 			letGoPending.clear();
 			for (const auto& handle : pending) {
 				const auto actor = handle.get();
-				if (!actor || actor->IsDeleted() || actor->IsDisabled() || !actor->Is3DLoaded() || actor->IsDead() || actor->IsOnMount()) {
+				if (!actor || actor->IsDeleted()) {
 					continue;
 				}
 				{
@@ -524,13 +536,16 @@ namespace NpcSync
 				if (!state) {
 					continue;
 				}
+				// The flags the hook wrote, cleared whether or not it is loaded (an unloaded NPC keeps them in the save);
+				// the graph only when it has one to send back, and its own state does not hold it there.
 				auto& flags = state->actorState1;
 				flags.sneaking = 0;
 				flags.sprinting = 0;
 				flags.running = 0;
 				flags.walking = 0;
 				flags.movingForward = 0;
-				if (state->GetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal || state->IsBleedingOut()) {
+				if (actor->IsDisabled() || !actor->Is3DLoaded() || actor->IsDead() || actor->IsOnMount() || state->GetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal ||
+					state->IsBleedingOut()) {
 					continue;
 				}
 				if (actor->NotifyAnimationGraph(Name("IdleForceDefaultState"))) {
