@@ -134,6 +134,13 @@ namespace Bodies
 			return out;
 		}
 
+		// The bone of that name in a list (none: not in it).
+		const Protocol::Bone* Named(const std::vector<Protocol::Bone>& a_bones, std::uint32_t a_name)
+		{
+			const auto it = std::find_if(a_bones.begin(), a_bones.end(), [&](const Protocol::Bone& a_bone) { return a_bone.name == a_name; });
+			return it != a_bones.end() ? &*it : nullptr;
+		}
+
 		// The pelvis: the bone whose node name holds "pelvis", else the first (a creature's root).
 		const BoneBody* Pelvis(RE::Actor* a_actor, const std::vector<BoneBody>& a_bones)
 		{
@@ -348,43 +355,54 @@ namespace Bodies
 					bones.size());
 				return true;
 			}
-			std::vector<const Protocol::Bone*> targets;
-			targets.reserve(bones.size());
 			for (const auto& one : bones) {
-				const auto it = std::find_if(a_rest.bones.begin(), a_rest.bones.end(), [&](const Protocol::Bone& a_bone) { return a_bone.name == one.bone.name; });
-				if (ObjectRules::Distance(BodyRules::At(*it), BodyRules::At(one.bone)) > ObjectRules::WRITE_JUMP) {
+				const auto to = Named(a_rest.bones, one.bone.name);
+				if (ObjectRules::Distance(BodyRules::At(*to), BodyRules::At(one.bone)) > ObjectRules::WRITE_JUMP) {
 					++counts.tooFar;
 					return true;  // a report never pulls a body across the map
 				}
-				targets.push_back(&*it);
 			}
 			// The reference first, to where the runner's lies: loot, activation, a cell's reload and the save follow it, not
 			// its bones.
-			if (ObjectRules::Distance(At(actor.get()), there) > BodyRules::REF_SLACK) {
+			const auto from = At(actor.get());
+			if (ObjectRules::Distance(from, there) > BodyRules::REF_SLACK) {
 				actor->SetPosition(RE::NiPoint3{ there.x, there.y, there.z }, true);
 				++counts.moved;
 			}
-			const auto write = [&](const std::vector<BoneBody>& a_bones, const std::vector<const Protocol::Bone*>& a_to) {
+			// Its bones found again: the move may have rebuilt its 3D (another cell), and the bodies found before it with
+			// it. Still whole, or left (the reference goes back).
+			const auto fresh = BonesOf(actor.get());
+			if (!BodyRules::LaysWhole(JustBones(fresh), a_rest.bones)) {
+				if (ObjectRules::Distance(At(actor.get()), from) > BodyRules::REF_SLACK) {
+					actor->SetPosition(RE::NiPoint3{ from.x, from.y, from.z }, true);
+				}
+				++counts.partial;
+				logs::info("Bodies: {:08X}'s ragdoll changed as its reference moved: left as it lies", a_rest.key.id);
+				return true;
+			}
+			// Each bone's pose by name from a_from (every one is there: LaysWhole), written with no velocity under the
+			// world's lock. Nothing between this write and the read-back below rebuilds the 3D, so the bodies hold.
+			const auto write = [&](const std::vector<Protocol::Bone>& a_from) {
 				Locked(actor.get(), [&] {
-					for (std::size_t i = 0; i < a_bones.size(); ++i) {
-						auto             at = ToHavok(BodyRules::At(*a_to[i]));
+					for (const auto& one : fresh) {
+						const auto to = Named(a_from, one.bone.name);
+						if (!to) {
+							continue;  // only in putting back, for a bone the 3D did not have before the move
+						}
+						auto             at = ToHavok(BodyRules::At(*to));
 						RE::hkQuaternion rot;
-						rot.vec = RE::hkVector4{ a_to[i]->rot.x, a_to[i]->rot.y, a_to[i]->rot.z, a_to[i]->rot.w };
-						a_bones[i].body->SetPositionAndRotation(at, rot);
-						a_bones[i].body->SetLinearVelocity(RE::hkVector4{ 0.0f });
-						a_bones[i].body->SetAngularVelocity(RE::hkVector4{ 0.0f });
+						rot.vec = RE::hkVector4{ to->rot.x, to->rot.y, to->rot.z, to->rot.w };
+						one.body->SetPositionAndRotation(at, rot);
+						one.body->SetLinearVelocity(RE::hkVector4{ 0.0f });
+						one.body->SetAngularVelocity(RE::hkVector4{ 0.0f });
 					}
 				});
 			};
-			write(bones, targets);
-			// Read back: a bone that came out not finite (or is gone) puts every bone back where it lay.
-			if (BonesOf(actor.get()).size() != bones.size()) {
-				std::vector<const Protocol::Bone*> before;
-				before.reserve(bones.size());
-				for (const auto& one : bones) {
-					before.push_back(&one.bone);
-				}
-				write(bones, before);
+			write(a_rest.bones);
+			// Read back: a bone that came out not finite (or is gone) puts every bone, and the reference, back where they lay.
+			if (BonesOf(actor.get()).size() != fresh.size()) {
+				write(here);
+				actor->SetPosition(RE::NiPoint3{ from.x, from.y, from.z }, true);
 				++counts.restored;
 				logs::warn("Bodies: {:08X} laid where its runner's lies read back wrong: every bone put back where it lay", a_rest.key.id);
 				return true;
