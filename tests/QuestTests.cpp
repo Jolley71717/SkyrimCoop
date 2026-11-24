@@ -1826,8 +1826,9 @@ TEST("quest audit: the hand list of each player's own quests and the stage rows 
 	for (const auto& own : QuestRules::OWN_QUESTS) {
 		const auto it = byName(own.editorId);
 		REQUIRE(it != audit.end());
-		// A typed one is each player's own by the list; an untyped one is not shared anyway.
-		CHECK((it->why == QuestRules::AuditWhy::kOwnList) == (it->type != 0));
+		// Never shared: by the list when it has a journal tab the game shares, else as misc (marriage, adoption) or untyped.
+		CHECK(it->verdict == QuestRules::AuditVerdict::kNotShared);
+		CHECK((it->why == QuestRules::AuditWhy::kOwnList && it->type != 0) || it->why == QuestRules::AuditWhy::kMisc || it->why == QuestRules::AuditWhy::kUntyped);
 	}
 	for (const auto& row : audit) {
 		if (row.why == QuestRules::AuditWhy::kOwnList) {
