@@ -162,6 +162,44 @@ public static class SkyrimFiles
     // changed (it replaces the earlier file's record).
     public static void Quests(string a_path, int a_file, Dictionary<uint, Quest> a_into)
     {
+        Records(a_path, a_file, "QUST", (id, body, at, size, global) =>
+        {
+            var q = ReadQuest(body, at, size, global);
+            q.Id = id;
+            q.File = a_file;
+            a_into[q.Id] = q;
+        });
+    }
+
+    // ---------------- ESM: image spaces ----------------
+
+    // An image space modifier (IMAD): whether it plays over a time and ends (DNAM: animatable, then its duration in
+    // seconds), or stays on until a script takes it off.
+    public class Imod { public uint Id; public string Edid = ""; public bool Animatable; public float Duration; }
+
+    public static void Imods(string a_path, int a_file, Dictionary<uint, Imod> a_into)
+    {
+        Records(a_path, a_file, "IMAD", (id, body, at, size, global) =>
+        {
+            var m = new Imod { Id = id };
+            for (int s = at, se = at + size; s < se;)
+            {
+                string st = Encoding.ASCII.GetString(body, s, 4);
+                int ss = BitConverter.ToUInt16(body, s + 4);
+                int d = s + 6;
+                if (st == "EDID") m.Edid = Encoding.ASCII.GetString(body, d, Math.Max(0, ss - 1));
+                else if (st == "DNAM" && ss >= 8) { m.Animatable = BitConverter.ToUInt32(body, d) != 0; m.Duration = BitConverter.ToSingle(body, d + 4); }
+                s = d + ss;
+            }
+            a_into[id] = m;
+        });
+    }
+
+    // The records of one type in one master, as the game loads them: each record's form ID as the game loads it (the
+    // file's index in MASTERS in its top byte), its body (inflated if compressed: the body, where it starts, its size)
+    // and a_global, which turns a form ID read in that body into the game's. Deleted records are skipped.
+    public static void Records(string a_path, int a_file, string a_type, Action<uint, byte[], int, int, Func<uint, uint>> a_each)
+    {
         using (var fs = File.OpenRead(a_path))
         using (var br = new BinaryReader(fs))
         {
@@ -182,7 +220,7 @@ public static class SkyrimFiles
             {
                 var gh = br.ReadBytes(24);
                 uint gsize = BitConverter.ToUInt32(gh, 4);
-                if (Encoding.ASCII.GetString(gh, 8, 4) != "QUST") { fs.Position += gsize - 24; continue; }
+                if (Encoding.ASCII.GetString(gh, 8, 4) != a_type) { fs.Position += gsize - 24; continue; }
                 var all = br.ReadBytes((int)gsize - 24);
                 int p = 0;
                 while (p < all.Length)
@@ -196,13 +234,10 @@ public static class SkyrimFiles
                     if ((flags & 0x40000) != 0) { bl = (int)BitConverter.ToUInt32(all, p + 24); body = Inflate(all, p + 28, (int)rsize - 4, bl); bo = 0; }
                     else { body = all; bo = p + 24; bl = (int)rsize; }
                     p += 24 + (int)rsize;
-                    if (rt != "QUST" || (flags & 0x20) != 0) continue;  // deleted
+                    if (rt != a_type || (flags & 0x20) != 0) continue;  // deleted
                     uint gid = loaded(id);
                     if (gid == 0xFFFFFFFF) continue;
-                    var q = ReadQuest(body, bo, bl, loaded);
-                    q.Id = gid;
-                    q.File = a_file;
-                    a_into[q.Id] = q;
+                    a_each(gid, body, bo, bl, loaded);
                 }
                 break;
             }
@@ -378,6 +413,9 @@ public static class Game
     public static readonly Dictionary<string, Script> scripts = new Dictionary<string, Script>(StringComparer.OrdinalIgnoreCase);
     // the quest a script is attached to, when it is attached to one quest only (a template on several says nothing)
     public static readonly Dictionary<string, SkyrimFiles.Quest> questOfScript = new Dictionary<string, SkyrimFiles.Quest>(StringComparer.OrdinalIgnoreCase);
+    // the image space modifiers, by form ID and by editor ID
+    public static readonly Dictionary<uint, SkyrimFiles.Imod> imods = new Dictionary<uint, SkyrimFiles.Imod>();
+    public static readonly Dictionary<string, SkyrimFiles.Imod> imodByEdid = new Dictionary<string, SkyrimFiles.Imod>(StringComparer.OrdinalIgnoreCase);
     public static readonly List<string> notes = new List<string>();
 
     static void AddScript(string a_name, byte[] a_pex)
@@ -397,11 +435,14 @@ public static class Game
             var path = Path.Combine(a_data, SkyrimFiles.MASTERS[file]);
             if (!File.Exists(path)) { notes.Add("# not installed: " + SkyrimFiles.MASTERS[file]); continue; }
             SkyrimFiles.Quests(path, file, quests);
+            SkyrimFiles.Imods(path, file, imods);
         }
         foreach (var q in quests.Values)
         {
             if (q.Edid.Length > 0 && !byEdid.ContainsKey(q.Edid)) byEdid[q.Edid] = q;
         }
+        foreach (var m in imods.Values)
+            if (m.Edid.Length > 0 && !imodByEdid.ContainsKey(m.Edid)) imodByEdid[m.Edid] = m;
         var shared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var q in quests.Values)
             foreach (var name in q.Scripts.Distinct(StringComparer.OrdinalIgnoreCase))
@@ -426,7 +467,7 @@ public static class Game
 
 // The stages that move the player, or take their screen, controls or saving away: a stage's own fragment (Direct: MoveTo,
 // SetPosition or TranslateTo of the player, a door the player is made to use, Game.FastTravel, Game.FadeOutGame, an image
-// space applied, cross-faded or held, a race menu, Game.DisablePlayerControls taking anything, Game.SetPlayerAIDriven,
+// space that stays on (not a flash), a race menu, Game.DisablePlayerControls taking anything, Game.SetPlayerAIDriven,
 // the player restrained, made not to move or their AI off, Game.SetInChargen), or what it calls (its quest's own script
 // through kmyQuest or self, any script a property or local is typed with, a few calls deep, a branch on a literal
 // argument followed one way) and the stages it sets (SetStage on its own quest or on a quest property) or the quests it
@@ -570,6 +611,26 @@ public static class MoveScan
         return a_quest != null && a_quest.Forms.TryGetValue(Bare(a_var), out form) && form == 0x00000014;
     }
 
+    // The image space modifier a variable holds, when known: the form a quest property of that name holds, else one whose
+    // editor ID is the name (the Creation Kit fills a property in by the editor ID it is named for), else null.
+    public static SkyrimFiles.Imod ImodOf(string a_var, SkyrimFiles.Quest a_quest)
+    {
+        uint form; SkyrimFiles.Imod m;
+        if (a_quest != null && a_quest.Forms.TryGetValue(Bare(a_var), out form)) return Game.imods.TryGetValue(form, out m) ? m : null;
+        return Game.imodByEdid.TryGetValue(Bare(a_var), out m) ? m : null;
+    }
+
+    // Whether an image space put on the screen with Apply or PopTo goes off by itself soon: one that plays a few seconds
+    // and ends (DNAM: animatable, a duration up to BRIEF seconds; a glow, a blur, a flash). One that is not known (a
+    // variable set at run time, a property of a script on a reference) counts as staying: a row that fires too often
+    // costs a stage made only with its friend near, a missed one a friend left behind a held screen.
+    public const float BRIEF = 10;
+    public static bool Brief(string a_imod, SkyrimFiles.Quest a_quest)
+    {
+        var m = ImodOf(a_imod, a_quest);
+        return m != null && m.Animatable && m.Duration > 0 && m.Duration <= BRIEF;
+    }
+
     // Whether a call's argument a_at (counted from its first parameter) is anything but the literal False: True, or a value
     // known only at run time (a variable, a parameter), which may be True. Left out (a default): a_default.
     static bool Takes(SkyrimFiles.Instr a_i, int a_first, int a_at, bool a_default)
@@ -584,10 +645,13 @@ public static class MoveScan
 
     // What a function's own code does to the player that is looked for (not through what it calls), or null: it moves
     // them (MoveTo and its kin, SetPosition, TranslateTo, a door they are made to use, Game.FastTravel), takes their
-    // screen (Game.FadeOutGame, an image space applied, cross-faded or held, a race menu), their controls
+    // screen and leaves it so (Game.FadeOutGame, an image space that stays on: Brief; a race menu), their controls
     // (Game.DisablePlayerControls taking anything, Game.SetPlayerAIDriven), freezes them (SetRestrained, SetDontMove,
     // EnableAI(False)) or stops saving and waiting (Game.SetInChargen). An argument known only at run time counts as
     // taking: a row that fires too often costs a stage made only with its friend near, a missed one a frozen friend.
+    // A fade or an image space the same code takes off again further on, with no branch or loop between (a wait is
+    // fine: the Greybeards' word fade, white for two seconds), is a flash, not a hold. One taken off only past a branch,
+    // in a loop waiting on the player (Molag Bal's haunting) or by another stage stays a hold.
     // a_f: the function (the types of its variables); a_quest: the quest whose script or fragment it is, when known.
     public static string Direct(List<SkyrimFiles.Instr> a_code, SkyrimFiles.Func a_f, SkyrimFiles.Quest a_quest)
     {
@@ -596,8 +660,17 @@ public static class MoveScan
         // the first of each kind, said by the worst: a move, then the player frozen, controls, chargen, the screen
         var found = new string[5];
         Action<int, string> note = (k, w) => { if (found[k] == null) found[k] = w; };
+        // what is on the screen and not yet taken off in straight code: (an image space's variable, "|crossfade|" or
+        // "|fade|"; what it is), held for good at the next branch or the end
+        var pending = new List<KeyValuePair<string, string>>();
+        Action<string> off = k => pending.RemoveAll(p => Is(p.Key, k));
+        Action<string, string> put = (k, w) => pending.Add(new KeyValuePair<string, string>(k, w));
+        Action held = () => { foreach (var p in pending) note(4, p.Value); pending.Clear(); };
         foreach (var i in a_code)
         {
+            if (i.Op == SkyrimFiles.JMP || i.Op == SkyrimFiles.JMPT || i.Op == SkyrimFiles.JMPF) { held(); continue; }
+            // only one cross-fade is on at a time: RemoveCrossFade takes it off
+            if (i.Op == SkyrimFiles.CALLSTATIC && Is(i.Args[0], "ImageSpaceModifier") && Is(i.Args[1], "RemoveCrossFade")) { off("|crossfade|"); continue; }
             if (i.Op == SkyrimFiles.CALLSTATIC && Is(i.Args[0], "game"))
             {
                 var m = i.Args[1];
@@ -607,7 +680,17 @@ public static class MoveScan
                 if (Is(m, "DisablePlayerControls") && (i.Args.Count <= 3 || Enumerable.Range(0, 8).Any(k => Takes(i, 3, k, false)))) note(2, "Game.DisablePlayerControls");
                 if (Is(m, "SetPlayerAIDriven") && Takes(i, 3, 0, true)) note(2, "Game.SetPlayerAIDriven");
                 if (Is(m, "SetInChargen") && (Takes(i, 3, 0, false) || Takes(i, 3, 1, false))) note(3, "Game.SetInChargen");
-                if (Is(m, "FadeOutGame") && Takes(i, 3, 0, false)) note(4, "Game.FadeOutGame");
+                // FadeOutGame(abFadingOut, abBlackFade, afSecsBeforeFade, afFadeDuration): fading out stays black (or white)
+                // until faded in; fading in holds the screen as it is for afSecsBeforeFade first (FadeOutGame(False, True,
+                // 50, 1) holds black for 50 s), and a short one ends any fade.
+                if (Is(m, "FadeOutGame"))
+                {
+                    if (Takes(i, 3, 0, false)) { put("|fade|", "Game.FadeOutGame"); continue; }
+                    off("|fade|");
+                    float secs;
+                    if (!(i.Args.Count > 5 && float.TryParse(i.Args[5], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out secs) && secs <= BRIEF))
+                        put("|fade|", "Game.FadeOutGame holding " + Bare(i.Args.Count > 5 ? i.Args[5] : "?") + " s");
+                }
                 if (Is(m, "ShowRaceMenu") || Is(m, "ShowLimitedRaceMenu")) note(4, "Game." + m);
                 continue;
             }
@@ -620,10 +703,18 @@ public static class MoveScan
             if (Is(name, "Activate") && i.Args.Count > 3 && player(i.Args[3]) && Bare(self).IndexOf("Door", StringComparison.OrdinalIgnoreCase) >= 0) note(0, "the player through " + Bare(self));
             if ((Is(name, "SetRestrained") || Is(name, "SetDontMove")) && player(self) && Takes(i, 3, 0, true)) note(1, name + " on the player");
             if (Is(name, "EnableAI") && player(self) && i.Args.Count > 3 && !Is(i.Args[3], "True") && !Is(i.Args[3], "1")) note(1, "EnableAI(False) on the player");
-            if ((Is(name, "Apply") || Is(name, "ApplyCrossFade") || Is(name, "PopTo")) && a_f != null && Is(TypeOf(a_f, self) ?? "", "ImageSpaceModifier"))
-                note(4, "ImageSpaceModifier." + name + " " + Bare(self));
+            if (a_f != null && Is(TypeOf(a_f, self) ?? "", "ImageSpaceModifier"))
+            {
+                // Apply: on until Remove (or played out if brief); PopTo: this one off, the target on; ApplyCrossFade: in
+                // place of the cross-fade before, on until RemoveCrossFade
+                var to = Is(name, "PopTo") && i.Args.Count > 3 ? i.Args[3] : self;
+                if (Is(name, "Remove") || Is(name, "PopTo")) off(Bare(self));
+                if ((Is(name, "Apply") || Is(name, "PopTo")) && !Brief(to, a_quest)) put(Bare(to), "ImageSpaceModifier." + name + " " + Bare(to));
+                if (Is(name, "ApplyCrossFade")) { off("|crossfade|"); put("|crossfade|", "ImageSpaceModifier." + name + " " + Bare(self)); }
+            }
             players.Remove(i.Args[2]);
         }
+        held();
         return found.FirstOrDefault(w => w != null);
     }
 
@@ -768,18 +859,29 @@ public static class MoveScan
         return sb.ToString();
     }
 
-    // One quest's stage fragments, disassembled (each stage's functions), with what the quest's record says: for checking
-    // a row by hand.
+    // An image space modifier as the scan sees it, for -Dump.
+    public static string Describe(SkyrimFiles.Imod a_m)
+    {
+        return string.Format("(image space {0}: {1})", a_m.Edid, a_m.Animatable && a_m.Duration > 0 ? "plays " + a_m.Duration.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + " s and ends" : "stays on until taken off");
+    }
+
+    // One quest's stage fragments, disassembled (each stage's functions), with what the quest's record says and what each
+    // image space property does: for checking a row by hand. An image space's editor ID gives what it does alone.
     public static string Dump(string a_data, string a_edid)
     {
         Game.Load(a_data);
         SkyrimFiles.Quest q;
-        if (!Game.byEdid.TryGetValue(a_edid, out q)) return "# no quest " + a_edid;
+        SkyrimFiles.Imod im;
+        if (!Game.byEdid.TryGetValue(a_edid, out q)) return Game.imodByEdid.TryGetValue(a_edid, out im) ? string.Format("# {0:X8} {1}", im.Id, Describe(im)) : "# no quest or image space " + a_edid;
         var sb = new StringBuilder();
         sb.AppendLine(string.Format("# {0} {1:X8} type={2} flags={3:X4} event={4} file={5} fragments={6} scripts={7}", q.Edid, q.Id, q.Type, q.Flags, q.Event, SkyrimFiles.MASTERS[q.File], q.FragmentScript, string.Join(",", q.Scripts.ToArray())));
         foreach (var st in q.Stages)
             sb.AppendLine(string.Format("# stage {0} flags={1:X2}{2}{3}", st.Index, st.Flags, st.Completes ? " completes" : "", st.Fails ? " fails" : ""));
-        foreach (var kv in q.Forms) sb.AppendLine(string.Format("# property {0} = {1:X8}", kv.Key, kv.Value));
+        foreach (var kv in q.Forms)
+        {
+            SkyrimFiles.Imod m;
+            sb.AppendLine(string.Format("# property {0} = {1:X8}{2}", kv.Key, kv.Value, Game.imods.TryGetValue(kv.Value, out m) ? " " + Describe(m) : ""));
+        }
         Game.Script script;
         if (!Game.scripts.TryGetValue(q.FragmentScript, out script)) return sb.ToString();
         foreach (var kv in q.Fragments.OrderBy(k => k.Key))

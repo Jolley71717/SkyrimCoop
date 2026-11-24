@@ -436,8 +436,19 @@ TEST("quest rules: the scan's rows cover the class: the screen held, controls, t
 		const auto row = QuestRules::StageRowOf(QuestRules::STAGE_RULES, a_edid, a_stage);
 		return row ? std::optional<StageEffect>{ row->effect } : std::nullopt;
 	};
-	CHECK(effect("DLC1VQ06", 61) == StageEffect::kScreen);   // an image space cross-faded and held (fade to white)
-	CHECK(effect("MG02", 50) == StageEffect::kScreen);       // ... popped to and held
+	CHECK(effect("MQ206", 42) == StageEffect::kScreen);      // an image space cross-faded and held (time travel, till stage 5)
+	CHECK(effect("MG04MonkSceneQuest", 0) == StageEffect::kScreen);  // ... popped to and held (time stopped, till 200)
+	CHECK(effect("DA10HauntingController", 0) == StageEffect::kScreen);  // ... cross-faded in a loop that waits on the player
+	CHECK(effect("DLC1VQ06", 61) == StageEffect::kControls);  // its fade to white is a flash; the controls it takes are not
+	// not rows: an image space that plays a few seconds and ends (a blur, a flash), one taken off again in straight code
+	// (the Greybeards' word fade, the vampire stage's), and a stage that takes a held one off (MG02 50, MG04MonkSceneQuest
+	// 200 pop the time freeze to its short outro)
+	CHECK(!effect("DA10", 110));
+	CHECK(!effect("MQ206", 5));
+	CHECK(!effect("MQ105", 70));
+	CHECK(!effect("DLC1VQ03Vampire", 67));
+	CHECK(!effect("MG02", 50));
+	CHECK(!effect("MG04MonkSceneQuest", 200));
 	CHECK(effect("MQ201", 95) == StageEffect::kControls);    // DisablePlayerControls
 	CHECK(effect("MQ101", 98) == StageEffect::kFrozen);      // SetRestrained on the player
 	CHECK(effect("DLC2MQ02", 50) == StageEffect::kChargen);  // SetInChargen
