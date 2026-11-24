@@ -169,17 +169,29 @@ namespace Gear
 			// never reach a plan (FormTranslate drops them, PlanGear keeps an unnamed hand as it is).
 			return a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
 		};
-		for (const auto& item : plan.unequip) {
+		// A spell leaves a hand only by DeselectSpell, which empties both hands of it: a hand the plan fills again is left
+		// to the equip into its slot, and a spell the plan keeps in the other hand is put back there (NpcRules::StepsOf).
+		const auto spellOf = [&](std::uint32_t a_id) {
+			const auto form = formOf(a_id);
+			return IsSpell(form) ? form->As<RE::SpellItem>() : nullptr;
+		};
+		const auto steps = NpcRules::StepsOf(plan, now, a_gear, [&](std::uint32_t a_id) { return spellOf(a_id) != nullptr; });
+		for (const auto& item : steps.unequip) {
 			const auto form = formOf(item.id);
-			if (const auto spell = IsSpell(form) ? form->As<RE::SpellItem>() : nullptr) {
-				a_actor->DeselectSpell(spell);
-				++out.unequipped;
-			} else if (const auto bound = form ? form->As<RE::TESBoundObject>() : nullptr) {
+			if (const auto bound = form ? form->As<RE::TESBoundObject>() : nullptr) {
 				manager->UnequipObject(a_actor, bound, nullptr, 1, HandSlot(item.hand, bound), false, true, false, true);
 				++out.unequipped;
 			} else {
 				++out.skipped;
 			}
+		}
+		for (const auto& item : steps.deselect) {
+			a_actor->DeselectSpell(spellOf(item.id));
+			++out.unequipped;
+		}
+		for (const auto& item : steps.reselect) {
+			const auto spell = spellOf(item.id);
+			manager->EquipSpell(a_actor, spell, HandSlot(item.hand, spell));
 		}
 		for (const auto& add : plan.add) {
 			const auto form = formOf(add.id);

@@ -1157,3 +1157,83 @@ TEST("npc server: a runner lets go, and everyone hears the NPC is nobody's; anot
 		CHECK(told[0].first.owners == std::vector<Protocol::NpcOwner>({ { GUARD, 0 } }));
 	}
 }
+
+TEST("npc rules: a spell leaves a hand by a deselect that empties both, so a hand filled again keeps the other's spell")
+{
+	using namespace NpcRules;
+	constexpr std::uint32_t FLAMES = 0x00012FCD, SPARKS = 0x0002DD2A, WARD = 0x0005D173;
+	const auto              isSpell = [&](std::uint32_t a_id) { return a_id == FLAMES || a_id == SPARKS || a_id == WARD; };
+	const std::vector<Count> carried{ { FLAMES, 2 }, { SPARKS, 2 }, { WARD, 2 }, { SWORD, 1 }, { SHIELD, 1 } };
+	const Wearing            dual{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = FLAMES, .left = FLAMES };
+	const auto               gearOf = [](std::uint32_t a_right, std::uint32_t a_left) {
+		return Protocol::NpcGear{ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = a_right, .left = a_left };
+	};
+
+	// Flames in both hands, the right swapped for a sword: the sword goes straight into the right hand's slot (no
+	// deselect, which would empty the left too); the left keeps its flames.
+	{
+		const auto gear = gearOf(SWORD, FLAMES);
+		const auto plan = PlanGear(gear, dual, carried, false);
+		CHECK(plan.unequip == Items({ { FLAMES, Hand::kRight } }));
+		CHECK(plan.equip == Items({ { SWORD, Hand::kRight } }));
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.unequip.empty());
+		CHECK(steps.deselect.empty());
+		CHECK(steps.reselect.empty());
+	}
+	// The left swapped for a ward: the ward replaces the flames in the left; the right keeps its flames.
+	{
+		const auto gear = gearOf(FLAMES, WARD);
+		const auto plan = PlanGear(gear, dual, carried, false);
+		CHECK(plan.equip == Items({ { WARD, Hand::kLeft } }));
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.deselect.empty());
+		CHECK(steps.reselect.empty());
+	}
+	// The left swapped for a shield (worn armor, put on with no hand named): the shield fills the left.
+	{
+		const Protocol::NpcGear gear{ .key = GUARD, .worn = { { CUIRASS, BODY }, { SHIELD, SHIELD_SLOT } }, .right = FLAMES, .left = SHIELD };
+		const auto              plan = PlanGear(gear, dual, carried, false);
+		CHECK(plan.unequip == Items({ { FLAMES, Hand::kLeft } }));
+		CHECK(plan.equip == Items({ { SHIELD, Hand::kNone } }));
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.deselect.empty());
+		CHECK(steps.reselect.empty());
+	}
+	// The left emptied: the flames are deselected (out of both hands) and put back in the right, which keeps them.
+	{
+		const auto gear = gearOf(FLAMES, 0);
+		const auto plan = PlanGear(gear, dual, carried, false);
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.deselect == Items({ { FLAMES, Hand::kLeft } }));
+		CHECK(steps.reselect == Items({ { FLAMES, Hand::kRight } }));
+	}
+	// Both emptied: deselected once, put back nowhere.
+	{
+		const auto gear = gearOf(0, 0);
+		const auto plan = PlanGear(gear, dual, carried, false);
+		CHECK(plan.unequip.size() == 2u);
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.deselect == Items({ { FLAMES, Hand::kRight } }));
+		CHECK(steps.reselect.empty());
+	}
+	// Two different spells, the right emptied: the deselect leaves the left's sparks, so nothing is put back.
+	{
+		const Wearing mixed{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = FLAMES, .left = SPARKS };
+		const auto    gear = gearOf(0, SPARKS);
+		const auto    plan = PlanGear(gear, mixed, carried, false);
+		const auto    steps = StepsOf(plan, mixed, gear, isSpell);
+		CHECK(steps.deselect == Items({ { FLAMES, Hand::kRight } }));
+		CHECK(steps.reselect.empty());
+	}
+	// A weapon taken off is no spell: unequipped as the plan says.
+	{
+		const Wearing armed{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = SWORD, .left = FLAMES };
+		const auto    gear = gearOf(0, FLAMES);
+		const auto    plan = PlanGear(gear, armed, carried, false);
+		const auto    steps = StepsOf(plan, armed, gear, isSpell);
+		CHECK(steps.unequip == Items({ { SWORD, Hand::kRight } }));
+		CHECK(steps.deselect.empty());
+		CHECK(steps.reselect.empty());
+	}
+}

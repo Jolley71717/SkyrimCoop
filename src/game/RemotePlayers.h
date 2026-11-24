@@ -114,7 +114,8 @@ namespace RemotePlayers
 	// up (down negative) off the height it was shown at, put back or not, when it is shown swimming (for `swim`: what the
 	// engine did, not where the plugin put it after).
 	bool HoldDepth(RE::Actor* a_actor, const Protocol::PlayerState& a_state, float* a_drift = nullptr);
-	// An actor this game placed (a copy of a spawn) goes out of the world as a stand-in does: disabled, then deleted
+	// An actor this game placed (a copy of a spawn), or one a stand-in or a copy made here (NpcSync: a summon), goes out of
+	// the world as a stand-in does: disabled, then deleted
 	// (Retire.h), its AI off meanwhile, taken out before a save and named in the co-save until it is gone.
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
 

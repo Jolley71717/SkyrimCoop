@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 // Spells in the hands of NPC copies (docs/DESIGN.md, "NPCs": "Spells"): the rules, free of the game (NpcSync.cpp is the
@@ -99,30 +101,100 @@ namespace SpellRules
 	};
 
 	// Whether such an actor is ended here: made by an actor this game shows for another game (a stand-in, a copy of an NPC
-	// another game runs), whose game makes the real one, so this one would stand beside the copy of that one.
+	// another game runs), whose game makes the real one, so this one would stand beside the copy of that one. Every kind
+	// of actor made so: a summon (an atronach, a familiar, a Dremora: made as the game ran) and a raised or commanded one
+	// (a corpse of the load order reanimated, a thrall, a commanded creature: an actor of this world).
 	[[nodiscard]] constexpr bool EndsMade(MadeBy a_by)
 	{
 		return a_by == MadeBy::kStandIn || a_by == MadeBy::kOthersCopy;
 	}
 
-	// A graph event of casting (a hand's or the voice's: "BeginCastRight", "MLh_SpellFire_Event", "BeginCastVoice",
-	// "ShoutStart", a ward's "MRh_SpellAimedStart"...): counted apart on copies, so the rig tells a copy's cast played
-	// from its walk's events. Names holding "cast", "spell" or "shout", in any case.
-	[[nodiscard]] inline bool CastEvent(std::string_view a_event)
+	// How such an actor is ended, each time the scan finds it, until it is gone. Never in the scan's own loop over the
+	// process lists (NpcSync gathers them and ends them after it), and never disabled and deleted in one frame: the
+	// disable's task, run later in the task pool on an actor the delete took out of its cell, crashed both games of the
+	// first two-player test (Retire.h).
+	//   1. Its making effect is dispelled (a summon's on its caster, a raise's or a command's on itself): the engine's own
+	//      end of it, which takes a summon out of the world itself (so one just dispelled is never also deleted here) and
+	//      lets a raised corpse fall.
+	//   2. A runtime actor (a summon) with no such effect found, or still there MADE_GRACE after its dispel, is handed to
+	//      the stand-ins' way out (RemotePlayers::TakeOut: disabled, then deleted only once its 3D is gone; Retire.h).
+	//   3. A load-order actor (a raised corpse of the world, a commanded NPC) is never disabled or deleted: it is an NPC of
+	//      this world and of its saves. Its dispel is tried again every MADE_GRACE while it stands commanded.
+	using Duration = std::chrono::steady_clock::duration;
+	inline constexpr auto MADE_GRACE = std::chrono::seconds(5);
+
+	enum class MadeStep : std::uint8_t
 	{
+		kDispel,   // try its making effect's dispel now
+		kWait,     // leave it be this time
+		kTakeOut,  // hand it to the way out (a runtime actor only)
+	};
+
+	struct MadeFacts
+	{
+		bool                    loadOrder = false;  // an actor of the load order (never taken out)
+		std::optional<Duration> sinceTried;         // since its dispel was last tried (none: never)
+		bool                    dispelled = false;  // that try found its effect and dispelled it
+		bool                    takenOut = false;   // handed to the way out already
+	};
+
+	[[nodiscard]] constexpr MadeStep NextMade(const MadeFacts& a_facts)
+	{
+		if (a_facts.takenOut) {
+			return MadeStep::kWait;
+		}
+		if (!a_facts.sinceTried) {
+			return MadeStep::kDispel;
+		}
+		if (a_facts.loadOrder) {
+			return *a_facts.sinceTried >= MADE_GRACE ? MadeStep::kDispel : MadeStep::kWait;
+		}
+		if (a_facts.dispelled && *a_facts.sinceTried < MADE_GRACE) {
+			return MadeStep::kWait;  // the engine is ending it: never deleted meanwhile
+		}
+		return MadeStep::kTakeOut;
+	}
+
+	// A graph event of a copy's runner's NPC, as a cast: the start of one (a hand's or the voice's wind-up:
+	// "BeginCastRight", "BeginCastLeft", "BeginCastVoice", "ShoutStart") or its release (the spell let go: "MRh_SpellFire_Event",
+	// "MLh_SpellFire_Event", "Voice_SpellFire_Event", "ShoutRelease..."), or none: a cast broken off or put away
+	// ("InterruptCast", "CastStop", "ShoutStop") is no cast, nor is a hand's readying ("MRh_SpellReadyOut",
+	// "MLh_Equipped_Event") or any walk's or swing's event. Counted apart on copies, so the rig tells a copy's casts played
+	// from its walk's events. Any case.
+	enum class Cast : std::uint8_t
+	{
+		kNone,
+		kStart,
+		kRelease,
+	};
+
+	[[nodiscard]] inline Cast CastOf(std::string_view a_event)
+	{
+		const auto lower = [](char a) { return static_cast<char>(std::tolower(static_cast<unsigned char>(a))); };
+		const auto same = [&](char a, char b) { return lower(a) == lower(b); };
+		const auto startsWith = [&](std::string_view a_part) {
+			return a_part.size() <= a_event.size() && std::ranges::equal(a_event.substr(0, a_part.size()), a_part, same);
+		};
 		const auto holds = [&](std::string_view a_part) {
-			if (a_part.size() > a_event.size()) {
-				return false;
-			}
 			for (std::size_t i = 0; i + a_part.size() <= a_event.size(); ++i) {
-				if (std::ranges::equal(a_event.substr(i, a_part.size()), a_part,
-						[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); })) {
+				if (std::ranges::equal(a_event.substr(i, a_part.size()), a_part, same)) {
 					return true;
 				}
 			}
 			return false;
 		};
-		return holds("cast") || holds("spell") || holds("shout");
+		if (startsWith("begincast") || startsWith("shoutstart")) {
+			return Cast::kStart;
+		}
+		if (holds("spellfire") || startsWith("shoutrelease")) {
+			return Cast::kRelease;
+		}
+		return Cast::kNone;
+	}
+
+	[[nodiscard]] inline bool CastEvent(std::string_view a_event)
+	{
+		return CastOf(a_event) != Cast::kNone;
 	}
 
 	// A copy's hand (or its voice), as the developer channel says it: what its runner's NPC holds there against what the

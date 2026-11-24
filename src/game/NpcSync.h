@@ -72,7 +72,8 @@ namespace NpcSync
 	// Developer channel: `npcs` (counts), `npcs list` (each NPC: who runs it, its kind, where it is and where its copy
 	// is), `npcs <form id>` (one NPC), `npcs spells [<form id>]` (the spells and voices of copies and of the NPCs this
 	// game runs: SpellRules.h), and for the rig `npcs spells find <aimed|self|summon|power>`, `npcs spells arm <local id>
-	// <right|left|voice> <spell id | 0>` (an NPC this game runs given a spell, the set-up of the step `npcspells`) and
+	// <right|left|voice> <spell id | 0>` (an NPC this game runs given a spell, the set-up of the step `npcspells`),
+	// `npcs spells knows <local id> <spell id>` (whether an actor knows it: the step takes back only what it taught) and
 	// `npcs spells refuse <on|off>`.
 	[[nodiscard]] std::string Describe(std::string_view a_args);
 	// Developer channel `swim` (the copies' part, after ours and the stand-ins': Water::Command): how many copies' runners

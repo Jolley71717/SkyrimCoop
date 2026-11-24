@@ -12,16 +12,19 @@
 #   0. Set-up (said in the run): a person the runner runs that the watcher shows as a copy (shots.sh's sh_pick; none is
 #      a rig fault). The runner's game finds the spells (`npcs spells find aimed|self|summon|power`: the lowest-id spell
 #      of the load order of that kind; no aimed, self or summon spell is a rig fault, no power only skips the voice with
-#      a WARN). The watcher's console teaches the copy the aimed and self spells and the power (`<copy>.addspell`, taken
-#      back after: a copy of a load-order NPC readies only what it knows), and the runner's dev channel arms its NPC
-#      (`npcs spells arm <local> right <aimed>`, `left <self>`, `voice <power>`; taught to it if it lacks them, taken back
-#      after). A refused arm is a rig fault.
+#      a WARN). The watcher's console teaches the copy the aimed and self spells and the power it does not know yet
+#      (`npcs spells knows <copy> <id>` asked first; `<copy>.addspell`, and only those taken back after: a copy of a
+#      load-order NPC readies only what it knows, and one it knew before the step keeps it), and the runner's dev
+#      channel arms its NPC (`npcs spells arm <local> right <aimed>`, `left <self>`, `voice <power>`; taught to it if it
+#      lacks them, taken back after). A refused arm is a rig fault.
 #   1. Hands: within NPCSPELLS_WAIT the watcher's copy holds its runner's spell in each hand and its voice ready
-#      (`npcs spells <key>`: right=, left=, voice= each `shown`); a hand still not shown is a FAIL (the row is said).
+#      (`npcs spells <key>`: right=<aimed>/..., left=<self>/..., voice=<power>/... each `shown`: the wanted half is the
+#      armed id, so what the copy showed before the arm reached it never counts); a hand still not shown is a FAIL.
 #   2. Never taught: the runner arms its NPC's left hand with the summon spell, which the copy was not taught. Within
-#      NPCSPELLS_WAIT the watcher's copy's left hand reads `lacks` (it keeps its own; PASS). `shown` is a FAIL: the copy
-#      was taught a spell, which would stay in its save. Anything else at the end (`differs`) is a FAIL. The left hand is
-#      armed with the self spell again after.
+#      NPCSPELLS_WAIT the watcher's copy's left hand wants the summon (left=<summon>/...: the runner's gear, read once a
+#      second, has reached it) and reads `lacks` (it keeps its own; PASS). `shown` is a FAIL: the copy was taught a
+#      spell, which would stay in its save. Anything else at the end (`differs`, or the summon never wanted) is a FAIL.
+#      The left hand is armed with the self spell again after.
 #   3. Refused: the watcher's console makes the copy cast the summon spell on itself (`<copy>.cast <summon> <copy>`:
 #      set-up, the injected cast of a copy's own AI). Within NPCSPELLS_SETTLE the effect hook refused it (`npcs spells`
 #      refused=summon: up) and nothing it made is in the world (madeNow=0): PASS. Not refused, and what it made ended by
@@ -32,18 +35,22 @@
 #      still there is a FAIL; nothing made at all is a rig fault. `npcs spells refuse on` after, whatever happened.
 #   5. Casts: the runner's NPC is set on the runner's player with the console (npcs.sh's fight set-up: confidence and
 #      aggression set so it stands and fights, the player given NPCSPELLS_HEALTH health; all put back after). Within
-#      NPCSPELLS_FIGHT_WAIT the watcher's copy plays a cast event of its runner's (castsPlayed= up; PASS), and turns away
-#      no more cast events than it plays. The runner's NPC never cast (its row's castsSent= not up: its AI chose to run
-#      or punch) is a WARN; cast while the copy played none is a FAIL. The magicka given back to the copy is said.
-#   6. Undo: the runner's hands and voice emptied (`arm ... 0`, which takes back what arm taught), the copy's taught
-#      spells removed with the console, the effects refused again.
+#      NPCSPELLS_FIGHT_WAIT the watcher's copy plays a cast of its runner's (castsPlayed= up: only a cast's start or its
+#      release counts, never one broken off or put away) and that cast did something here: the runner's projectile was
+#      launched from the copy (`shots` from the runner's player: npcLaunched= up) or the copy spent magicka casting here
+#      (magickaBack= up): PASS. It turns away no more cast events than it plays. Casts played with neither result is a
+#      FAIL (the hands moved, nothing was released). The runner's NPC never cast (its row's castsSent= not up: its AI
+#      chose to run or punch) is a WARN; cast while the copy played none is a FAIL.
+#   6. Undo: the runner's hands and voice emptied (`arm ... 0`, which takes back what arm taught), the spells the
+#      watcher's console taught the copy removed (only those), the effects refused again.
 # Not on the rig yet: a creature's spells (a spriggan's, an atronach's: arm takes people's hands only), a dragon's
-# shout, a raised corpse (Reanimate) and the other refused kinds (they share the summon's path in the hook and the
-# scan), a spawn's copy taught what it lacks.
+# shout, a raised corpse (Reanimate: refused by the hook as a summon is; the scan dispels a load-order corpse's raise and
+# never deletes it, a path of its own that no leg here runs), the other refused kinds (the hook's archetype path), a
+# spawn's copy taught what it lacks.
 
 NPCSPELLS_WAIT=${NPCSPELLS_WAIT:-10}              # s: for the watcher's copy to hold what its runner's NPC holds
 NPCSPELLS_SETTLE=${NPCSPELLS_SETTLE:-2}           # s: after a console cast, for the hook's count and the scan
-NPCSPELLS_END=${NPCSPELLS_END:-8}                 # s: for what a copy made to be ended (MADE_GRACE 2 s, scans 4 a second)
+NPCSPELLS_END=${NPCSPELLS_END:-12}                # s: for what a copy made to be ended (its dispel, or taken out MADE_GRACE 5 s after)
 NPCSPELLS_FIGHT_WAIT=${NPCSPELLS_FIGHT_WAIT:-25}  # s: for the copy to play a cast of its fighting runner's NPC
 NPCSPELLS_HEALTH=${NPCSPELLS_HEALTH:-5000}        # the health the runner's player is given for the fight
 
@@ -64,32 +71,46 @@ ns_found() { [[ $1 == "spell id="* ]] && field id "$1"; }
 # ns_rose <before> <after>: both numbers and the second larger
 ns_rose() { is_num "$1" && is_num "$2" && _cmp "$2" ">" "$1"; }
 
+# ns_wants <row> <right|left|voice>: the id that hand of a copy wants (its runner's NPC's: the half before the "/")
+ns_wants() { local v; v=$(field "$2" "$1"); [[ $v == */* ]] && echo "${v%%/*}"; }
+# ns_hand_is <row> <hand> <id> <state>: that hand wants that id (the arm has reached the copy) and is in that state
+ns_hand_is() { [ -n "$3" ] && [ "$(ns_wants "$1" "$2")" = "$3" ] && [ "$(ns_hand "$1" "$2")" = "$4" ]; }
+
 # ns_read <who> <key>: that game's `npcs spells <key>` reply
 ns_read() { dc "$1" "npcs spells $2"; }
 # ns_get <who> <field>: a count of that game's `npcs spells`
 ns_get() { field "$2" "$(ns_head "$(dc "$1" 'npcs spells')")"; }
-# ns_hands_are <who> <key> <state> <hand...>: every named hand of that game's copy is in that state
+# ns_hands_are <who> <key> <state> <hand=id...>: every named hand of that game's copy wants that id and is in that state
 ns_hands_are() {
-	local r h; r=$(ns_row "$(ns_read "$1" "$2")" "$2")
-	for h in "${@:4}"; do [ "$(ns_hand "$r" "$h")" = "$3" ] || return 1; done
+	local r p; r=$(ns_row "$(ns_read "$1" "$2")" "$2")
+	for p in "${@:4}"; do ns_hand_is "$r" "${p%%=*}" "${p#*=}" "$3" || return 1; done
 }
-# ns_left_settled <who> <key>: the copy's left hand reads lacks or shown (taught): the step's answer either way
-ns_left_settled() { local s; s=$(ns_hand "$(ns_row "$(ns_read "$1" "$2")" "$2")" left); [ "$s" = lacks ] || [ "$s" = shown ]; }
+# ns_left_settled <who> <key> <id>: the copy's left hand wants that id and reads lacks or shown (taught): the step's
+# answer either way; the old spell still wanted (the runner's gear not read since the arm) is not yet
+ns_left_settled() { local r; r=$(ns_row "$(ns_read "$1" "$2")" "$2"); ns_hand_is "$r" left "$3" lacks || ns_hand_is "$r" left "$3" shown; }
 # ns_ended <who> <madeEnded before>: something made here was ended since, and nothing made is left
 ns_ended() { local h; h=$(ns_head "$(dc "$1" 'npcs spells')"); ns_rose "$2" "$(field madeEnded "$h")" && [ "$(field madeNow "$h")" = 0 ]; }
-# ns_played <who> <key> <castsPlayed before>: the copy played a cast since
-ns_played() { ns_rose "$3" "$(field castsPlayed "$(ns_row "$(ns_read "$1" "$2")" "$2")")"; }
+# ns_cast_did <watcher> <key> <runner's player> <castsPlayed before> <npcLaunched before> <magickaBack before>: the copy
+# played a cast since, and it did something here: the runner's projectile launched from it, or magicka it spent here
+ns_cast_did() {
+	local row; row=$(ns_row "$(ns_read "$1" "$2")" "$2")
+	ns_rose "$4" "$(field castsPlayed "$row")" || return 1
+	ns_rose "$5" "$(sh_npc_launched "$1" "$3")" || ns_rose "$6" "$(field magickaBack "$row")"
+}
 # ns_arm <who> <local> <hand> <id>: arms (or, with 0, empties) a hand of an NPC that game runs; true when it took
 ns_arm() { local r; r=$(dc "$1" "npcs spells arm $2 $3 $4"); NS_ARMED=$r; [[ $r == armed* || $r == cleared* ]]; }
+# ns_knows <who> <local> <id>: that actor knows that spell or power (`npcs spells knows`)
+ns_knows() { [ "$(dc "$1" "npcs spells knows $2 $3")" = knows=1 ]; }
 
-# The way's set-up, kept for its legs and the undo.
-NS_KEY=""; NS_MLOCAL=""; NS_WLOCAL=""; NS_AIMED=""; NS_SELF=""; NS_SUMMON=""; NS_POWER=""; NS_ARMED=""
+# The way's set-up, kept for its legs and the undo. NS_TAUGHT: what the watcher's console taught the copy (only those
+# are taken back: one it knew before the step keeps it).
+NS_KEY=""; NS_MLOCAL=""; NS_WLOCAL=""; NS_AIMED=""; NS_SELF=""; NS_SUMMON=""; NS_POWER=""; NS_ARMED=""; NS_TAUGHT=""
 
 # ns_setup <runner> <watcher> <label>: the person picked, the spells found, the copy taught, the runner's NPC armed;
 # false (a rig fault said) when the way cannot go on
 ns_setup() {
 	local m=$1 w=$2 label=$3 mid pick kind r
-	NS_KEY=""; NS_MLOCAL=""; NS_WLOCAL=""; NS_AIMED=""; NS_SELF=""; NS_SUMMON=""; NS_POWER=""
+	NS_KEY=""; NS_MLOCAL=""; NS_WLOCAL=""; NS_AIMED=""; NS_SELF=""; NS_SUMMON=""; NS_POWER=""; NS_TAUGHT=""
 	mid=$(field player "$(dc "$m" 'session status')")
 	pick=$(sh_pick "$(npc_rows "$(dc "$m" 'npcs list')")" "$(npc_rows "$(dc "$w" 'npcs list')")" "$mid" "$(pos_of "$m")" human)
 	if [ -z "$pick" ]; then rig_fault state "$label: a person the $m runs that the $w shows (set-up)" "$(dc "$m" npcs | cut -c1-200)"; return 1; fi
@@ -105,8 +126,12 @@ ns_setup() {
 		return 1
 	fi
 	[ -n "$NS_POWER" ] || warn "$label: a power in the load order for the voice" "none found ($(dc "$m" 'npcs spells find power' | cut -c1-120)): the voice is not tried"
-	for r in $NS_AIMED $NS_SELF $NS_POWER; do dc "$w" "console $NS_WLOCAL.addspell $r" >/dev/null; done
-	say "$label: set-up: the $m's $NS_KEY ($NS_MLOCAL, the $w's copy $NS_WLOCAL); the $w's console taught the copy aimed=$NS_AIMED self=$NS_SELF power=${NS_POWER:-none} (taken back after)"
+	for r in $NS_AIMED $NS_SELF $NS_POWER; do
+		ns_knows "$w" "$NS_WLOCAL" "$r" && continue
+		dc "$w" "console $NS_WLOCAL.addspell $r" >/dev/null
+		NS_TAUGHT="${NS_TAUGHT:+$NS_TAUGHT }$r"
+	done
+	say "$label: set-up: the $m's $NS_KEY ($NS_MLOCAL, the $w's copy $NS_WLOCAL), aimed=$NS_AIMED self=$NS_SELF power=${NS_POWER:-none}; the $w's console taught the copy ${NS_TAUGHT:-nothing (it knew them all)} (taken back after)"
 	if ! ns_arm "$m" "$NS_MLOCAL" right "$NS_AIMED" || ! ns_arm "$m" "$NS_MLOCAL" left "$NS_SELF" || { [ -n "$NS_POWER" ] && ! ns_arm "$m" "$NS_MLOCAL" voice "$NS_POWER"; }; then
 		rig_fault state "$label: the $m's NPC armed (set-up)" "npcs spells arm: $NS_ARMED"
 		ns_undo "$m" "$w"
@@ -115,20 +140,22 @@ ns_setup() {
 	say "$label: set-up (dev): the $m's NPC armed right=$NS_AIMED left=$NS_SELF voice=${NS_POWER:-none}"
 }
 
-# ns_undo <runner> <watcher>: the runner's NPC's hands and voice emptied (what arm taught taken back), the copy's taught
-# spells removed, the copy's effects refused again
+# ns_undo <runner> <watcher>: the runner's NPC's hands and voice emptied (what arm taught taken back), the spells the
+# watcher's console taught the copy removed (only those), the copy's effects refused again
 ns_undo() {
 	local m=$1 w=$2 id
 	[ -n "$NS_MLOCAL" ] && for id in right left voice; do dc "$m" "npcs spells arm $NS_MLOCAL $id 0" >/dev/null; done
-	[ -n "$NS_WLOCAL" ] && for id in $NS_AIMED $NS_SELF $NS_POWER; do dc "$w" "console $NS_WLOCAL.removespell $id" >/dev/null; done
+	[ -n "$NS_WLOCAL" ] && for id in $NS_TAUGHT; do dc "$w" "console $NS_WLOCAL.removespell $id" >/dev/null; done
 	dc "$w" 'npcs spells refuse on' >/dev/null
-	say "npcspells: set-up undone (the $m's NPC's hands and voice emptied, the $w's copy's taught spells removed, its effects refused)"
+	say "npcspells: set-up undone (the $m's NPC's hands and voice emptied, the $w's copy's taught spells removed: ${NS_TAUGHT:-none}; its effects refused)"
+	NS_TAUGHT=""
 }
 
 # ns_hands <runner> <watcher> <label>: the copy holds its runner's spells and voice
 ns_hands() {
-	local m=$1 w=$2 label="$3: the $2's copy holds its runner's spells and voice" hands="right left" row
-	[ -n "$NS_POWER" ] && hands="right left voice"
+	local m=$1 w=$2 label="$3: the $2's copy holds its runner's spells and voice" hands row
+	hands="right=$NS_AIMED left=$NS_SELF"
+	[ -n "$NS_POWER" ] && hands="$hands voice=$NS_POWER"
 	if wait_until "$NPCSPELLS_WAIT" ns_hands_are "$w" "$NS_KEY" shown $hands; then
 		row=$(ns_row "$(ns_read "$w" "$NS_KEY")" "$NS_KEY")
 		pass "$label" "right=$(field right "$row") left=$(field left "$row") voice=$(field voice "$row")"
@@ -141,8 +168,10 @@ ns_hands() {
 ns_lacks() {
 	local m=$1 w=$2 label="$3: a spell the $2's copy does not know is never taught to it (lacks)" s row
 	if ! ns_arm "$m" "$NS_MLOCAL" left "$NS_SUMMON"; then rig_fault state "$label: the $m's NPC armed with the summon (set-up)" "$NS_ARMED"; return; fi
-	wait_until "$NPCSPELLS_WAIT" ns_left_settled "$w" "$NS_KEY"
+	wait_until "$NPCSPELLS_WAIT" ns_left_settled "$w" "$NS_KEY" "$NS_SUMMON"
 	row=$(ns_row "$(ns_read "$w" "$NS_KEY")" "$NS_KEY"); s=$(ns_hand "$row" left)
+	# A state read while the copy still wants another spell there is no answer about the summon.
+	[ "$(ns_wants "$row" left)" = "$NS_SUMMON" ] || s="the summon never wanted: wants $(ns_wants "$row" left)"
 	case "$s" in
 		lacks) pass "$label" "left=$(field left "$row") voicesLacked=$(ns_get "$w" voicesLacked)" ;;
 		shown) fail "$label" "left=$(field left "$row"): the copy was taught $NS_SUMMON, which would stay in its save" ;;
@@ -198,9 +227,10 @@ ns_ended_leg() {
 
 # ns_casts <runner> <watcher> <label>: the runner's NPC fights its player; the watcher's copy plays its casts
 ns_casts() {
-	local m=$1 w=$2 label="$3: the $2's copy plays its runner's casts" one conf0 aggr0 setav=0 p0 x0 s0 row mrow p1 x1 s1
-	row=$(ns_row "$(ns_read "$w" "$NS_KEY")" "$NS_KEY"); p0=$(field castsPlayed "$row"); x0=$(field castsRefused "$row")
+	local m=$1 w=$2 label="$3: the $2's copy plays its runner's casts" one conf0 aggr0 setav=0 p0 x0 s0 row mrow p1 x1 s1 mid l0 l1 b0 b1
+	row=$(ns_row "$(ns_read "$w" "$NS_KEY")" "$NS_KEY"); p0=$(field castsPlayed "$row"); x0=$(field castsRefused "$row"); b0=$(field magickaBack "$row")
 	s0=$(field castsSent "$(ns_row "$(ns_read "$m" "$NS_KEY")" "$NS_KEY")")
+	mid=$(field player "$(dc "$m" 'session status')"); l0=$(sh_npc_launched "$w" "$mid")
 	one=$(dc "$m" "npcs $NS_MLOCAL"); conf0=$(field confidence "$one"); aggr0=$(field aggression "$one")
 	if is_num "$conf0" && is_num "$aggr0"; then
 		dc "$m" "console $NS_MLOCAL.setav confidence $NPC_FIGHT_CONFIDENCE" >/dev/null; dc "$m" "console $NS_MLOCAL.setav aggression $NPC_FIGHT_AGGRESSION" >/dev/null; setav=1
@@ -209,16 +239,19 @@ ns_casts() {
 		rig_fault input "$label: the fight's set-up" "the $m's console refused modav or startcombat"
 	else
 		say "$label: set-up (console): the $m's player +$NPCSPELLS_HEALTH health; $NS_MLOCAL ($NS_KEY) set on it with startcombat$([ "$setav" = 1 ] && echo ", confidence $conf0 -> $NPC_FIGHT_CONFIDENCE, aggression $aggr0 -> $NPC_FIGHT_AGGRESSION")"
-		if wait_until "$NPCSPELLS_FIGHT_WAIT" ns_played "$w" "$NS_KEY" "$p0"; then
+		if wait_until "$NPCSPELLS_FIGHT_WAIT" ns_cast_did "$w" "$NS_KEY" "$mid" "$p0" "$l0" "$b0"; then
 			sleep 3  # a few more casts, for the counts
-			row=$(ns_row "$(ns_read "$w" "$NS_KEY")" "$NS_KEY"); p1=$(field castsPlayed "$row"); x1=$(field castsRefused "$row")
-			mrow=$(ns_row "$(ns_read "$m" "$NS_KEY")" "$NS_KEY"); s1=$(field castsSent "$mrow")
-			pass "$label" "castsPlayed $p0 -> $p1 (last $(field lastCast "$row")), the $m sent $s0 -> $s1"
+			row=$(ns_row "$(ns_read "$w" "$NS_KEY")" "$NS_KEY"); p1=$(field castsPlayed "$row"); x1=$(field castsRefused "$row"); b1=$(field magickaBack "$row")
+			mrow=$(ns_row "$(ns_read "$m" "$NS_KEY")" "$NS_KEY"); s1=$(field castsSent "$mrow"); l1=$(sh_npc_launched "$w" "$mid")
+			pass "$label" "castsPlayed $p0 -> $p1 (last $(field lastCast "$row")), the $m sent $s0 -> $s1; launched from the copy $l0 -> $l1, magicka it spent here $b0 -> $b1"
 			expect_le "$label: it turns away no more of them than it plays" "$((x1 - x0))" "$((p1 - p0))" "cast events refused, of $((p1 - p0)) played"
-			say "$label: the copy's magicka $(field magicka "$row"), given back $(field magickaBack "$row") (magickaTopUps=$(ns_get "$w" magickaTopUps))"
+			say "$label: the copy's magicka $(field magicka "$row"), given back $b1 (magickaTopUps=$(ns_get "$w" magickaTopUps))"
 		else
-			mrow=$(ns_row "$(ns_read "$m" "$NS_KEY")" "$NS_KEY"); s1=$(field castsSent "$mrow")
-			if ns_rose "$s0" "$s1"; then
+			row=$(ns_row "$(ns_read "$w" "$NS_KEY")" "$NS_KEY"); p1=$(field castsPlayed "$row"); b1=$(field magickaBack "$row")
+			mrow=$(ns_row "$(ns_read "$m" "$NS_KEY")" "$NS_KEY"); s1=$(field castsSent "$mrow"); l1=$(sh_npc_launched "$w" "$mid")
+			if ns_rose "$p0" "$p1"; then
+				fail "$label" "the copy played casts (castsPlayed $p0 -> $p1, last $(field lastCast "$row")) and none did anything here in $NPCSPELLS_FIGHT_WAIT s: launched from it $l0 -> $l1, magicka spent here $b0 -> $b1"
+			elif ns_rose "$s0" "$s1"; then
 				fail "$label" "the $m's NPC cast (castsSent $s0 -> $s1) and the copy played none in $NPCSPELLS_FIGHT_WAIT s: $(ns_row "$(ns_read "$w" "$NS_KEY")" "$NS_KEY" | cut -c1-240)"
 			else
 				warn "$label" "the $m's NPC never cast in $NPCSPELLS_FIGHT_WAIT s (castsSent $s0 -> ${s1:-?}: its AI fought another way): casts not seen"
@@ -283,29 +316,46 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "rose: not equal" "$(ns_rose 2 2 || echo no)" no
 	t "rose: not a number" "$(ns_rose '' 2 || echo no)" no
 
-	# The VM runs the person (0001A67C), the host shows its copy (0001A67C: a load-order NPC, the same id). FN_MODE:
-	# ok; nopick (no person: the rig's); nofind (no summon spell: the rig's); nopower (no power: a WARN, the voice not
-	# tried); noarm (arm refused: the rig's); hands (the copy's left hand differs: a FAIL); taught (the summon shown in the
-	# copy's left hand: a FAIL); stuck (the left hand still differs: a FAIL); unrefused (the hook misses, the scan ends it:
-	# a WARN); made (not refused, and what it made stays: a FAIL, and the belt's FAIL too); nothing (the console's cast does
-	# nothing, both times: two rig faults); nocast (the runner's NPC never casts: a WARN); noplay (it casts, the copy
-	# plays none: a FAIL); turned (the copy turns away more casts than it plays: a FAIL). FN_SHOW=1 adds the undo's
-	# console and dev lines in order.
+	t "wants: the runner's half" "$(ns_wants "$(ns_row "$R" 0001A67C)" left)" 000640B6
+	t "wants: a run NPC's has none" "$(ns_wants "$(ns_row "$R" 0001A690)" right)" ""
+	t "hand is: wanted and in that state" "$(ns_hand_is "$(ns_row "$R" 0001A67C)" left 000640B6 lacks && echo yes)" yes
+	t "hand is: another wanted is not" "$(ns_hand_is "$(ns_row "$R" 0001A67C)" left 00012FCC lacks || echo no)" no
+	t "hand is: no id asked is not" "$(ns_hand_is "$(ns_row "$R" 0001A67C)" right '' shown || echo no)" no
+
+	# The VM runs the person (0001A67C), the host shows its copy (0001A67C: a load-order NPC, the same id). The copy's
+	# row is one read behind the runner's arms (the runner reads its NPC's gear once a second): before the arms its
+	# runner's guard holds a sword and a shield, which the copy shows. FN_MODE: ok; nopick (no person: the rig's); nofind
+	# (no summon spell: the rig's); nopower (no power: a WARN, the voice not tried); noarm (arm refused: the rig's); hands
+	# (the copy's left hand differs: a FAIL); taught (the summon shown in the copy's left hand: a FAIL); stuck (the left
+	# hand still differs: a FAIL); nogear (the summon's arm never reaches the copy: a FAIL); unrefused (the hook misses,
+	# the scan ends it: a WARN); made (not refused, and what it made stays: a FAIL, and the belt's FAIL too); nothing (the
+	# console's cast does nothing, both times: two rig faults); nocast (the runner's NPC never casts: a WARN); noplay (it
+	# casts, the copy plays none: a FAIL); noresult (the copy plays cast events and nothing is launched from it or spent:
+	# a FAIL); selfcast (no launch, magicka spent here: a PASS); turned (the copy turns away more casts than it plays: a
+	# FAIL); known (the copy knew the self spell before: never taught, never removed). FN_SHOW=1 adds the set-up's and the
+	# undo's console and dev lines in order.
 	fake_ns() {
 		FN=$d/fn.$RANDOM; mkdir -p "$FN"; FN_MODE=$1
-		local f; for f in refused ended now sent played turned left_taught; do echo 0 > "$FN/$f"; done
-		echo 1 > "$FN/refuse"; echo none > "$FN/left"; : > "$FN/undo"
+		local f; for f in refused ended now sent played turned launched mback; do echo 0 > "$FN/$f"; done
+		echo 1 > "$FN/refuse"; : > "$FN/undo"
+		# the runner's NPC's hands (r_) and what the host's copy row shows (s_), one read behind
+		echo 0001AAAA > "$FN/r_right"; echo 0001BBBB > "$FN/r_left"; echo 0 > "$FN/r_voice"
+		for f in right left voice; do cp -f "$FN/r_$f" "$FN/s_$f"; done
 		fn_inc() { echo $(( $(cat "$FN/$1") + ${2:-1} )) > "$FN/$1"; }
 		fn_spells() {  # the host's `npcs spells` reply
-			local left right=0001C789/0001C789:shown voice=00013E07/00013E07:shown lefts
-			case "$(cat "$FN/left")" in
-				self) left=00012FCC/00012FCC:shown ;;
-				summon) case "$FN_MODE" in taught) left=000640B6/000640B6:shown ;; stuck) left=000640B6/00012FCC:differs ;; *) left=000640B6/00012FCC:lacks ;; esac ;;
+			local left right voice h
+			case "$(cat "$FN/s_right")" in
+				0001AAAA) right=0001AAAA/0001AAAA:shown ;; 0001C789) right=0001C789/0001C789:shown ;; *) right=00000000/00000000:empty ;;
+			esac
+			case "$(cat "$FN/s_left")" in
+				0001BBBB) left=0001BBBB/0001BBBB:shown ;;
+				00012FCC) left=00012FCC/00012FCC:shown; [ "$FN_MODE" = hands ] && left=00012FCC/00000000:differs ;;
+				000640B6) case "$FN_MODE" in taught) left=000640B6/000640B6:shown ;; stuck) left=000640B6/00012FCC:differs ;; *) left=000640B6/00012FCC:lacks ;; esac ;;
 				*) left=00000000/00000000:empty ;;
 			esac
-			[ "$FN_MODE" = hands ] && [ "$(cat "$FN/left")" = self ] && left=00012FCC/00000000:differs
-			[ "$FN_MODE" = nopower ] && voice=00000000/00000000:empty
-			echo "spells copies=1 holding=1 hands=shown:2,lacks:0,unnamed:0,differs:0 castsPlayed=$(cat "$FN/played") castsRefused=$(cat "$FN/turned") castsSent=0 voicesSet=1 voicesLacked=0 magickaTopUps=2 refuse=$(cat "$FN/refuse") refused=summon:$(cat "$FN/refused"),spawn:0,move:0,lock:0,time:0 madeEnded=$(cat "$FN/ended") madeRemoved=0 madeNow=$(cat "$FN/now") | 0001A67C local=0001A67C role=copy runner=2 mirror=1 gear=1 right=$right left=$left voice=$voice magicka=90/120 magickaBack=30 castsPlayed=$(cat "$FN/played") castsRefused=$(cat "$FN/turned") lastCast=BeginCastRight"
+			case "$(cat "$FN/s_voice")" in 00013E07) voice=00013E07/00013E07:shown ;; *) voice=00000000/00000000:empty ;; esac
+			echo "spells copies=1 holding=1 hands=shown:2,lacks:0,unnamed:0,differs:0 castsPlayed=$(cat "$FN/played") castsRefused=$(cat "$FN/turned") castsSent=0 voicesSet=1 voicesLacked=0 magickaTopUps=2 refuse=$(cat "$FN/refuse") refused=summon:$(cat "$FN/refused"),spawn:0,move:0,lock:0,time:0 madeEnded=$(cat "$FN/ended") madeDispelled=0 madeRemoved=0 madeRaised=0 madeNow=$(cat "$FN/now") | 0001A67C local=0001A67C role=copy runner=2 mirror=1 gear=1 right=$right left=$left voice=$voice magicka=90/120 magickaBack=$(cat "$FN/mback") castsPlayed=$(cat "$FN/played") castsRefused=$(cat "$FN/turned") lastCast=BeginCastRight"
+			for h in right left voice; do cp -f "$FN/r_$h" "$FN/s_$h"; done  # the runner's gear reaches the copy by the next read
 		}
 		fn_cast() {  # the host's copy casts the summon
 			case "$FN_MODE" in
@@ -328,22 +378,27 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 			"vm npcs spells arm 0001A67C "*)
 				set -- $2
 				[ "$FN_MODE" = noarm ] && { echo "error: the hand refused"; return; }
-				if [ "$6" = 0 ]; then echo "cleared $5 0" >> "$FN/undo"; echo "cleared $5 holds=00000000 untaught=1"; return; fi
-				[ "$5" = left ] && case "$6" in 00012FCC) echo self > "$FN/left" ;; 000640B6) echo summon > "$FN/left" ;; esac
+				if [ "$6" = 0 ]; then echo "cleared $5 0" >> "$FN/undo"; echo 0 > "$FN/r_$5"; echo "cleared $5 holds=00000000 untaught=1"; return; fi
+				if [ "$FN_MODE" != nogear ] || [ "$6" != 000640B6 ]; then echo "$6" > "$FN/r_$5"; fi
 				echo "armed $5 $6 taught=1 holds=$6" ;;
-			"vm npcs spells 0001A67C") echo "spells copies=0 holding=0 hands=shown:0,lacks:0,unnamed:0,differs:0 castsPlayed=0 castsRefused=0 castsSent=$(cat "$FN/sent") | 0001A67C local=0001A67C role=run right=0001C789 left=00012FCC voice=00013E07 castsSent=$(cat "$FN/sent")" ;;
+			"vm npcs spells 0001A67C") echo "spells copies=0 holding=0 hands=shown:0,lacks:0,unnamed:0,differs:0 castsPlayed=0 castsRefused=0 castsSent=$(cat "$FN/sent") | 0001A67C local=0001A67C role=run right=$(cat "$FN/r_right") left=$(cat "$FN/r_left") voice=$(cat "$FN/r_voice") castsSent=$(cat "$FN/sent")" ;;
 			"host npcs spells"|"host npcs spells 0001A67C") fn_spells ;;
+			"host npcs spells knows 0001A67C "*) set -- $2; if [ "$FN_MODE" = known ] && [ "$5" = 00012FCC ]; then echo knows=1; else echo knows=0; fi ;;
 			"host npcs spells refuse off") echo 0 > "$FN/refuse"; echo "refuse=0" ;;
 			"host npcs spells refuse on") echo 1 > "$FN/refuse"; echo "refuse=1" ;;
+			"host shots") echo "shots active=1 hooked=7/7 | theirs launched=$(cat "$FN/launched") | from player=2 in=0 launched=0 npcIn=$(cat "$FN/launched") npcLaunched=$(cat "$FN/launched")" ;;
 			"host console 0001A67C.cast 000640B6 0001A67C") fn_cast; echo ran ;;
+			"host console 0001A67C.addspell "*) set -- $2; echo "addspell ${3#*addspell }" >> "$FN/undo"; echo ran ;;
 			"host console 0001A67C.removespell "*) set -- $2; echo "removespell ${3#*removespell }" >> "$FN/undo"; echo ran ;;
 			"vm npcs 0001A67C") echo "npcs 0001A67C | role=run confidence=1 aggression=0" ;;
 			"vm console 0001A67C.startcombat player")
 				case "$FN_MODE" in
 					nocast) ;;
 					noplay) fn_inc sent 3 ;;
-					turned) fn_inc sent 3; fn_inc played 1; fn_inc turned 4 ;;
-					*) fn_inc sent 3; fn_inc played 3 ;;
+					noresult) fn_inc sent 3; fn_inc played 3 ;;
+					selfcast) fn_inc sent 3; fn_inc played 3; fn_inc mback 30 ;;
+					turned) fn_inc sent 3; fn_inc played 1; fn_inc turned 4; fn_inc launched 1 ;;
+					*) fn_inc sent 3; fn_inc played 3; fn_inc launched 2 ;;
 				esac; echo ran ;;
 			*" console"*) echo ran ;;
 			*) echo ok ;; esac; }
@@ -355,18 +410,22 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "way: all of it" "$(fake_ns ok)" "PASS:6 refuse=1"
 	t "way: no person is the rig's" "$(fake_ns nopick)" "RIG:1 refuse=1"
 	t "way: no summon spell is the rig's" "$(fake_ns nofind)" "RIG:1 refuse=1"
-	t "way: no power skips the voice with a WARN" "$(fake_ns nopower)" "PASS:6 WARN:1 refuse=1"
+	t "way: no power skips the voice with a WARN (the guard's sword and shield never pass for spells)" "$(fake_ns nopower)" "PASS:6 WARN:1 refuse=1"
 	t "way: a refused arm is the rig's, and undone" "$(fake_ns noarm)" "RIG:1 refuse=1"
 	t "way: a hand not shown fails" "$(fake_ns hands)" "FAIL:1 PASS:5 refuse=1"
 	t "way: a copy taught a spell fails (its save keeps it)" "$(fake_ns taught)" "FAIL:1 PASS:5 refuse=1"
 	t "way: a hand that never settles fails" "$(fake_ns stuck)" "FAIL:1 PASS:5 refuse=1"
+	t "way: a summon the copy never wants fails, never read off the old spell" "$(fake_ns nogear)" "FAIL:1 PASS:5 refuse=1"
 	t "way: a summon the hook missed and the scan ended is a WARN" "$(fake_ns unrefused)" "PASS:5 WARN:1 refuse=1"
 	t "way: a summon made and left fails, both times" "$(fake_ns made)" "FAIL:2 PASS:4 refuse=1"
 	t "way: a console cast that does nothing is the rig's, both times, and refusal back on" "$(fake_ns nothing)" "PASS:4 RIG:2 refuse=1"
 	t "way: a runner's NPC that never casts is a WARN" "$(fake_ns nocast)" "PASS:4 WARN:1 refuse=1"
 	t "way: casts sent and none played fails" "$(fake_ns noplay)" "FAIL:1 PASS:4 refuse=1"
+	t "way: casts played that release nothing fail" "$(fake_ns noresult)" "FAIL:1 PASS:4 refuse=1"
+	t "way: a cast with no projectile passes on the magicka it spent here" "$(fake_ns selfcast)" "PASS:6 refuse=1"
 	t "way: more casts turned away than played fails" "$(fake_ns turned)" "FAIL:1 PASS:5 refuse=1"
-	t "undo: hands emptied, taught spells removed" "$(FN_SHOW=1 fake_ns ok)" "PASS:6 refuse=1 undo=cleared right 0,cleared left 0,cleared voice 0,removespell 0001C789,removespell 00012FCC,removespell 00013E07"
+	t "undo: hands emptied, the taught spells removed" "$(FN_SHOW=1 fake_ns ok)" "PASS:6 refuse=1 undo=addspell 0001C789,addspell 00012FCC,addspell 00013E07,cleared right 0,cleared left 0,cleared voice 0,removespell 0001C789,removespell 00012FCC,removespell 00013E07"
+	t "undo: a spell the copy knew before is neither taught nor removed" "$(FN_SHOW=1 fake_ns known)" "PASS:6 refuse=1 undo=addspell 0001C789,addspell 00013E07,cleared right 0,cleared left 0,cleared voice 0,removespell 0001C789,removespell 00013E07"
 
 	# the step is wired into the harness: in STEPS before final, a session step, run by default
 	t "npcspells is a step" "$(case " $STEPS " in *" npcspells "*) echo yes ;; esac)" yes

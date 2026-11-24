@@ -62,23 +62,71 @@ TEST("made here: only what a stand-in or another game's NPC's copy made is ended
 	CHECK(!SpellRules::EndsMade(MadeBy::kNobody));
 }
 
-TEST("cast events: a hand's, the voice's and a ward's are told from the walk's and the swing's, in any case")
+TEST("made here: how it is ended, a step each scan: dispelled first, never deleted just after its dispel")
 {
-	CHECK(SpellRules::CastEvent("BeginCastRight"));
-	CHECK(SpellRules::CastEvent("BeginCastLeft"));
-	CHECK(SpellRules::CastEvent("BeginCastVoice"));
-	CHECK(SpellRules::CastEvent("MLh_SpellFire_Event"));
-	CHECK(SpellRules::CastEvent("MRh_SpellAimedStart"));
-	CHECK(SpellRules::CastEvent("ShoutStart"));
-	CHECK(SpellRules::CastEvent("shoutstop"));
-	CHECK(SpellRules::CastEvent("CASTSTOP"));
+	using SpellRules::MadeFacts;
+	using SpellRules::MadeStep;
+	using namespace std::chrono_literals;
+	// Found: its making effect's dispel is tried, a summon's and a raised corpse's alike.
+	CHECK(SpellRules::NextMade({}) == MadeStep::kDispel);
+	CHECK(SpellRules::NextMade({ .loadOrder = true }) == MadeStep::kDispel);
+	// A summon whose effect was dispelled: the engine is taking it out; left be until the grace has run.
+	CHECK(SpellRules::NextMade({ .sinceTried = 0s, .dispelled = true }) == MadeStep::kWait);
+	CHECK(SpellRules::NextMade({ .sinceTried = SpellRules::MADE_GRACE - 1ms, .dispelled = true }) == MadeStep::kWait);
+	// Still there after it: sent out the stand-ins' way (disabled, then deleted: Retire.h).
+	CHECK(SpellRules::NextMade({ .sinceTried = SpellRules::MADE_GRACE, .dispelled = true }) == MadeStep::kTakeOut);
+	// A summon with no effect of it found: sent out at once.
+	CHECK(SpellRules::NextMade({ .sinceTried = 0s, .dispelled = false }) == MadeStep::kTakeOut);
+	// Sent out already: nothing more (the way out deletes it).
+	CHECK(SpellRules::NextMade({ .sinceTried = 1h, .dispelled = false, .takenOut = true }) == MadeStep::kWait);
+	// A load-order NPC (a raised corpse of the world, a thrall) is never taken out: its dispel is tried again after
+	// the grace, whether the last try found an effect or not.
+	CHECK(SpellRules::NextMade({ .loadOrder = true, .sinceTried = 0s, .dispelled = false }) == MadeStep::kWait);
+	CHECK(SpellRules::NextMade({ .loadOrder = true, .sinceTried = 0s, .dispelled = true }) == MadeStep::kWait);
+	CHECK(SpellRules::NextMade({ .loadOrder = true, .sinceTried = SpellRules::MADE_GRACE, .dispelled = false }) == MadeStep::kDispel);
+	CHECK(SpellRules::NextMade({ .loadOrder = true, .sinceTried = 1h, .dispelled = true }) == MadeStep::kDispel);
+	for (const auto since : { 0s, 1s, 10s, 3600s }) {
+		for (const bool dispelled : { false, true }) {
+			CHECK(SpellRules::NextMade({ .loadOrder = true, .sinceTried = since, .dispelled = dispelled }) != MadeStep::kTakeOut);
+		}
+	}
+}
 
-	CHECK(!SpellRules::CastEvent("moveStart"));
-	CHECK(!SpellRules::CastEvent("attackStart"));
-	CHECK(!SpellRules::CastEvent("weaponDraw"));
-	CHECK(!SpellRules::CastEvent("bowAttackStart"));
-	CHECK(!SpellRules::CastEvent(""));
-	CHECK(!SpellRules::CastEvent("cas"));
+TEST("cast events: only a cast's start and its release are casts; a cast broken off or put away is none")
+{
+	using SpellRules::Cast;
+	// The wind-up of a hand's or the voice's cast.
+	CHECK(SpellRules::CastOf("BeginCastRight") == Cast::kStart);
+	CHECK(SpellRules::CastOf("BeginCastLeft") == Cast::kStart);
+	CHECK(SpellRules::CastOf("BeginCastVoice") == Cast::kStart);
+	CHECK(SpellRules::CastOf("ShoutStart") == Cast::kStart);
+	CHECK(SpellRules::CastOf("begincastright") == Cast::kStart);
+	// The spell let go.
+	CHECK(SpellRules::CastOf("MRh_SpellFire_Event") == Cast::kRelease);
+	CHECK(SpellRules::CastOf("MLh_SpellFire_Event") == Cast::kRelease);
+	CHECK(SpellRules::CastOf("Voice_SpellFire_Event") == Cast::kRelease);
+	CHECK(SpellRules::CastOf("ShoutReleaseSlowTime") == Cast::kRelease);
+	CHECK(SpellRules::CastOf("MLH_SPELLFIRE_EVENT") == Cast::kRelease);
+	// Broken off, put away or only readied: no cast.
+	CHECK(SpellRules::CastOf("InterruptCast") == Cast::kNone);
+	CHECK(SpellRules::CastOf("CastStop") == Cast::kNone);
+	CHECK(SpellRules::CastOf("CASTSTOP") == Cast::kNone);
+	CHECK(SpellRules::CastOf("ShoutStop") == Cast::kNone);
+	CHECK(SpellRules::CastOf("MRh_SpellReadyOut") == Cast::kNone);
+	CHECK(SpellRules::CastOf("MLh_Equipped_Event") == Cast::kNone);
+	CHECK(SpellRules::CastOf("MRh_SpellAimedStart") == Cast::kNone);
+	// The walk's and the swing's.
+	CHECK(SpellRules::CastOf("moveStart") == Cast::kNone);
+	CHECK(SpellRules::CastOf("attackStart") == Cast::kNone);
+	CHECK(SpellRules::CastOf("weaponDraw") == Cast::kNone);
+	CHECK(SpellRules::CastOf("bowAttackStart") == Cast::kNone);
+	CHECK(SpellRules::CastOf("") == Cast::kNone);
+	CHECK(SpellRules::CastOf("begin") == Cast::kNone);
+	// CastEvent: a start or a release.
+	CHECK(SpellRules::CastEvent("BeginCastRight"));
+	CHECK(SpellRules::CastEvent("MRh_SpellFire_Event"));
+	CHECK(!SpellRules::CastEvent("InterruptCast"));
+	CHECK(!SpellRules::CastEvent("CastStop"));
 }
 
 TEST("hands: shown when it holds its runner's, empty when neither holds anything")

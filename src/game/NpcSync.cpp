@@ -176,7 +176,10 @@ namespace NpcSync
 			std::uint64_t hitsIn = 0, hitsApplied = 0, healthsSent = 0, healthsIn = 0, deathsSent = 0, deathsIn = 0, killsOnLoad = 0, healthSets = 0;
 			// Spells (SpellRules.h): a copy's voice readied as its runner's, or not known here; magicka given back to copies
 			// (times); actors a stand-in or another game's NPC's copy made here, ended by their effect's dispel or taken out.
-			std::uint64_t voicesSet = 0, voicesLacked = 0, magickaTopUps = 0, madeEnded = 0, madeRemoved = 0;
+			// madeEnded: found (each once); madeDispelled: its making effect dispelled (each try that found one);
+			// madeRemoved: a runtime one handed to the way out (RemotePlayers::TakeOut); madeRaised: a load-order one (a
+			// raised corpse of the world, a thrall), never deleted.
+			std::uint64_t voicesSet = 0, voicesLacked = 0, magickaTopUps = 0, madeEnded = 0, madeDispelled = 0, madeRemoved = 0, madeRaised = 0;
 		};
 		Counts counts;
 		// A copy's effects refused by kind (SpellRules::CopyMagic; any thread: the effect hook), and whether they are
@@ -190,9 +193,15 @@ namespace NpcSync
 		PeaceRules::IdSet<MAX_COPY_IDS>                                                                 othersCopyIds;
 		std::vector<std::uint32_t>                                                                      othersCopyList;
 		bool                                                                                            saidCopyIdsFull = false;
-		// Actors a stand-in or a copy made here, ended once (their effect dispelled) and when: one still there a while
-		// after is taken out of the world.
-		std::unordered_map<RE::FormID, Clock::time_point>                                                madeEnding;
+		// Actors a stand-in or a copy made here, on their way out (SpellRules::NextMade): when their effect's dispel was
+		// last tried, whether it found one, and whether a runtime one was handed to the way out.
+		struct MadeEnding
+		{
+			std::optional<Clock::time_point> triedAt;
+			bool                             dispelled = false;
+			bool                             takenOut = false;
+		};
+		std::unordered_map<RE::FormID, MadeEnding>                                                       madeEnding;
 		Clock::time_point                                                                               nextMagicka{};
 		// What `npcs spells arm` taught an NPC we run (its form id, the spell's), taken back by `arm ... 0`.
 		std::set<std::pair<RE::FormID, RE::FormID>>                                                    armTaught;
@@ -781,31 +790,73 @@ namespace NpcSync
 			return false;
 		}
 
-		// An actor a stand-in or another game's NPC's copy made here (SpellRules::EndsMade): its effect dispelled once; one
-		// still there MADE_GRACE after (no effect found, or the dispel left it) is disabled and deleted (a runtime
-		// reference of this game's, never a load-order one).
-		constexpr auto MADE_GRACE = 2s;
-
-		void EndMade(RE::Actor* a_made, RE::Actor* a_commander, SpellRules::MadeBy a_by, Clock::time_point a_now)
+		// Whether an actor stands in the world as one alive (a raised corpse is: its life state is the raise's, not death).
+		bool Up(RE::Actor* a_actor)
 		{
-			const auto id = a_made->GetFormID();
-			const auto ending = madeEnding.find(id);
-			if (ending == madeEnding.end()) {
-				madeEnding[id] = a_now;
-				const bool dispelled = DispelMaker(a_made, a_commander);
-				++counts.madeEnded;
-				logs::info("NPCs: {:08X} (made here by {} {:08X}) ended{}: its game makes the real one", id, a_by == SpellRules::MadeBy::kStandIn ? "the stand-in" : "the copy",
-					a_commander ? a_commander->GetFormID() : 0, dispelled ? "" : " (no effect of it found: taken out)");
-				if (dispelled) {
-					return;
+			const auto state = a_actor->AsActorState();
+			return !a_actor->IsDead() || (state && state->IsReanimated());
+		}
+
+		// An actor a stand-in or another game's NPC's copy made here, as the scan found it: ended after the scan's loop
+		// over the process lists (EndMades), never inside it.
+		struct Made
+		{
+			RE::ActorHandle    actor;
+			RE::FormID         id = 0;
+			RE::ActorHandle    commander;
+			SpellRules::MadeBy by = SpellRules::MadeBy::kNobody;
+		};
+
+		// Who made it, as an actor that made one (an actor this game shows for another game) is said.
+		std::string_view MadeByName(SpellRules::MadeBy a_by)
+		{
+			return a_by == SpellRules::MadeBy::kStandIn ? "the stand-in" : "the copy";
+		}
+
+		// Each actor a stand-in or another game's NPC's copy made here, a step further out (SpellRules::NextMade): its
+		// making effect dispelled; a runtime one with none, or still there after, handed to the stand-ins' way out
+		// (RemotePlayers::TakeOut: disabled, deleted only once the game has taken it out); a load-order one never deleted.
+		void EndMades(const std::vector<Made>& a_made, Clock::time_point a_now)
+		{
+			for (const auto& made : a_made) {
+				const auto actor = made.actor.get();
+				if (!actor || actor->GetFormID() != made.id || actor->IsDeleted() || actor->IsDisabled()) {
+					continue;
 				}
-			} else if (a_now - ending->second < MADE_GRACE) {
-				return;
-			}
-			if (FormIds::IsRuntime(id) && !a_made->IsDisabled()) {
-				a_made->Disable();
-				a_made->SetDelete(true);
-				++counts.madeRemoved;
+				const bool loadOrder = !FormIds::IsRuntime(made.id);
+				const auto commander = made.commander.get();
+				auto [it, fresh] = madeEnding.try_emplace(made.id);
+				auto& ending = it->second;
+				if (fresh) {
+					++counts.madeEnded;
+					counts.madeRaised += loadOrder ? 1 : 0;
+				}
+				const auto facts = [&] {
+					return SpellRules::MadeFacts{ .loadOrder = loadOrder,
+						.sinceTried = ending.triedAt ? std::optional{ a_now - *ending.triedAt } : std::nullopt,
+						.dispelled = ending.dispelled,
+						.takenOut = ending.takenOut };
+				};
+				auto step = SpellRules::NextMade(facts());
+				if (step == SpellRules::MadeStep::kDispel) {
+					const bool first = !ending.triedAt;
+					ending.triedAt = a_now;
+					ending.dispelled = DispelMaker(actor.get(), commander.get());
+					counts.madeDispelled += ending.dispelled ? 1 : 0;
+					if (first || !ending.dispelled) {
+						logs::info("NPCs: {:08X} ({}, made here by {} {:08X}) {}: its game makes the real one", made.id, loadOrder ? "of the load order" : "made as the game ran",
+							MadeByName(made.by), commander ? commander->GetFormID() : 0,
+							ending.dispelled ? "ended by its effect's dispel" : loadOrder ? "has no effect of it found; left (never deleted), tried again" : "has no effect of it found; taken out");
+					}
+					step = SpellRules::NextMade(facts());
+				}
+				if (step == SpellRules::MadeStep::kTakeOut) {
+					ending.takenOut = true;
+					++counts.madeRemoved;
+					logs::info("NPCs: {:08X} (made here by {} {:08X}) taken out of the world{}", made.id, MadeByName(made.by), commander ? commander->GetFormID() : 0,
+						ending.dispelled ? ": still there after its effect's dispel" : "");
+					RemotePlayers::TakeOut(actor.get(), {});
+				}
 			}
 		}
 
@@ -882,8 +933,27 @@ namespace NpcSync
 					}
 				}
 			}
-			std::set<Key>                  found;
-			std::unordered_set<RE::FormID> madeFound;
+			std::set<Key>     found;
+			std::vector<Made> made;  // ended after the loop (EndMades): nothing in it changes the lists it walks
+			// One a stand-in or another game's NPC's copy commands here (its own AI's conjuring, reanimating or commanding, a
+			// cast the effect hook did not see) is ended: that game makes the real one (SpellRules::EndsMade).
+			const auto madeHere = [&](RE::Actor* a_actor) {
+				if (!Up(a_actor)) {
+					return false;
+				}
+				const auto by = a_actor->GetCommandingActor();
+				if (!by || by.get() == player) {
+					return false;
+				}
+				const auto kind = MadeByOf(by.get());
+				if (!SpellRules::EndsMade(kind)) {
+					return false;
+				}
+				if (made.size() < Protocol::MAX_NPCS) {
+					made.push_back({ a_actor->GetHandle(), a_actor->GetFormID(), by->GetHandle(), kind });
+				}
+				return true;
+			};
 			for (const auto* handles : { &lists->highActorHandles, &lists->middleHighActorHandles }) {
 				for (const auto& handle : *handles) {
 					const auto actor = handle.get();
@@ -901,20 +971,18 @@ namespace NpcSync
 						// which every game makes its own of) is not shared yet. A horse of ours is (NpcRules::SharedRuntime).
 						const auto commander = CommanderOf(actor.get(), player);
 						if (!loaded.contains(Key{ id, ourId }) && !NpcRules::SharedRuntime(commander, OurMount(actor.get(), player))) {
-							// One a stand-in or another game's NPC's copy made here (its own AI's conjuring, a cast the
-							// effect hook did not see) is ended: that game makes the real one (SpellRules::EndsMade).
-							if (commander == NpcRules::Commander::kOther && !actor->IsDead()) {
-								const auto by = actor->GetCommandingActor();
-								if (const auto made = MadeByOf(by.get()); SpellRules::EndsMade(made)) {
-									madeFound.insert(id);
-									EndMade(actor.get(), by.get(), made, a_now);
-									continue;
-								}
+							// One a stand-in or another game's NPC's copy made here: ended after the loop, never shared.
+							if (commander != NpcRules::Commander::kOther || !madeHere(actor.get())) {
+								++counts.unshared;
 							}
-							++counts.unshared;
 							continue;
 						}
 						key.spawner = ourId;
+					} else {
+						// An NPC of the load order (a corpse of the world raised, a thrall, a commanded creature) that a
+						// stand-in or another game's NPC's copy commands here: its raise or command ended after the loop,
+						// never the NPC (it stays this world's, found and shared as any other).
+						static_cast<void>(madeHere(actor.get()));
 					}
 					found.insert(key);
 					auto& npc = loaded[key];
@@ -929,7 +997,8 @@ namespace NpcSync
 					}
 				}
 			}
-			std::erase_if(madeEnding, [&](const auto& a_entry) { return !madeFound.contains(a_entry.first); });
+			std::erase_if(madeEnding, [&](const auto& a_entry) { return std::ranges::none_of(made, [&](const Made& a_m) { return a_m.id == a_entry.first; }); });
+			EndMades(made, a_now);
 			// Gone from this game's loaded world: one we ran is let go of (the next scan of the others' games claims it).
 			for (auto it = loaded.begin(); it != loaded.end();) {
 				if (!found.contains(it->first)) {
@@ -2454,7 +2523,12 @@ namespace NpcSync
 				if (voice) {
 					Gear::SetVoice(actor, 0, false);
 				} else if (const auto held = actor->GetEquippedObject(hand == NpcRules::Hand::kLeft); Gear::IsSpell(held)) {
+					// DeselectSpell empties both hands of it: the other hand's, when it held the same, is put back.
+					const bool other = actor->GetEquippedObject(hand != NpcRules::Hand::kLeft) == held;
 					actor->DeselectSpell(held->As<RE::SpellItem>());
+					if (other) {
+						static_cast<void>(Gear::EquipOne(actor, held, hand == NpcRules::Hand::kLeft ? NpcRules::Hand::kRight : NpcRules::Hand::kLeft));
+					}
 				}
 				std::size_t untaught = 0;
 				for (auto it = armTaught.begin(); it != armTaught.end();) {
@@ -2491,7 +2565,8 @@ namespace NpcSync
 			return std::format("armed {} {:08X} taught={} holds={}", handWord, *id, taught ? 1 : 0, holds());
 		}
 
-		// How many actors made here by a stand-in or another game's NPC's copy are in the world now (alive, enabled).
+		// How many actors a stand-in or another game's NPC's copy commands here now (up: alive or raised; enabled), made as
+		// the game ran (a summon) or of the load order (a raised corpse, a thrall).
 		std::size_t MadeNow()
 		{
 			const auto lists = RE::ProcessLists::GetSingleton();
@@ -2502,7 +2577,7 @@ namespace NpcSync
 			for (const auto* handles : { &lists->highActorHandles, &lists->middleHighActorHandles }) {
 				for (const auto& handle : *handles) {
 					const auto actor = handle.get();
-					if (!actor || actor->IsDead() || actor->IsDisabled() || actor->IsDeleted() || !FormIds::IsRuntime(actor->GetFormID())) {
+					if (!actor || actor->IsDisabled() || actor->IsDeleted() || !Up(actor.get())) {
 						continue;
 					}
 					const auto by = actor->GetCommandingActor();
@@ -2530,9 +2605,26 @@ namespace NpcSync
 				refuseCopyMagic = a_words[2] == "on";
 				return std::format("refuse={}", refuseCopyMagic ? 1 : 0);
 			}
+			if (a_words.size() >= 2 && a_words[1] == "knows") {
+				// Whether an actor (any: the rig asks of a copy before its console teaches it) knows a spell, a power or a
+				// shout, so the step takes back only what it taught.
+				const auto local = a_words.size() == 4 ? FormId(a_words[2]) : std::nullopt;
+				const auto id = a_words.size() == 4 ? FormId(a_words[3]) : std::nullopt;
+				if (!local || !id) {
+					return "error: usage: npcs spells knows <local id> <spell id>";
+				}
+				const auto actor = RE::TESForm::LookupByID<RE::Actor>(*local);
+				if (!actor) {
+					return std::format("error: {:08X} is no actor", *local);
+				}
+				if (!Gear::IsMagic(*id)) {
+					return std::format("error: {:08X} is no spell, power or shout", *id);
+				}
+				return std::format("knows={}", Gear::Knows(actor, *id) ? 1 : 0);
+			}
 			const auto only = a_words.size() == 2 ? FormId(a_words[1]) : std::nullopt;
 			if (a_words.size() > 2 || (a_words.size() == 2 && !only)) {
-				return "error: usage: npcs spells [<form id> | find <kind> | arm <local id> <right|left|voice> <spell id | 0> | refuse <on|off>]";
+				return "error: usage: npcs spells [<form id> | find <kind> | arm <local id> <right|left|voice> <spell id | 0> | knows <local id> <spell id> | refuse <on|off>]";
 			}
 			const auto  madeNow = MadeNow();
 			std::string refused;
@@ -2608,10 +2700,10 @@ namespace NpcSync
 					HexOrNone(right), HexOrNone(left), HexOrNone(Gear::VoiceOf(actor.get())), npc.castsSent);
 			}
 			return std::format("spells copies={} holding={} hands=shown:{},lacks:{},unnamed:{},differs:{} castsPlayed={} castsRefused={} castsSent={} voicesSet={} voicesLacked={} "
-							   "magickaTopUps={} refuse={} refused={} madeEnded={} madeRemoved={} madeNow={}{}",
+							   "magickaTopUps={} refuse={} refused={} madeEnded={} madeDispelled={} madeRemoved={} madeRaised={} madeNow={}{}",
 				others, holding, states[static_cast<std::size_t>(SpellRules::Hand::kShown)], states[static_cast<std::size_t>(SpellRules::Hand::kLacks)],
 				states[static_cast<std::size_t>(SpellRules::Hand::kUnnamed)], states[static_cast<std::size_t>(SpellRules::Hand::kDiffers)], played, turned, castsSent, counts.voicesSet,
-				counts.voicesLacked, counts.magickaTopUps, refuseCopyMagic ? 1 : 0, refused, counts.madeEnded, counts.madeRemoved, madeNow, rows);
+				counts.voicesLacked, counts.magickaTopUps, refuseCopyMagic ? 1 : 0, refused, counts.madeEnded, counts.madeDispelled, counts.madeRemoved, counts.madeRaised, madeNow, rows);
 		}
 	}
 
