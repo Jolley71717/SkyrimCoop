@@ -75,6 +75,11 @@ namespace
 		// begin a few at a time). Past it one is dropped, never kept: the pair is over by the time a budget would let it go.
 		TokenBucket pairBudget{ 16.0, 8.0 };
 		bool        toldPairsDropped = false;
+		// Knockdowns passed on (kKnocks): a burst of 64, then 32 a second of downs and asks (an explosion throws a crowd at
+		// once). Past it one is dropped, never kept: the actor is up by the time a budget would let it go. An up is never
+		// dropped: the others hold their actor down until it comes.
+		TokenBucket knockBudget{ 64.0, 32.0 };
+		bool        toldKnocksDropped = false;
 		bool        toldUnknown = false;
 	};
 
@@ -712,6 +717,48 @@ void Server::Run()
 				if (!msg->pairs.empty()) {
 					msg->sender = a_peer.playerId;
 					broadcast(Protocol::Encode(*msg), true, &a_key);
+				}
+			}
+			break;
+		case MT::kKnocks:
+			// A down or an up to the others, the sender named: its own player's, or an NPC its game runs. An ask to the NPC's
+			// runner alone: a knock the sender's game gave a copy of an NPC another game runs; an ask-up too (the paralysis
+			// it asked is over there). Downs and asks within the sender's budget (past it dropped, said once); an up or an
+			// ask-up never dropped (an actor is held down until it comes).
+			if (auto msg = Protocol::DecodeKnocks(a_data)) {
+				const auto                                now = Clock::now();
+				Protocol::Knocks                          others;
+				std::map<std::uint32_t, Protocol::Knocks> asks;
+				std::size_t                               over = 0;
+				for (const auto& knock : msg->knocks) {
+					const bool ask = Protocol::KnockToRunner(knock.phase);
+					const auto runner = knock.actor.player != 0 ? 0u : npcs.Owner(knock.actor.npc);
+					if (ask) {
+						if (runner == 0 || runner == a_peer.playerId || !peerOf(runner)) {
+							continue;
+						}
+					} else if (knock.actor.player != 0 ? knock.actor.player != a_peer.playerId : runner != a_peer.playerId) {
+						continue;
+					}
+					if (knock.phase != Protocol::KnockPhase::kUp && knock.phase != Protocol::KnockPhase::kAskUp && !a_peer.knockBudget.Take(now)) {
+						++over;
+						continue;
+					}
+					(ask ? asks[runner] : others).knocks.push_back(knock);
+				}
+				if (over != 0 && !a_peer.toldKnocksDropped) {
+					a_peer.toldKnocksDropped = true;
+					log(std::format("server: player {} sends knockdowns faster than they are passed on: the rest are dropped (said once)", a_peer.playerId));
+				}
+				if (!others.knocks.empty()) {
+					others.sender = a_peer.playerId;
+					broadcast(Protocol::Encode(others), true, &a_key);
+				}
+				for (auto& [runner, knocks] : asks) {
+					if (const auto to = peerOf(runner)) {
+						knocks.sender = a_peer.playerId;
+						send(*to, Protocol::Encode(knocks), true);
+					}
 				}
 			}
 			break;

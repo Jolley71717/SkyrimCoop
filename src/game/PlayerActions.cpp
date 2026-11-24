@@ -3,6 +3,7 @@
 #include "DevLine.h"
 #include "game/Furniture.h"
 #include "game/Pairs.h"
+#include "game/Knocks.h"
 #include "game/Gear.h"
 #include "game/StandInRules.h"
 #include "game/VtableHook.h"
@@ -70,7 +71,7 @@ namespace PlayerActions
 			// Nor a paired animation's (a kill move): its beginning is said as a pair, and every game plays the whole pair on
 			// the actors that show both (Pairs.h).
 			Pairs::Noted(player, name);
-			if (Pairs::EventsStay(player)) {
+			if (Pairs::EventsStay(player) || Knocks::EventsStay(player)) {
 				return taken;
 			}
 			std::scoped_lock l{ lock };

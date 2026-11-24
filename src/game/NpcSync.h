@@ -90,6 +90,9 @@ namespace NpcSync
 	[[nodiscard]] std::optional<Protocol::NpcKey>                                  KeyOf(RE::Actor* a_actor);
 	[[nodiscard]] std::uint32_t                                                    RunnerOf(const Protocol::NpcKey& a_key);
 	[[nodiscard]] std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> RunActors();
+	// The copies this game moves by their runners' states now, with their actors (knockdowns: src/game/Knocks.h). Main
+	// thread.
+	[[nodiscard]] std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> CopyActors();
 	// For the effect hook (RemotePlayers.cpp; any thread, no lock): whether an effect of a_caster's is refused because
 	// a_caster is a copy of an NPC another game runs and the effect makes or moves something here (SpellRules::
 	// JudgeCopyMagic); counted by kind when it is.
