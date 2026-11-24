@@ -624,4 +624,209 @@ namespace DropRules
 		}
 		return a_dropId == 0 ? Offer::kRefused : Offer::kLies;
 	}
+
+	// ---- which reference a drop became -----------------------------------------------------------------------------------
+
+	// The engine's container event for our player's drop is meant to name the reference the item became. On the rig's
+	// runtime (SE 1.7.104) it named none, for every drop, so nothing was ever given (every drop judged noref). The
+	// reference is now found three ways, the first that answers, whichever way our player dropped the item (the
+	// inventory menu's Drop, the console's player.drop, a script's DropObject, the dev channel's):
+	//   1. the event's own handle, read in the sink and read again on the tick (the reference may only be made after the
+	//      event is sent): kEvent, kLate;
+	//   2. what our player's drop call returned: the game side hooks the player's RemoveItem (reason kDropping, into the
+	//      world) and DropObject, and hands each reference they made here (AddCall); an event of the same item takes the
+	//      oldest one of the same count, else the oldest of that item: kCall;
+	//   3. a search near our player, once an event has waited CALL_WAIT for its call: a reference made at run time of the
+	//      same item and count, in the world, within SEARCH_RADIUS, that is no drop this game knows of nor one named
+	//      before; the newest (the highest run-time ID): kSearch.
+	// An event none of them names is kNone, judged noref as before: nothing taken out of our world, nothing given.
+	enum class NamedBy : std::uint8_t
+	{
+		kEvent,   // the event's handle, in the sink
+		kLate,    // the event's handle, read again on the tick
+		kCall,    // the reference our player's drop call returned
+		kSearch,  // found near our player
+		kNone,    // not found: noref
+	};
+	inline constexpr std::size_t NAMED_BY_COUNT = static_cast<std::size_t>(NamedBy::kNone) + 1;
+
+	[[nodiscard]] constexpr const char* NamedByName(NamedBy a_by)
+	{
+		switch (a_by) {
+		case NamedBy::kEvent:
+			return "event";
+		case NamedBy::kLate:
+			return "late";
+		case NamedBy::kCall:
+			return "call";
+		case NamedBy::kSearch:
+			return "search";
+		case NamedBy::kNone:
+			return "none";
+		}
+		return "?";
+	}
+
+	class Naming
+	{
+	public:
+		static constexpr auto        CALL_WAIT = std::chrono::milliseconds(250);  // an event with no reference waits this for its call
+		static constexpr auto        CALL_KEEP = std::chrono::seconds(2);         // a call no event took is forgotten after this
+		static constexpr std::size_t MAX_EVENTS = 64;
+		static constexpr std::size_t MAX_CALLS = 64;
+		static constexpr std::size_t MAX_RECENT = 256;    // references named lately, never handed to a later event
+		static constexpr float       SEARCH_RADIUS = 1024.0f;  // units around our player (an item rolls down stairs)
+
+		struct Event
+		{
+			std::uint32_t     ref = 0;  // the reference the event named (in the sink, or late); 0: none
+			std::uint32_t     base = 0;
+			std::uint32_t     count = 0;
+			bool              byPlayer = false;
+			bool              late = false;  // named by the handle read on the tick, not in the sink
+			Clock::time_point at{};          // when the tick first read it
+		};
+
+		struct Named
+		{
+			Event   event;  // event.ref: the reference it became (0 with kSearch: the caller searches)
+			NamedBy by = NamedBy::kNone;
+		};
+
+		// A reference near our player, for the search.
+		struct Found
+		{
+			std::uint32_t ref = 0;
+			std::uint32_t base = 0;
+			std::uint32_t count = 1;  // its count (1 when it holds none)
+			bool          runtime = false;
+			bool          inWorld = false;
+			float         distance = 0.0f;
+		};
+
+		// An event of our player's drop. False when full (the caller counts it, and the drop stays an ordinary item).
+		bool AddEvent(const Event& a_event)
+		{
+			if (a_event.base == 0 || events.size() >= MAX_EVENTS) {
+				return false;
+			}
+			events.push_back(a_event);
+			return true;
+		}
+
+		// A reference our player's drop call made. None (0), or one named already, is not kept; past MAX_CALLS the
+		// oldest goes (forgotten).
+		void AddCall(std::uint32_t a_ref, std::uint32_t a_base, std::uint32_t a_count, Clock::time_point a_now)
+		{
+			if (a_ref == 0 || a_base == 0 || recent.contains(a_ref) || std::ranges::find(calls, a_ref, &Call::ref) != calls.end()) {
+				return;
+			}
+			if (calls.size() >= MAX_CALLS) {
+				calls.pop_front();
+				++forgotten;
+			}
+			calls.push_back({ a_ref, a_base, a_count, a_now });
+		}
+
+		// The events named or due for a search now, in the order they came; the others wait. Calls no event took in
+		// CALL_KEEP are forgotten.
+		std::vector<Named> Take(Clock::time_point a_now)
+		{
+			std::vector<Named> out;
+			for (auto it = events.begin(); it != events.end();) {
+				auto event = *it;
+				if (event.ref != 0) {
+					if (const auto call = std::ranges::find(calls, event.ref, &Call::ref); call != calls.end()) {
+						calls.erase(call);
+					}
+					Gave(event.ref);
+					out.push_back({ event, event.late ? NamedBy::kLate : NamedBy::kEvent });
+					it = events.erase(it);
+					continue;
+				}
+				auto call = std::ranges::find_if(calls, [&](const Call& a_call) { return a_call.base == event.base && a_call.count == event.count; });
+				if (call == calls.end()) {
+					call = std::ranges::find(calls, event.base, &Call::base);
+				}
+				if (call != calls.end()) {
+					event.ref = call->ref;
+					calls.erase(call);
+					Gave(event.ref);
+					out.push_back({ event, NamedBy::kCall });
+					it = events.erase(it);
+					continue;
+				}
+				if (a_now - event.at >= CALL_WAIT) {
+					out.push_back({ event, NamedBy::kSearch });
+					it = events.erase(it);
+					continue;
+				}
+				++it;
+			}
+			while (!calls.empty() && a_now - calls.front().at >= CALL_KEEP) {
+				calls.pop_front();
+				++forgotten;
+			}
+			return out;
+		}
+
+		// The search: of the references near our player (a_near), the one a drop of a_count of a_base became, if any:
+		// made at run time, in the world, within SEARCH_RADIUS, of that count (a_count 0: any), not one this game knows
+		// (a_known: our drops pending, reported, swapped, the session's copies) nor one named before; the newest of them.
+		[[nodiscard]] std::optional<std::uint32_t> Search(std::span<const Found> a_near, std::uint32_t a_base, std::uint32_t a_count,
+			const std::unordered_set<std::uint32_t>& a_known) const
+		{
+			std::optional<std::uint32_t> best;
+			for (const auto& found : a_near) {
+				if (found.ref == 0 || found.base != a_base || !found.runtime || !found.inWorld || found.distance > SEARCH_RADIUS ||
+					(a_count != 0 && found.count != a_count) || a_known.contains(found.ref) || recent.contains(found.ref)) {
+					continue;
+				}
+				if (!best || found.ref > *best) {
+					best = found.ref;
+				}
+			}
+			return best;
+		}
+
+		// A reference named (by the search too): never handed to another event.
+		void Gave(std::uint32_t a_ref)
+		{
+			if (a_ref == 0 || recent.contains(a_ref)) {
+				return;
+			}
+			if (recentOrder.size() >= MAX_RECENT) {
+				recent.erase(recentOrder.front());
+				recentOrder.pop_front();
+			}
+			recentOrder.push_back(a_ref);
+			recent.insert(a_ref);
+		}
+
+		[[nodiscard]] std::size_t   Waiting() const { return events.size(); }
+		[[nodiscard]] std::size_t   Calls() const { return calls.size(); }
+		[[nodiscard]] std::uint64_t Forgotten() const { return forgotten; }
+
+		// A welcome or a load: drops from before are ordinary items. What was named stays named.
+		void Clear()
+		{
+			events.clear();
+			calls.clear();
+		}
+
+	private:
+		struct Call
+		{
+			std::uint32_t     ref = 0;
+			std::uint32_t     base = 0;
+			std::uint32_t     count = 0;
+			Clock::time_point at{};
+		};
+
+		std::deque<Event>                 events;
+		std::deque<Call>                  calls;
+		std::deque<std::uint32_t>         recentOrder;
+		std::unordered_set<std::uint32_t> recent;
+		std::uint64_t                     forgotten = 0;
+	};
 }

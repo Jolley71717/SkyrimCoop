@@ -23,18 +23,32 @@ namespace DropSync
 
 		constexpr RE::FormID PLAYER_REF = 0x14;
 
-		// An item our player dropped, as the container event named it, read on the next frame.
+		// An item our player dropped, as the container event named it, read on the next frame. On SE 1.7.104 the event
+		// names no reference (ref 0): its handle is kept to read again on the tick, and the reference is otherwise found
+		// by our player's drop call or a search near our player (DropRules::Naming).
 		struct DropEvent
 		{
-			RE::FormID    ref = 0;
-			RE::FormID    base = 0;
-			std::uint32_t count = 0;
-			bool          byPlayer = false;  // a drop menu was open (the inventory, the console), or the dev channel dropped it
+			RE::FormID          ref = 0;
+			RE::ObjectRefHandle handle;
+			RE::FormID          base = 0;
+			std::uint32_t       count = 0;
+			bool                byPlayer = false;  // a drop menu was open (the inventory, the console), or the dev channel dropped it
 		};
 
-		// What the sinks queue (under queueLock, never stateLock): our player's drops, and the references they activated.
+		// A reference our player's drop call made (the hooks on the player's RemoveItem and DropObject, below).
+		struct DropCall
+		{
+			RE::FormID        ref = 0;
+			RE::FormID        base = 0;
+			std::uint32_t     count = 0;
+			Clock::time_point at{};
+		};
+
+		// What the sinks and the drop hooks queue (under queueLock, never stateLock): our player's drops, the references
+		// its drop calls made, and the references it activated.
 		std::mutex              queueLock;
 		std::vector<DropEvent>  dropQueue;
+		std::vector<DropCall>   callQueue;
 		std::vector<RE::FormID> activateQueue;
 		constexpr std::size_t   MAX_QUEUED = 256;
 		std::uint64_t           queueDropped = 0;
@@ -113,6 +127,7 @@ namespace DropSync
 		bool          recordDue = false;
 
 		std::vector<Pending>                   pending;
+		DropRules::Naming                      naming;  // which reference each of our drops became
 		std::map<std::uint64_t, Reported>      reported;
 		DropRules::Unconfirmed                 unconfirmed;
 		DropRules::Lying                       lying;
@@ -155,7 +170,9 @@ namespace DropSync
 			std::uint64_t returned = 0;    // our items given back to our world after a session
 			std::uint64_t swept = 0;       // copies a load brought back, removed
 			std::uint64_t offMain = 0;
+			std::uint64_t namingFull = 0;  // events past DropRules::Naming::MAX_EVENTS (ordinary items)
 			std::array<std::uint64_t, DropRules::GIVABLE_COUNT> judged{};
+			std::array<std::uint64_t, DropRules::NAMED_BY_COUNT> namedBy{};  // which way each drop's reference was found
 		};
 		Counts counts;
 
@@ -512,16 +529,86 @@ namespace DropSync
 			Send(Protocol::Encode(Protocol::ClaimDrop{ a_dropId, a_op }));
 		}
 
+		// The reference a drop of a_count of a_base became, found near our player (the third way, DropRules::Naming):
+		// one this game knows already (our drops pending or reported, the session's copies, those on their way out) is
+		// never it.
+		std::optional<std::uint32_t> SearchNear(RE::FormID a_base, std::uint32_t a_count)
+		{
+			const auto player = Player();
+			const auto tes = RE::TES::GetSingleton();
+			if (!player || !tes) {
+				return std::nullopt;
+			}
+			std::unordered_set<std::uint32_t> known;
+			for (const auto& drop : pending) {
+				known.insert(drop.ref);
+			}
+			for (const auto& [nonce, drop] : reported) {
+				known.insert(drop.ref);
+			}
+			for (const auto& [id, copy] : copies) {
+				known.insert(copy);
+			}
+			for (const auto& retiring : graveyard) {
+				known.insert(retiring.id);
+			}
+			constexpr std::size_t                  MAX_FOUND = 256;
+			std::vector<DropRules::Naming::Found> around;
+			const auto                             at = player->GetPosition();
+			tes->ForEachReferenceInRange(player, DropRules::Naming::SEARCH_RADIUS, [&](RE::TESObjectREFR* a_ref) {
+				const auto base = a_ref ? a_ref->GetBaseObject() : nullptr;
+				if (!base || base->GetFormID() != a_base || a_ref->IsDeleted() || a_ref->IsMarkedForDeletion()) {
+					return RE::BSContainer::ForEachResult::kContinue;
+				}
+				const auto count = a_ref->extraList.GetCount();
+				around.push_back({ .ref = a_ref->GetFormID(),
+					.base = a_base,
+					.count = count > 0 ? static_cast<std::uint32_t>(count) : 1,
+					.runtime = FormIds::IsRuntime(a_ref->GetFormID()),
+					.inWorld = InWorld(a_ref),
+					.distance = a_ref->GetPosition().GetDistance(at) });
+				return around.size() < MAX_FOUND ? RE::BSContainer::ForEachResult::kContinue : RE::BSContainer::ForEachResult::kStop;
+			});
+			return naming.Search(around, a_base, a_count, known);
+		}
+
 		// Our drops: judged as they come, reported once at rest; one picked up again first is forgotten.
 		void TendPending(Clock::time_point a_now)
 		{
 			std::vector<DropEvent> events;
+			std::vector<DropCall>  calls;
 			{
 				std::lock_guard guard{ queueLock };
 				events = std::exchange(dropQueue, {});
+				calls = std::exchange(callQueue, {});
+			}
+			for (const auto& call : calls) {
+				naming.AddCall(call.ref, call.base, call.count, call.at);
 			}
 			for (const auto& event : events) {
 				++counts.events;
+				DropRules::Naming::Event named{ .ref = event.ref, .base = event.base, .count = event.count, .byPlayer = event.byPlayer, .at = a_now };
+				if (named.ref == 0) {
+					// The event's handle, read again now: the reference may have been made after the event was sent.
+					if (const auto late = event.handle.get()) {
+						named.ref = late->GetFormID();
+						named.late = true;
+					}
+				}
+				if (!naming.AddEvent(named)) {
+					++counts.namingFull;
+				}
+			}
+			for (auto& [event, by] : naming.Take(a_now)) {
+				if (by == DropRules::NamedBy::kSearch) {
+					const auto found = SearchNear(event.base, event.count);
+					event.ref = found.value_or(0);
+					by = found ? DropRules::NamedBy::kSearch : DropRules::NamedBy::kNone;
+					if (found) {
+						naming.Gave(*found);
+					}
+				}
+				++counts.namedBy[static_cast<std::size_t>(by)];
 				const auto ref = event.ref != 0 ? RE::TESForm::LookupByID<RE::TESObjectREFR>(event.ref) : nullptr;
 				DropRules::ItemFacts facts;
 				facts.named = ref != nullptr;
@@ -732,6 +819,7 @@ namespace DropSync
 				std::lock_guard guard{ queueLock };
 				if (dropQueue.size() < MAX_QUEUED) {
 					dropQueue.push_back({ .ref = ref ? ref->GetFormID() : 0,
+						.handle = a_event->reference,
 						.base = a_event->baseObj,
 						.count = static_cast<std::uint32_t>(a_event->itemCount),
 						.byPlayer = byPlayer });
@@ -762,6 +850,64 @@ namespace DropSync
 			}
 		};
 		Sinks sinks;
+
+		// Our player's drop calls: the reference each one made, whatever made the call (the inventory menu's Drop, the
+		// console's player.drop, a script's DropObject, the dev channel's). Two slots of the player's own vtable, so no
+		// other actor's call comes here: RemoveItem (0x56) with reason kDropping and no container to move to, and
+		// DropObject (0xCB). A call inside another (DropObject going through RemoveItem) is the outer one's: only the
+		// outermost is noted. Both return their handle through a hidden pointer (a member function returning a class),
+		// so the thunks take it after `this` and give it back. The caller's thread is any: queued under queueLock only.
+		thread_local int dropDepth = 0;
+
+		void NoteCall(RE::Actor* a_actor, const RE::ObjectRefHandle& a_made, const RE::TESBoundObject* a_item, std::int32_t a_count)
+		{
+			if (dropDepth != 0 || !a_actor || a_actor != Player() || !a_item || a_count <= 0) {
+				return;
+			}
+			const auto made = a_made.get();
+			if (!made) {
+				return;
+			}
+			std::lock_guard guard{ queueLock };
+			if (callQueue.size() < MAX_QUEUED) {
+				callQueue.push_back({ made->GetFormID(), a_item->GetFormID(), static_cast<std::uint32_t>(a_count), Clock::now() });
+			} else {
+				++queueDropped;
+			}
+		}
+
+		struct RemoveItemHook
+		{
+			static RE::ObjectRefHandle* Thunk(RE::Actor* a_this, RE::ObjectRefHandle& a_out, RE::TESBoundObject* a_item, std::int32_t a_count,
+				RE::ITEM_REMOVE_REASON a_reason, RE::ExtraDataList* a_extra, RE::TESObjectREFR* a_moveTo, const RE::NiPoint3* a_at, const RE::NiPoint3* a_rotate)
+			{
+				++dropDepth;
+				const auto out = Original(a_this, a_out, a_item, a_count, a_reason, a_extra, a_moveTo, a_at, a_rotate);
+				--dropDepth;
+				if (a_reason == RE::ITEM_REMOVE_REASON::kDropping && !a_moveTo && out) {
+					NoteCall(a_this, *out, a_item, a_count);
+				}
+				return out;
+			}
+			static inline REL::Relocation<decltype(Thunk)> Original;
+		};
+
+		struct DropObjectHook
+		{
+			static RE::ObjectRefHandle* Thunk(RE::Actor* a_this, RE::ObjectRefHandle& a_out, const RE::TESBoundObject* a_item, RE::ExtraDataList* a_extra,
+				std::int32_t a_count, const RE::NiPoint3* a_at, const RE::NiPoint3* a_rotate)
+			{
+				++dropDepth;
+				const auto out = Original(a_this, a_out, a_item, a_extra, a_count, a_at, a_rotate);
+				--dropDepth;
+				if (out) {
+					NoteCall(a_this, *out, a_item, a_count);
+				}
+				return out;
+			}
+			static inline REL::Relocation<decltype(Thunk)> Original;
+		};
+		bool hooked = false;
 
 		// The session's drops forgotten (the copies too: on their way out).
 		void ForgetSession()
@@ -794,6 +940,14 @@ namespace DropSync
 		events->AddEventSink<RE::TESActivateEvent>(&sinks);
 		installed = true;
 		logs::info("Drops: watching our player's drops and takes");
+		if (!hooked) {
+			// The reference each of our player's drop calls made: the container event names none on SE 1.7.104.
+			REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_PlayerCharacter[0] };
+			RemoveItemHook::Original = vtable.write_vfunc(0x56, RemoveItemHook::Thunk);
+			DropObjectHook::Original = vtable.write_vfunc(0xCB, DropObjectHook::Thunk);
+			hooked = true;
+			logs::info("Drops: reading the reference our player's drop calls make (RemoveItem, DropObject)");
+		}
 		return true;
 	}
 
@@ -804,10 +958,12 @@ namespace DropSync
 		sessionId = a_sessionId;
 		ForgetSession();
 		record.Bind(a_sessionId);
+		naming.Clear();
 		recordDue = true;  // sent from the world: the server answers it with what lies there
 		{
 			std::lock_guard queueGuard{ queueLock };
 			dropQueue.clear();  // dropped before we were in: ordinary items
+			callQueue.clear();
 			activateQueue.clear();
 		}
 	}
@@ -979,9 +1135,11 @@ namespace DropSync
 		unconfirmed.Clear();
 		returns.clear();
 		devDrops.clear();
+		naming.Clear();
 		{
 			std::lock_guard queueGuard{ queueLock };
 			dropQueue.clear();
+			callQueue.clear();
 			activateQueue.clear();
 		}
 		for (const auto& [id, base] : loadedOut) {
@@ -1223,6 +1381,61 @@ namespace DropSync
 			return std::format("count={}", CountOf(item));
 		}
 
+		// menu [open | close | <item hex>]: the inventory menu, for the rig's drop through it with the pad's x, as a player
+		// drops. open shows it and close hides it (through the UI's message queue, as the game's own menu keys do); with
+		// no word, or an item, what it shows: inventory=<open: 0|1> selected=<the selected entry's item | none>
+		// selCount=<its count> entries=<items listed> has=<the item is among them: 0|1>.
+		std::string MenuCommand(const std::vector<std::string_view>& a_words)
+		{
+			constexpr std::string_view USAGE = "error: usage: drops menu [open | close | <item hex>]";
+			const auto                 ui = RE::UI::GetSingleton();
+			const auto                 uiQueue = RE::UIMessageQueue::GetSingleton();
+			if (!ui || !uiQueue) {
+				return "error: no UI";
+			}
+			if (a_words.size() == 2 && a_words[1] == "open") {
+				if (!LocalPlayer::InWorld()) {
+					return "error: not in the world";
+				}
+				uiQueue->AddMessage(RE::BSFixedString{ RE::InventoryMenu::MENU_NAME }, RE::UI_MESSAGE_TYPE::kShow, nullptr);
+				return "opening";
+			}
+			if (a_words.size() == 2 && a_words[1] == "close") {
+				uiQueue->AddMessage(RE::BSFixedString{ RE::InventoryMenu::MENU_NAME }, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+				return "closing";
+			}
+			std::optional<RE::FormID> want;
+			if (a_words.size() == 2) {
+				want = FormsCommand::ParseHex(a_words[1]);
+				if (!want) {
+					return std::string{ USAGE };
+				}
+			} else if (a_words.size() > 2) {
+				return std::string{ USAGE };
+			}
+			const bool        open = ui->IsMenuOpen(RE::InventoryMenu::MENU_NAME);
+			auto              menu = open ? ui->GetMenu<RE::InventoryMenu>() : RE::GPtr<RE::InventoryMenu>{};
+			const auto        list = menu ? menu->GetRuntimeData().itemList : nullptr;
+			std::string       selected = "none";
+			std::uint32_t     selCount = 0;
+			bool              has = false;
+			std::size_t       entries = 0;
+			if (list) {
+				entries = list->items.size();
+				for (const auto item : list->items) {
+					const auto object = item && item->data.objDesc ? item->data.objDesc->GetObject() : nullptr;
+					if (want && object && object->GetFormID() == *want) {
+						has = true;
+					}
+				}
+				if (const auto pick = list->GetSelectedItem(); pick && pick->data.objDesc && pick->data.objDesc->GetObject()) {
+					selected = std::format("{:08X}", pick->data.objDesc->GetObject()->GetFormID());
+					selCount = pick->data.GetCount();
+				}
+			}
+			return std::format("inventory={} selected={} selCount={} entries={} has={}", open ? 1 : 0, selected, selCount, entries, has ? 1 : 0);
+		}
+
 		// ref <hex>: what became of a reference (the rig's check that a dropper's own item left its world in the swap).
 		std::string RefCommand(const std::vector<std::string_view>& a_words)
 		{
@@ -1256,16 +1469,28 @@ namespace DropSync
 					judged += std::format("{}{}:{}", judged.empty() ? "" : ",", DropRules::GivableName(static_cast<DropRules::Givable>(i)), Counted(counts.judged[i]));
 				}
 			}
+			// Which way each drop's reference was found (DropRules::Naming): event, late, call, search, none.
+			std::string named;
+			for (std::size_t i = 0; i < DropRules::NAMED_BY_COUNT; ++i) {
+				if (counts.namedBy[i] != 0) {
+					named += std::format("{}{}:{}", named.empty() ? "" : ",", DropRules::NamedByName(static_cast<DropRules::NamedBy>(i)), Counted(counts.namedBy[i]));
+				}
+			}
 			const auto mine = record.ForSession();
 			return std::format("installed={} us={} session={} lying={} copies={} pending={} reported={} unconfirmed={} claims={} grants={} graveyard={} returns={} "
 							   "made={} taken={} events={} reports={} pickedUp={} refused={} swapped={} kept={} forgotten={} heard={} gone={} placed={} removed={} "
-							   "lost={} unplaceable={} claimsSent={} granted={} took={} unsure={} gaveBack={} returned={} swept={} eventsDropped={} judged={} offmain={}",
+							   "lost={} unplaceable={} claimsSent={} granted={} took={} unsure={} gaveBack={} returned={} swept={} eventsDropped={} judged={} offmain={} "
+							   "hooked={} named={} naming={} calls={} callsForgotten={} namingFull={}",
 				installed ? 1 : 0, ourId, sessionId != 0 ? 1 : 0, lying.Size(), copies.size(), pending.size(), reported.size(), unconfirmed.Size(), claims.Size(),
 				grants.size(), graveyard.size(), returns.size(), mine.made.size(), mine.taken.size(), Counted(counts.events), Counted(counts.reports),
 				Counted(counts.pickedUp), Counted(counts.refused), Counted(counts.swapped), Counted(counts.kept), Counted(counts.forgotten), Counted(counts.heard),
 				Counted(counts.gone), Counted(counts.placed), Counted(counts.removed), Counted(counts.lost), Counted(counts.unplaceable), Counted(counts.claimsSent),
 				Counted(counts.granted), Counted(counts.took), Counted(counts.unsure), Counted(counts.gaveBack), Counted(counts.returned), Counted(counts.swept),
-				Counted(dropped), judged.empty() ? "-" : judged, Counted(counts.offMain));
+				Counted(dropped), judged.empty() ? "-" : judged, Counted(counts.offMain), hooked ? 1 : 0, named.empty() ? "-" : named, naming.Waiting(),
+				naming.Calls(), Counted(naming.Forgotten()), Counted(counts.namingFull));
+		}
+		if (words[0] == "menu") {
+			return MenuCommand(words);
 		}
 		if (words[0] == "list") {
 			return List();
@@ -1282,6 +1507,6 @@ namespace DropSync
 		if (words[0] == "ref") {
 			return RefCommand(words);
 		}
-		return "error: usage: drops [list | drop <item hex> <n> | take <drop id> | count <item hex> | ref <ref hex>]";
+		return "error: usage: drops [list | drop <item hex> <n> | take <drop id> | count <item hex> | ref <ref hex> | menu [open | close | <item hex>]]";
 	}
 }
