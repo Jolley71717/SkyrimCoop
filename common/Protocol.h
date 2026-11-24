@@ -57,7 +57,13 @@ namespace Protocol
 	//    every game does the same job, and a radiant job begun again is a new run whose old stages are not its own.
 	//    Written on top of 11 (drops) beside 11 (swimming, another branch): whichever is merged later renumbers; the
 	//    messages (55, 56) do not clash.
-	inline constexpr std::uint16_t VERSION = 12;
+	// 15: conversations (Line, Talk; docs/DESIGN.md "Conversations"): the lines said in a player's conversation (what
+	//    the NPC says, the topic the player picks) go to the others, who see them in the subtitle area and hear the
+	//    recording from the speaker; one player at a time talks with an NPC (the server's talk book), and a friend's own
+	//    talk with an NPC someone else talks with is closed. Written on top of 12 (quest runs) beside 12, 13 and 14 (riding,
+	//    projectiles and furniture, another branch): the number is above both lines' and is renumbered at merge; its messages
+	//    (59-62) clash with neither line's.
+	inline constexpr std::uint16_t VERSION = 15;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -133,6 +139,11 @@ namespace Protocol
 		kDropList = 54,        // server -> one game: every item lying in the session now (the answer to its kDropRecord)
 		kQuestRun = 55,        // host -> server, reliable: a quest started (a run), its aliases' references read, or a radiant job stopped
 		kRemoteQuestRun = 56,  // server -> the others: the host's word (and every run that is on, to a joiner and to one that loaded)
+		// 57 and 58 are left for projectiles and furniture, written at the same time on another branch.
+		kLine = 59,        // client -> server, reliable: a line said in our player's conversation, or its end
+		kRemoteLine = 60,  // server -> the others: that player's line (never kept: a joiner hears only what is said after)
+		kTalk = 61,        // client -> server, reliable: our player talks with this NPC (again every few seconds), or no longer
+		kTalkAnswer = 62,  // server -> the asker alone: who talks with that NPC (the asker: it is theirs)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -501,6 +512,59 @@ namespace Protocol
 	// The most aliases a run names (a quest has a few dozen at most; the radiant trackers a few hundred, and those are
 	// untyped, never shared): past it the rest are each game's own picks.
 	inline constexpr std::size_t MAX_ALIAS_FILLS = 256;
+
+	// A line said in a player's conversation (docs/DESIGN.md, "Conversations"): one response of what the NPC they talk
+	// with says (its subtitle as the talker's game shows it, and the recording it plays), or the topic the player picked
+	// (their own line: Skyrim's player is not voiced). kLine from the talker (playerId 0), kRemoteLine from the server
+	// (the talker's player id). kEnd says the talker's line of that number ended there (the talker skipped it, or the
+	// conversation was left): a reader still playing it ends it too.
+	struct Line
+	{
+		enum Kind : std::uint8_t
+		{
+			kSay = 0,
+			kEnd = 1,
+		};
+		enum Speaker : std::uint8_t
+		{
+			kTalker = 0,  // the talking player themselves (the topic they picked): their stand-in says it
+			kRef = 1,     // a reference (the NPC): `speaker`, or none the reader has (0), when `name` shows who it was
+		};
+		std::uint32_t playerId = 0;
+		std::uint8_t  kind = kSay;
+		std::uint8_t  speakerKind = kRef;
+		std::uint32_t speaker = 0;   // with kRef: the reference saying it; 0 for one the reader's game lacks
+		std::uint32_t info = 0;      // the dialogue response's info (TESTopicInfo); 0: not known, or the reader lacks it
+		std::uint8_t  response = 0;  // its response number, from 1; 0: not known
+		std::uint32_t seq = 0;       // the talker's number for the line, from 1, rising; kEnd names the line it ends
+		std::string   name;          // with kRef: the speaker's name as the talker's game shows it, for a reader without it
+		std::string   text;          // with kSay: what is said, never blank
+		std::string   voice;         // with kSay: the recording's path under Data (Sound\Voice\...); empty: none
+		bool operator==(const Line&) const = default;
+	};
+	// A line's text, a speaker's name and a recording's path at most (bytes of UTF-8: a response is a sentence or three,
+	// some languages take three bytes a character; a path is at most Windows' 260 characters).
+	inline constexpr std::size_t MAX_LINE_TEXT = 1024;
+	inline constexpr std::size_t MAX_SPEAKER_NAME = 128;
+	inline constexpr std::size_t MAX_VOICE_PATH = 260;
+
+	// Our player talks with an NPC (on), said when the conversation starts and again every few seconds while it goes on,
+	// or no longer (off). The server keeps one talker for each NPC and answers each "on" with who that is (TalkAnswer).
+	struct Talk
+	{
+		std::uint32_t ref = 0;  // the NPC
+		bool          on = true;
+		bool operator==(const Talk&) const = default;
+	};
+
+	// Who talks with an NPC, to the player who asked: themselves (it is theirs), or another player (busy: their game
+	// ends its own talk with it).
+	struct TalkAnswer
+	{
+		std::uint32_t ref = 0;
+		std::uint32_t holderId = 0;
+		bool operator==(const TalkAnswer&) const = default;
+	};
 
 	// A game's clock and weather (kClock, playerId 0; kRemoteClock, the clock owner's player id). Its forms are the
 	// worldspace the sender stands in outside (0: inside, or a place the reader's game lacks) and the weather there (0:
@@ -1495,6 +1559,124 @@ namespace Protocol
 			}
 		}
 		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// A text with nothing to read in it (empty, or only spaces and the control characters the Reader drops).
+	[[nodiscard]] inline bool BlankText(std::string_view a_text)
+	{
+		return std::ranges::all_of(a_text, [](char a_c) { return a_c == ' ' || static_cast<unsigned char>(a_c) < 0x20; });
+	}
+
+	// kLine (no player id: the server knows whose it is) or kRemoteLine (the talker's player id first): kind, speakerKind,
+	// speaker, info, response, seq, then the name (Str), the text and the voice (LongStr). None for a kind or speaker kind
+	// not known; a kSay with a blank text; a kEnd with a text, a recording or no line number; a line of the talker
+	// themselves naming a reference, an info, a response, a name or a recording (their own line is the topic's text alone);
+	// a response with no info; any text past its MAX_*.
+	inline std::vector<std::uint8_t> Encode(const Line& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		if (a_type == MessageType::kRemoteLine) {
+			w.U32(a_msg.playerId);
+		}
+		w.U8(a_msg.kind);
+		w.U8(a_msg.speakerKind);
+		w.U32(a_msg.speaker);
+		w.U32(a_msg.info);
+		w.U8(a_msg.response);
+		w.U32(a_msg.seq);
+		w.Str(a_msg.name, MAX_SPEAKER_NAME);
+		w.LongStr(a_msg.text, MAX_LINE_TEXT);
+		w.LongStr(a_msg.voice, MAX_VOICE_PATH);
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const Line& a_msg) { return Encode(a_msg, MessageType::kLine); }
+
+	inline std::optional<Line> DecodeLine(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kLine && type != MessageType::kRemoteLine) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		Line msg;
+		if (type == MessageType::kRemoteLine) {
+			msg.playerId = r.U32();
+		}
+		msg.kind = r.U8();
+		msg.speakerKind = r.U8();
+		msg.speaker = r.U32();
+		msg.info = r.U32();
+		msg.response = r.U8();
+		msg.seq = r.U32();
+		msg.name = r.Str(MAX_SPEAKER_NAME);
+		msg.text = r.LongStr(MAX_LINE_TEXT);
+		msg.voice = r.LongStr(MAX_VOICE_PATH);
+		if (!r.AtEnd() || msg.seq == 0 || (msg.kind != Line::kSay && msg.kind != Line::kEnd) ||
+			(msg.speakerKind != Line::kTalker && msg.speakerKind != Line::kRef)) {
+			return std::nullopt;
+		}
+		if (msg.kind == Line::kSay ? BlankText(msg.text) : (!msg.text.empty() || !msg.voice.empty())) {
+			return std::nullopt;
+		}
+		if (msg.speakerKind == Line::kTalker && (msg.speaker != 0 || msg.info != 0 || msg.response != 0 || !msg.name.empty() || !msg.voice.empty())) {
+			return std::nullopt;
+		}
+		if (msg.response != 0 && msg.info == 0) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kTalk: ref, on (0 or 1). None for no NPC or an "on" that is neither.
+	inline std::vector<std::uint8_t> Encode(const Talk& a_msg)
+	{
+		Writer w{ MessageType::kTalk };
+		w.U32(a_msg.ref);
+		w.U8(a_msg.on ? 1 : 0);
+		return w.Data();
+	}
+
+	inline std::optional<Talk> DecodeTalk(std::span<const std::uint8_t> a_data)
+	{
+		if (PeekType(a_data) != MessageType::kTalk) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		Talk msg;
+		msg.ref = r.U32();
+		const auto on = r.U8();
+		if (!r.AtEnd() || msg.ref == 0 || on > 1) {
+			return std::nullopt;
+		}
+		msg.on = on == 1;
+		return msg;
+	}
+
+	// kTalkAnswer: ref, holderId. None for no NPC or no holder (an answer always names who has it).
+	inline std::vector<std::uint8_t> Encode(const TalkAnswer& a_msg)
+	{
+		Writer w{ MessageType::kTalkAnswer };
+		w.U32(a_msg.ref);
+		w.U32(a_msg.holderId);
+		return w.Data();
+	}
+
+	inline std::optional<TalkAnswer> DecodeTalkAnswer(std::span<const std::uint8_t> a_data)
+	{
+		if (PeekType(a_data) != MessageType::kTalkAnswer) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		TalkAnswer msg;
+		msg.ref = r.U32();
+		msg.holderId = r.U32();
+		if (!r.AtEnd() || msg.ref == 0 || msg.holderId == 0) {
 			return std::nullopt;
 		}
 		return msg;

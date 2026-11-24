@@ -40,6 +40,9 @@
 //   other side has its base made 0: going out, the server refuses it (the session can't name that item, so it stays its
 //   dropper's own); coming in, this game places no copy of it (it would be another item), and still knows the drop, so
 //   it hears who takes it. Its place is a place or nowhere (both 0), as a player's state's is: nowhere is placed by none.
+// - a conversation's line (kLine, kRemoteLine) whose speaker or info has no ID becomes 0 there (with the info its response
+//   number): the reader shows it by the speaker's name, as text; a talk with an NPC (kTalk) or its answer (kTalkAnswer)
+//   whose NPC has none is not sent (kDrop): that NPC is that game's own.
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -102,6 +105,10 @@ namespace FormTranslate
 		case MT::kDropList:
 		case MT::kQuestRun:
 		case MT::kRemoteQuestRun:
+		case MT::kLine:
+		case MT::kRemoteLine:
+		case MT::kTalk:
+		case MT::kTalkAnswer:
 			return true;
 		case MT::kClaimDrop:  // drop numbers, no forms
 		case MT::kDropGone:
@@ -403,6 +410,61 @@ namespace FormTranslate
 			}
 		}
 
+		// A conversation's line, written back with its own type: its speaker and its info, each 0 when it has no ID on the
+		// other side (the reader shows the line by the speaker's name, and as text alone: a mod's NPC or line it lacks).
+		inline void ApplyLine(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeLine(a_packet);
+			if (!msg) {
+				return;
+			}
+			a_ctx.Detail(msg->speaker);
+			if (!a_ctx.Key(msg->info)) {
+				msg->info = 0;
+				msg->response = 0;  // a response number names a response of that info alone
+				++a_ctx.out.fields;
+				a_ctx.changed = true;
+			}
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
+		// A talk with an NPC (kTalk) and its answer (kTalkAnswer): kDrop when the NPC has no ID on the other side. That NPC
+		// is the game's own (a mod's some game lacks): nobody else can talk with it in their game, so no talk of it is
+		// kept, and a game that hears no answer talks on.
+		inline void ApplyTalk(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			if (a_type == Protocol::MessageType::kTalk) {
+				auto msg = Protocol::DecodeTalk(a_packet);
+				if (!msg) {
+					return;
+				}
+				if (!a_ctx.Key(msg->ref)) {
+					a_ctx.out.kind = Result::Kind::kDrop;
+					return;
+				}
+				if (a_ctx.changed) {
+					a_ctx.out.kind = Result::Kind::kChanged;
+					a_ctx.out.packet = Protocol::Encode(*msg);
+				}
+				return;
+			}
+			auto msg = Protocol::DecodeTalkAnswer(a_packet);
+			if (!msg) {
+				return;
+			}
+			if (!a_ctx.Key(msg->ref)) {
+				a_ctx.out.kind = Result::Kind::kDrop;
+				return;
+			}
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg);
+			}
+		}
+
 		inline void MapLooks(Context& a_ctx, Protocol::PlayerLooks& a_looks)
 		{
 			a_ctx.Detail(a_looks.race);
@@ -470,6 +532,14 @@ namespace FormTranslate
 		case MT::kQuestRun:
 		case MT::kRemoteQuestRun:
 			detail::ApplyQuestRun(a_packet, ctx, *type);
+			break;
+		case MT::kLine:
+		case MT::kRemoteLine:
+			detail::ApplyLine(a_packet, ctx, *type);
+			break;
+		case MT::kTalk:
+		case MT::kTalkAnswer:
+			detail::ApplyTalk(a_packet, ctx, *type);
 			break;
 		default:
 			break;

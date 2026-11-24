@@ -10,3 +10,7 @@ reject.mods = Twoje mody różnią się od modów hosta.
 
 steam.status_hosting = Hostuje Skyrim w trybie co-op
 steam.status_playing = Gra w Skyrim w trybie co-op
+
+talk.line = {speaker}: „{line}”
+talk.busy = {name} rozmawia teraz z: {player}.
+talk.another = inny gracz

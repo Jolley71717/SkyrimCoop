@@ -228,7 +228,7 @@ DropSync's state is under one lock, taken by the tick and by SKSE's callbacks on
 
 Since protocol 7 (runs and aliases since protocol 12). Not tested in a game yet; the rig steps `quests` and `jobs` are ready for it. The rules, free of the game, are `src/game/QuestRules.h`; the game side is `src/game/QuestSync`; the server's book is `common/QuestBook.h`; tests in `tests/QuestTests.cpp`.
 
-The aim is that every quest is shared: a stage done is done for everyone, whoever did the step, and the host's save keeps it. This version shares a quest's stages, its objectives and its end (completed or failed). Dialogue, scenes, quest items and rewards are each player's own for now (below).
+The aim is that every quest is shared: a stage done is done for everyone, whoever did the step, and the host's save keeps it. This version shares a quest's stages, its objectives and its end (completed or failed); a conversation is seen and heard by the others near ("Conversations"). Scenes, quest items and rewards are each player's own for now (below).
 
 **Which quests, by class.** Each quest is judged by its own record, never by a name list alone, so a mod's quest is shared as the base game's are and the load order does not matter:
 
@@ -273,12 +273,43 @@ Every game judges again by its own record before it makes anything, so a quest o
 **Threads.** The console commands run from the plugin's tick, which until the frame hook is written runs on SKSE's task queue; each one run off the main thread is counted (`offmain=`), and each the game made no script to run in (`norun=`). The console runs a command it cannot compile without a word, so what is made is read again two seconds later: an objective or end that does not read so is counted and logged (`unmade=`), and a stage that never reads done is counted stuck.
 
 **Not yet:**
-- Dialogue and scenes play for the player who started them; the others see the stage it set.
+- A conversation is the talker's: the others near see and hear it ("Conversations") and see the stage it set. Scenes play in each game for itself.
 - Quest items and rewards go to the player who got them.
 - Misc quests are each game's own, and so is a radiant job a friend's game starts on its own (only the host's jobs are the session's).
 - An actor a quest creates for its alias is each game's own until NPCs are paired, and so is a quest's location alias in a game that cannot find where the engine keeps it (`locSlot=none` or `locMap` not verified). Such a location is not read there, so it is neither the same as the host's nor apart from it (`unread=` in `quests run`): it never restarts a radiant job, is never said apart, and the run's references are judged on their own (`refSame=`).
 - A choice a quest keeps in a script variable rather than a stage (which side a player took in a dialogue) is not shared.
 - A quest a friend took further in its own save than the host has (apart) stays the friend's own until the host reaches that stage; the friend cannot hand it to the host.
+
+## Conversations
+
+Since protocol 15. Not tested in a game yet; the rig step `talk` is ready for it. The rules, free of the game, are `src/game/TalkRules.h` (with `src/game/SubtitleTime.h` and `src/game/LineSounds.h`, ported from the sister project); the server's book is `common/TalkBook.h`; the game side is `src/game/Conversations`; tests in `tests/TalkTests.cpp` and `tests/LineSoundsTests.cpp`.
+
+One player talks with an NPC, and the others near see it and hear it: the NPC's lines in their subtitle area over the NPC, with the NPC's own recording played from the NPC, and the talker's chosen topics over the talker's stand-in. The conversation itself (its menu, its choices, what it sets in a quest) stays the talker's; the others watch it, as players stand around a friend who talks with someone. A stage it sets is shared as every quest stage is ("Quests").
+
+**What is a line, by class.** Each line is read from what the game shows, never from a list of topics, so a mod's dialogue is shared as the base game's is:
+- every line the NPC our player talks with says while the Dialogue Menu is open with it: its subtitle as the game shows it (`HighProcessData::voiceSubtitle`), so a line with a variable filled in (a name, a sum of gold) is the text our player read. Each new subtitle is a line; the same text again within 300 ms is the same line (the game sets it more than once). Its recording is found from the topic info being said (the response whose text it is), and sent as its path under `Sound\Voice\`, which every game with the same plugins has; one the rules do not trust (no `Sound\Voice\` root, `..`, another extension than `.fuz`, `.xwm` or `.wav`) is sent without one, the line shown and not heard;
+- the topic our player picks: its text, said by the talker's stand-in, with no recording (the player character has no voice);
+- the end of a line said early (the talker skipped it, or left): the others' recording of it ends too, unless it would end within 750 ms anyway.
+A line is sent with the speaker as a form the other games share (`FormTranslate`: a placed NPC of a plugin both have); a speaker made at run time (a summoned or spawned actor, an NPC a quest created) is sent as none, and the others show the line as a notice with the speaker's name. Lines and their names are cut at a character boundary (1024 bytes of text, 128 of name) and lose control characters.
+
+**How it is shown.** In each game that hears the line:
+- far (more than 1400 units from both the speaker and the talker's stand-in, or no speaker in this world): nothing, counted `far=`;
+- when the game's own settings would show a nearby NPC's line (general subtitles on, or dialogue subtitles while its own menu is open): in the subtitle area over the speaker, the game's own subtitle list, for as long as the game shows a line of its length (`SubtitleTime`). The game owns that list, so after 200 ms each game checks the line is still there; one it dropped is shown as a notice instead, and after three such drops the session shows notices only (`subsOff=1`);
+- otherwise as a notice: "{speaker}: {line}", in the player's language.
+The same line from the same speaker again within 5 seconds is shown once (`repeats=`), and no more than three lines of one speaker are shown in 3 seconds (`tooMany=`).
+
+**How it is heard.** The recording is played from the speaker (followed as it moves) as a 3D sound through the game's dialogue output model, never through the dialogue system, which would start the NPC's own talk in that game. It is found in that game's data (`.fuz`, then `.xwm`, then `.wav`, loose or in an archive); one not there is counted `missing=`, one the audio manager will not play `unplayed=`. Each sound has a hard end: its own length, or the subtitle's time when that cannot be read. At most one line of a speaker plays at a time: a new one ends the last (`cutCrowded=`), and one still playing past its end is ended (`cutLong=`).
+
+**One talker at a time.** Two players talking with one NPC at once would each lead it through a different conversation. A game says whom its player talks with (`kTalk`, on when the menu opens with an NPC, again every 5 seconds, off 2 seconds after it closes so a goodbye still said is kept), and the server's book (`common/TalkBook.h`) gives each placed NPC to one player: the first to ask, until they say off, leave, or go 20 seconds without saying it again. A player told another talks with that NPC (`kTalkAnswer`) has its menu shut and is told so ("{name} is talking with {player}."), when its player started the talk; a forcegreet (the NPC walked up and spoke) is left to run, its lines kept in that game (`busyRefused=`), as shutting it would start it again. Lines from a player who does not hold the talk are dropped by the server. An NPC made at run time is never in the book: each game's own. The book holds 64 talks; past that a talk is let through and not kept. The server passes on 16 lines a second per player, with a burst of 4.
+
+**Threads.** The topic event (`TESTopicInfoEvent`) only queues; the conversation is read, and friends' lines shown and played, from the plugin's tick. The subtitle list is written under its own lock; each write off the main thread is counted (`offmain=`).
+
+**Not yet:**
+- An NPC that talks to another NPC (a scene) is each game's own: each game plays it for itself, as the game does today, and a scene a quest starts plays in every game where its stage is set.
+- A forcegreet in two games at once (both players near an NPC who walks up to speak) plays in both; the server lets the first through and the other game keeps its lines.
+- Talking activators (a shrine, a skull that speaks) and the player's own shouts are not lines.
+- Who talks with an NPC is not yet the NPC's sync: an NPC the talker's game moves as it talks (turning, a gesture) moves there only, until NPCs are synced.
+- Whether a line put in the game's subtitle list stays there, and the sound flags the voice plays with, are read from the engine and checked on the rig (`talk subs`).
 
 ## The menu
 

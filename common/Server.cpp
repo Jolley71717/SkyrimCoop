@@ -9,6 +9,7 @@
 #include "QuestRuns.h"
 #include "Redact.h"
 #include "RefBook.h"
+#include "TalkBook.h"
 #include "Text.h"
 #include "TokenBucket.h"
 
@@ -94,6 +95,15 @@ namespace
 		TokenBucket                         dropRecordBudget{ 4.0, 0.5 };
 		std::optional<Protocol::DropRecord> dropRecordOwed;
 		std::uint64_t                       dropsRefused = 0;
+		// Conversations (docs/DESIGN.md, "Conversations"): lines, a burst of 16 then 4 a second (an NPC says a response
+		// every second or two; a player skipping through them says more); past it dropped (said once, counted): a line is
+		// of the moment, never owed. Talks, 8 then 2 a second (a game says its talk every 5 s); past it dropped: the game
+		// says it again. A line of an NPC from a player who does not talk with it (another player does) is dropped too.
+		TokenBucket   lineBudget{ 16.0, 4.0 };
+		TokenBucket   talkBudget{ 8.0, 2.0 };
+		std::uint64_t linesDropped = 0;
+		std::uint64_t linesNotTheirs = 0;
+		std::uint64_t talksDropped = 0;
 		bool        toldNotHost = false;
 		bool        toldUnknown = false;
 	};
@@ -220,6 +230,8 @@ void Server::Run()
 	// The items dropped for the others to take (common/DropStore.h): the server grants each one to a single taker.
 	DropStore drops;
 	std::uint64_t dupRisk = 0;
+	// Who talks with which NPC (common/TalkBook.h): one player at a time. A new session starts it empty.
+	TalkBook talks;
 
 	const auto send = [&](const PeerKey& a_to, const std::vector<std::uint8_t>& a_packet, bool a_reliable) {
 		transports[a_to.first]->Send(a_to.second, a_packet, a_reliable);
@@ -243,6 +255,8 @@ void Server::Run()
 	const auto left = [&](const PeerKey& a_key, const Peer& a_peer, std::string_view a_why) {
 		log(std::format("server: player {} left ({})", a_peer.playerId, a_why));
 		broadcast(Protocol::Encode(Protocol::PlayerLeft{ a_peer.playerId }), true, &a_key);
+		// The NPC they talked with is free for the others.
+		(void)talks.Left(a_peer.playerId);
 		// Their drops still lying go with them: their game puts each back in its world as it leaves the session.
 		const auto withdrawn = drops.Left(a_peer.playerId);
 		for (const auto& gone : withdrawn) {
@@ -395,6 +409,7 @@ void Server::Run()
 			loot.Restart((std::uint64_t{ random() } << 32) | random());  // ... and its loot, under a new log id
 			lootFullSaid = false;
 			drops.Clear();  // ... and what lay about in it (its numbers go on)
+			talks.Clear();  // ... and who talked with whom
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -822,6 +837,53 @@ void Server::Run()
 				} else {
 					a_peer.dropRecordOwed = *record;  // the newest: its world is the one that counts
 				}
+			}
+			break;
+		case MT::kTalk:
+			// One talker for each NPC (common/TalkBook.h): every "on" is answered to the asker alone with who talks with it
+			// (themselves: theirs; another player: busy, and their game ends its own talk). Past the budget it is dropped,
+			// unanswered: the game says it again in a few seconds, and talks on meanwhile.
+			if (const auto talk = Protocol::DecodeTalk(a_data)) {
+				const auto now = Clock::now();
+				if (!a_peer.talkBudget.Take(now)) {
+					if (a_peer.talksDropped++ == 0) {
+						log(std::format("server: player {} says who it talks with faster than the server takes it; dropped (counted after this)", a_peer.playerId));
+					}
+					break;
+				}
+				if (!talk->on) {
+					(void)talks.Release(a_peer.playerId, talk->ref);
+					break;
+				}
+				const auto claimed = talks.Claim(a_peer.playerId, talk->ref, now);
+				if (!claimed.granted) {
+					log(std::format("server: player {} would talk with {:08X}, which player {} talks with: told it is busy", a_peer.playerId, talk->ref, claimed.holder));
+				}
+				send(a_key, Protocol::Encode(Protocol::TalkAnswer{ talk->ref, claimed.holder }), true);
+			}
+			break;
+		case MT::kLine:
+			// A line is of the moment: passed on to the others as it comes, never kept (a joiner hears what is said after it
+			// joined). An NPC's line only from the player who talks with it; one the session cannot name passes (nobody else
+			// can talk with it). Past the budget it is dropped.
+			if (auto line = Protocol::DecodeLine(a_data)) {
+				const auto now = Clock::now();
+				if (line->kind == Protocol::Line::kSay && line->speakerKind == Protocol::Line::kRef && line->speaker != 0 &&
+					!talks.Holds(a_peer.playerId, line->speaker, now)) {
+					if (a_peer.linesNotTheirs++ == 0) {
+						log(std::format("server: player {} sent a line of {:08X}, whom they do not talk with (player {} does); not passed on (counted after this)",
+							a_peer.playerId, line->speaker, talks.HolderOf(line->speaker, now)));
+					}
+					break;
+				}
+				if (!a_peer.lineBudget.Take(now)) {
+					if (a_peer.linesDropped++ == 0) {
+						log(std::format("server: player {} sends lines faster than the server passes them on; dropped (counted after this)", a_peer.playerId));
+					}
+					break;
+				}
+				line->playerId = a_peer.playerId;
+				broadcast(Protocol::Encode(*line, MT::kRemoteLine), true, &a_key);
 			}
 			break;
 		case MT::kHeartbeat:
