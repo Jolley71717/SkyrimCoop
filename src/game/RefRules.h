@@ -210,6 +210,7 @@ namespace RefRules
 		kTooFar,        // their stand-in is further than USE_REACH from it
 		kNotLoaded,     // this game holds no loaded reference of that id (another cell, or a plugin's this game lacks)
 		kNotMechanism,  // it is no mechanism here (Of(...).use is false: a door, a chest, an unnamed activator)
+		kTrap,          // a trap this game shares (src/game/Traps.h): the trap's word says what became of it, never a stand-in's use
 	};
 
 	struct UseFacts
@@ -218,12 +219,16 @@ namespace RefRules
 		bool  mechanism = false;
 		bool  standIn = false;
 		float standInDistance = -1.0f;
+		bool  trap = false;  // a trap this game shares (Traps::IsTrap)
 	};
 
 	constexpr UseVerdict JudgeUse(const UseFacts& a_facts)
 	{
 		if (!a_facts.loaded) {
 			return UseVerdict::kNotLoaded;
+		}
+		if (a_facts.trap) {
+			return UseVerdict::kTrap;
 		}
 		if (!a_facts.mechanism) {
 			return UseVerdict::kNotMechanism;
@@ -250,6 +255,8 @@ namespace RefRules
 			return "not loaded";
 		case UseVerdict::kNotMechanism:
 			return "not a mechanism";
+		case UseVerdict::kTrap:
+			return "trap";
 		}
 		return "?";
 	}

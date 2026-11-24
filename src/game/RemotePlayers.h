@@ -69,6 +69,9 @@ namespace RemotePlayers
 	// That player's stand-in, placed in this world now (enabled, its 3D there); null when there is none. Main thread:
 	// what a friend's use of a mechanism is made by (src/game/WorldObjects.cpp).
 	[[nodiscard]] RE::Actor* StandInOf(std::uint32_t a_playerId);
+	// Every stand-in placed in this world now (each as StandInOf gives it). Main thread: whose stand-in is nearer to a
+	// trap than our player (src/game/Traps.cpp).
+	[[nodiscard]] std::vector<RE::Actor*> StandIns();
 
 	// Developer channel: `standins` (one line each), `strays` (placed actors of a preset base in the loaded game:
 	// 0 outside a session means nothing of a session was saved), `graph <player> [event <name> | vars]`.

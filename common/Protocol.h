@@ -76,7 +76,13 @@ namespace Protocol
 	//    of 16 (what a use did) beside 17 to 21 (loose objects, quests ended, ragdolls, the quest reset, NPC spells: other
 	//    branches): the number is above every branch's and is renumbered at merge; its messages (71-73) clash with none of
 	//    theirs.
-	inline constexpr std::uint16_t VERSION = 22;
+	// 32: world traps (Trap; docs/DESIGN.md "Traps"): a one-shot trap (a tripwire, a trapped chest's or door's hinge, a
+	//    rigged rockfall, a breakaway floor, a magic trap's soul gem) one game sets off or disarms is spent in every game,
+	//    and a bear trap is snapped or set again in every game; the server keeps them for whoever joins or loads later and
+	//    never sends a player their own. Written on top of 22 (what a player takes) beside 23 to 34 (other branches). Two
+	//    branches opened before it also use 32 and message 85 (weather magic, knockdowns): this one is renumbered when it
+	//    merges, to the next numbers free then (35 and messages 91-93 today).
+	inline constexpr std::uint16_t VERSION = 32;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -164,6 +170,10 @@ namespace Protocol
 		kPickups = 71,        // client -> server, reliable: loose items our player picked up, plants and trees it harvested
 		kRemotePickups = 72,  // server -> the others: that player's (and every kept one not theirs, to a joiner and an asker)
 		kAskPickups = 73,     // client -> server, reliable: send me every kept pickup again (after a load)
+		// 74 to 84 are other branches' messages; 85 is also two other branches' (this one is renumbered at merge).
+		kTraps = 85,        // client -> server, reliable: world traps spent (or a bear trap set again) in our game
+		kRemoteTraps = 86,  // server -> the others: that player's (and every kept one not theirs, to a joiner and an asker)
+		kAskTraps = 87,     // client -> server, reliable: send me every kept trap again (after a load)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -880,6 +890,85 @@ namespace Protocol
 		std::vector<Pickup> entries;
 
 		bool operator==(const PickupBatch&) const = default;
+	};
+
+	// The kinds of world trap a session shares (src/game/TrapRules.h says how each is told by its scripts). One-shot kinds
+	// are spent once for good; a bear trap is a toggle: a player sets it again.
+	enum class TrapKind : std::uint8_t
+	{
+		kNone = 0,
+		kTripwire = 1,   // a tripwire (script Tripwire): snapped, it sets off what it is linked to
+		kHinge = 2,      // a trapped chest's or door's hinge trigger (TrapTriggerHinge): set off, or disarmed
+		kRockfall = 3,   // a rigged rockfall (TrapRiggedRockfall): falls once
+		kBreakaway = 4,  // a breakaway floor or bridge (TrapBreakAwayBase): breaks once
+		kBearTrap = 5,   // a bear trap (TrapBear): snapped shut, or set open again
+		kSoulGem = 6,    // a magic trap's soul gem (trapSoulGemController): taken off, the trap disarmed
+	};
+	inline constexpr std::uint8_t TRAP_KIND_MAX = 6;
+	[[nodiscard]] constexpr bool TrapToggles(TrapKind a_kind) { return a_kind == TrapKind::kBearTrap; }
+
+	// A world trap of the load order that one game spent (docs/DESIGN.md, "Traps"): it went off (kFired), a player disarmed
+	// it (kDisarmed), or, for a bear trap only, a player set it open again (kArmed). ref and base in the session's numbering
+	// (FormTranslate.h: one a game lacks is left out); base is the reference's base form, by which the reader checks its
+	// own reference is the same trap. playerId is the server's (none in kTraps): whose word the session holds.
+	struct Trap
+	{
+		enum Phase : std::uint8_t
+		{
+			kFired = 1,
+			kDisarmed = 2,
+			kArmed = 3,
+		};
+		static constexpr std::uint8_t PHASE_MAX = kArmed;
+
+		std::uint32_t ref = 0;
+		std::uint32_t base = 0;
+		TrapKind      kind = TrapKind::kNone;
+		std::uint8_t  phase = kFired;
+		std::uint32_t playerId = 0;
+
+		bool operator==(const Trap&) const = default;
+	};
+	// The most entries in one batch, and the most traps the server keeps for a session (a dungeon holds a few dozen; a long
+	// evening a few hundred). Past it a new one is not kept or passed on (said once).
+	inline constexpr std::size_t MAX_TRAP_BATCH = 64;
+	inline constexpr std::size_t MAX_TRAPS = 8192;
+
+	// Whether a word is one the session can hold: a kind known, a phase known, and kArmed only for a toggle (a one-shot
+	// trap is never set again by a word).
+	[[nodiscard]] constexpr bool TrapWordFits(TrapKind a_kind, std::uint8_t a_phase)
+	{
+		const auto kind = static_cast<std::uint8_t>(a_kind);
+		if (kind == 0 || kind > TRAP_KIND_MAX || a_phase == 0 || a_phase > Trap::PHASE_MAX) {
+			return false;
+		}
+		return a_phase != Trap::kArmed || TrapToggles(a_kind);
+	}
+
+	// Whether a word replaces the one the session holds (none: a_old empty). A one-shot trap keeps its first word: spent is
+	// spent, whoever says it again (a friend's stand-in set it off there too). A toggle keeps its last word of the other
+	// side (a bear trap snapped, set again, snapped); a word of the same side again is no news.
+	[[nodiscard]] constexpr bool TrapSupersedes(TrapKind a_kind, std::uint8_t a_new, std::optional<std::uint8_t> a_old)
+	{
+		if (!a_old) {
+			return true;
+		}
+		if (!TrapToggles(a_kind)) {
+			return false;
+		}
+		const bool shutNow = a_new != Trap::kArmed;  // fired or disarmed: shut
+		const bool shutBefore = *a_old != Trap::kArmed;
+		return shutNow != shutBefore;
+	}
+
+	// kTraps (a game's own: playerId none) and kRemoteTraps (the server's; catchUp: kept ones sent to a joiner or an asker,
+	// not one just spent).
+	struct TrapBatch
+	{
+		bool              catchUp = false;
+		std::vector<Trap> entries;
+
+		bool operator==(const TrapBatch&) const = default;
 	};
 
 	// ---- serialization -------------------------------------------------------------
@@ -2416,6 +2505,88 @@ namespace Protocol
 			PickupBatch batch;
 			batch.catchUp = a_catchUp;
 			const auto end = (std::min)(a_entries.size(), at + MAX_PICKUP_BATCH);
+			batch.entries.assign(a_entries.begin() + static_cast<std::ptrdiff_t>(at), a_entries.begin() + static_cast<std::ptrdiff_t>(end));
+			out.push_back(Encode(batch, a_type));
+		}
+		return out;
+	}
+
+	// kTraps: a count (1 to MAX_TRAP_BATCH), then each entry: ref, base, kind, phase. kRemoteTraps: a flags byte (1:
+	// catchUp) first, and each entry with playerId after its phase. None for no entry, an entry of no reference or no base,
+	// or a kind and phase the session can't hold (TrapWordFits).
+	inline std::vector<std::uint8_t> Encode(const TrapBatch& a_msg, MessageType a_type)
+	{
+		Writer     w{ a_type };
+		const bool remote = a_type == MessageType::kRemoteTraps;
+		if (remote) {
+			w.U8(a_msg.catchUp ? 1 : 0);
+		}
+		const auto count = (std::min)(a_msg.entries.size(), MAX_TRAP_BATCH);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& entry = a_msg.entries[i];
+			w.U32(entry.ref);
+			w.U32(entry.base);
+			w.U8(static_cast<std::uint8_t>(entry.kind));
+			w.U8(entry.phase);
+			if (remote) {
+				w.U32(entry.playerId);
+			}
+		}
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const TrapBatch& a_msg) { return Encode(a_msg, MessageType::kTraps); }
+
+	inline std::optional<TrapBatch> DecodeTrapBatch(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kTraps && type != MessageType::kRemoteTraps) {
+			return std::nullopt;
+		}
+		const bool remote = type == MessageType::kRemoteTraps;
+		Reader     r{ a_data };
+		r.U8();
+		TrapBatch msg;
+		if (remote) {
+			const auto flags = r.U8();
+			if (flags > 1) {
+				return std::nullopt;
+			}
+			msg.catchUp = flags == 1;
+		}
+		const auto count = r.U8();
+		if (!r.Ok() || count == 0 || count > MAX_TRAP_BATCH) {
+			return std::nullopt;
+		}
+		msg.entries.reserve(count);
+		for (std::uint8_t i = 0; i < count; ++i) {
+			Trap entry;
+			entry.ref = r.U32();
+			entry.base = r.U32();
+			entry.kind = static_cast<TrapKind>(r.U8());
+			entry.phase = r.U8();
+			if (remote) {
+				entry.playerId = r.U32();
+			}
+			if (!r.Ok() || entry.ref == 0 || entry.base == 0 || !TrapWordFits(entry.kind, entry.phase)) {
+				return std::nullopt;
+			}
+			msg.entries.push_back(entry);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// a_entries in batches of MAX_TRAP_BATCH, each encoded as a_type (marked catchUp for kRemoteTraps); none for none.
+	inline std::vector<std::vector<std::uint8_t>> TrapBatches(const std::vector<Trap>& a_entries, MessageType a_type, bool a_catchUp = false)
+	{
+		std::vector<std::vector<std::uint8_t>> out;
+		for (std::size_t at = 0; at < a_entries.size(); at += MAX_TRAP_BATCH) {
+			TrapBatch batch;
+			batch.catchUp = a_catchUp;
+			const auto end = (std::min)(a_entries.size(), at + MAX_TRAP_BATCH);
 			batch.entries.assign(a_entries.begin() + static_cast<std::ptrdiff_t>(at), a_entries.begin() + static_cast<std::ptrdiff_t>(end));
 			out.push_back(Encode(batch, a_type));
 		}

@@ -5,6 +5,7 @@
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
 #include "game/PickupRules.h"
+#include "game/Traps.h"
 #include "net/FormsCommand.h"
 
 #include <array>
@@ -51,6 +52,7 @@ namespace Pickups
 		std::uint64_t              takesNoRef = 0;      // our player's gains from nowhere that named no reference (a script's
 		                                                // AddItem, or a pickup the event does not name: the rig reads it)
 		std::uint64_t              takesOtherBase = 0;  // ... naming a reference of another base than the item's (never a pickup)
+		std::uint64_t              takesTrap = 0;       // ... naming a trap (a magic trap's soul gem): its own word's (src/game/Traps.h)
 		std::atomic<bool>          active{ false };    // in a session: the sinks queue
 		std::atomic<bool>          anyWaiting{ false };  // the attach sink queues only while something waits
 
@@ -96,6 +98,7 @@ namespace Pickups
 			std::uint64_t scanned = 0;        // ... the plants those scans found
 			std::uint64_t heard = 0;          // entries heard
 			std::uint64_t catchUps = 0;       // catch-up batches heard
+			std::uint64_t trapsLeft = 0;      // taken entries naming a trap here: left to Traps (never disabled here)
 			std::uint64_t applied = 0;        // references taken out of this world
 			std::uint64_t harvestsApplied = 0;
 			std::uint64_t already = 0;        // so here already
@@ -389,6 +392,15 @@ namespace Pickups
 		void Try(const Pickup& a_entry, bool a_news, bool a_attached)
 		{
 			using State = PickupRules::Waiting::State;
+			if (a_entry.kind == Pickup::kTaken) {
+				// A trap is never taken out of the world here (a magic trap's soul gem disabled with its controller still
+				// set would leave the trap casting): Traps makes the word that it was taken, through its own script.
+				if (const auto ref = RE::TESForm::LookupByID<RE::TESObjectREFR>(a_entry.ref); ref && Traps::IsTrap(ref)) {
+					++counts.trapsLeft;
+					waiting.Remove(a_entry.ref);
+					return;
+				}
+			}
 			const auto facts = Read(a_entry.ref);
 			const auto judged = PickupRules::Receive(a_entry, facts, RespawnHours());
 			const auto was = waiting.StateOf(a_entry.ref);
@@ -484,6 +496,11 @@ namespace Pickups
 				if (!base || base->GetFormID() != a_event->baseObj) {
 					std::lock_guard guard{ queueLock };
 					++takesOtherBase;
+					return RE::BSEventNotifyControl::kContinue;
+				}
+				if (Traps::IsTrap(ref.get())) {
+					std::lock_guard guard{ queueLock };
+					++takesTrap;  // a trap taken (a magic trap's soul gem) is told by Traps, which makes its script's own end
 					return RE::BSEventNotifyControl::kContinue;
 				}
 				TakeEvent event{ .ref = ref->GetFormID(), .base = a_event->baseObj, .quest = ref->extraList.HasQuestObjectAlias() };
@@ -1051,11 +1068,13 @@ namespace Pickups
 			std::uint64_t dropped = 0;
 			std::uint64_t noRef = 0;
 			std::uint64_t otherBase = 0;
+			std::uint64_t trapTakes = 0;
 			{
 				std::lock_guard queueGuard{ queueLock };
 				dropped = queueDropped;
 				noRef = takesNoRef;
 				otherBase = takesOtherBase;
+				trapTakes = takesTrap;
 			}
 			const auto judged = [](const std::array<std::uint64_t, PickupRules::WHY_COUNT>& a_counts) {
 				std::string out;
@@ -1068,13 +1087,13 @@ namespace Pickups
 			};
 			using State = PickupRules::Waiting::State;
 			return std::format("installed={} us={} session={} queued={} waiting={} parkedNow={} madeNow={} loadedNow={} known={} plants={} heardQueued={} "
-							   "watched={} takes={} takesNoRef={} takesOtherBase={} activations={} oldActivations={} harvestEvents={} sent={} harvestsSent={} paired={} scans={} "
+							   "watched={} takes={} takesNoRef={} takesOtherBase={} takesTrap={} trapsLeft={} activations={} oldActivations={} harvestEvents={} sent={} harvestsSent={} paired={} scans={} "
 							   "scanned={} censuses={} heard={} catchUps={} applied={} harvestsApplied={} already={} bothTook={} parked={} reapplied={} held={} "
 							   "waited={} attached={} ownTakesWatched={} asks={} overflow={} refused={} eventsDropped={} heardDropped={} plantsForgot={} "
 							   "judged={} skipped={} respawnHours={:.0f} offmain={}",
 				installed ? 1 : 0, ourId, active ? 1 : 0, outbox.Size(), waiting.Count(State::kWaiting), waiting.Count(State::kParked),
 				waiting.Count(State::kMade), waiting.Loaded(), known.Size(), plants.Size(), heard.size(), harvests.Watched(), Counted(counts.takes), Counted(noRef),
-				Counted(otherBase), Counted(counts.activations), Counted(counts.oldActivations), Counted(counts.harvestEvents), Counted(counts.sent), Counted(counts.harvestsSent),
+				Counted(otherBase), Counted(trapTakes), Counted(counts.trapsLeft), Counted(counts.activations), Counted(counts.oldActivations), Counted(counts.harvestEvents), Counted(counts.sent), Counted(counts.harvestsSent),
 				Counted(counts.paired), Counted(counts.scans), Counted(counts.scanned), Counted(counts.censuses), Counted(counts.heard), Counted(counts.catchUps),
 				Counted(counts.applied), Counted(counts.harvestsApplied), Counted(counts.already), Counted(counts.bothTook), Counted(counts.parked),
 				Counted(counts.reapplied), Counted(counts.held), Counted(counts.waited), Counted(counts.attached), Counted(counts.ownTakesWatched),

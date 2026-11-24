@@ -62,11 +62,12 @@ declare -A STEP_INFO=(
 	[talk]="one player talks with an NPC (walks up, a) and the other, near, sees each line in its subtitle area or as a notice (the same line: a hash of its text) and hears the NPC's recording where its game has sound, the greeting, a topic picked (on counters of its own) and its answer, both ways; a talk's start never sends the line left up from before; one player at a time talks with an NPC: a friend using it is told no and its menu shut (steps/talk.sh)"
 	[claws]="a mechanism whose script checks its user's items (wants=) works for a friend: the VM, given the item, uses it and the host's stand-in makes the use holding the item lent, given back after; what the use did (its animations, the references it enabled or disabled) reads the same in both, nothing played twice; the reverse with the VM saving while it lends (taken back first); a pillar whose use the watcher refuses has what it did made there, both ways (steps/claws.sh)"
 	[pickups]="a loose item one player takes (walked up to, activated) goes out of the other's world (disabled), both ways; a book stays each player's own, both ways; (the VM saves, loads and rejoins) a save from before the other's take, loaded, has it out again; one from before our own take has it back, ours to take again (never sent our own); a player who joins again hears what was taken while away; a flora and a tree one player harvests read harvested in the other's and show what the harvester's 3D shows, both ways, and in a save loaded out of the session (steps/pickups.sh)"
+	[traps]="a one-shot trap (a tripwire, a breakaway floor) one player walks through (real movement, god mode on) is spent in the other's world, both ways; (the VM saves, loads and rejoins) a save from before the other set one off, loaded, has it spent again; one from before our own has it armed again, never sent its own; a player who joins again hears what went off while it was away; a bear trap one player snaps shut and sets open (an activation) is so in the other's, both ways, never sent as a mechanism's use; a magic trap's soul gem one player takes is disarmed in the other's (its trap stops), both ways; the other's game hears and makes each word and never tells a friend's stand-in's set-off as its own (steps/traps.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
-STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors quests jobs clock loot drops talk claws pickups jobsreset final"
+STEPS="preflight world join see move_vm move_host gait save_rejoin forms doors quests jobs clock loot drops talk claws pickups traps jobsreset final"
 # Steps that need the two games in one session; the state guard puts them back in one first (smoke.sh run()).
-SESSION_STEPS="see move_vm move_host gait save_rejoin forms doors quests jobs clock loot drops talk claws pickups jobsreset"
+SESSION_STEPS="see move_vm move_host gait save_rejoin forms doors quests jobs clock loot drops talk claws pickups traps jobsreset"
 # Steps a run makes only when --only names them: they change a game's files for a while (each puts them back, and the
 # set-up heals what a run that died left), which the maintainer agrees to before they run by default.
 OPTIN_STEPS="forms"
@@ -497,6 +498,7 @@ declare -F step_drops >/dev/null || . "$RIG/steps/drops.sh"
 declare -F step_talk >/dev/null || . "$RIG/steps/talk.sh"
 declare -F step_claws >/dev/null || . "$RIG/steps/claws.sh"
 declare -F step_pickups >/dev/null || . "$RIG/steps/pickups.sh"
+declare -F step_traps >/dev/null || . "$RIG/steps/traps.sh"
 
 # --- self-test: the steps' reading of the games, both games faked ------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then

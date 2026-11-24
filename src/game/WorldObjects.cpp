@@ -6,6 +6,7 @@
 #include "game/LootSync.h"
 #include "game/RefRules.h"
 #include "game/RemotePlayers.h"
+#include "game/Traps.h"
 #include "game/UseRules.h"
 #include "net/FormsCommand.h"
 
@@ -769,8 +770,8 @@ namespace WorldObjects
 					continue;
 				}
 				const auto ref = Find(note.ref);
-				if (!ref) {
-					continue;
+				if (!ref || Traps::IsTrap(ref)) {
+					continue;  // a trap's animation is its own word's (src/game/Traps.h), never a use's effect
 				}
 				for (const auto& use : watched) {
 					const auto mechanism = Find(use.mechanism);
@@ -822,6 +823,9 @@ namespace WorldObjects
 				if (!UseRules::EnableSays(PlacedOf(change.ref), change.disabled)) {
 					continue;  // a carryable item gone: a pickup, loot's and drops'
 				}
+				if (Traps::IsTrap(change.ref)) {
+					continue;  // a trap disabled (a magic trap's gem, a breakaway floor): its own word's
+				}
 				capture.Add(change.seq, change.ref->GetFormID(), change.disabled ? Protocol::UseEffect::kDisable : Protocol::UseEffect::kEnable, {}, a_now);
 			}
 		}
@@ -835,6 +839,10 @@ namespace WorldObjects
 				const auto  cell = ref ? ref->GetParentCell() : nullptr;
 				if (!ref || ref->IsDeleted() || !cell || !cell->IsAttached()) {
 					++useCounts.unloaded;
+					continue;
+				}
+				if (Traps::IsTrap(ref)) {
+					++useCounts.refusedKind;  // a trap is made by its own word (src/game/Traps.h), never by a use's effect
 					continue;
 				}
 				if (effect.what == Protocol::UseEffect::kAnim) {
@@ -907,6 +915,9 @@ namespace WorldObjects
 			const auto ref = Find(a_event.ref);
 			if (!ref || !ref->Is3DLoaded()) {
 				return;
+			}
+			if (Traps::IsTrap(ref)) {
+				return;  // a trap's state and its use are its own word's (src/game/Traps.h): never a door's or a mechanism's
 			}
 			const auto facts = FactsOf(ref);
 			const auto shares = RefRules::Of(facts);
@@ -1310,6 +1321,7 @@ namespace WorldObjects
 			.mechanism = RefRules::Of(facts).use,
 			.standIn = standIn != nullptr,
 			.standInDistance = ref && standIn ? Distance(standIn, ref) : -1.0f,
+			.trap = Traps::IsTrap(ref),
 		});
 		// Its effects (what it did in the user's game) are timed from now here, made or not: a use not made here is
 		// followed by its effects alone.

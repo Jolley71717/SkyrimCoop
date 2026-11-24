@@ -48,6 +48,8 @@
 //   the mechanism becomes 0, and a batch left with no effect is not sent (kDrop).
 // - a pickup (kPickups, kRemotePickups) whose reference or base has no ID on the other side is left out (a mod's item or
 //   plant some game lacks is that game's own), and a batch left with none is not sent (kDrop).
+// - a trap (kTraps, kRemoteTraps) whose reference or base has no ID on the other side is left out (a mod's trap some game
+//   lacks is that game's own), and a batch left with none is not sent (kDrop).
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
 // has one (FormIds::Shareable), and a receiver never looks one up.
@@ -118,6 +120,8 @@ namespace FormTranslate
 		case MT::kRemoteUseEffects:
 		case MT::kPickups:
 		case MT::kRemotePickups:
+		case MT::kTraps:
+		case MT::kRemoteTraps:
 			return true;
 		case MT::kClaimDrop:  // drop numbers, no forms
 		case MT::kDropGone:
@@ -136,6 +140,7 @@ namespace FormTranslate
 		case MT::kAskQuests:
 		case MT::kQuestReset:
 		case MT::kAskPickups:
+		case MT::kAskTraps:
 			return false;
 		}
 		return false;  // a type this version does not know
@@ -523,6 +528,34 @@ namespace FormTranslate
 			}
 		}
 
+		// Traps, written back with their own type: the entries whose reference and base both have an ID on the other side
+		// (none left is kDrop: a batch with no entry can't be read).
+		inline void ApplyTraps(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeTrapBatch(a_packet);
+			if (!msg) {
+				return;
+			}
+			std::vector<Protocol::Trap> kept;
+			kept.reserve(msg->entries.size());
+			for (auto entry : msg->entries) {
+				if (a_ctx.Key(entry.ref) && a_ctx.Key(entry.base)) {
+					kept.push_back(entry);
+				}
+			}
+			const auto left = msg->entries.size() - kept.size();
+			a_ctx.out.entries += static_cast<std::uint32_t>(left);
+			if (kept.empty()) {
+				a_ctx.out.kind = Result::Kind::kDrop;
+				return;
+			}
+			if (a_ctx.changed || left != 0) {
+				msg->entries = std::move(kept);
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
+			}
+		}
+
 		// A talk with an NPC (kTalk) and its answer (kTalkAnswer): kDrop when the NPC has no ID on the other side. That NPC
 		// is the game's own (a mod's some game lacks): nobody else can talk with it in their game, so no talk of it is
 		// kept, and a game that hears no answer talks on.
@@ -640,6 +673,10 @@ namespace FormTranslate
 		case MT::kPickups:
 		case MT::kRemotePickups:
 			detail::ApplyPickups(a_packet, ctx, *type);
+			break;
+		case MT::kTraps:
+		case MT::kRemoteTraps:
+			detail::ApplyTraps(a_packet, ctx, *type);
 			break;
 		default:
 			break;
