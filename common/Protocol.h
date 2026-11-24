@@ -59,11 +59,14 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
+	// 27: a player's magic on an NPC another game runs is dealt by that game (kNpcEffects, message type 77): every effect
+	//    of a spell, a shout, an enchantment or a poison but the health it takes (which kNpcHits carries); and a player's
+	//    Slow Time slows the world for every player near (kSlowTimes, type 78). (As with 21: renumbered when it lands.)
 	// 26: an NPC's state carries its graph's flight values (NpcGraph: TurnDelta, PitchDelta, TargetSpeed), which the
 	//    engine feeds a graph from the actor's movement and a copy has none of, so a copied dragon banks, climbs and
 	//    dives as its runner's does; and whether it is a body that died flying and still crashes (NpcGraph::crash).
 	//    (As with 21: renumbered when it lands; 25 is another change's.)
-	inline constexpr std::uint16_t VERSION = 26;
+	inline constexpr std::uint16_t VERSION = 27;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -134,6 +137,8 @@ namespace Protocol
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
 		// 59-75: the other changes' messages (each in its own change).
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
+		kNpcEffects = 77,  // client -> server -> the NPC's runner alone, reliable: our player's magic effects on copies (but health)
+		kSlowTimes = 78,   // client -> server -> the others, reliable: our player's Slow Time, for every player near to share
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2267,6 +2272,160 @@ namespace Protocol
 	inline constexpr std::size_t PAIR_BYTES = 2 * (4 + 8) + 4 + 4 + 1 + MAX_EVENT_NAME + 1 + 4 * 4;
 	inline constexpr std::size_t MAX_PAIRS_SIZE = 1 + 4 + 1 + MAX_PAIRS * PAIR_BYTES;
 	static_assert(MAX_PAIRS <= 0xFF && MAX_PAIRS_SIZE <= 2048, "a message of pairs stays small");
+
+	// ---- magic on NPCs another game runs, and Slow Time (protocol 27) ----
+	// A player's spell, shout, enchantment or poison on a copy of an NPC another game runs takes hold in that game, on the
+	// real NPC, effect by effect (docs/DESIGN.md, "Magic on NPCs"): the copy here only shows what its runner's game makes
+	// of it. What an effect takes from health is not in it: the copy's own health share goes as a hit (kNpcHits).
+
+	// At most this many in one message (a game sends what a tick saw).
+	inline constexpr std::size_t MAX_NPC_EFFECTS = 16;
+
+	enum NpcEffectFlags : std::uint8_t
+	{
+		kEffectDual = 1 << 0,  // dual cast
+		kEffectArea = 1 << 1,  // it reached the NPC as an area's (an explosion's, a cone's) target
+	};
+	inline constexpr std::uint8_t kEffectAllFlags = kEffectDual | kEffectArea;
+	// MagicSystem::CastingSource: left hand, right hand, other (a voice, a power), instant (a scroll, a potion, a trap).
+	inline constexpr std::uint8_t MAX_CASTING_SOURCE = 3;
+
+	// One effect: key, the NPC as the session names it; item, the magic item it is of (a spell, a shout's word's spell, an
+	// enchantment, a poison, a potion, a scroll, an ingredient); index, which of its effects; source, what dealt it (a
+	// weapon an enchantment or a poison is on; 0: none); magnitude and power as the game reckoned them as it put the
+	// effect on the copy (the caster's skill and perks in them).
+	struct NpcEffect
+	{
+		NpcKey        key;
+		std::uint32_t item = 0;
+		std::uint8_t  index = 0;
+		std::uint32_t source = 0;
+		float         magnitude = 0;
+		float         power = 1;
+		std::uint8_t  castingSource = 0;
+		std::uint8_t  flags = 0;
+		bool operator==(const NpcEffect&) const = default;
+	};
+
+	// caster: 0 from a game; the server names the game that sent them (its player cast them).
+	struct NpcEffects
+	{
+		std::uint32_t          caster = 0;
+		std::vector<NpcEffect> effects;
+		bool operator==(const NpcEffects&) const = default;
+	};
+
+	// A magnitude or a power the game could have reckoned: finite, not below 0, and below a bound no effect reaches.
+	[[nodiscard]] inline bool IsEffectAmount(float a_value)
+	{
+		return std::isfinite(a_value) && a_value >= 0.0f && a_value <= 1.0e6f;
+	}
+
+	[[nodiscard]] inline bool NpcEffectHolds(const NpcEffect& a_effect)
+	{
+		return a_effect.key.id != 0 && a_effect.item != 0 && IsEffectAmount(a_effect.magnitude) && IsEffectAmount(a_effect.power) &&
+		       a_effect.castingSource <= MAX_CASTING_SOURCE && (a_effect.flags & ~kEffectAllFlags) == 0;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcEffects& a_msg)
+	{
+		Writer     w{ MessageType::kNpcEffects };
+		const auto count = (std::min)(a_msg.effects.size(), MAX_NPC_EFFECTS);
+		w.U32(a_msg.caster);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& effect = a_msg.effects[i];
+			WriteKey(w, effect.key);
+			w.U32(effect.item);
+			w.U8(effect.index);
+			w.U32(effect.source);
+			w.F32(effect.magnitude);
+			w.F32(effect.power);
+			w.U8(effect.castingSource);
+			w.U8(effect.flags);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_EFFECTS, or an effect that does not hold (NpcEffectHolds). An empty list reads (the
+	// translation may leave every effect out).
+	inline std::optional<NpcEffects> DecodeNpcEffects(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcEffects msg;
+		msg.caster = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_NPC_EFFECTS) {
+			return std::nullopt;
+		}
+		msg.effects.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			NpcEffect effect;
+			effect.key = ReadKey(r);
+			effect.item = r.U32();
+			effect.index = r.U8();
+			effect.source = r.U32();
+			effect.magnitude = r.F32();
+			effect.power = r.F32();
+			effect.castingSource = r.U8();
+			effect.flags = r.U8();
+			if (r.Ok() && !NpcEffectHolds(effect)) {
+				return std::nullopt;
+			}
+			msg.effects.push_back(effect);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t NPC_EFFECT_BYTES = 8 + 4 + 1 + 4 + 4 + 4 + 1 + 1;
+	inline constexpr std::size_t MAX_NPC_EFFECTS_SIZE = 1 + 4 + 1 + MAX_NPC_EFFECTS * NPC_EFFECT_BYTES;
+	static_assert(MAX_NPC_EFFECTS <= 0xFF && MAX_NPC_EFFECTS_SIZE <= 1200, "a message of effects stays one datagram");
+
+	// A player's Slow Time (the game's slow-time kind of effect, on themselves): every other game whose player is near
+	// that player's stand-in puts the same effect on its own player, so the world slows in every game and every player has
+	// the edge (a world slowed in one game only would leave the NPCs other games run at full speed there). player: 0 from a
+	// game; the server names it. item and index as NpcEffect's; magnitude, the time's rate (0.3: three tenths).
+	struct SlowTime
+	{
+		std::uint32_t player = 0;
+		std::uint32_t item = 0;
+		std::uint8_t  index = 0;
+		float         magnitude = 0;
+		float         power = 1;
+		bool operator==(const SlowTime&) const = default;
+	};
+
+	inline std::vector<std::uint8_t> Encode(const SlowTime& a_msg)
+	{
+		Writer w{ MessageType::kSlowTimes };
+		w.U32(a_msg.player);
+		w.U32(a_msg.item);
+		w.U8(a_msg.index);
+		w.F32(a_msg.magnitude);
+		w.F32(a_msg.power);
+		return w.Data();
+	}
+
+	// None for no item, or a rate or power that is no amount.
+	inline std::optional<SlowTime> DecodeSlowTime(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		SlowTime msg;
+		msg.player = r.U32();
+		msg.item = r.U32();
+		msg.index = r.U8();
+		msg.magnitude = r.F32();
+		msg.power = r.F32();
+		if (!r.AtEnd() || msg.item == 0 || !IsEffectAmount(msg.magnitude) || !IsEffectAmount(msg.power)) {
+			return std::nullopt;
+		}
+		return msg;
+	}
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

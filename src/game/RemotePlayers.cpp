@@ -2,6 +2,7 @@
 
 #include "DevLine.h"
 #include "FormIds.h"
+#include "game/Effects.h"
 #include "game/Face.h"
 #include "game/FaceRules.h"
 #include "game/Gait.h"
@@ -541,8 +542,8 @@ namespace RemotePlayers
 		// taken only when one of the two is a stand-in or on its way out (watchedIds, read with no lock).
 		bool LetMagic(RE::MagicTarget* a_this, const RE::MagicTarget::AddTargetData& a_data)
 		{
-			if (!Watching() || !a_this) {
-				return true;
+			if (!Watching() || !a_this || Effects::Applying()) {
+				return true;  // (Applying: a friend's effect on an NPC we run, or their Slow Time, put on by Effects with their stand-in as caster)
 			}
 			// The caster when it is an actor (a trap or a hazard casts too: never a stand-in).
 			const auto casterRef = a_data.caster;
@@ -558,6 +559,13 @@ namespace RemotePlayers
 			// game makes the real summon, the real raised corpse. Asked only of the archetypes that would (NpcSync's
 			// lookup of its copies takes no lock: an id set).
 			if (caster && !casterWatched && SpellRules::Judged(archetype) && NpcSync::RefusesCopyMagic(caster, archetype)) {
+				return false;
+			}
+			// Our player's on a copy of an NPC another game runs: what that game deals (all but health and what makes or moves
+			// something here) is held back and sent to it (Effects.h). Our player's on themselves: a Slow Time is said.
+			if (onItself) {
+				Effects::NoteSelf(caster, a_data, archetype);
+			} else if (caster && target && Effects::Forwards(caster, target, a_data, archetype)) {
 				return false;
 			}
 			if (!casterWatched && !targetWatched) {

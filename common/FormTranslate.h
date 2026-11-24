@@ -85,6 +85,8 @@ namespace FormTranslate
 		case MT::kShots:
 		case MT::kSits:
 		case MT::kPairs:
+		case MT::kNpcEffects:
+		case MT::kSlowTimes:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -429,6 +431,21 @@ namespace FormTranslate
 					ctx.Detail(pair.idle);
 				}
 			});
+			break;
+		// Magic on NPCs other games run: an effect on an NPC the other side lacks, or of a magic item it lacks (a mod's spell,
+		// a potion or an enchantment the player made: runtime forms), is left out; a source it lacks (the weapon an
+		// enchantment is on) becomes none.
+		case MT::kNpcEffects:
+			detail::Apply<Protocol::NpcEffects>(a_packet, ctx, Protocol::DecodeNpcEffects, [&](Protocol::NpcEffects& a_msg) {
+				ctx.Entries(a_msg.effects, [&](Protocol::NpcEffect& a_effect) { return ctx.Npc(a_effect.key) && ctx.Key(a_effect.item); });
+				for (auto& effect : a_msg.effects) {
+					ctx.Detail(effect.source);
+				}
+			});
+			break;
+		// Slow Time: a magic item the other side lacks reads none, which its reader refuses (nothing to put on its player).
+		case MT::kSlowTimes:
+			detail::Apply<Protocol::SlowTime>(a_packet, ctx, Protocol::DecodeSlowTime, [&](Protocol::SlowTime& a_msg) { ctx.Detail(a_msg.item); });
 			break;
 		default:
 			break;
