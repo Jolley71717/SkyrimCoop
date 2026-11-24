@@ -14,6 +14,7 @@
 #include "game/NpcSync.h"
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
+#include "game/Riding.h"
 #include "game/VirtualPad.h"
 #include "net/Session.h"
 #include "steam/Steam.h"
@@ -209,6 +210,7 @@ namespace
 		case SKSE::MessagingInterface::kPreLoadGame:
 			// Which save is loaded: the line a report of "an old save" is read by.
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
+			Riding::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
 			break;
@@ -220,6 +222,7 @@ namespace
 			break;
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
+			Riding::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
 			CheckSteam();
@@ -261,6 +264,7 @@ namespace
 
 	void OnRevert(SKSE::SerializationInterface*)
 	{
+		Riding::ForgetWorld();
 		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();
 	}

@@ -81,6 +81,7 @@ namespace FormTranslate
 		case MT::kNpcDeaths:
 		case MT::kPlayerFace:
 		case MT::kRemoteFace:
+		case MT::kRides:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -374,6 +375,20 @@ namespace FormTranslate
 		case MT::kNpcDeaths:
 			detail::Apply<Protocol::NpcDeaths>(a_packet, ctx, Protocol::DecodeNpcDeaths, [&](Protocol::NpcDeaths& a_msg) {
 				ctx.Entries(a_msg.deaths, [&](Protocol::NpcDeath& a_death) { return ctx.Npc(a_death.key); });
+			});
+			break;
+		// Rides: an NPC rider the other side lacks is left out (it has no copy to seat); a mount it lacks becomes none (id
+		// 0), the ride kept, so the rider is shown on foot rather than not at all.
+		case MT::kRides:
+			detail::Apply<Protocol::Rides>(a_packet, ctx, Protocol::DecodeRides, [&](Protocol::Rides& a_msg) {
+				ctx.Entries(a_msg.rides, [&](Protocol::Ride& a_ride) { return a_ride.player != 0 || ctx.Npc(a_ride.rider); });
+				for (auto& ride : a_msg.rides) {
+					if (ride.mount.id != 0 && !ctx.Npc(ride.mount)) {
+						ride.mount = {};
+						++ctx.out.fields;
+						ctx.changed = true;
+					}
+				}
 			});
 			break;
 		default:
