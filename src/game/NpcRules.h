@@ -77,6 +77,9 @@ namespace NpcRules
 		// at once, not at the follower's pace), or by an NPC another game runs (riddenThere: that game runs it).
 		bool                             ridden = false;
 		bool                             riddenThere = false;
+		// A body we ran that died flying and still falls (Crash): kept until it lies still, so its crash states go on from
+		// one game (handed over now, its new runner would never send them).
+		bool                             crashing = false;
 		std::optional<Clock::time_point> lastClaim;     // our last claim of it, of any kind
 		// Our last kFollower claim of it, kept until we say kHave or kRelease of it: none, the book has not heard from us
 		// that it follows our player (or has heard that it stopped).
@@ -103,6 +106,9 @@ namespace NpcRules
 		}
 		switch (a_facts.owner) {
 		case Owner::kUs:
+			if (a_facts.crashing) {
+				return Ask::kNone;
+			}
 			if (a_facts.riddenThere && !a_facts.ridden) {
 				// A mount an NPC of another game's rides goes with its rider: that game asks for it (as its follower).
 				return since(CLAIM_EVERY) ? Ask::kRelease : Ask::kNone;
@@ -222,16 +228,23 @@ namespace NpcRules
 	// left to its own AI and walks its own way until the states come back (it is put where they say then): a runner
 	// whose game is on a loading screen, an NPC that went through a door ours did not, one moved far by a script.
 	inline constexpr float MIRROR_WITHIN = 8000.0f;
+	// A flyer in the air (its state says it flies, or it crashes: Crash) is followed further. A dragon circles wide over
+	// a fight, high up: left to its own AI past MIRROR_WITHIN it would fly its own way in each game, and come back to the
+	// fight from another side than its runner's (or land elsewhere). Up to FLYER_MIRROR_WITHIN, and only over cells this
+	// game has loaded: the loaded grid's edge can be as near as two cells (8192 u) along an axis at the default grid, and a
+	// copy placed beyond it would lose its 3D and its cell.
+	inline constexpr float FLYER_MIRROR_WITHIN = 12000.0f;
 
 	enum class Mode
 	{
 		kMirror,
 		kSilent,     // no recent state
 		kElsewhere,  // its runner has it in another space than our player's
-		kFar,        // its runner has it further from our player than MIRROR_WITHIN
+		kFar,        // its runner has it further from our player than MIRROR_WITHIN (in the air: FLYER_MIRROR_WITHIN, or not over a loaded cell)
 	};
 
-	[[nodiscard]] inline Mode CopyMode(bool a_recentState, bool a_sameSpace, std::optional<float> a_fromOurPlayer)
+	// a_overLoaded: where its runner has it is over a cell this game has loaded (asked only of a flyer past MIRROR_WITHIN).
+	[[nodiscard]] inline Mode CopyMode(bool a_recentState, bool a_sameSpace, std::optional<float> a_fromOurPlayer, bool a_inTheAir = false, bool a_overLoaded = true)
 	{
 		if (!a_recentState) {
 			return Mode::kSilent;
@@ -239,10 +252,104 @@ namespace NpcRules
 		if (!a_sameSpace) {
 			return Mode::kElsewhere;
 		}
-		if (!a_fromOurPlayer || *a_fromOurPlayer > MIRROR_WITHIN) {
+		if (!a_fromOurPlayer) {
+			return Mode::kFar;
+		}
+		if (*a_fromOurPlayer > MIRROR_WITHIN && !(a_inTheAir && a_overLoaded && *a_fromOurPlayer <= FLYER_MIRROR_WITHIN)) {
 			return Mode::kFar;
 		}
 		return Mode::kMirror;
+	}
+
+	// ---- a flyer's crash ----
+
+	// A flyer that dies in the air (a dragon shot down) falls and slides along the ground before it lies still, in its
+	// runner's game. A copy killed at once, where it was drawn, would drop straight down in each other game and lie there,
+	// far from its runner's body (a dragon's body is where its soul is absorbed and its bones are looted). So its runner
+	// goes on sending where its body is while it moves (NpcGraph::crash), every copy is kept alive and follows it, and
+	// it is killed where its runner's body came to rest (HoldsDeath).
+	//
+	// The body lies still once it moved less than CRASH_STILL in CRASH_STILL_FOR; its crash is over after CRASH_MOST
+	// whatever it does (a body caught on a slope that twitches).
+	inline constexpr auto  CRASH_MOST = 20s;
+	inline constexpr float CRASH_STILL = 5.0f;
+	inline constexpr auto  CRASH_STILL_FOR = 1s;
+	// A copy holds its runner's death while its last crash state is this fresh (its runner sends them 20 a second).
+	inline constexpr auto  CRASH_FRESH = 500ms;
+
+	// The runner's side: one NPC's crash, from the death it sees.
+	class Crash
+	{
+	public:
+		// Its NPC is dead (each frame it is seen dead): a_wasFlying, the last state sent of it before said it flew. Only
+		// the first call after a Reset counts, so one that died on the ground and is lifted by a spell never crashes.
+		void Died(bool a_wasFlying, Clock::time_point a_now)
+		{
+			if (started) {
+				return;
+			}
+			started = true;
+			active = a_wasFlying;
+			since = a_now;
+			stillSince = a_now;
+			at.reset();
+		}
+
+		// Where its body is now: true while it still crashes (a state goes out), false once it lies still or it crashed for
+		// CRASH_MOST, and from then on.
+		bool Follow(float a_x, float a_y, float a_z, Clock::time_point a_now)
+		{
+			if (!active) {
+				return false;
+			}
+			if (a_now - since >= CRASH_MOST) {
+				active = false;
+				return false;
+			}
+			const auto moved = [&] {
+				const float dx = a_x - (*at)[0], dy = a_y - (*at)[1], dz = a_z - (*at)[2];
+				return !(dx * dx + dy * dy + dz * dz <= CRASH_STILL * CRASH_STILL);
+			};
+			if (!at || moved()) {
+				at = std::array<float, 3>{ a_x, a_y, a_z };
+				stillSince = a_now;
+			} else if (a_now - stillSince >= CRASH_STILL_FOR) {
+				active = false;
+				return false;
+			}
+			return true;
+		}
+
+		// It lives (or was never seen dead).
+		void Reset() { *this = {}; }
+
+		[[nodiscard]] bool Started() const { return started; }
+		[[nodiscard]] bool Active() const { return active; }
+
+	private:
+		bool                                started = false;
+		bool                                active = false;
+		Clock::time_point                   since{};
+		Clock::time_point                   stillSince{};
+		std::optional<std::array<float, 3>> at;
+	};
+
+	// A copy's side: its runner's death is held (it is kept alive and followed) while its runner's crash states come, and
+	// while its last state that said it flies is that fresh: the death (sent reliably) may come before the first crash
+	// state (sent as states are), and a flyer that died in the air is followed from its first one.
+	[[nodiscard]] inline bool HoldsDeath(std::optional<Clock::time_point> a_lastCrashState, std::optional<Clock::time_point> a_lastFlyingState, Clock::time_point a_now)
+	{
+		const auto fresh = [&](const std::optional<Clock::time_point>& a_at) { return a_at && a_now - *a_at < CRASH_FRESH; };
+		return fresh(a_lastCrashState) || fresh(a_lastFlyingState);
+	}
+
+	// Whether this game kills now an NPC alive here that the session has dead (CopyHealth::KillsOnLoad): not while it is in
+	// a kill move (the move kills it), nor while it is a copy whose runner's body crashes (HoldsDeath: it follows that body
+	// and is killed where it came to rest). Either is killed afterwards if it still lives; meanwhile it stays the
+	// session's dead and is never asked for, so nobody takes a falling body over mid-crash.
+	[[nodiscard]] constexpr bool KillsSessionDeadNow(bool a_inKillMove, bool a_crashing)
+	{
+		return !a_inKillMove && !a_crashing;
 	}
 
 	[[nodiscard]] constexpr std::string_view ModeName(Mode a_mode)

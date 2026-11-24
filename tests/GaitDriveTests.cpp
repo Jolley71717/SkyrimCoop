@@ -55,3 +55,32 @@ TEST("gait drive: a stand-in taken away, or all of them, leave nothing behind")
 	table.Clear();
 	CHECK(table.Size() == 0);
 }
+
+TEST("gait drive: a flyer's flight values are held for its address, read without the actor, and counted while any is set")
+{
+	GaitDrive::Table<int> table;
+	CHECK(!table.AnyFlight());
+	table.Set(1, 0xFF000801, { 150.0f, 0.0f }, T0);
+	CHECK(!table.AnyFlight());  // a walker: the flight channels skip the table
+	const GaitDrive::Values flying{ .speed = 900.0f, .flight = true, .turnDelta = -0.5f, .pitchDelta = 0.25f, .targetSpeed = 1800.0f };
+	table.Set(2, 0x000F77F8, flying, T0);
+	CHECK(table.AnyFlight());
+	const auto held = table.Held(2, T0 + 10ms);
+	CHECK(held.has_value());
+	CHECK(held->first == 0x000F77F8u);
+	CHECK(held->second == flying);
+	CHECK(!table.Held(3, T0).has_value());                          // an address nothing was set for
+	CHECK(!table.Held(2, T0 + GaitDrive::FRESH + 1ms).has_value());  // stale
+	// Landed: set again without flight.
+	table.Set(2, 0x000F77F8, { 300.0f, 0.0f }, T0 + 1s);
+	CHECK(!table.AnyFlight());
+	table.Set(2, 0x000F77F8, flying, T0 + 2s);
+	table.Set(3, 0x000F77F9, flying, T0 + 2s);
+	table.Erase(2);
+	CHECK(table.AnyFlight());
+	table.Erase(3);
+	CHECK(!table.AnyFlight());
+	table.Set(3, 0x000F77F9, flying, T0 + 3s);
+	table.Clear();
+	CHECK(!table.AnyFlight());
+}

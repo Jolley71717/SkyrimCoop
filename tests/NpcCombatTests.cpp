@@ -681,6 +681,21 @@ TEST("copy health: its runner's death kills a copy, after any kill move it is in
 	CHECK(!r.copy.RunnerDead());
 }
 
+TEST("copy health: a flyer shot down in its runner's game dies here once its body lies still, not in the air")
+{
+	Run r;
+	r.Look({ .share = 1.0f });
+	r.copy.Died();
+	// Its runner's body still falls and slides (NpcRules::Crash): the copy follows it, alive.
+	CHECK(r.Look({ .share = 0.5f, .crashing = true }).what == Do::kNothing);
+	r.t += 5s;
+	CHECK(r.Look({ .share = 0.5f, .crashing = true }).what == Do::kNothing);
+	CHECK(r.counts.kills == 0u);
+	// It lies still: killed there.
+	CHECK(r.Look({ .share = 0.5f }).what == Do::kKill);
+	CHECK(r.counts.kills == 1u);
+}
+
 TEST("copy health: a copy dead here while its runner's NPC lives is raised after REVIVE_AFTER, unless it may not be or is down at none")
 {
 	Run r;

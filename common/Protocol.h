@@ -59,7 +59,11 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	inline constexpr std::uint16_t VERSION = 24;
+	// 26: an NPC's state carries its graph's flight values (NpcGraph: TurnDelta, PitchDelta, TargetSpeed), which the
+	//    engine feeds a graph from the actor's movement and a copy has none of, so a copied dragon banks, climbs and
+	//    dives as its runner's does; and whether it is a body that died flying and still crashes (NpcGraph::crash).
+	//    (As with 21: renumbered when it lands; 25 is another change's.)
+	inline constexpr std::uint16_t VERSION = 26;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -454,6 +458,38 @@ namespace Protocol
 		bool operator==(const NpcOwners&) const = default;
 	};
 
+	// The values an NPC's graph is fed from its movement besides Speed and Direction (the engine's graph data channels:
+	// ActorTurnDeltaChannel, ActorPitchDeltaChannel, ActorTargetSpeedChannel), as its runner's graph had them. A copy's AI
+	// never runs, so its movement feeds it none of them; a flyer's graph blends its flight by them (banking, climbing,
+	// diving, flapping or gliding: docs/DESIGN.md, "Dragons"). TurnDelta and PitchDelta in thousandths (the graph's own
+	// units), TargetSpeed in whole units per second; all 0 for an NPC whose race does not fly (its copy's graph keeps the
+	// engine's). crash: the NPC died flying and its body still falls or slides (NpcRules::Crash): its runner goes on
+	// sending where it is, and every copy follows it there before it dies.
+	struct NpcGraph
+	{
+		std::int16_t turnDelta = 0;
+		std::int16_t pitchDelta = 0;
+		std::int16_t targetSpeed = 0;
+		bool         crash = false;
+
+		bool operator==(const NpcGraph&) const = default;
+	};
+
+	inline constexpr float GRAPH_DELTA_SCALE = 1000.0f;
+	inline constexpr float GRAPH_SPEED_SCALE = 1.0f;
+
+	[[nodiscard]] inline std::int16_t PackGraphValue(float a_value, float a_scale)
+	{
+		if (!std::isfinite(a_value)) {
+			return 0;
+		}
+		return static_cast<std::int16_t>(std::clamp(std::lround(a_value * a_scale), -32767L, 32767L));
+	}
+	[[nodiscard]] inline float UnpackGraphValue(std::int16_t a_value, float a_scale)
+	{
+		return static_cast<float>(a_value) / a_scale;
+	}
+
 	// One NPC's state: base is the NPC its game made it of (its leveled pick's, for one placed from a leveled list; 0
 	// when not known), which a spawn's copy is placed from and a copy's look is checked against. state.sequence counts
 	// that NPC's states.
@@ -462,6 +498,7 @@ namespace Protocol
 		NpcKey        key;
 		std::uint32_t base = 0;
 		PlayerState   state;
+		NpcGraph      graph;
 		bool operator==(const NpcState&) const = default;
 	};
 
@@ -1657,6 +1694,11 @@ namespace Protocol
 			WriteKey(w, a_msg.npcs[i].key);
 			w.U32(a_msg.npcs[i].base);
 			WriteState(w, a_msg.npcs[i].state);
+			const auto& graph = a_msg.npcs[i].graph;
+			w.U16(static_cast<std::uint16_t>(graph.turnDelta));
+			w.U16(static_cast<std::uint16_t>(graph.pitchDelta));
+			w.U16(static_cast<std::uint16_t>(graph.targetSpeed));
+			w.U8(graph.crash ? 1 : 0);
 		}
 		return w.Data();
 	}
@@ -1678,6 +1720,10 @@ namespace Protocol
 			npc.key = ReadKey(r);
 			npc.base = r.U32();
 			npc.state = ReadState(r);
+			npc.graph.turnDelta = static_cast<std::int16_t>(r.U16());
+			npc.graph.pitchDelta = static_cast<std::int16_t>(r.U16());
+			npc.graph.targetSpeed = static_cast<std::int16_t>(r.U16());
+			npc.graph.crash = r.U8() != 0;
 			if (r.Ok() && (npc.key.id == 0 || !npc.state.IsFinite())) {
 				return std::nullopt;
 			}
@@ -2303,7 +2349,8 @@ namespace Protocol
 	inline constexpr std::size_t KEY_BYTES = 8;
 	inline constexpr std::size_t STATE_BYTES = 4 + 4 + 4 + 4 * 5 + 1 + 4 + 1 + 1;
 	inline constexpr std::size_t MAX_NPC_OWNERS_SIZE = 1 + 1 + 2 + MAX_NPCS * (KEY_BYTES + 4);
-	inline constexpr std::size_t MAX_NPC_STATES_SIZE = 1 + 4 + 1 + MAX_NPC_STATES * (KEY_BYTES + 4 + STATE_BYTES);
+	inline constexpr std::size_t GRAPH_BYTES = 2 * 3 + 1;
+	inline constexpr std::size_t MAX_NPC_STATES_SIZE = 1 + 4 + 1 + MAX_NPC_STATES * (KEY_BYTES + 4 + STATE_BYTES + GRAPH_BYTES);
 	inline constexpr std::size_t MAX_NPC_ACTIONS_SIZE = 1 + 4 + 1 + MAX_NPC_ACTIONS * (KEY_BYTES + 4 + 1 + MAX_EVENT_NAME);
 	static_assert(MAX_NPC_OWNERS_SIZE <= MAX_MESSAGE_SIZE && MAX_NPC_ACTIONS_SIZE <= MAX_MESSAGE_SIZE);
 	static_assert(MAX_NPC_STATES_SIZE <= 1200, "a batch of NPC states stays about one datagram");

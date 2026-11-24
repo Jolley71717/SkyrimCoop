@@ -53,6 +53,7 @@ namespace CopyHealth
 		float share = 1;
 		bool  dead = false;
 		bool  inKillMove = false;
+		bool  crashing = false;  // its runner's body still crashes (NpcRules::Crash): its death waits
 		float floor = 0;
 		float ourDrain = 0;
 		bool  killedByUs = false;
@@ -197,8 +198,9 @@ namespace CopyHealth
 			};
 
 			if (runnerDead) {
-				// Its runner's NPC is dead: the copy dies too, once out of any kill move (the move kills it itself).
-				if (a_seen.dead || a_seen.inKillMove) {
+				// Its runner's NPC is dead: the copy dies too, once out of any kill move (the move kills it itself), and once its
+				// runner's body, shot down in flight, lies still (it is killed where that body came to rest).
+				if (a_seen.dead || a_seen.inKillMove || a_seen.crashing) {
 					return {};
 				}
 				if (killTried && a_now - *killTried < KILL_AGAIN) {

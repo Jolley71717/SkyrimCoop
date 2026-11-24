@@ -7,6 +7,7 @@
 #include "game/Prediction.h"
 #include "game/StateBuffer.h"
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -93,6 +94,11 @@ TEST("npc protocol: claims, owners, states, actions and gear read back as they w
 
 	const Protocol::NpcStates states{ .runner = 2, .npcs = { { GUARD, 0x00013BBF, StateAt(5, 10.0f) }, { ATRONACH_OF_1, 0x000204C0, StateAt(9, -40.0f) } } };
 	CHECK(Protocol::DecodeNpcStates(Protocol::Encode(states)) == states);
+	// A dragon's, its flight values with it (protocol 26), and a body that died flying and still crashes.
+	const Protocol::NpcGraph flight{ .turnDelta = -1234, .pitchDelta = 567, .targetSpeed = 1800 };
+	const Protocol::NpcGraph crash{ .turnDelta = 12, .pitchDelta = -3, .targetSpeed = 0, .crash = true };
+	const Protocol::NpcStates dragons{ .runner = 2, .npcs = { { WOLF, 0x000F77F8, StateAt(3, 20.0f), flight }, { GUARD, 0x000F77F8, StateAt(4, 20.0f), crash } } };
+	CHECK(Protocol::DecodeNpcStates(Protocol::Encode(dragons)) == dragons);
 
 	const Protocol::NpcActions actions{ .runner = 2, .actions = { { GUARD, 1234, "attackStart" }, { WOLF, 0, "FlyStartCruise" } } };
 	CHECK(Protocol::DecodeNpcActions(Protocol::Encode(actions)) == actions);
@@ -118,7 +124,7 @@ TEST("npc protocol: the longest of each message fits its limit, and one past a l
 
 	Protocol::NpcStates states;
 	for (std::uint32_t i = 0; i < Protocol::MAX_NPC_STATES; ++i) {
-		states.npcs.push_back({ { 0x00100000 + i, 0 }, 0x00013BBF, StateAt(i + 1, 10.0f) });
+		states.npcs.push_back({ { 0x00100000 + i, 0 }, 0x00013BBF, StateAt(i + 1, 10.0f), { .turnDelta = -32767, .pitchDelta = 32767, .targetSpeed = 32767, .crash = true } });
 	}
 	const auto stateBytes = Protocol::Encode(states);
 	CHECK(stateBytes.size() <= Protocol::MAX_NPC_STATES_SIZE);
@@ -504,6 +510,13 @@ TEST("npc rules: the runner lets go of an NPC its player left behind for a frien
 	CHECK(Decide(near, t) == Ask::kNone);
 	Facts behind{ .owner = Owner::kUs, .ours = HANDOFF_FAR + 1.0f, .nearestFriend = 200.0f };
 	CHECK(Decide(behind, t) == Ask::kRelease);
+	// A dragon's body still falling is kept by the game that sends its crash, then let go.
+	Facts crashing = behind;
+	crashing.crashing = true;
+	CHECK(Decide(crashing, t) == Ask::kNone);
+	Facts crashingRidden = crashing;
+	crashingRidden.riddenThere = true;
+	CHECK(Decide(crashingRidden, t) == Ask::kNone);
 	// Far, but the friend is no nearer by the margin: it stays.
 	Facts both{ .owner = Owner::kUs, .ours = HANDOFF_FAR + 1.0f, .nearestFriend = HANDOFF_FAR };
 	CHECK(Decide(both, t) == Ask::kNone);
@@ -628,8 +641,107 @@ TEST("npc rules: a copy follows its runner only with a recent state in our playe
 	CHECK(CopyMode(false, true, 1000.0f) == Mode::kSilent);
 	CHECK(CopyMode(true, false, std::nullopt) == Mode::kElsewhere);
 	CHECK(CopyMode(true, true, MIRROR_WITHIN + 1.0f) == Mode::kFar);
+	// A flyer in the air is followed further: a dragon circling wide over the fight.
+	CHECK(CopyMode(true, true, MIRROR_WITHIN + 1.0f, true) == Mode::kMirror);
+	CHECK(CopyMode(true, true, FLYER_MIRROR_WITHIN, true) == Mode::kMirror);
+	CHECK(CopyMode(true, true, FLYER_MIRROR_WITHIN + 1.0f, true) == Mode::kFar);
+	CHECK(CopyMode(true, false, std::nullopt, true) == Mode::kElsewhere);
+	CHECK(CopyMode(false, true, 1000.0f, true) == Mode::kSilent);
+	// Past MIRROR_WITHIN only over a loaded cell: the loaded grid can end nearer than FLYER_MIRROR_WITHIN.
+	CHECK(CopyMode(true, true, MIRROR_WITHIN + 1.0f, true, false) == Mode::kFar);
+	CHECK(CopyMode(true, true, MIRROR_WITHIN, true, false) == Mode::kMirror);
+	CHECK(CopyMode(true, true, MIRROR_WITHIN + 1.0f, false, true) == Mode::kFar);
 	CHECK(ModeName(Mode::kMirror) == "mirror");
 	CHECK(ModeName(Mode::kFar) == "far");
+}
+
+TEST("npc protocol: a graph's flight values are packed to their units, and a value the graph cannot hold is 0 or held at the end")
+{
+	CHECK(Protocol::PackGraphValue(0.5f, Protocol::GRAPH_DELTA_SCALE) == 500);
+	CHECK(Protocol::PackGraphValue(-1.2346f, Protocol::GRAPH_DELTA_SCALE) == -1235);
+	CHECK(Protocol::UnpackGraphValue(-1235, Protocol::GRAPH_DELTA_SCALE) == -1.235f);
+	CHECK(Protocol::PackGraphValue(1800.4f, Protocol::GRAPH_SPEED_SCALE) == 1800);
+	CHECK(Protocol::PackGraphValue(1.0e9f, Protocol::GRAPH_SPEED_SCALE) == 32767);
+	CHECK(Protocol::PackGraphValue(-1.0e9f, Protocol::GRAPH_SPEED_SCALE) == -32767);
+	CHECK(Protocol::PackGraphValue(std::numeric_limits<float>::quiet_NaN(), Protocol::GRAPH_DELTA_SCALE) == 0);
+	CHECK(Protocol::PackGraphValue(std::numeric_limits<float>::infinity(), Protocol::GRAPH_DELTA_SCALE) == 0);
+}
+
+TEST("npc rules: a flyer that dies in the air is followed while its body falls and slides, until it lies still")
+{
+	using namespace NpcRules;
+	const Clock::time_point t0{ 100s };
+	Crash crash;
+	crash.Died(true, t0);
+	CHECK(crash.Started());
+	CHECK(crash.Active());
+	// It falls: each state further on.
+	CHECK(crash.Follow(0.0f, 0.0f, 3000.0f, t0));
+	CHECK(crash.Follow(0.0f, 100.0f, 2500.0f, t0 + 50ms));
+	CHECK(crash.Follow(0.0f, 400.0f, 0.0f, t0 + 2s));
+	// It slides to a stop, twitching less than CRASH_STILL: still followed until CRASH_STILL_FOR has passed.
+	CHECK(crash.Follow(0.0f, 402.0f, 0.0f, t0 + 2s + 500ms));
+	CHECK(crash.Follow(0.0f, 403.0f, 1.0f, t0 + 2s + 999ms));
+	CHECK(!crash.Follow(0.0f, 403.0f, 1.0f, t0 + 3s));
+	CHECK(!crash.Active());
+	// Over for good: a body that moves again (a spell throws it) is not followed again.
+	CHECK(!crash.Follow(0.0f, 900.0f, 0.0f, t0 + 4s));
+	// Seen dead again each frame: only the first death counts.
+	crash.Died(true, t0 + 5s);
+	CHECK(!crash.Active());
+	// Raised, and shot down again: followed again.
+	crash.Reset();
+	crash.Died(true, t0 + 10s);
+	CHECK(crash.Follow(0.0f, 0.0f, 0.0f, t0 + 10s));
+}
+
+TEST("npc rules: a body that never stops (caught on a slope) is followed CRASH_MOST at most, and one that died on the ground not at all")
+{
+	using namespace NpcRules;
+	const Clock::time_point t0{ 100s };
+	Crash slope;
+	slope.Died(true, t0);
+	float y = 0.0f;
+	auto  t = t0;
+	for (; t < t0 + CRASH_MOST; t += 50ms, y += 10.0f) {
+		CHECK(slope.Follow(0.0f, y, 0.0f, t));
+	}
+	CHECK(!slope.Follow(0.0f, y, 0.0f, t0 + CRASH_MOST));
+
+	Crash ground;
+	ground.Died(false, t0);
+	CHECK(ground.Started());
+	CHECK(!ground.Active());
+	CHECK(!ground.Follow(0.0f, 0.0f, 0.0f, t0));
+}
+
+TEST("npc rules: a copy holds its runner's death while crash states come, or its last state that said it flies is fresh")
+{
+	using namespace NpcRules;
+	const Clock::time_point t0{ 100s };
+	CHECK(!HoldsDeath(std::nullopt, std::nullopt, t0));
+	CHECK(HoldsDeath(t0, std::nullopt, t0 + CRASH_FRESH - 1ms));
+	CHECK(!HoldsDeath(t0, std::nullopt, t0 + CRASH_FRESH));
+	// The death came before the first crash state: its last flying state holds it meanwhile.
+	CHECK(HoldsDeath(std::nullopt, t0, t0 + 100ms));
+	CHECK(!HoldsDeath(std::nullopt, t0, t0 + CRASH_FRESH));
+	CHECK(HoldsDeath(t0 + 400ms, t0, t0 + 600ms));
+}
+
+TEST("npc rules: the session's dead is not killed here in a kill move or while its runner's body crashes, and is after")
+{
+	using namespace NpcRules;
+	static_assert(KillsSessionDeadNow(false, false));
+	static_assert(!KillsSessionDeadNow(true, false));
+	static_assert(!KillsSessionDeadNow(false, true));
+	static_assert(!KillsSessionDeadNow(true, true));
+	// The death word comes while the copy still flies, then crash states follow it: not killed until they stop.
+	const Clock::time_point t0{ 100s };
+	CHECK(!KillsSessionDeadNow(false, HoldsDeath(std::nullopt, t0, t0 + 250ms)));
+	CHECK(!KillsSessionDeadNow(false, HoldsDeath(t0 + 3s, t0, t0 + 3s + 250ms)));
+	CHECK(KillsSessionDeadNow(false, HoldsDeath(t0 + 3s, t0, t0 + 3s + CRASH_FRESH)));
+	// A copy that never flew (no crash, no flight) is killed at once.
+	CHECK(KillsSessionDeadNow(false, HoldsDeath(std::nullopt, std::nullopt, t0)));
 }
 
 TEST("npc rules: a copy plays its runner's events but not the walk's own, whatever their case, nor names no graph takes")
