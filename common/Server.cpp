@@ -107,7 +107,8 @@ namespace
 		std::uint64_t linesDropped = 0;
 		std::uint64_t linesNotTheirs = 0;
 		std::uint64_t talksDropped = 0;
-		bool        toldNotHost = false;
+		bool        toldNotHost = false;       // a quest reset from a player not the host (said once)
+		bool        toldWorldNotHost = false;  // ... a quest world (said once)
 		bool        toldUnknown = false;
 	};
 
@@ -586,7 +587,7 @@ void Server::Run()
 				using E = Protocol::QuestEntry;
 				const bool world = *type == MT::kQuestWorld;
 				if (world && (a_peer.playerId != hostId || hostId == 0)) {
-					if (!std::exchange(a_peer.toldNotHost, true)) {
+					if (!std::exchange(a_peer.toldWorldNotHost, true)) {
 						log(std::format("server: player {} is not the host: its quest world is ignored", a_peer.playerId));
 					}
 					break;

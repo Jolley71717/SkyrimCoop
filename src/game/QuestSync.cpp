@@ -141,6 +141,7 @@ namespace QuestSync
 		};
 		Counts      counts;
 		std::size_t endedSaid = 0;  // World(): the ended quests it read
+		bool        endedSkipped = false;  // ... none: the done bit is not trusted
 		QuestRunRules::Keeper   keeper;    // the host's game: the runs it says
 		QuestRunRules::Follower follower;  // a friend's game: the host's runs, made here
 		std::string lastRun = "none";
@@ -1094,7 +1095,15 @@ namespace QuestSync
 			};
 			EachRunning(add);
 			const auto running = reads.size();
-			EachEnded(add);
+			// an ended quest's stages are read by the done bit alone (what this game saw set is forgotten at its stop): with
+			// the bit not trusted only its last stage would be said, and a friend behind in it would be set straight to its
+			// end, its stages between never run. Not said then (endedSkipped); a friend catches up on it as it was before.
+			if (bit && bit->trusted) {
+				EachEnded(add);
+				endedSkipped = false;
+			} else {
+				endedSkipped = true;
+			}
 			endedSaid = reads.size() - running;
 			return QuestRules::Snapshot(std::move(reads));
 		}
@@ -1399,8 +1408,8 @@ namespace QuestSync
 			++counts.snapshots;
 			counts.snapshotEntries += world.size();
 			counts.snapshotEnded = endedSaid;
-			logs::info("Quests: said this world's quests to the session as the host's ({} runs, {} entries, {} of the quests ended here)", runs, world.size(),
-				endedSaid);
+			logs::info("Quests: said this world's quests to the session as the host's ({} runs, {} entries, {} of the quests ended here{})", runs, world.size(),
+				endedSaid, endedSkipped ? "; ended quests not said: the done bit is not trusted, so their stages between would be skipped" : "");
 		}
 
 		std::vector<Entry> news;

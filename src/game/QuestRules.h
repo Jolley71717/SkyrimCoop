@@ -489,6 +489,10 @@ namespace QuestRules
 		// The session's word has the quest ended (completed or failed): one the host's world finished, before the session
 		// or in it.
 		bool                        sessionEnded = false;
+
+		// This game ran the quest: it runs, has ended, or was stopped part way (it has a current stage). The one notion of
+		// "started here" the rules use (kParked, PAST_SETTLE, kPassed).
+		[[nodiscard]] bool Ran() const { return started || current != 0; }
 	};
 
 	// What of an objective's word this game is to make: show it, and end it (1 completed, 2 failed; 0 nothing). Its end
@@ -522,8 +526,9 @@ namespace QuestRules
 		kFar,         // a stage that moves the player, said by a friend who was not near when they set it: held until
 		              // they are near (Maker gives it up after FAR_WAIT, or when they leave: kFarPast)
 		kFarPast,     // ... said as the session's word (a join, a load: no friend did it now), or given up: dropped, not made
-		kPassed,      // a stage below the current one of a quest started here: this game went past it (done, or a
-		              // branch it did not take), so it is never set again (its fragment would run twice): dropped
+		kPassed,      // a stage below the current one of a quest that ran here (Here::Ran: stopped part way too): this game
+		              // went past it (done, or a branch it did not take), so it is never set again (its fragment would run
+		              // twice): dropped
 		kNotStarted,  // an objective or end of a quest not started here (its stages bring it, or were not made): dropped
 		kHold,        // the quest's run is heard and not started here yet (its fills, its start): held, its later wants too
 		kParked,      // the session's past (a join, a load) on a quest it has ended that this game never started: put aside,
@@ -578,13 +583,13 @@ namespace QuestRules
 		// friend's save is from before it): the friend's world is not walked through every quest the host ever ended, one
 		// after another, at a join. Its word waits until the quest starts here, and is made then; a quest started here, a
 		// stage or end said live, are made as ever.
-		if (!a_here.started && a_reporter == 0 && a_here.sessionEnded) {
+		if (!a_here.Ran() && a_reporter == 0 && a_here.sessionEnded) {
 			return Verdict::kParked;
 		}
 		if (a_entry.kind != Entry::kStage) {
 			return a_here.started ? Verdict::kMake : Verdict::kNotStarted;
 		}
-		if (a_here.started && a_entry.index < a_here.current) {
+		if (a_here.Ran() && a_entry.index < a_here.current) {
 			return Verdict::kPassed;
 		}
 		if (a_here.rule) {
@@ -731,7 +736,7 @@ namespace QuestRules
 					blocked.insert(e.questId);  // its later stages wait behind it
 					continue;
 				}
-				if ((verdict == Verdict::kMake || verdict == Verdict::kNotStarted) && it->reporter == 0 && !here.started && a_now - lastPast < PAST_SETTLE) {
+				if ((verdict == Verdict::kMake || verdict == Verdict::kNotStarted) && it->reporter == 0 && !here.Ran() && a_now - lastPast < PAST_SETTLE) {
 					blocked.insert(e.questId);  // the past may still say it ended (PAST_SETTLE)
 					continue;
 				}

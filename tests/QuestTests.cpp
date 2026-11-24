@@ -1402,6 +1402,15 @@ TEST("quest judge: the session's past on a quest it ended that this game never s
 	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kMake);  // said live: a friend did it just now
 	CHECK(QuestRules::Judge(Completed(0x10), 2, here) == V::kNotStarted);
 
+	// Stopped here part way (not running, not ended, a current stage): it ran here, so it is not put aside as never
+	// started (Here::Ran, the one notion the rules use).
+	here.current = 5;
+	CHECK(here.Ran());
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 0, here) != V::kParked);
+	CHECK(QuestRules::Judge(Stage(0x10, 1), 0, here) == V::kPassed);
+	here.current = 0;
+	CHECK(!here.Ran());
+
 	// Started here (its own play, or a stage made here): caught up to the session's end as ever.
 	here.started = true;
 	here.current = 5;
@@ -1528,6 +1537,9 @@ TEST("server: the host's world goes to the others as the session's word (player 
 	// A friend's game cannot say the world.
 	f.fake->Deliver(2, Protocol::Encode(QuestBatch{ 0, { Stage(0x40, 10) } }, MT::kQuestWorld));
 	REQUIRE(f.LoggedSoon("is not the host: its quest world is ignored"));
+	// ... and its reset after it is said too (each has its own line)
+	f.fake->Deliver(2, Protocol::Encode(QuestReset{}, false));
+	REQUIRE(f.LoggedSoon("is not the host: its quest reset is ignored"));
 	REQUIRE(f.fake->Settle());
 	CHECK(CountOf(f.fake->Take(1), MT::kRemoteQuests) == 0);
 	CHECK(CountOf(f.fake->Take(2), MT::kRemoteQuests) == 0);
