@@ -118,9 +118,7 @@ jobs:
           version: ${{ steps.zip.outputs.version }}
           display_name: SkyrimCoop ${{ steps.zip.outputs.version }}
           description: >-
-            The mod (SKSE plugin, settings file, install guide). Everyone in a session needs this same version. Install
-            with a mod manager or extract into Skyrim Special Edition\Data; the host sets bHost = true in
-            Data\SKSE\Plugins\SkyrimCoop.ini. Dedicated server: GitHub.
+            The mod: SKSE plugin, settings file and install guide. Everyone in a session needs the same version. Dedicated server: GitHub.
           category: main
           archive_existing_version: true
           primary_mod_manager_download: true
