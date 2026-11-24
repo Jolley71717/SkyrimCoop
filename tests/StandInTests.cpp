@@ -661,3 +661,45 @@ TEST("stand-in rules: a voice that is not its friend's is drift, none included; 
 	CHECK(!StandInRules::VoiceDrifted(0, false, 0));
 	CHECK(!StandInRules::VoiceDrifted(0, true, 0x00013E07));  // their game could not name it: kept as it is
 }
+
+TEST("stand-in fall: dying, dead, a thrall or a recycled body is dead; bleeding out or knocked out is down")
+{
+	using StandInRules::Fall;
+	CHECK(StandInRules::FallOf(StandInRules::kLifeAlive, false) == Fall::kStanding);
+	CHECK(StandInRules::FallOf(StandInRules::kLifeRestrained, false) == Fall::kStanding);
+	for (const auto state : { StandInRules::kLifeDying, StandInRules::kLifeDead, StandInRules::kLifeReanimate, StandInRules::kLifeRecycle }) {
+		CHECK(StandInRules::FallOf(state, false) == Fall::kDead);
+		CHECK(StandInRules::FallOf(state, true) == Fall::kDead);
+	}
+	for (const auto state : { StandInRules::kLifeUnconscious, StandInRules::kLifeEssentialDown, StandInRules::kLifeBleedout }) {
+		CHECK(StandInRules::FallOf(state, false) == Fall::kDown);
+		CHECK(StandInRules::FallOf(state, true) == Fall::kDown);  // the engine may call an essential actor down dead
+	}
+	// The engine's own word of a death counts whatever state it is in, and a state this list does not know is no fall.
+	CHECK(StandInRules::FallOf(StandInRules::kLifeAlive, true) == Fall::kDead);
+	CHECK(StandInRules::FallOf(42, false) == Fall::kStanding);
+	CHECK(StandInRules::FallOf(42, true) == Fall::kDead);
+	CHECK(StandInRules::FallName(Fall::kDead) == "dead");
+	CHECK(StandInRules::FallName(Fall::kDown) == "down");
+	CHECK(StandInRules::FallName(Fall::kStanding) == "standing");
+}
+
+TEST("stand-in fall: placed again at once, but after a wait when they keep falling, and never given up on")
+{
+	StandInRules::Falls falls;
+	const auto          t0 = Steady::now();
+	CHECK(falls.Fell(t0) == Steady::duration::zero());
+	CHECK(falls.Fell(t0 + 5s) == Steady::duration::zero());
+	// The third within 30 s: the next waits.
+	CHECK(falls.Fell(t0 + 10s) == StandInRules::FALLS_WAIT);
+	CHECK(falls.waits == 1);
+	// Still falling: still waits, never given up.
+	CHECK(falls.Fell(t0 + 21s) == StandInRules::FALLS_WAIT);
+	CHECK(falls.Fell(t0 + 32s) == StandInRules::FALLS_WAIT);
+	CHECK(falls.total == 5);
+	// Once the falls are older than the window, the next is placed at once again.
+	CHECK(falls.Fell(t0 + 120s) == Steady::duration::zero());
+	CHECK(falls.Fell(t0 + 125s) == Steady::duration::zero());
+	CHECK(falls.total == 7);
+	CHECK(falls.waits == 3);
+}

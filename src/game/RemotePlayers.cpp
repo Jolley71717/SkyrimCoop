@@ -44,6 +44,15 @@ namespace RemotePlayers
 		constexpr auto CHECK_EVERY = 1s;
 		constexpr auto REDRESS_COOL = 5s;
 
+		// The life states StandInRules names (a stand-in that fell here), the game's own numbers.
+		using LS = RE::ACTOR_LIFE_STATE;
+		static_assert(StandInRules::kLifeAlive == std::to_underlying(LS::kAlive) && StandInRules::kLifeDying == std::to_underlying(LS::kDying) &&
+						  StandInRules::kLifeDead == std::to_underlying(LS::kDead) && StandInRules::kLifeUnconscious == std::to_underlying(LS::kUnconcious) &&
+						  StandInRules::kLifeReanimate == std::to_underlying(LS::kReanimate) && StandInRules::kLifeRecycle == std::to_underlying(LS::kRecycle) &&
+						  StandInRules::kLifeRestrained == std::to_underlying(LS::kRestrained) &&
+						  StandInRules::kLifeEssentialDown == std::to_underlying(LS::kEssentialDown) && StandInRules::kLifeBleedout == std::to_underlying(LS::kBleedout),
+			"StandInRules' life states are the game's");
+
 		// The kinds of magic effect StandInRules names, the game's own numbers.
 		using ArchetypeID = RE::EffectArchetypes::ArchetypeID;
 		static_assert(StandInRules::kArchNone == std::to_underlying(ArchetypeID::kNone) && StandInRules::kValueModifier == std::to_underlying(ArchetypeID::kValueModifier) &&
@@ -143,6 +152,10 @@ namespace RemotePlayers
 			Clock::time_point       nextCheck{};
 			Clock::time_point       redressAfter{};
 			StandInRules::DrawFix   drawFix;  // its weapon drawn or put away by hand when its graph disagrees
+			// Its stand-ins that fell here (died, bled out, were knocked out: StandInRules::Falls), each taken away and a
+			// new one placed; how the last one fell.
+			StandInRules::Falls     falls;
+			StandInRules::Fall      lastFall = StandInRules::Fall::kStanding;
 
 			// Its face (main thread): what its friend's game sent, whether it goes on (FaceRules::Fits), the copy of the
 			// preset it stands on with it (none: the preset itself), the face that copy shows (its hash; 0: the preset's),
@@ -776,6 +789,13 @@ namespace RemotePlayers
 				}
 				return;
 			}
+			// One that fell here (StandInRules::FallOf: killed by a console or a script, brought down) is no longer its
+			// friend's: it is neither placed nor told its friend's walk and actions (a body would be dragged along), and the
+			// next tick takes it away and places another (Frame).
+			const auto lifeState = a_this->AsActorState();
+			if (lifeState && StandInRules::FallOf(std::to_underlying(lifeState->GetLifeState()), false) != StandInRules::Fall::kStanding) {
+				sample.reset();
+			}
 			// Its own AI never runs: no packages, no combat, no greetings. Where its friend is, the engine's no-AI update
 			// places its 3D.
 			if (sample && seated) {
@@ -1046,6 +1066,13 @@ namespace RemotePlayers
 					values->RestoreActorValue(value, lost);
 				}
 			}
+		}
+
+		// Whether a stand-in fell here (StandInRules::FallOf): its life state, and the engine's own word on its death.
+		StandInRules::Fall FallOf(RE::Actor* a_actor)
+		{
+			const auto state = a_actor->AsActorState();
+			return StandInRules::FallOf(state ? std::to_underlying(state->GetLifeState()) : StandInRules::kLifeAlive, a_actor->IsDead());
 		}
 
 		// Whether its friend's face goes on a stand-in standing on a_preset (FaceRules::Fits), and the face it should show
@@ -1563,6 +1590,22 @@ namespace RemotePlayers
 				TakeAway(id, remote, "gone");
 				continue;
 			}
+			// One that fell here (StandInRules::Falls): taken away at once and another placed, its friend being up. A pair it
+			// is held in (a kill move) ends first.
+			if (actor && remote.standInId != 0 && !Pairs::Held(actor.get())) {
+				if (const auto fall = FallOf(actor.get()); fall != StandInRules::Fall::kStanding) {
+					const auto wait = remote.falls.Fell(now);
+					remote.lastFall = fall;
+					if (remote.falls.total <= 3 || wait != Clock::duration::zero()) {
+						logs::warn("Players: player {}'s stand-in {:08X} is {} here (life state {}): taken away, another placed{} ({} so far)", id, remote.standInId,
+							StandInRules::FallName(fall), actor->AsActorState() ? std::to_underlying(actor->AsActorState()->GetLifeState()) : 0u,
+							wait != Clock::duration::zero() ? " in 10 s: they keep falling" : "", remote.falls.total);
+					}
+					TakeAway(id, remote, fall == StandInRules::Fall::kDead ? "it died here" : "it fell here");
+					remote.placeAfter = now + RESPAWN_AFTER + wait;
+					continue;
+				}
+			}
 			const bool wanted = here && sample && remote.looks && SameSpace(*here, sample->state) && Distance(*here, sample->state) < (actor ? HIDE_BEYOND : SHOW_WITHIN);
 			if (!wanted) {
 				if (actor) {
@@ -1813,9 +1856,10 @@ namespace RemotePlayers
 		for (const auto& [id, remote] : players) {
 			const auto read = reads.contains(id) ? reads[id] : Read{};
 			out += std::format(" | standin player={} id={:08X} ghost={} processGhost={} inCombat={} combatTarget={:08X} crimeFaction={:08X} hp={:.1f} hpMax={:.1f} dead={}"
-							   " bleedout={} hitsOn={} woundsOn={} healthBack={:.1f} magicOn={} blows={} magicRefused={}",
+							   " bleedout={} hitsOn={} woundsOn={} healthBack={:.1f} magicOn={} blows={} magicRefused={} fell={} fellWaits={} lastFall={}",
 				id, remote.standInId, read.ghost, read.processGhost, read.inCombat, read.target, read.crime, read.health, read.healthMax, read.dead, read.bleedout,
-				remote.hitsOn, remote.woundsOn, remote.healthBack, remote.magicOnRefused, remote.blows, remote.magicRefused);
+				remote.hitsOn, remote.woundsOn, remote.healthBack, remote.magicOnRefused, remote.blows, remote.magicRefused, remote.falls.total, remote.falls.waits,
+				StandInRules::FallName(remote.lastFall));
 		}
 		return out;
 	}

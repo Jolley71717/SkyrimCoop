@@ -509,4 +509,95 @@ namespace StandInRules
 		const float degrees = std::clamp(static_cast<float>(a_state.pitch), -MAX_AIM_DEGREES, MAX_AIM_DEGREES);
 		return -degrees * std::numbers::pi_v<float> / 180.0f;
 	}
+
+	// ---- a stand-in that fell here ----
+
+	// A stand-in deals nothing and is never hurt here (its damage nothing, essential, its health kept full and given back
+	// in the health damage hook, a ghost to weapons: "Players"), but a few paths reach its life all the same: a console's
+	// or a script's kill, a reanimating spell on its body, an essential actor's bleedout a wound began before its health
+	// came back, a scene's or a mod's knock-out. Its friend stands, so what fell here no longer shows them: it is taken out
+	// of the world at once (never moved by its friend's states again: a dead one would be dragged along as a body) and a
+	// new one is placed. A paired animation it is held in (Pairs.h) ends first: the pair kills or lets go of it itself.
+
+	// The engine's life states (ACTOR_LIFE_STATE), checked against the game's own in RemotePlayers.cpp.
+	inline constexpr std::uint32_t kLifeAlive = 0;
+	inline constexpr std::uint32_t kLifeDying = 1;
+	inline constexpr std::uint32_t kLifeDead = 2;
+	inline constexpr std::uint32_t kLifeUnconscious = 3;
+	inline constexpr std::uint32_t kLifeReanimate = 4;
+	inline constexpr std::uint32_t kLifeRecycle = 5;
+	inline constexpr std::uint32_t kLifeRestrained = 6;
+	inline constexpr std::uint32_t kLifeEssentialDown = 7;
+	inline constexpr std::uint32_t kLifeBleedout = 8;
+
+	enum class Fall : std::uint8_t
+	{
+		kStanding,  // alive and up (restrained too: a scene's hold, not a fall)
+		kDown,      // bleeding out, an essential actor brought down, or knocked out
+		kDead,      // dying, dead, raised as a thrall, or a body the engine recycles
+	};
+
+	// a_dead: the engine's own word (Actor::IsDead), which a state this list does not know may still say.
+	[[nodiscard]] constexpr Fall FallOf(std::uint32_t a_lifeState, bool a_dead)
+	{
+		switch (a_lifeState) {
+		case kLifeDying:
+		case kLifeDead:
+		case kLifeReanimate:
+		case kLifeRecycle:
+			return Fall::kDead;
+		case kLifeUnconscious:
+		case kLifeEssentialDown:
+		case kLifeBleedout:
+			return Fall::kDown;  // an essential actor down may be IsDead to the engine too: it is down, not dead
+		default:
+			return a_dead ? Fall::kDead : Fall::kStanding;  // alive, restrained, or a state this list does not know
+		}
+	}
+
+	[[nodiscard]] constexpr std::string_view FallName(Fall a_fall)
+	{
+		switch (a_fall) {
+		case Fall::kStanding:
+			return "standing";
+		case Fall::kDown:
+			return "down";
+		case Fall::kDead:
+			return "dead";
+		}
+		return "?";
+	}
+
+	// When the next stand-in of a friend whose stand-in fell is placed: at once (the usual short wait), unless its
+	// stand-ins keep falling (FALLS_MAX within FALLS_WINDOW: a script that kills every actor of a kind, a hazard the friend
+	// stands in here), then FALLS_WAIT after the last, so the game is not made to place and take away an actor every few
+	// frames. A friend is never given up on: a stand-in is placed again after the wait, every time.
+	inline constexpr std::size_t FALLS_MAX = 3;
+	inline constexpr auto        FALLS_WINDOW = 30s;
+	inline constexpr auto        FALLS_WAIT = 10s;
+
+	class Falls
+	{
+	public:
+		// A stand-in fell at a_now: how much longer than usual to wait before the next is placed (zero: no longer).
+		Clock::duration Fell(Clock::time_point a_now)
+		{
+			++total;
+			while (!recent.empty() && a_now - recent.front() >= FALLS_WINDOW) {
+				recent.pop_front();
+			}
+			recent.push_back(a_now);
+			if (recent.size() >= FALLS_MAX) {
+				++waits;
+				return FALLS_WAIT;
+			}
+			return Clock::duration::zero();
+		}
+
+		std::uint64_t total = 0;  // every fall of this friend's stand-ins this session
+		std::uint64_t waits = 0;  // times the next one waited FALLS_WAIT
+
+	private:
+		std::deque<Clock::time_point> recent;
+	};
 }
