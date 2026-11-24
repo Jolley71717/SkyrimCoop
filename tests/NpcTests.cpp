@@ -765,6 +765,22 @@ TEST("npc rules: a body is not dressed in its runner's gear, and a copy that sta
 	CHECK(geared);
 }
 
+TEST("npc rules: the session's dead is not killed here in a kill move or while its runner's body crashes, and is after")
+{
+	using namespace NpcRules;
+	static_assert(KillsSessionDeadNow(false, false));
+	static_assert(!KillsSessionDeadNow(true, false));
+	static_assert(!KillsSessionDeadNow(false, true));
+	static_assert(!KillsSessionDeadNow(true, true));
+	// The death word comes while the copy still flies, then crash states follow it: not killed until they stop.
+	const Clock::time_point t0{ 100s };
+	CHECK(!KillsSessionDeadNow(false, HoldsDeath(std::nullopt, t0, t0 + 250ms)));
+	CHECK(!KillsSessionDeadNow(false, HoldsDeath(t0 + 3s, t0, t0 + 3s + 250ms)));
+	CHECK(KillsSessionDeadNow(false, HoldsDeath(t0 + 3s, t0, t0 + 3s + CRASH_FRESH)));
+	// A copy that never flew (no crash, no flight) is killed at once.
+	CHECK(KillsSessionDeadNow(false, HoldsDeath(std::nullopt, std::nullopt, t0)));
+}
+
 TEST("npc rules: a copy plays its runner's events but not the walk's own, whatever their case, nor names no graph takes")
 {
 	using namespace NpcRules;
