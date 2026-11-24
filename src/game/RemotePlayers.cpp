@@ -470,7 +470,9 @@ namespace RemotePlayers
 			if (!Watching() || !a_this) {
 				return true;
 			}
-			const auto caster = a_data.caster;
+			// The caster when it is an actor (a trap or a hazard casts too: never a stand-in).
+			const auto casterRef = a_data.caster;
+			const auto caster = casterRef && casterRef->IsActor() ? static_cast<RE::Actor*>(casterRef) : nullptr;
 			const auto targetRef = a_this->MagicTargetIsActor() ? a_this->GetTargetStatsObject() : nullptr;
 			const auto target = targetRef && targetRef->IsActor() ? static_cast<RE::Actor*>(targetRef) : nullptr;
 			const bool onItself = caster && caster->AsMagicTarget() == a_this;
