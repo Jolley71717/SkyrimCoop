@@ -300,6 +300,7 @@ namespace Session
 				if (const auto msg = Protocol::DecodeQuestReset(a_data, true); msg && welcomed) {
 					if (msg->playerId != playerId) {
 						QuestSync::HostReset(msg->playerId);
+						QuestRewards::HostReset(msg->playerId);  // ... and the rewards heard from its world before are dropped
 					} else {
 						QuestSync::ResetEchoed();  // our own reset, back from the server after every word it passed on before it
 					}

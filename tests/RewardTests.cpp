@@ -29,7 +29,7 @@ namespace
 	Talk Talking()
 	{
 		Talk talk;
-		talk.dialogue = T0;
+		talk.Open(T0);
 		talk.infoQuest = 0x40;
 		talk.infoAt = T0;
 		return talk;
@@ -189,18 +189,87 @@ TEST("reward judge: a key is the door's, not a reward; anything else a player ca
 		CHECK(Judge(talk, T0, kind) == Why::kReward);
 	}
 	CHECK(std::string{ WhyName(Why::kMade) } == "made");
-	static_assert(WHY_COUNT == 6);
+	static_assert(WHY_COUNT == 7);
 }
 
-TEST("reward judge: an item a stage of the quest made here from the session's word just gave is that stage's, not our reward")
+TEST("reward judge: an item after a stage made here in the talk is the stage's, whoever made it and whenever its fragment ran")
+{
+	// Our player's line sets stage 20 of the quest (ours: the game made it). Its fragment gives an item of a leveled list,
+	// rolled in each game on its own: every game's own stage 20 gives its player one, so ours is not said.
+	auto talk = Talking();
+	talk.Open(T0);
+	talk.dialogue = T0 + 40s;  // still talking
+	talk.infoAt = T0 + 30s;
+	talk.staged.Add(T0 + 1s);
+	CHECK(Judge(talk, T0 + 1500ms, ItemKind::kWeapon) == Why::kMade);
+	CHECK(Judge(talk, T0 + 1s + MADE_GRACE, ItemKind::kWeapon) == Why::kMade);
+	CHECK(Judge(talk, T0 + 30s, ItemKind::kWeapon) == Why::kMade);  // a fragment that ran late, or a later line of the same talk
+	CHECK(Judge(talk, T0 + 500ms, ItemKind::kMisc) == Why::kReward);  // before the stage: the line's own
+
+	// Another player's step made here from the session's word as we talk: the same.
+	auto other = Talking();
+	other.Open(T0);
+	other.dialogue = T0 + 5s;
+	other.staged.Add(T0 + 2s);
+	CHECK(Judge(other, T0 + 2500ms, ItemKind::kMisc) == Why::kMade);
+
+	// A stage made long before this talk began is not this talk's: only MADE_GRACE after it counts.
+	auto later = Talking();
+	later.staged.Add(T0 - 60s);
+	later.Open(T0);
+	CHECK(Judge(later, T0 + 500ms, ItemKind::kMisc) == Why::kReward);
+	auto justBefore = Talking();
+	justBefore.staged.Add(T0 - 1s);  // the stage that started the talk (a forced greeting)
+	justBefore.Open(T0);
+	justBefore.dialogue = T0 + 10s;
+	justBefore.infoAt = T0 + 5s;
+	CHECK(Judge(justBefore, T0 + 8s, ItemKind::kMisc) == Why::kMade);
+}
+
+TEST("reward judge: a talk begins when the Dialogue Menu opens after none for TALK_GRACE")
+{
+	Talk talk;
+	CHECK(!Talking(talk, T0));
+	talk.Open(T0);
+	CHECK(talk.opened == T0);
+	talk.Open(T0 + 1s);
+	talk.Open(T0 + 2s);
+	CHECK(talk.opened == T0);  // the same talk
+	CHECK(Talking(talk, T0 + 2s + TALK_GRACE));
+	CHECK(!Talking(talk, T0 + 2s + TALK_GRACE + 1ms));
+	talk.Open(T0 + 2s + TALK_GRACE + 1ms);
+	CHECK(talk.opened == T0 + 2s + TALK_GRACE + 1ms);  // a new one
+}
+
+TEST("reward judge: an item our player paid gold for in the talk is bought, not a reward, whichever came first")
 {
 	auto talk = Talking();
-	talk.dialogue = T0 + 5s;  // still talking
-	talk.madeAt = T0 + 1s;  // another player's step made here as we talk: its fragment gave this
-	CHECK(Judge(talk, T0 + 1500ms, ItemKind::kMisc) == Why::kMade);
-	CHECK(Judge(talk, T0 + 1s + MADE_GRACE, ItemKind::kMisc) == Why::kMade);
-	CHECK(Judge(talk, T0 + 1s + MADE_GRACE + 1ms, ItemKind::kMisc) == Why::kReward);
-	CHECK(Judge(talk, T0 + 500ms, ItemKind::kMisc) == Why::kReward);  // before the stage was made: ours
+	talk.dialogue = T0 + 10s;
+	talk.paid.Add(T0 + 1s);
+	CHECK(Judge(talk, T0 + 1s, ItemKind::kPotion) == Why::kBought);
+	CHECK(Judge(talk, T0 + 1s + PAID_GRACE, ItemKind::kPotion) == Why::kBought);
+	CHECK(Judge(talk, T0 + 1s - PAID_GRACE, ItemKind::kPotion) == Why::kBought);  // the item first, then the gold
+	CHECK(Judge(talk, T0 + 1s + PAID_GRACE + 1ms, ItemKind::kPotion) == Why::kReward);
+	CHECK(std::string{ WhyName(Why::kBought) } == "bought");
+}
+
+TEST("reward marks: kept in order, the newest MAX_MARKS; the newest before a time")
+{
+	Marks marks;
+	CHECK(!marks.Before(T0));
+	marks.Add(T0);
+	marks.Add(T0 + 2s);
+	marks.Add(T0 + 1s);  // from another thread, a little late: kept in order
+	CHECK(marks.Before(T0 + 1500ms) == T0);
+	CHECK(marks.Before(T0 + 2s) == T0 + 2s);
+	CHECK(marks.Near(T0 + 3s, 1s));
+	CHECK(!marks.Near(T0 + 3s + 1ms, 1s));
+	CHECK(!marks.Near(T0 - 1s - 1ms, 1s));
+	for (std::uint32_t i = 0; i < MAX_MARKS + 5; ++i) {
+		marks.Add(T0 + 10s + std::chrono::seconds{ i });
+	}
+	CHECK(marks.Size() == MAX_MARKS);
+	CHECK(!marks.Before(T0 + 10s));  // the oldest went
 }
 
 TEST("reward outbox: the same item for the same quest within SEND_AFTER is one reward, said SEND_AFTER after its last part")
@@ -405,4 +474,17 @@ TEST("server: a game saying rewards faster than a conversation gives them has th
 	CHECK(passed < 100);
 	const auto lines = f.LogLines();
 	CHECK(std::ranges::count_if(lines, [](const std::string& a_l) { return a_l.find("faster than a conversation") != std::string::npos; }) == 1);
+}
+
+TEST("reward give: nothing is given while our own player talks (it would be taken for our reward); after, as ever")
+{
+	Ledger     ledger;
+	const auto heard = Reward40(0x1234, 1, T0);
+	const auto quest = Ran(T0 - 1s);
+	CHECK(Judge(heard, quest, ledger, T0 + SETTLE, true).verdict == Verdict::kWait);
+	CHECK(Judge(heard, quest, ledger, T0 + GIVE_UP, true).verdict == Verdict::kWait);  // a long talk: still not dropped
+	CHECK(Judge(heard, QuestHere{}, ledger, T0, true).verdict == Verdict::kNotShared);
+	const auto d = Judge(heard, quest, ledger, T0 + SETTLE, false);
+	CHECK(d.verdict == Verdict::kGive);
+	CHECK(d.give == 1);
 }

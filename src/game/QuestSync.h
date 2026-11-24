@@ -67,6 +67,8 @@ namespace QuestSync
 	[[nodiscard]] RewardRules::QuestHere QuestHere(std::uint32_t a_questId);
 	[[nodiscard]] bool SharesQuest(std::uint32_t a_questId);
 	[[nodiscard]] bool HearsOthers();
+	// Whether this game is the session's host (its world is the session's).
+	[[nodiscard]] bool HostsWorld();
 
 	// A save is about to load: the alias records rewritten for a run's start are put back.
 	void BeforeLoad();
