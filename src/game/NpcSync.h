@@ -20,7 +20,8 @@
 // (the stand-ins' leg channels, GaitDrive), its walk's events come from Gait as a stand-in's do, and the runner's other
 // graph events are played at the same point of its walk (NpcRules::ActionQueue). Otherwise it is left to its own AI.
 //
-// Main thread, except UpdateCopy (the actor update hook, on the game's job threads) and the graph event hook.
+// Main thread, except UpdateCopy (the actor update hook, on the game's job threads), the graph event hook and the hit event
+// sink (whatever thread sends the event).
 namespace NpcSync
 {
 	using SendFn = std::function<void(std::vector<std::uint8_t>, bool)>;

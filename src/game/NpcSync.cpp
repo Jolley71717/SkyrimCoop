@@ -120,7 +120,7 @@ namespace NpcSync
 		// Counts for the developer channel.
 		struct Counts
 		{
-			std::uint64_t claims = 0, granted = 0, refused = 0, released = 0, hands = 0;
+			std::uint64_t claims = 0, granted = 0, refused = 0, released = 0, hands = 0, letGo = 0, graphsReset = 0;
 			std::uint64_t statesSent = 0, statesIn = 0, actionsSent = 0, actionsIn = 0, gearSent = 0, gearIn = 0, gearMissing = 0, gearSkipped = 0, gearTakenOff = 0;
 			std::uint64_t spawnsPlaced = 0, spawnsTaken = 0, unshared = 0, lookDiffers = 0;
 			std::uint64_t fallbackSilent = 0, fallbackElsewhere = 0, fallbackFar = 0;
@@ -478,6 +478,67 @@ namespace NpcSync
 		}
 
 		// ---- letting go of a copy's actor (main thread, under copyLock): a spawn's copy taken out of the world, an NPC's legs its own ----
+
+		// A load-order NPC's copy let go of: the hook no longer moves it, and its own AI runs it again from where it
+		// stands. What the hook left on it is not the AI's: the move flags SetMoveFlags wrote, and a graph in whatever
+		// state its runner's last events put it in (a furniture idle with no furniture, a stagger, a kneel), which an AI
+		// that did not enter it has no way out of, and which a load-order NPC would keep in the save. So its legs are freed
+		// at once, and once copyLock is let go (ResetLetGo) its move flags are cleared and its graph sent back to its
+		// default state, unless its own state says it really sits, sleeps, rides, bleeds out or is dead: that graph is
+		// the AI's. Its weapon is left as it is: a copy's weapon state follows its graph (as a stand-in's does), so the
+		// AI sees it drawn and puts it away itself.
+		std::vector<RE::ActorHandle> letGoPending;  // main thread
+
+		void LetCopyGo(RE::Actor* a_actor)
+		{
+			if (!a_actor) {
+				return;
+			}
+			RemotePlayers::StopLegs(a_actor);
+			++counts.letGo;
+			if (letGoPending.size() < Protocol::MAX_NPCS) {
+				letGoPending.push_back(a_actor->GetHandle());
+			}
+		}
+
+		// Main thread, outside copyLock (it calls the game: a graph's notify, which the graph event hook hears).
+		void ResetLetGo()
+		{
+			auto pending = std::move(letGoPending);
+			letGoPending.clear();
+			for (const auto& handle : pending) {
+				const auto actor = handle.get();
+				if (!actor || actor->IsDeleted() || actor->IsDisabled() || !actor->Is3DLoaded() || actor->IsDead() || actor->IsOnMount()) {
+					continue;
+				}
+				{
+					// mirrored again meanwhile (another game took it on): the hook moves it, and its graph is its runner's
+					std::scoped_lock l{ copyLock };
+					if (const auto byActor = copyByActor.find(actor.get()); byActor != copyByActor.end()) {
+						if (const auto copy = copies.find(byActor->second); copy != copies.end() && copy->second.mirror) {
+							continue;
+						}
+					}
+				}
+				const auto state = actor->AsActorState();
+				if (!state) {
+					continue;
+				}
+				auto& flags = state->actorState1;
+				flags.sneaking = 0;
+				flags.sprinting = 0;
+				flags.running = 0;
+				flags.walking = 0;
+				flags.movingForward = 0;
+				if (state->GetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal || state->IsBleedingOut()) {
+					continue;
+				}
+				if (actor->NotifyAnimationGraph(Name("IdleForceDefaultState"))) {
+					++counts.graphsReset;
+				}
+			}
+		}
+
 		void TakeAwaySpawn(const Key& a_key, Copy& a_copy, std::string_view a_why)
 		{
 			const auto actor = a_copy.handle.get();
@@ -486,7 +547,7 @@ namespace NpcSync
 				++counts.spawnsTaken;
 				logs::info("NPCs: the copy {:08X} of player {}'s spawn {:08X} taken away ({})", a_copy.actorId, a_key.spawner, a_key.id, a_why);
 			} else if (actor) {
-				RemotePlayers::StopLegs(actor.get());
+				LetCopyGo(actor.get());
 			}
 			copyByActor.erase(actor.get());
 			a_copy.handle = {};
@@ -593,6 +654,11 @@ namespace NpcSync
 				}
 			}
 			const auto plan = NpcRules::PlanGear(wanted, now, carried, a_mayAdd);
+			// What is put on is held on against the copy's own AI (the equip's "force", Papyrus' abPreventRemoval) only on a
+			// spawn's copy, which is never saved: on a load-order NPC that lock would stay in the friend's save after the
+			// session (a follower who will not take other armor). Its AI does not run while it is mirrored, and its gear is
+			// its own to change once it runs again.
+			const bool holdOn = FormIds::IsRuntime(a_actor->GetFormID());
 			const auto defaults = RE::BGSDefaultObjectManager::GetSingleton();
 			const auto slotOf = [&](NpcRules::Hand a_hand, const RE::TESForm* a_form) -> const RE::BGSEquipSlot* {
 				// A one-handed weapon goes in the hand named; a two-handed one, a torch or a shield where the game puts it
@@ -628,7 +694,7 @@ namespace NpcSync
 					++out.skipped;
 					continue;
 				}
-				manager->EquipObject(a_actor, bound, nullptr, 1, slotOf(item.hand, bound), false, true, false, true);
+				manager->EquipObject(a_actor, bound, nullptr, 1, slotOf(item.hand, bound), false, holdOn, false, true);
 				++out.equipped;
 			}
 			out.missing = plan.missing;
@@ -933,7 +999,7 @@ namespace NpcSync
 							copy.geared = false;
 						} else if (!actor && copy.actorId != 0) {
 							if (const auto was = copy.handle.get()) {
-								RemotePlayers::StopLegs(was.get());
+								LetCopyGo(was.get());
 							}
 							copy.handle = {};
 							copy.actorId = 0;
@@ -962,7 +1028,7 @@ namespace NpcSync
 					if (copy.mirror && !mirror) {
 						copy.actions.Clear();
 						if (actor) {
-							RemotePlayers::StopLegs(actor);
+							LetCopyGo(actor);
 						}
 					}
 					if (mirror && !copy.mirror) {
@@ -1001,6 +1067,7 @@ namespace NpcSync
 				}
 				RemotePlayers::SetCopies(copyByActor.size());
 			}
+			ResetLetGo();
 			// What calls the game at length (placing, equipping) runs outside the lock: the hook takes it on job threads,
 			// and a placed actor's first update may come at once.
 			for (const auto& job : work) {
@@ -1162,6 +1229,7 @@ namespace NpcSync
 			copyByActor.clear();
 			RemotePlayers::SetCopies(0);
 		}
+		ResetLetGo();
 		{
 			std::scoped_lock l{ eventLock };
 			runIds.clear();
@@ -1232,13 +1300,18 @@ namespace NpcSync
 				if (const auto copy = copies.find(key); copy != copies.end()) {
 					if (const auto actor = copy->second.handle.get()) {
 						copyByActor.erase(actor.get());
-						RemotePlayers::StopLegs(actor.get());
+						if (copy->second.spawned) {
+							RemotePlayers::StopLegs(actor.get());
+						} else {
+							LetCopyGo(actor.get());
+						}
 					}
 					copies.erase(copy);
 					RemotePlayers::SetCopies(copyByActor.size());
 				}
 			}
 		}
+		ResetLetGo();
 	}
 
 	void States(const Protocol::NpcStates& a_msg)
@@ -1282,8 +1355,8 @@ namespace NpcSync
 			return;  // id 0: an NPC this game lacks (FormTranslate.h)
 		}
 		std::scoped_lock l{ copyLock };
-		if (Runs(a_msg.key)) {
-			return;
+		if (Runs(a_msg.key) || (copies.size() >= Protocol::MAX_NPCS && !copies.contains(a_msg.key))) {
+			return;  // ours now, or too many (as States: a join's replay of the session's gear makes no more copies than states would)
 		}
 		auto& copy = CopyOf(a_msg.key, a_msg.runner);
 		copy.gear = a_msg;
@@ -1403,11 +1476,11 @@ namespace NpcSync
 		}
 		if (words.empty()) {
 			return std::format(
-				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} statesSent={} statesIn={} "
+				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} letGo={} graphsReset={} statesSent={} statesIn={} "
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
 				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
-				counts.hands, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
+				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0);
 		}

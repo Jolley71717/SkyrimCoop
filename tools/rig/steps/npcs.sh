@@ -285,10 +285,19 @@ npcs_walk_route() {
 	return 0
 }
 
+# npcs_back <walker> <route back> <label>: the walker walks back; 3 (and a rig fault) when the way back stops short, so
+# the step does not run its other sub-steps with the players apart (they need both near the same NPCs)
+npcs_back() {
+	local why
+	why=$(npcs_walk_route "$1" "$2") && return 0
+	rig_fault walk "$3: the way back" "the $1's walk back stopped short ($why): the players are apart, the sub-steps after this are not run"
+	return 3
+}
+
 # npcs_handover <walker> <stayer>: the walker's player walks NPC_ROUTE away; the NPCs it ran near the stayer go to the
-# stayer's game in both books; the walker walks the route back to where it began
+# stayer's game in both books; the walker walks the route back to where it began (3 when it could not: npcs_back)
 npcs_handover() {
-	local walker=$1 stayer=$2 label="npcs: the $1 walks away, the $2 takes its NPCs" wid sid p0 sp keys moved why back rel ready left
+	local walker=$1 stayer=$2 label="npcs: the $1 walks away, the $2 takes its NPCs" wid sid p0 sp keys moved why back rel ready left sum0 sum1 lg
 	section "$label"
 	wid=$(field player "$(dc "$walker" 'session status')"); sid=$(field player "$(dc "$stayer" 'session status')")
 	if ! is_num "$wid" || ! is_num "$sid"; then rig_broken game "$label" "no player ids (walker '$wid', stayer '$sid')"; return; fi
@@ -300,15 +309,16 @@ npcs_handover() {
 		return
 	fi
 	say "$label: following $(wc -w <<<"$keys") NPC(s): $keys"
+	sum0=$(dc "$stayer" npcs)   # its copies let go of so far (letGo=), and their graphs sent back to default (graphsReset=)
 	back="$(npcs_reversed "$NPC_ROUTE") $(awk '{printf "%.0f,%.0f", $1, $2}' <<<"$p0")"
 	if ! why=$(npcs_walk_route "$walker" "$NPC_ROUTE"); then
 		rig_fault walk "$label: the walk" "the $walker's walk along NPC_ROUTE stopped: $why"
-		npcs_walk_route "$walker" "$back" >/dev/null; return
+		npcs_back "$walker" "$back" "$label"; return
 	fi
 	moved=$(dist2 "$(pos_of "$walker")" "$sp")
 	if ! is_num "$moved" || [ "$moved" -lt $((NPC_WALK * 3 / 4)) ]; then
 		rig_fault walk "$label: the walk" "the $walker walked the route but is ${moved:-?} u from the $stayer, not about $NPC_WALK: NPC_ROUTE wants farther points"
-		npcs_walk_route "$walker" "$back" >/dev/null; return
+		npcs_back "$walker" "$back" "$label"; return
 	fi
 	pass "$label: the walk" "the $walker is $moved u from the $stayer, along the road"
 	# Only the NPCs the release rule lets go of from where the players are now (they were picked before the walk, and
@@ -320,18 +330,21 @@ npcs_handover() {
 	[ -n "$left" ] && say "$label: not checked, not past the release rule from where the players are now (key:u from the $walker/u from the $stayer): $left"
 	if [ -z "$ready" ]; then
 		warn "$label: NPCs to hand over" "none of the $(wc -w <<<"$keys") NPC(s) is past the release rule after the walk ($left): nothing to check this way"
-		npcs_walk_route "$walker" "$back" >/dev/null; return
+		npcs_back "$walker" "$back" "$label"; return
 	fi
 	# shellcheck disable=SC2086
 	if wait_until "$NPC_WAIT" _npcs_handed "$sid" $ready; then
 		pass "$label: both books say the $stayer runs them" "$(wc -w <<<"$ready") NPC(s) past the release rule: $ready"
+		# the copies it showed are let go of: the hook moves them no more, their move flags and graphs are their own AI's
+		sum1=$(dc "$stayer" npcs); lg=""
+		is_num "$(field letGo "$sum0")" && is_num "$(field letGo "$sum1")" && lg=$(( $(field letGo "$sum1") - $(field letGo "$sum0") ))
+		expect_ge "$label: the $stayer let its copies go to their own AI" "$lg" 1 "let go (graphs sent back to default: $(( $(field graphsReset "$sum1") - $(field graphsReset "$sum0") )))"
 	else
 		# shellcheck disable=SC2086
 		why="host: $(npcs_owned_by "$(_npcs_rows host)" "$sid" $ready); vm: $(npcs_owned_by "$(_npcs_rows vm)" "$sid" $ready)"
 		fail "$label: both books say the $stayer runs them" "after $NPC_WAIT s, not the $stayer's (key:owner): $why"
 	fi
-	# no check: the next step puts the players together again if the way back falls short
-	why=$(npcs_walk_route "$walker" "$back") || say "$label: the way back stopped short ($why)"
+	npcs_back "$walker" "$back" "$label"
 }
 
 # npcs_fight <runner> <watcher>: an NPC the runner runs is set on the runner's player (console set-up); the watcher's
@@ -483,10 +496,11 @@ step_npcs() {
 	say "npcs: kinds seen: host $(field kinds "$hs"), vm $(field kinds "$vs"); runtime actors not shared: host $(field unshared "$hs"), vm $(field unshared "$vs")"
 	npcs_fight host vm
 	npcs_spawn host vm
-	npcs_handover host vm
-	npcs_fight vm host
-	npcs_spawn vm host
-	npcs_handover vm host
+	if npcs_handover host vm; then
+		npcs_fight vm host
+		npcs_spawn vm host
+		npcs_handover vm host
+	fi
 	section "npcs: events, both games"
 	for w in host vm; do
 		s=$(dc $w npcs)
@@ -686,6 +700,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 			'npcs list') if [ "$n" -ge 1 ]; then if [ "$1" = host ]; then echo "$HO_AFTER_H"; else echo "$HO_AFTER_V"; fi
 				elif [ "$1" = host ]; then echo "$HOST_LIST"; else echo "$NEAR_LIST"; fi ;;
 			'session status') if [ "$1" = host ]; then echo 'player=1'; else echo 'player=2'; fi ;;
+			npcs) if [ "$n" -ge 1 ]; then echo "active=1 letGo=${HO_LETGO:-1} graphsReset=${HO_LETGO:-1}"; else echo 'active=1 letGo=0 graphsReset=0'; fi ;;
 			where) if [ "$1" = host ] && [ "$n" -ge 1 ]; then echo 'cell=00000000 world=0000003C pos=(9200,200,0) modal=0'; else echo 'cell=00000000 world=0000003C pos=(120,200,0) modal=0'; fi ;;
 			'walkto stop') echo stopped ;;
 			walkto\ *) echo 1 > "$HO_N"; echo "walking to (x)" ;;
@@ -697,7 +712,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	}
 	HANDED_H=${HOST_LIST/0001A67C local=0001A67C owner=1 role=run/0001A67C local=0001A67C owner=2 role=copy}
 	HANDED_V=${NEAR_LIST/0001A67C local=0001A67C owner=1 role=copy/0001A67C local=0001A67C owner=2 role=run}
-	t "handover: the walk, then both books the VM's: passes" "$(ho "$HANDED_H" "$HANDED_V")" "PASS PASS "
+	t "handover: the walk, then both books the VM's, its copies let go: passes" "$(ho "$HANDED_H" "$HANDED_V")" "PASS PASS PASS "
+	t "handover: both books the VM's, but the VM let go of no copy: FAIL" "$(HO_LETGO=0 ho "$HANDED_H" "$HANDED_V")" "PASS PASS FAIL "
 	t "handover: the host kept it: FAIL" "$(ho "$HOST_LIST" "$NEAR_LIST")" "PASS FAIL "
 	t "handover: one book only: FAIL" "$(ho "$HOST_LIST" "$HANDED_V")" "PASS FAIL "
 	# picked within NPC_NEAR of the stayer before the walk, but after it the NPC is not past the release rule (it walked
@@ -706,7 +722,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "handover: a route that stops is a rig fault, not a FAIL" "$( npcs_walk_route() { echo 'point 2 (x) not reached'; return 1; }; ho_route_stops() { :; }; HO_N=$d/ho_n; echo 0 > "$HO_N"
 		dc() { case "$2" in 'npcs list') if [ "$1" = host ]; then echo "$HOST_LIST"; else echo "$NEAR_LIST"; fi ;; 'session status') if [ "$1" = host ]; then echo 'player=1'; else echo 'player=2'; fi ;;
 			where) echo 'cell=00000000 world=0000003C pos=(120,200,0) modal=0' ;; *) echo ok ;; esac; }
-		( A_OUT=$d/hr; mkdir -p "$A_OUT"; a_init hr >/dev/null; npcs_handover host vm >/dev/null; cut -f1 "$A_RESULTS" | tr '\n' ' ' ) )" "RIG "
+		( A_OUT=$d/hr; mkdir -p "$A_OUT"; a_init hr >/dev/null; npcs_handover host vm >/dev/null; cut -f1 "$A_RESULTS" | tr '\n' ' ' ) )" "RIG RIG "
 
 	# the step is wired into the harness: in STEPS before final, a session step, run by default
 	t "npcs is a step" "$(case " $STEPS " in *" npcs "*) echo yes ;; esac)" yes
