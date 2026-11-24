@@ -70,7 +70,11 @@ namespace NpcSync
 	void BeforeSave();
 
 	// Developer channel: `npcs` (counts), `npcs list` (each NPC: who runs it, its kind, where it is and where its copy
-	// is), `npcs <form id>` (one NPC).
+	// is), `npcs <form id>` (one NPC), `npcs spells [<form id>]` (the spells and voices of copies and of the NPCs this
+	// game runs: SpellRules.h), and for the rig `npcs spells find <aimed|self|summon|power>`, `npcs spells arm <local id>
+	// <right|left|voice> <spell id | 0>` (an NPC this game runs given a spell, the set-up of the step `npcspells`),
+	// `npcs spells knows <local id> <spell id>` (whether an actor knows it: the step takes back only what it taught) and
+	// `npcs spells refuse <on|off>`.
 	[[nodiscard]] std::string Describe(std::string_view a_args);
 	// Developer channel `swim` (the copies' part, after ours and the stand-ins': Water::Command): how many copies' runners
 	// have them swimming and under water, how many are shown swimming, the swim events their graphs took and turned
@@ -86,6 +90,10 @@ namespace NpcSync
 	[[nodiscard]] std::optional<Protocol::NpcKey>                                  KeyOf(RE::Actor* a_actor);
 	[[nodiscard]] std::uint32_t                                                    RunnerOf(const Protocol::NpcKey& a_key);
 	[[nodiscard]] std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> RunActors();
+	// For the effect hook (RemotePlayers.cpp; any thread, no lock): whether an effect of a_caster's is refused because
+	// a_caster is a copy of an NPC another game runs and the effect makes or moves something here (SpellRules::
+	// JudgeCopyMagic); counted by kind when it is.
+	[[nodiscard]] bool                                                             RefusesCopyMagic(const RE::Actor* a_caster, std::int32_t a_archetype);
 	// For projectiles (src/game/Shots.h): whether a_actor is a copy this game moves by its runner's states now (any
 	// thread: the projectile hook asks), and the moment on this game's clock its runner's a_sentMs was (none: not known).
 	[[nodiscard]] bool                                                             Mirrored(const RE::Actor* a_actor);

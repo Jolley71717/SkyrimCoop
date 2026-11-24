@@ -94,6 +94,10 @@ namespace RemotePlayers
 	// whom, its crime faction, the hits that landed on it here and the effects put on it refused (none and any), its own
 	// blows and its effects refused.
 	[[nodiscard]] std::string Peace();
+	// The effect hook of Character's magic target (a stand-in's spells take hold on no one here; a copy's make nothing
+	// here: SpellRules.h), put in from a_character (any Character but the player) if no stand-in put it in yet: NpcSync
+	// asks with its first copy, which may come before any stand-in. Main thread.
+	void HookMagic(RE::Actor* a_character);
 	// How many copies NpcSync moves: while any, the actor update hook asks NpcSync::UpdateCopy about every Character
 	// that is not a stand-in, and the leg channels look actors up.
 	void SetCopies(std::size_t a_count);
@@ -110,7 +114,8 @@ namespace RemotePlayers
 	// up (down negative) off the height it was shown at, put back or not, when it is shown swimming (for `swim`: what the
 	// engine did, not where the plugin put it after).
 	bool HoldDepth(RE::Actor* a_actor, const Protocol::PlayerState& a_state, float* a_drift = nullptr);
-	// An actor this game placed (a copy of a spawn) goes out of the world as a stand-in does: disabled, then deleted
+	// An actor this game placed (a copy of a spawn), or one a stand-in or a copy made here (NpcSync: a summon), goes out of
+	// the world as a stand-in does: disabled, then deleted
 	// (Retire.h), its AI off meanwhile, taken out before a save and named in the co-save until it is gone.
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
 

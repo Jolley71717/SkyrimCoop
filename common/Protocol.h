@@ -53,7 +53,10 @@ namespace Protocol
 	// 14: who sits, lies, leans or works in what furniture (kSits, message type 58): a player's chair, bed or crafting
 	//    station, and those of the NPCs a game runs, so the others put the actor that shows them in the same one. (As
 	//    with 9: whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 14;
+	// 21: an NPC's gear says its voice too (NpcGear::voice: the shout or power it has ready), so a copy readies what its
+	//    runner's NPC has, as it holds the spells in its hands. (The two lines of changes waiting to land each numbered
+	//    their own; this one is renumbered when it lands.)
+	inline constexpr std::uint16_t VERSION = 21;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -277,8 +280,8 @@ namespace Protocol
 		kRightUnnamed = 1 << 0,
 		kLeftUnnamed = 1 << 1,
 		kAmmoUnnamed = 1 << 2,
-		kAllUnnamed = kRightUnnamed | kLeftUnnamed | kAmmoUnnamed,  // an NPC's gear: the hands and the quiver
-		kVoiceUnnamed = 1 << 3,                                     // a player's looks: the voice too
+		kAllUnnamed = kRightUnnamed | kLeftUnnamed | kAmmoUnnamed,  // the hands and the quiver
+		kVoiceUnnamed = 1 << 3,                                     // the voice too: a player's looks, an NPC's gear
 		kAllLooksUnnamed = kAllUnnamed | kVoiceUnnamed,
 	};
 
@@ -492,9 +495,9 @@ namespace Protocol
 		auto operator<=>(const WornItem&) const = default;
 	};
 
-	// What an NPC wears (armor, at most MAX_WORN) and holds: each hand's weapon, spell, shield or torch, and its
-	// ammunition; 0 for none. unnamedSlots: the body slots of worn items left out (none named to this game), so a copy
-	// keeps what it wears there.
+	// What an NPC wears (armor, at most MAX_WORN) and holds: each hand's weapon, spell, shield or torch, its ammunition,
+	// and its voice (the shout or power it has ready); 0 for none. unnamedSlots: the body slots of worn items left out
+	// (none named to this game), so a copy keeps what it wears there.
 	struct NpcGear
 	{
 		std::uint32_t         runner = 0;
@@ -503,7 +506,8 @@ namespace Protocol
 		std::uint32_t         right = 0;
 		std::uint32_t         left = 0;
 		std::uint32_t         ammo = 0;
-		std::uint8_t          unnamed = 0;  // GearUnnamed
+		std::uint32_t         voice = 0;
+		std::uint8_t          unnamed = 0;  // GearUnnamed bits, kAllLooksUnnamed at most
 		std::uint32_t         unnamedSlots = 0;
 		bool operator==(const NpcGear&) const = default;
 	};
@@ -1669,6 +1673,7 @@ namespace Protocol
 		w.U32(a_msg.right);
 		w.U32(a_msg.left);
 		w.U32(a_msg.ammo);
+		w.U32(a_msg.voice);
 		w.U8(a_msg.unnamed);
 		w.U32(a_msg.unnamedSlots);
 		return w.Data();
@@ -1695,9 +1700,10 @@ namespace Protocol
 		msg.right = r.U32();
 		msg.left = r.U32();
 		msg.ammo = r.U32();
+		msg.voice = r.U32();
 		msg.unnamed = r.U8();
 		msg.unnamedSlots = r.U32();
-		if (!r.AtEnd() || (msg.unnamed & ~kAllUnnamed) != 0) {
+		if (!r.AtEnd() || (msg.unnamed & ~kAllLooksUnnamed) != 0) {
 			return std::nullopt;
 		}
 		return msg;

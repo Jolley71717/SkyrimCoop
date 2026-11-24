@@ -14,6 +14,7 @@
 #include "game/PeaceRules.h"
 #include "game/Retire.h"
 #include "game/Riding.h"
+#include "game/SpellRules.h"
 #include "game/StandInPeace.h"
 #include "game/StandInRules.h"
 #include "game/StateBuffer.h"
@@ -58,6 +59,15 @@ namespace RemotePlayers
 					  StandInRules::kSpawnHazard == std::to_underlying(ArchetypeID::kSpawnHazard) && StandInRules::kEtherealize == std::to_underlying(ArchetypeID::kEtherealize) &&
 					  StandInRules::kSpawnScriptedRef == std::to_underlying(ArchetypeID::kSpawnScriptedRef),
 			"StandInRules' magic effect kinds are the game's");
+		static_assert(SpellRules::kArchNone == std::to_underlying(ArchetypeID::kNone) && SpellRules::kArchCommandSummoned == std::to_underlying(ArchetypeID::kCommandSummoned) &&
+					  SpellRules::kArchLock == std::to_underlying(ArchetypeID::kLock) && SpellRules::kArchOpen == std::to_underlying(ArchetypeID::kOpen) &&
+					  SpellRules::kArchBoundWeapon == std::to_underlying(ArchetypeID::kBoundWeapon) &&
+					  SpellRules::kArchSummonCreature == std::to_underlying(ArchetypeID::kSummonCreature) &&
+					  SpellRules::kArchTelekinesis == std::to_underlying(ArchetypeID::kTelekinesis) && SpellRules::kArchReanimate == std::to_underlying(ArchetypeID::kReanimate) &&
+					  SpellRules::kArchSlowTime == std::to_underlying(ArchetypeID::kSlowTime) &&
+					  SpellRules::kArchSpawnScriptedRef == std::to_underlying(ArchetypeID::kSpawnScriptedRef) &&
+					  SpellRules::kArchGrabActor == std::to_underlying(ArchetypeID::kGrabActor),
+			"SpellRules' magic effect kinds are the game's");
 
 		struct Remote
 		{
@@ -481,11 +491,17 @@ namespace RemotePlayers
 			const bool onItself = caster && caster->AsMagicTarget() == a_this;
 			const bool casterWatched = caster && watchedIds.Contains(caster->GetFormID());
 			const bool targetWatched = !onItself && target && watchedIds.Contains(target->GetFormID());
+			const auto base = a_data.effect ? a_data.effect->baseEffect : nullptr;
+			const auto archetype = base ? static_cast<std::int32_t>(std::to_underlying(base->GetArchetype())) : StandInRules::kArchNone;
+			// A copy of an NPC another game runs makes or moves nothing here (SpellRules::JudgeCopyMagic): its runner's
+			// game makes the real summon, the real raised corpse. Asked only of the archetypes that would (NpcSync's
+			// lookup of its copies takes no lock: an id set).
+			if (caster && !casterWatched && SpellRules::Judged(archetype) && NpcSync::RefusesCopyMagic(caster, archetype)) {
+				return false;
+			}
 			if (!casterWatched && !targetWatched) {
 				return true;
 			}
-			const auto base = a_data.effect ? a_data.effect->baseEffect : nullptr;
-			const auto archetype = base ? static_cast<std::int32_t>(std::to_underlying(base->GetArchetype())) : StandInRules::kArchNone;
 			std::scoped_lock l{ lock };
 			const auto       leaving = [](RE::Actor* a_actor) {
 				const auto gone = a_actor ? retiring.find(a_actor) : retiring.end();
@@ -1299,7 +1315,7 @@ namespace RemotePlayers
 			const auto  looks = Allowed(*a_remote.looks, refused);
 			a_remote.refusedForms = refused;
 			a_remote.gear = StandInRules::GearFor(looks);
-			const auto dressed = Gear::Dress(a_remote.gear, true, a_actor, Gear::Spells::kHands);
+			const auto dressed = Gear::Dress(a_remote.gear, true, a_actor);
 			a_remote.gearMissing = dressed.missing;
 			TopUpAmmo(a_remote, a_actor);
 			// Its friend's voice, or none when they have none ready; one their game could not name is left as it is.
@@ -1325,7 +1341,7 @@ namespace RemotePlayers
 		void Check(std::uint32_t a_id, Remote& a_remote, RE::Actor* a_actor, Clock::time_point a_now)
 		{
 			a_remote.nextCheck = a_now + CHECK_EVERY;
-			a_remote.held = Gear::Check(a_remote.gear, a_actor, Gear::Spells::kHands);
+			a_remote.held = Gear::Check(a_remote.gear, a_actor);
 			a_remote.wornShown = a_remote.held.matched;
 			a_remote.checked = true;
 			const auto voice = Gear::VoiceOf(a_actor);
@@ -1731,6 +1747,13 @@ namespace RemotePlayers
 	std::size_t Count()
 	{
 		return players.size();
+	}
+
+	void HookMagic(RE::Actor* a_character)
+	{
+		if (a_character && !a_character->IsPlayerRef()) {
+			HookCharacterMagic(a_character);
+		}
 	}
 
 	bool IsOurs(const RE::Actor* a_actor)

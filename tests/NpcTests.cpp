@@ -99,6 +99,11 @@ TEST("npc protocol: claims, owners, states, actions and gear read back as they w
 
 	const Protocol::NpcGear gear{ .runner = 2, .key = GUARD, .worn = { { 0x00012E49, 0x4 }, { 0x00012E4B, 0x80 } }, .right = 0x00012EB7, .left = 0x00012EB6, .ammo = 0x0001397D, .unnamed = Protocol::kAmmoUnnamed, .unnamedSlots = 0x2 };
 	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(gear)) == gear);
+	// A mage's: a spell in each hand and a shout ready (protocol 21), the voice unnamed or not.
+	const Protocol::NpcGear mage{ .runner = 2, .key = GUARD, .right = 0x00012FCD, .left = 0x0002F3B8, .voice = 0x00013E07 };
+	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(mage)) == mage);
+	const Protocol::NpcGear unnamedVoice{ .runner = 2, .key = GUARD, .right = 0x00012FCD, .unnamed = Protocol::kVoiceUnnamed };
+	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(unnamedVoice)) == unnamedVoice);
 }
 
 TEST("npc protocol: the longest of each message fits its limit, and one past a limit, or cut short, is refused")
@@ -177,9 +182,11 @@ TEST("npc protocol: a claim of no NPC or of an unknown reason, a state of no NPC
 	CHECK(Protocol::DecodeNpcGear(Protocol::Encode(Protocol::NpcGear{ .key = {} })));
 	// An unnamed bit this version does not know is refused.
 	auto unknownBit = Protocol::Encode(Protocol::NpcGear{ .key = GUARD });
-	unknownBit[unknownBit.size() - 5] = 0x08;
+	unknownBit[unknownBit.size() - 5] = 0x10;
 	CHECK(!Protocol::DecodeNpcGear(unknownBit));
 	unknownBit[unknownBit.size() - 5] = Protocol::kAllUnnamed;
+	CHECK(Protocol::DecodeNpcGear(unknownBit));
+	unknownBit[unknownBit.size() - 5] = Protocol::kAllLooksUnnamed;  // the voice's bit too (protocol 21)
 	CHECK(Protocol::DecodeNpcGear(unknownBit));
 }
 
@@ -285,6 +292,17 @@ TEST("npc form translate: an NPC of a plugin both games have is named as each ga
 	CHECK(gear->right == 0u);
 	CHECK(gear->left == 0x01000903u);
 	CHECK(gear->unnamed == Protocol::kRightUnnamed);  // the left's is known, and no ammunition is none, not unnamed
+	CHECK(gear->voice == 0u);
+	// The voice the same way (protocol 21): a shout or power of B.esp is renumbered; one of Extra.esp, which the guest
+	// lacks, is 0 said as unnamed (the copy keeps its own ready), never as none.
+	const auto voiced = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofB, .voice = 0x03000904 })));
+	REQUIRE(voiced);
+	CHECK(voiced->voice == 0x01000904u);
+	CHECK(voiced->unnamed == 0u);
+	const auto unvoiced = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofB, .voice = 0x04000905 })));
+	REQUIRE(unvoiced);
+	CHECK(unvoiced->voice == 0u);
+	CHECK(unvoiced->unnamed == Protocol::kVoiceUnnamed);
 	const auto lacked = Protocol::DecodeNpcGear(e.HostToGuest(Protocol::Encode(Protocol::NpcGear{ .key = ofExtra, .worn = { { 0x00012E49, 0x4 } } })));
 	REQUIRE(lacked);
 	CHECK(lacked->key.id == 0u);
@@ -1137,5 +1155,85 @@ TEST("npc server: a runner lets go, and everyone hears the NPC is nobody's; anot
 		const auto told = OwnersSent(f, peer);
 		REQUIRE(told.size() == 1u);
 		CHECK(told[0].first.owners == std::vector<Protocol::NpcOwner>({ { GUARD, 0 } }));
+	}
+}
+
+TEST("npc rules: a spell leaves a hand by a deselect that empties both, so a hand filled again keeps the other's spell")
+{
+	using namespace NpcRules;
+	constexpr std::uint32_t FLAMES = 0x00012FCD, SPARKS = 0x0002DD2A, WARD = 0x0005D173;
+	const auto              isSpell = [&](std::uint32_t a_id) { return a_id == FLAMES || a_id == SPARKS || a_id == WARD; };
+	const std::vector<Count> carried{ { FLAMES, 2 }, { SPARKS, 2 }, { WARD, 2 }, { SWORD, 1 }, { SHIELD, 1 } };
+	const Wearing            dual{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = FLAMES, .left = FLAMES };
+	const auto               gearOf = [](std::uint32_t a_right, std::uint32_t a_left) {
+		return Protocol::NpcGear{ .key = GUARD, .worn = { { CUIRASS, BODY } }, .right = a_right, .left = a_left };
+	};
+
+	// Flames in both hands, the right swapped for a sword: the sword goes straight into the right hand's slot (no
+	// deselect, which would empty the left too); the left keeps its flames.
+	{
+		const auto gear = gearOf(SWORD, FLAMES);
+		const auto plan = PlanGear(gear, dual, carried, false);
+		CHECK(plan.unequip == Items({ { FLAMES, Hand::kRight } }));
+		CHECK(plan.equip == Items({ { SWORD, Hand::kRight } }));
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.unequip.empty());
+		CHECK(steps.deselect.empty());
+		CHECK(steps.reselect.empty());
+	}
+	// The left swapped for a ward: the ward replaces the flames in the left; the right keeps its flames.
+	{
+		const auto gear = gearOf(FLAMES, WARD);
+		const auto plan = PlanGear(gear, dual, carried, false);
+		CHECK(plan.equip == Items({ { WARD, Hand::kLeft } }));
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.deselect.empty());
+		CHECK(steps.reselect.empty());
+	}
+	// The left swapped for a shield (worn armor, put on with no hand named): the shield fills the left.
+	{
+		const Protocol::NpcGear gear{ .key = GUARD, .worn = { { CUIRASS, BODY }, { SHIELD, SHIELD_SLOT } }, .right = FLAMES, .left = SHIELD };
+		const auto              plan = PlanGear(gear, dual, carried, false);
+		CHECK(plan.unequip == Items({ { FLAMES, Hand::kLeft } }));
+		CHECK(plan.equip == Items({ { SHIELD, Hand::kNone } }));
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.deselect.empty());
+		CHECK(steps.reselect.empty());
+	}
+	// The left emptied: the flames are deselected (out of both hands) and put back in the right, which keeps them.
+	{
+		const auto gear = gearOf(FLAMES, 0);
+		const auto plan = PlanGear(gear, dual, carried, false);
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.deselect == Items({ { FLAMES, Hand::kLeft } }));
+		CHECK(steps.reselect == Items({ { FLAMES, Hand::kRight } }));
+	}
+	// Both emptied: deselected once, put back nowhere.
+	{
+		const auto gear = gearOf(0, 0);
+		const auto plan = PlanGear(gear, dual, carried, false);
+		CHECK(plan.unequip.size() == 2u);
+		const auto steps = StepsOf(plan, dual, gear, isSpell);
+		CHECK(steps.deselect == Items({ { FLAMES, Hand::kRight } }));
+		CHECK(steps.reselect.empty());
+	}
+	// Two different spells, the right emptied: the deselect leaves the left's sparks, so nothing is put back.
+	{
+		const Wearing mixed{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = FLAMES, .left = SPARKS };
+		const auto    gear = gearOf(0, SPARKS);
+		const auto    plan = PlanGear(gear, mixed, carried, false);
+		const auto    steps = StepsOf(plan, mixed, gear, isSpell);
+		CHECK(steps.deselect == Items({ { FLAMES, Hand::kRight } }));
+		CHECK(steps.reselect.empty());
+	}
+	// A weapon taken off is no spell: unequipped as the plan says.
+	{
+		const Wearing armed{ .armor = { { CUIRASS, CUIRASS, BODY } }, .right = SWORD, .left = FLAMES };
+		const auto    gear = gearOf(0, FLAMES);
+		const auto    plan = PlanGear(gear, armed, carried, false);
+		const auto    steps = StepsOf(plan, armed, gear, isSpell);
+		CHECK(steps.unequip == Items({ { SWORD, Hand::kRight } }));
+		CHECK(steps.deselect.empty());
+		CHECK(steps.reselect.empty());
 	}
 }

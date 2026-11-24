@@ -34,12 +34,6 @@ namespace Gear
 			return a_id != 0 && !FormIds::IsRuntime(a_id) ? RE::TESForm::LookupByID(a_id) : nullptr;
 		}
 
-		// A spell by its id in this game, a runtime one included (a copy may hold one its own game made).
-		bool IsSpellId(std::uint32_t a_id)
-		{
-			return a_id != 0 && IsSpell(RE::TESForm::LookupByID(a_id));
-		}
-
 		// A runtime form named as the plugin form it was made from, or 0 with its bit set in a_unnamed.
 		std::uint32_t Named(const RE::TESForm* a_form, std::uint8_t a_bit, std::uint8_t& a_unnamed)
 		{
@@ -148,45 +142,23 @@ namespace Gear
 		return now;
 	}
 
-	NpcRules::GearShown Check(const Protocol::NpcGear& a_gear, RE::Actor* a_actor, Spells a_spells)
+	NpcRules::GearShown Check(const Protocol::NpcGear& a_gear, RE::Actor* a_actor)
 	{
-		const auto now = WearingOf(a_actor, nullptr);
-		if (a_spells == Spells::kHands) {
-			return NpcRules::CheckGear(a_gear, now);
-		}
-		// A hand with a spell in it, wanted or held, is not judged (Dress leaves it be).
-		auto judged = a_gear;
-		if (IsSpellId(judged.right) || IsSpellId(now.right)) {
-			judged.unnamed = static_cast<std::uint8_t>(judged.unnamed | Protocol::kRightUnnamed);
-		}
-		if (IsSpellId(judged.left) || IsSpellId(now.left)) {
-			judged.unnamed = static_cast<std::uint8_t>(judged.unnamed | Protocol::kLeftUnnamed);
-		}
-		return NpcRules::CheckGear(judged, now);
+		return NpcRules::CheckGear(a_gear, WearingOf(a_actor, nullptr));
 	}
 
-	Dressed Dress(const Protocol::NpcGear& a_gear, bool a_mayAdd, RE::Actor* a_actor, Spells a_spells)
+	Dressed Dress(const Protocol::NpcGear& a_gear, bool a_mayAdd, RE::Actor* a_actor)
 	{
 		Dressed    out;
 		const auto manager = RE::ActorEquipManager::GetSingleton();
 		if (!manager) {
 			return out;
 		}
-		const bool spells = a_spells == Spells::kHands;
-		// Without spells: a spell in the runner's NPC's hand is never in an inventory, so it is not looked for (a
-		// load-order copy would count it missing): the hand is planned as empty and the spell counted skipped.
-		auto wanted = a_gear;
-		if (!spells) {
-			for (auto* hand : { &wanted.right, &wanted.left }) {
-				if (IsSpellId(*hand)) {
-					*hand = 0;
-					++out.skipped;
-				}
-			}
-		}
+		// A spell in a hand is in no inventory: one the actor knows counts as carried (WearingOf), one it does not is
+		// missing unless a_mayAdd teaches it (PlanGear), so a load-order NPC's copy keeps its own in that hand.
 		std::vector<NpcRules::Count> carried;
-		const auto                   now = WearingOf(a_actor, &carried, spells ? &wanted : nullptr);
-		const auto                   plan = NpcRules::PlanGear(wanted, now, carried, a_mayAdd);
+		const auto                   now = WearingOf(a_actor, &carried, &a_gear);
+		const auto                   plan = NpcRules::PlanGear(a_gear, now, carried, a_mayAdd);
 		// What is put on is held on against the actor's own AI (the equip's "force", Papyrus' abPreventRemoval) only on an
 		// actor this game made as it ran (a stand-in, a spawn's copy), which is never saved: on a load-order NPC's copy that
 		// lock would stay in the friend's save after the session (a follower who will not take other armor).
@@ -195,20 +167,31 @@ namespace Gear
 			// Any id of this game, a runtime one included: what the plan takes off and puts on from what the actor has is
 			// named by this game's own ids (an enchanted or tempered copy made here is one); another game's runtime ids
 			// never reach a plan (FormTranslate drops them, PlanGear keeps an unnamed hand as it is).
-			const auto form = a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
-			return spells || !IsSpell(form) ? form : nullptr;  // without spells, one held is neither taken off nor put on
+			return a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
 		};
-		for (const auto& item : plan.unequip) {
+		// A spell leaves a hand only by DeselectSpell, which empties both hands of it: a hand the plan fills again is left
+		// to the equip into its slot, and a spell the plan keeps in the other hand is put back there (NpcRules::StepsOf).
+		const auto spellOf = [&](std::uint32_t a_id) {
+			const auto form = formOf(a_id);
+			return IsSpell(form) ? form->As<RE::SpellItem>() : nullptr;
+		};
+		const auto steps = NpcRules::StepsOf(plan, now, a_gear, [&](std::uint32_t a_id) { return spellOf(a_id) != nullptr; });
+		for (const auto& item : steps.unequip) {
 			const auto form = formOf(item.id);
-			if (const auto spell = IsSpell(form) ? form->As<RE::SpellItem>() : nullptr) {
-				a_actor->DeselectSpell(spell);
-				++out.unequipped;
-			} else if (const auto bound = form ? form->As<RE::TESBoundObject>() : nullptr) {
+			if (const auto bound = form ? form->As<RE::TESBoundObject>() : nullptr) {
 				manager->UnequipObject(a_actor, bound, nullptr, 1, HandSlot(item.hand, bound), false, true, false, true);
 				++out.unequipped;
 			} else {
 				++out.skipped;
 			}
+		}
+		for (const auto& item : steps.deselect) {
+			a_actor->DeselectSpell(spellOf(item.id));
+			++out.unequipped;
+		}
+		for (const auto& item : steps.reselect) {
+			const auto spell = spellOf(item.id);
+			manager->EquipSpell(a_actor, spell, HandSlot(item.hand, spell));
 		}
 		for (const auto& add : plan.add) {
 			const auto form = formOf(add.id);
@@ -232,6 +215,33 @@ namespace Gear
 		}
 		out.missing = plan.missing;
 		return out;
+	}
+
+	bool IsMagic(std::uint32_t a_id)
+	{
+		const auto form = a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
+		return form && (form->Is(RE::FormType::Spell) || form->Is(RE::FormType::Shout));
+	}
+
+	bool Knows(RE::Actor* a_actor, std::uint32_t a_id)
+	{
+		const auto form = a_actor && a_id != 0 ? RE::TESForm::LookupByID(a_id) : nullptr;
+		if (!form) {
+			return false;
+		}
+		if (const auto shout = form->As<RE::TESShout>()) {
+			return a_actor->HasShout(shout);
+		}
+		const auto spell = IsSpell(form) ? form->As<RE::SpellItem>() : nullptr;
+		return spell && a_actor->HasSpell(spell);
+	}
+
+	bool HoldsMagic(RE::Actor* a_actor)
+	{
+		if (!a_actor) {
+			return false;
+		}
+		return IsSpell(a_actor->GetEquippedObject(false)) || IsSpell(a_actor->GetEquippedObject(true)) || VoiceOf(a_actor) != nullptr;
 	}
 
 	RE::TESForm* VoiceOf(RE::Actor* a_actor)

@@ -527,6 +527,52 @@ namespace NpcRules
 		return plan;
 	}
 
+	// How a plan's hands are done when a spell is in one. The engine takes a spell out of a hand only by deselecting it
+	// (Actor::DeselectSpell), which takes no hand: the spell leaves both. So, for every actor dressed (a copy of any NPC,
+	// a stand-in), a spell in a hand the plan fills again is not taken off at all (equipping into that hand's slot
+	// replaces it: a dual-casting mage drawing a sword in its right keeps its spell in its left, one raising a ward in its
+	// left keeps its spell in its right); a spell taken off for an empty hand is deselected once; and a spell the plan
+	// keeps in the other hand (it held the same one there) is put back in that hand after.
+	struct HandSteps
+	{
+		std::vector<GearItem> unequip;   // the plan's take-offs that are no spell in a hand (UnequipObject), in its order
+		std::vector<GearItem> deselect;  // each spell taken out of every hand (DeselectSpell), once
+		std::vector<GearItem> reselect;  // after the deselects: a spell put back in the hand the plan keeps it in
+	};
+
+	// a_isSpell(id): whether that id is a spell (held in a hand, in no inventory).
+	template <class IsSpell>
+	[[nodiscard]] HandSteps StepsOf(const GearPlan& a_plan, const Wearing& a_now, const Protocol::NpcGear& a_gear, IsSpell&& a_isSpell)
+	{
+		HandSteps  steps;
+		const auto heldIn = [&](Hand a_hand) { return a_hand == Hand::kLeft ? a_now.left : a_now.right; };
+		const auto wantedIn = [&](Hand a_hand) { return a_hand == Hand::kLeft ? a_gear.left : a_gear.right; };
+		// Something goes into that hand: equipped into it, or a shield (put on with the worn armor) that its hand wants.
+		const auto filled = [&](Hand a_hand) {
+			return std::ranges::any_of(a_plan.equip, [&](const GearItem& a_e) {
+				return a_e.hand == a_hand || (a_e.hand == Hand::kNone && a_e.id != 0 && a_e.id == wantedIn(a_hand));
+			});
+		};
+		const auto takenFrom = [&](std::uint32_t a_id, Hand a_hand) {
+			return std::ranges::any_of(a_plan.unequip, [&](const GearItem& a_u) { return a_u.id == a_id && a_u.hand == a_hand; });
+		};
+		for (const auto& item : a_plan.unequip) {
+			if (item.hand == Hand::kNone || !a_isSpell(item.id)) {
+				steps.unequip.push_back(item);
+			} else if (!filled(item.hand) && std::ranges::none_of(steps.deselect, [&](const GearItem& a_d) { return a_d.id == item.id; })) {
+				steps.deselect.push_back(item);
+			}
+		}
+		for (const auto& gone : steps.deselect) {
+			for (const auto hand : { Hand::kRight, Hand::kLeft }) {
+				if (heldIn(hand) == gone.id && !takenFrom(gone.id, hand) && !filled(hand)) {
+					steps.reselect.push_back({ gone.id, hand });
+				}
+			}
+		}
+		return steps;
+	}
+
 	// What a copy wears and holds, read back from it a while after it was dressed, against its runner's gear: the equip
 	// and unequip calls say nothing of what the game did (an equip it refused, a bow left on the back by an unequip of
 	// the wrong slot). Judged as PlanGear plans: what the runner's game could not name to this one (an unnamed hand,
