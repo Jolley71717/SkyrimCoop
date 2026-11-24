@@ -1343,3 +1343,58 @@ TEST("object parts: a copy is put when any part lies elsewhere; a rest's parts a
 	CHECK(!ObjectRules::PartsOf(names, { Pose{}, std::nullopt }));  // a body gone NaN: none of it said
 	CHECK(!ObjectRules::PartsOf(names, { Pose{} }));
 }
+
+TEST("object parts: a knock that leaves the lead still is seen by the part that moved most; at rest only once every part is")
+{
+	using ObjectRules::NamedPoses;
+	const auto t = Steady::now();
+	const auto names = ObjectRules::PartNames({ "Link", "Link", "Link" });
+	const NamedPoses hanging{ { names[0], Pose{ { 0, 0, 100 } } }, { names[1], Pose{ { 0, 0, 80 } } }, { names[2], Pose{ { 0, 0, 60 } } } };
+
+	ObjectRules::PartsSeen seen;
+	CHECK(!seen.Look(TANKARD, hanging, t));  // the first look is the baseline
+	CHECK(!seen.Look(TANKARD, hanging, t + 250ms));
+	auto knocked = hanging;
+	knocked[1].second.at.x += 3.0f;
+	knocked[2].second.at.x += 12.0f;  // the far end swings most
+	const auto move = seen.Look(TANKARD, knocked, t + 500ms);
+	REQUIRE(move);
+	CHECK(Near(move->from, Vec{ 0, 0, 60 }));
+	CHECK(Near(move->to, Vec{ 12, 0, 60 }));
+	CHECK(!seen.Look(TANKARD, knocked, t + 750ms));  // the baseline moved with it
+	auto creep = knocked;
+	creep[2].second.at.x += 0.6f;
+	CHECK(!seen.Look(TANKARD, creep, t + 1s));
+	creep[2].second.at.x += 0.6f;  // a slow drift adds up against the kept baseline
+	CHECK(seen.Look(TANKARD, creep, t + 1250ms).has_value());
+	seen.Forget(TANKARD);
+	CHECK(!seen.Look(TANKARD, hanging, t + 1500ms));
+	seen.Prune(t + 1500ms + ObjectRules::PartsSeen::FORGET_AFTER + 1s);
+	CHECK(seen.Size() == 0u);
+	for (std::uint32_t i = 0; i < ObjectRules::PartsSeen::MAX_OBJECTS + 5; ++i) {
+		(void)seen.Look(0x00800000 + i, hanging, t);
+	}
+	CHECK(seen.Size() == ObjectRules::PartsSeen::MAX_OBJECTS);
+
+	// Settling: the lead still from the start, the far end swinging until 2 s.
+	ObjectRules::PartsSettle settle{ t };
+	auto swing = hanging;
+	bool rested = false;
+	for (int i = 1; i <= 8 && !rested; ++i) {
+		swing[2].second.at.x = (i % 2 ? 10.0f : -10.0f);
+		rested = settle.Look(swing, t + std::chrono::milliseconds(250 * i));
+	}
+	CHECK(!rested);
+	rested = settle.Look(swing, t + 2250ms);
+	CHECK(!rested);  // still for 250 ms only
+	CHECK(settle.Look(swing, t + 2000ms + ObjectRules::STILL_FOR));
+	CHECK(settle.Look(knocked, t + 9s));  // at rest stays so
+
+	// One that swings for ever is given up on.
+	ObjectRules::PartsSettle forever{ t };
+	for (int i = 1; i * 250ms < ObjectRules::GIVE_UP; ++i) {
+		swing[2].second.at.x = (i % 2 ? 10.0f : -10.0f);
+		CHECK(!forever.Look(swing, t + std::chrono::milliseconds(250 * i)));
+	}
+	CHECK(forever.Look(swing, t + ObjectRules::GIVE_UP));
+}

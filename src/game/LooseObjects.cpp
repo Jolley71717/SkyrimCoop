@@ -251,9 +251,10 @@ namespace LooseObjects
 		// A move of ours, watched until it rests.
 		struct Watch
 		{
-			ObjectRules::Settle settle;
-			Clock::time_point   lastFound{};
-			bool                thrown = false;  // our player's let-go
+			ObjectRules::Settle                     settle;
+			Clock::time_point                       lastFound{};
+			bool                                    thrown = false;  // our player's let-go
+			std::optional<ObjectRules::PartsSettle> parts;           // an object of several bodies': every loose one at rest
 		};
 		// A friend's hold of an object, drawn in front of their stand-in.
 		struct FriendHold
@@ -294,6 +295,7 @@ namespace LooseObjects
 
 		ObjectRules::Causes                       causes;
 		ObjectRules::Seen                         seen;
+		ObjectRules::PartsSeen                    partsSeen;  // objects of several bodies' parts
 		ObjectRules::Pacer                        pacer;
 		ObjectRules::HoldPace                     holdPace;
 		ObjectRules::Quiet                        quiet;
@@ -322,7 +324,7 @@ namespace LooseObjects
 		{
 			std::uint64_t holdsSent = 0, holdsHeard = 0, holdsDrawn = 0, holdsRefused = 0, grabsDropped = 0, holdsEnded = 0;
 			std::uint64_t telekinesisHolds = 0, lateHolds = 0, parted = 0, carried = 0, carriedOver = 0, leftBehind = 0, notMovable = 0;
-			std::uint64_t partRests = 0, partsWritten = 0, partsUnlike = 0, severalGrabs = 0;
+			std::uint64_t partRests = 0, partsWritten = 0, partsUnlike = 0, severalGrabs = 0, partMoves = 0, partsOnly = 0;
 			std::uint64_t letGosSent = 0, letGosHeard = 0, letGosApplied = 0;
 			std::uint64_t restsSaid = 0, restsSent = 0, restsHeard = 0, restsApplied = 0, restsLeft = 0, answers = 0, catchUps = 0;
 			std::uint64_t placesApplied = 0, goneSent = 0, goneHeard = 0;
@@ -468,7 +470,8 @@ namespace LooseObjects
 		}
 
 		// The lead rigid body of a loose object of the class (ObjectRules::Movable: its only one, or its first loose one), or none.
-		RE::bhkRigidBody* LooseBody(RE::TESObjectREFR* a_ref)
+		// a_bodies: what was found, for the caller (one walk of its 3D, not two).
+		RE::bhkRigidBody* LooseBody(RE::TESObjectREFR* a_ref, Bodies* a_bodies = nullptr)
 		{
 			if (!a_ref) {
 				return nullptr;
@@ -487,6 +490,9 @@ namespace LooseObjects
 			const auto bodies = BodiesOf(a_ref);
 			facts.bodies = bodies.count;
 			facts.motion = MotionOf(bodies.first);
+			if (a_bodies) {
+				*a_bodies = bodies;
+			}
 			return ObjectRules::Movable(facts) ? bodies.first : nullptr;
 		}
 
@@ -613,13 +619,25 @@ namespace LooseObjects
 				return false;
 			}
 			const bool several = bodies.count > 1;
-			Pose       lead = a_pose;
+			if (!several && a_parts) {
+				++counts.partsUnlike;  // a rest of several bodies for one of one here: another mesh, left as it lies
+				return false;
+			}
+			Pose lead = a_pose;
+			bool moveRef = a_moveRef;
 			if (several) {
 				const auto parts = LooseParts(bodies);
 				const bool still = a_velocity.x == 0.0f && a_velocity.y == 0.0f && a_velocity.z == 0.0f;
 				if (!a_parts || !a_moveRef || !still || !ObjectRules::PartsAlike(NamesOf(parts), *a_parts)) {
 					++counts.partsUnlike;
 					return false;
+				}
+				// Its reference moves with its lead only when every body is loose (a heap of bones). One with a fixed or
+				// keyframed body (a chain's anchor, a lantern's hook) keeps its reference where it is, and only its loose
+				// bodies are put: moving the reference would take the anchor along by the lead's swing, and drift.
+				if (parts.size() != bodies.count) {
+					moveRef = false;
+					++counts.partsOnly;
 				}
 				// The reference goes where our lead's part lies in the rest (its own place is its sender's lead's).
 				for (const auto& part : parts) {
@@ -635,7 +653,10 @@ namespace LooseObjects
 			const auto root = a_ref->Get3D();
 			const auto senseOfBody = bodySense.Settled();
 			const auto senseOfAngles = angleSense.Settled();
-			if (!a_moveRef) {
+			const auto refWas = a_ref->GetPosition();
+			const auto anglesWas = a_ref->GetAngle();
+			bool       refMoved = false;
+			if (!moveRef) {
 				++counts.bodyOnly;
 			} else if (here && root && senseOfBody != ObjectRules::Sense::kUnknown && senseOfAngles != ObjectRules::Sense::kUnknown) {
 				const auto& t = root->world.translate;
@@ -648,6 +669,7 @@ namespace LooseObjects
 					a_ref->SetPosition(RE::NiPoint3{ refPose.at.x, refPose.at.y, refPose.at.z });
 					a_ref->SetAngle(RE::NiPoint3{ angles.x, angles.y, angles.z });
 					a_ref->Update3DPosition(true);
+					refMoved = true;
 					++counts.refWrites;
 				} else {
 					++counts.badPoses;
@@ -663,7 +685,13 @@ namespace LooseObjects
 				for (const auto& part : LooseParts(now)) {
 					const auto it = std::find_if(a_parts->begin(), a_parts->end(), [&](const Protocol::ObjectPart& a_part) { return a_part.name == part.name; });
 					if (it == a_parts->end()) {
-						++counts.partsUnlike;  // its 3D made anew otherwise: put none
+						// Its 3D made anew otherwise: whole or none, so its reference goes back where it was.
+						if (refMoved) {
+							a_ref->SetPosition(refWas);
+							a_ref->SetAngle(anglesWas);
+							a_ref->Update3DPosition(true);
+						}
+						++counts.partsUnlike;
 						return false;
 					}
 					puts.emplace_back(part.body, ObjectRules::PoseOf(*it));
@@ -1032,6 +1060,7 @@ namespace LooseObjects
 			++counts.scans;
 			causes.Prune(a_now);
 			seen.Prune(a_now);
+			partsSeen.Prune(a_now);
 			quiet.Prune(a_now);
 			falls.Prune(a_now);
 			const auto me = At(a_player);
@@ -1046,6 +1075,7 @@ namespace LooseObjects
 				RE::TESObjectREFR* ref;
 				RE::bhkRigidBody*  body;
 				float              distance;
+				bool               several;  // of several bodies
 			};
 			std::vector<Near>                      nearBy;
 			std::unordered_map<std::uint32_t, Vec> shotsNow;
@@ -1095,8 +1125,9 @@ namespace LooseObjects
 				if (distance > SCAN_RANGE) {
 					return RE::BSContainer::ForEachResult::kContinue;
 				}
-				if (const auto body = LooseBody(a_ref)) {
-					nearBy.push_back({ a_ref, body, distance });
+				Bodies bodies;
+				if (const auto body = LooseBody(a_ref, &bodies)) {
+					nearBy.push_back({ a_ref, body, distance, bodies.count > 1 });
 				}
 				return RE::BSContainer::ForEachResult::kContinue;
 			});
@@ -1112,8 +1143,9 @@ namespace LooseObjects
 			struct Looked
 			{
 				RE::FormID id;
-				Pose       before;
-				Pose       pose;
+				Vec        from;  // where what moved lay (the lead, or the part of several that moved most)
+				Vec        to;    // and lies now
+				Pose       pose;  // the lead's
 			};
 			std::vector<Looked> moved;
 			for (const auto& one : nearBy) {
@@ -1125,6 +1157,10 @@ namespace LooseObjects
 				if (!pose) {
 					continue;
 				}
+				// An object of several bodies: its parts, looked at with its lead (a knock on a chain's far end may leave
+				// its lead, by the anchor, where it was).
+				const auto parts = one.several ? PartPoses(BodiesOf(one.ref)) : ObjectRules::NamedPoses{};
+				const auto partMove = one.several ? partsSeen.Look(id, parts, a_now) : std::nullopt;
 				if ((ourHold && *ourHold == id) || friendHolds.contains(id)) {
 					seen.Set(id, *pose, a_now);
 					continue;
@@ -1142,25 +1178,32 @@ namespace LooseObjects
 					continue;
 				}
 				const auto before = seen.Look(id, *pose, a_now);
-				if (!before) {
+				if (!before && !partMove) {
 					continue;
+				}
+				// What moved most: the lead, or a part that moved farther.
+				Vec from = before ? before->at : pose->at;
+				Vec to = pose->at;
+				if (partMove && (!before || ObjectRules::Distance(partMove->from, partMove->to) > ObjectRules::Distance(from, to))) {
+					from = partMove->from;
+					to = partMove->to;
+					++counts.partMoves;
 				}
 				if (quiet.Hushed(id, a_now)) {
 					// A friend's move put it there: our physics settling it is not ours to say, and what it knocks over on
 					// the way is theirs.
 					++counts.hushed;
-					AddCause(before->at, pose->at, reach, ObjectRules::Strength::kStrike, Whose::kTheirs, a_now + ObjectRules::SHOT_HOLD);
+					AddCause(from, to, reach, ObjectRules::Strength::kStrike, Whose::kTheirs, a_now + ObjectRules::SHOT_HOLD);
 					++counts.theirPaths;
 					continue;
 				}
-				moved.push_back({ id, *before, *pose });
+				moved.push_back({ id, from, to, *pose });
 			}
 
 			for (const auto& one : moved) {
 				const auto  id = one.id;
-				const auto* before = &one.before;
 				const auto* pose = &one.pose;
-				bool        ours = causes.Judge(id, before->at, pose->at, a_now).Ours();
+				bool        ours = causes.Judge(id, one.from, one.to, a_now).Ours();
 				if (!ours) {
 					if (const auto follow = followOns.find(id); follow != followOns.end() && a_now < follow->second.until && follow->second.count < FOLLOW_ON_MAX) {
 						ours = true;  // a rest of ours that rolls on
@@ -1199,7 +1242,16 @@ namespace LooseObjects
 					continue;
 				}
 				watch.lastFound = a_now;
-				if (!watch.settle.Look(*pose, a_now)) {
+				bool rested = watch.settle.Look(*pose, a_now);
+				// An object of several bodies is at rest once every loose part is (a chain's far end may swing on while its
+				// lead, by the anchor, is still).
+				if (const auto bodies = BodiesOf(ref); bodies.count > 1) {
+					if (!watch.parts) {
+						watch.parts.emplace(watch.settle.Began());
+					}
+					rested = watch.parts->Look(PartPoses(bodies), a_now) && rested;
+				}
+				if (!rested) {
 					++it;
 					continue;
 				}
@@ -1255,8 +1307,8 @@ namespace LooseObjects
 				// Only one of the class here, before anything moves it: a hold names what its holder's game calls loose,
 				// and a plugin only one game has may make that reference a door, a static, a quest's item or an actor
 				// here. Such a one is never drawn, released or carried (it was drawn before: what it was is known).
-				if (!MayCarry(ref) || (!hold.motion && !LooseBody(ref))) {
-					continue;
+				if (!MayCarry(ref) || (!hold.motion && !LooseBody(ref)) || BodiesOf(ref).count != 1) {
+					continue;  // (an object of several bodies is never drawn in a friend's hands)
 				}
 				// The holder is not here (gone through a door, out of what is loaded): our copy falls where it is, and is
 				// drawn again once the stand-in is back. The holder's rest says where it ends.
@@ -1283,9 +1335,6 @@ namespace LooseObjects
 						hold.refWritten.reset();
 						++counts.carried;
 					}
-					continue;
-				}
-				if (BodiesOf(ref).count != 1) {
 					continue;
 				}
 				hold.parted = false;
@@ -1386,6 +1435,7 @@ namespace LooseObjects
 				++counts.restsLeft;
 			}
 			seen.Set(id, pose, a_now);
+			partsSeen.Forget(id);  // the next look at its parts is their baseline
 			quiet.Hush(id, a_now + ObjectRules::QUIET);
 			if (a_sender != 0) {
 				echo.Theirs(id, a_now);
@@ -1615,7 +1665,7 @@ namespace LooseObjects
 			}
 			// Not one that may be moved here (a plugin only one game has makes it a door, a static, a quest's item or an
 			// actor): never drawn.
-			if (const auto form = RE::TESForm::LookupByID<RE::TESObjectREFR>(id); form && !MayCarry(form)) {
+			if (const auto form = RE::TESForm::LookupByID<RE::TESObjectREFR>(id); form && (!MayCarry(form) || (form->Is3DLoaded() && BodiesOf(form).count > 1))) {
 				++counts.notMovable;
 				continue;
 			}
@@ -1696,6 +1746,7 @@ namespace LooseObjects
 		ReleaseAll();
 		causes.Clear();
 		seen.Clear();
+		partsSeen.Clear();
 		pacer.Clear();
 		holdPace.Reset();
 		quiet.Clear();
@@ -1730,6 +1781,7 @@ namespace LooseObjects
 		// The world they were in is going: nothing is written to them any more (the load's own physics starts afresh).
 		friendHolds.clear();
 		seen.Clear();
+		partsSeen.Clear();
 		watches.clear();
 		followOns.clear();
 		shotsSeen.clear();
@@ -1788,12 +1840,12 @@ namespace LooseObjects
 		}
 		const auto& c = counts;
 		return std::format(
-			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} telekinesis={} late={} parted={} carried={} carriedOver={} leftBehind={} notMovable={} | parts rests={} written={} unlike={} grabs={} | letGos sent={} heard={} applied={} | "
+			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} telekinesis={} late={} parted={} carried={} carriedOver={} leftBehind={} notMovable={} | parts rests={} written={} unlike={} grabs={} moves={} anchored={} | letGos sent={} heard={} applied={} | "
 			"rests said={} sent={} heard={} applied={} left={} answers={} placesApplied={} catchUps={} waiting={} waitingRefused={} | gone sent={} heard={} | "
 			"scans={} started={} notOurs={} hushed={} followOns={} lost={} gaveUp={} watched={} seen={} causes={} paced={} pacedDropped={} echoStopped={} | "
 			"blasts={} hits={} pickups={} | flights watched={} heard={} dropped={} stretches={} stretchesDropped={} cones={} | bodyFalls={} ourPaths={} theirPaths={} causesJoined={} causesDropped={} | writes={} refWrites={} refUnwritten={} bodyOnly={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
 			active.load() ? 1 : 0, explosionHooked ? 1 : 0, c.holdsSent, c.holdsHeard, c.holdsDrawn, c.holdsRefused, c.grabsDropped, c.holdsEnded, c.keyframes, c.releases,
-			c.telekinesisHolds, c.lateHolds, c.parted, c.carried, c.carriedOver, c.leftBehind, c.notMovable, c.partRests, c.partsWritten, c.partsUnlike, c.severalGrabs,
+			c.telekinesisHolds, c.lateHolds, c.parted, c.carried, c.carriedOver, c.leftBehind, c.notMovable, c.partRests, c.partsWritten, c.partsUnlike, c.severalGrabs, c.partMoves, c.partsOnly,
 			c.letGosSent, c.letGosHeard, c.letGosApplied, c.restsSaid, c.restsSent, c.restsHeard, c.restsApplied, c.restsLeft, c.answers, c.placesApplied, c.catchUps,
 			waiting.Size(), waiting.refused, c.goneSent, c.goneHeard, c.scans, c.started, c.notOurs, c.hushed, c.followOns, c.lost, c.gaveUp, watches.size(), seen.Size(),
 			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), Shots::AllHooked() ? 1 : 0,
