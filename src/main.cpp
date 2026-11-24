@@ -8,6 +8,7 @@
 #include "Protocol.h"
 #include "RuntimeSupport.h"
 #include "Text.h"
+#include "game/Furniture.h"
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
@@ -213,6 +214,7 @@ namespace
 			// Which save is loaded: the line a report of "an old save" is read by.
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
 			Riding::ForgetWorld();
+			Furniture::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
@@ -226,6 +228,7 @@ namespace
 		case SKSE::MessagingInterface::kNewGame:
 			logs::info("Load: a new game started");
 			Riding::ForgetWorld();
+			Furniture::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
@@ -270,6 +273,7 @@ namespace
 	void OnRevert(SKSE::SerializationInterface*)
 	{
 		Riding::ForgetWorld();
+		Furniture::ForgetWorld();
 		Shots::ForgetWorld();
 		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();

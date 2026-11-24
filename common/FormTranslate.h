@@ -83,6 +83,7 @@ namespace FormTranslate
 		case MT::kRemoteFace:
 		case MT::kRides:
 		case MT::kShots:
+		case MT::kSits:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -401,6 +402,18 @@ namespace FormTranslate
 					for (auto* id : { &shot.weapon, &shot.ammo, &shot.spell, &shot.enchant, &shot.poison }) {
 						ctx.Detail(*id);
 					}
+				}
+			});
+			break;
+		// Furniture: an NPC the other side lacks is left out (it has no copy to sit down); a reference it lacks (a mod's,
+		// or one made as the game ran) becomes none and its base, if it has that, finds it by place (SitRules::Pick); a
+		// base it lacks becomes none too, and the friend is shown standing beside it.
+		case MT::kSits:
+			detail::Apply<Protocol::Sits>(a_packet, ctx, Protocol::DecodeSits, [&](Protocol::Sits& a_msg) {
+				ctx.Entries(a_msg.sits, [&](Protocol::Sit& a_sit) { return a_sit.player != 0 || ctx.Npc(a_sit.rider); });
+				for (auto& sit : a_msg.sits) {
+					ctx.Detail(sit.furniture);
+					ctx.Detail(sit.base);
 				}
 			});
 			break;

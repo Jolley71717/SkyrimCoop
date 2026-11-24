@@ -7,6 +7,7 @@
 #include "NpcFates.h"
 #include "Redact.h"
 #include "RideBook.h"
+#include "SitBook.h"
 #include "Text.h"
 #include "TokenBucket.h"
 
@@ -62,6 +63,9 @@ namespace
 		// Ride changes passed on (common/RideBook.h): a burst of 64, then 16 a second (a player gets on or off a horse now
 		// and then, the NPCs a game runs a few at a time). Past it a change is kept and owed, never dropped.
 		TokenBucket rideBudget{ 64.0, 16.0 };
+		// Furniture changes passed on (common/SitBook.h): a burst of 64, then 16 a second (a player sits or gets up now and
+		// then; an inn's NPCs sit and rise a few at a time). Past it a change is kept and owed, never dropped.
+		TokenBucket sitBudget{ 64.0, 16.0 };
 		// Projectiles passed on (kShots): a burst of 96, then 48 a second (a player's bow or spell sends one a second or
 		// two, a concentration spell about ten while held, and the NPCs a game runs a few more in a fight). Past it a shot
 		// is dropped, never kept: its flight is over by the time a budget would let it go.
@@ -175,6 +179,8 @@ void Server::Run()
 	NpcFates::Book fates;
 	// Who rides what (common/RideBook.h), for whoever joins after.
 	RideBook::Book rides;
+	// Who is in what furniture (common/SitBook.h), for whoever joins after.
+	SitBook::Book sits;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -220,6 +226,19 @@ void Server::Run()
 			}
 		}
 	};
+	// The same for who is in what furniture (MAX_SITS each).
+	const auto sendSits = [&](const PeerKey* a_to, const PeerKey* a_except, std::vector<Protocol::Sit> a_sits, bool a_full, std::uint32_t a_sender = 0) {
+		for (std::size_t first = 0; first < a_sits.size(); first += Protocol::MAX_SITS) {
+			Protocol::Sits msg{ .sender = a_sender, .full = a_full && first == 0 };
+			const auto     end = (std::min)(a_sits.size(), first + Protocol::MAX_SITS);
+			msg.sits.assign(a_sits.begin() + static_cast<std::ptrdiff_t>(first), a_sits.begin() + static_cast<std::ptrdiff_t>(end));
+			if (a_to) {
+				send(*a_to, Protocol::Encode(msg), true);
+			} else {
+				broadcast(Protocol::Encode(msg), true, a_except);
+			}
+		}
+	};
 	// A joined player is gone: the others hear it.
 	const auto left = [&](const PeerKey& a_key, const Peer& a_peer, std::string_view a_why) {
 		log(std::format("server: player {} left ({})", a_peer.playerId, a_why));
@@ -242,6 +261,10 @@ void Server::Run()
 		// Their ride, and those of the NPCs their game ran, end: the others get the riders off.
 		if (auto ended = rides.Leave(a_peer.playerId); !ended.empty()) {
 			sendRides(nullptr, &a_key, std::move(ended), false);
+		}
+		// And whatever furniture they and their NPCs were in: the others stand them up.
+		if (auto ended = sits.Leave(a_peer.playerId); !ended.empty()) {
+			sendSits(nullptr, &a_key, std::move(ended), false);
 		}
 	};
 
@@ -299,6 +322,7 @@ void Server::Run()
 			sessionTable.clear();  // the first player's load order numbers the new session
 			fates.Clear();         // and the deaths and wounds of the last one are not this one's
 			rides.Clear();         // nor its rides
+			sits.Clear();          // nor who sat where
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -366,6 +390,10 @@ void Server::Run()
 		// Who rides what (after the owners: an NPC rider's ride is read against its runner).
 		if (auto all = rides.All(); !all.empty()) {
 			sendRides(&a_key, nullptr, std::move(all), true);
+		}
+		// Who is in what furniture (after the owners, as the rides).
+		if (auto all = sits.All(); !all.empty()) {
+			sendSits(&a_key, nullptr, std::move(all), true);
 		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
@@ -622,6 +650,23 @@ void Server::Run()
 				}
 			}
 			break;
+		case MT::kSits:
+			// Who is in what furniture: a player's own and the NPCs' its game runs (SitBook.h), as the rides above.
+			if (const auto msg = Protocol::DecodeSits(a_data)) {
+				const auto                 now = Clock::now();
+				std::vector<Protocol::Sit> pass;
+				for (auto& sit : sits.Take(a_peer.playerId, msg->sits, [&](const Protocol::NpcKey& a_npc) { return npcs.Runs(a_peer.playerId, a_npc); })) {
+					if (!sits.Owes(a_peer.playerId) && a_peer.sitBudget.Take(now)) {
+						pass.push_back(sit);
+					} else {
+						sits.Owe(a_peer.playerId, sit);
+					}
+				}
+				if (!pass.empty()) {
+					sendSits(nullptr, &a_key, std::move(pass), false, a_peer.playerId);
+				}
+			}
+			break;
 		case MT::kShots:
 			// To the others, the sender named: a player's own shots and those of the NPCs its game runs, each within the
 			// sender's budget (past it dropped, said once).
@@ -710,6 +755,16 @@ void Server::Run()
 				}
 				if (!pass.empty()) {
 					sendRides(nullptr, &key, std::move(pass), false, peer.playerId);
+				}
+			}
+			if (peer.joined && sits.Owes(peer.playerId)) {
+				std::vector<Protocol::Sit> pass;
+				Protocol::Sit              sit;
+				while (pass.size() < Protocol::MAX_SITS && sits.Owes(peer.playerId) && peer.sitBudget.Take(now) && sits.NextOwed(peer.playerId, sit)) {
+					pass.push_back(sit);
+				}
+				if (!pass.empty()) {
+					sendSits(nullptr, &key, std::move(pass), false, peer.playerId);
 				}
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {

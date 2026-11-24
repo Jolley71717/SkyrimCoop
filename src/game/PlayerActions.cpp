@@ -1,6 +1,7 @@
 #include "game/PlayerActions.h"
 
 #include "DevLine.h"
+#include "game/Furniture.h"
 #include "game/Gear.h"
 #include "game/StandInRules.h"
 #include "game/VtableHook.h"
@@ -60,7 +61,9 @@ namespace PlayerActions
 			const auto now = Clock::now();
 			// Kept for the rig's `swim` (the events the game's own swimming sends our graph), session or not.
 			Water::Heard(name, now);
-			if (!inSession) {
+			// The engine's furniture play (sitting down, the idle, getting up) is never sent: every game plays its own for
+			// the stand-in it puts in its copy of the furniture (Furniture.h).
+			if (!inSession || Furniture::EngineOwnsEvents(player)) {
 				return taken;
 			}
 			std::scoped_lock l{ lock };

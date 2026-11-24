@@ -13,10 +13,12 @@
 // NPC's only from its runner's, each change once (the same ride again from the same game is not passed on; from a new
 // runner it is, that runner named), and gives a joiner every ride the session has. A player who leaves takes every ride their game said with them: the others hear each one end.
 // Past a sender's budget a change is still kept and owed (Owe): the server's loop passes the newest of it on once the
-// budget has room, so an end of a ride is never lost. No game and no network here: tests/RideTests.cpp.
+// budget has room, so an end of a ride is never lost. The same book keeps who is in what furniture (kSits,
+// common/SitBook.h): a sit is said, passed on, owed and ended as a ride is. No game and no network here:
+// tests/RideTests.cpp, tests/SitTests.cpp.
 namespace RideBook
 {
-	// Who rides: a player (npc none), or an NPC (player 0).
+	// Who rides (or sits): a player (npc none), or an NPC (player 0).
 	struct Rider
 	{
 		std::uint32_t   player = 0;
@@ -24,29 +26,42 @@ namespace RideBook
 		auto operator<=>(const Rider&) const = default;
 	};
 
-	[[nodiscard]] inline Rider RiderOf(const Protocol::Ride& a_ride)
+	// Item: Protocol::Ride or Protocol::Sit (each names a player or an NPC rider, and whether it is on).
+	template <class Item>
+	[[nodiscard]] Rider RiderOf(const Item& a_item)
 	{
-		return a_ride.player != 0 ? Rider{ a_ride.player, {} } : Rider{ 0, a_ride.rider };
+		return a_item.player != 0 ? Rider{ a_item.player, {} } : Rider{ 0, a_item.rider };
 	}
 
-	// The end of a rider's ride, as passed on.
-	[[nodiscard]] inline Protocol::Ride Off(const Rider& a_rider)
+	// The end of a rider's ride (or sit), as passed on: it names the rider and nothing else.
+	template <class Item>
+	[[nodiscard]] Item EndOf(const Rider& a_rider)
 	{
-		return Protocol::Ride{ .player = a_rider.player, .rider = a_rider.npc, .mount = {}, .on = false };
+		Item out{};
+		out.player = a_rider.player;
+		out.rider = a_rider.npc;
+		out.on = false;
+		return out;
 	}
 
-	class Book
+	[[nodiscard]] inline Protocol::Ride Off(const Rider& a_rider) { return EndOf<Protocol::Ride>(a_rider); }
+
+	[[nodiscard]] inline bool Holds(const Protocol::Ride& a_ride) { return Protocol::RideHolds(a_ride); }
+	[[nodiscard]] inline bool Holds(const Protocol::Sit& a_sit) { return Protocol::SitHolds(a_sit); }
+
+	template <class Item>
+	class BookOf
 	{
 	public:
 		// The rides a_sender's game says, of which those it may say (its own player's; an NPC's when a_runs(that NPC):
 		// it runs it) and that change what the book holds are kept and returned, to pass on. A ride that ends one the book
 		// does not hold changes nothing (nobody was told it began).
 		template <class Runs>
-		std::vector<Protocol::Ride> Take(std::uint32_t a_sender, const std::vector<Protocol::Ride>& a_rides, Runs&& a_runs)
+		std::vector<Item> Take(std::uint32_t a_sender, const std::vector<Item>& a_rides, Runs&& a_runs)
 		{
-			std::vector<Protocol::Ride> out;
+			std::vector<Item> out;
 			for (const auto& ride : a_rides) {
-				if (a_sender == 0 || !Protocol::RideHolds(ride) || (ride.player != 0 ? ride.player != a_sender : !a_runs(ride.rider))) {
+				if (a_sender == 0 || !Holds(ride) || (ride.player != 0 ? ride.player != a_sender : !a_runs(ride.rider))) {
 					++refused;
 					continue;
 				}
@@ -66,16 +81,16 @@ namespace RideBook
 						continue;
 					}
 					rides.erase(held);
-					out.push_back(Off(rider));
+					out.push_back(EndOf<Item>(rider));
 				}
 			}
 			return out;
 		}
 
 		// Every ride the session has now, for a joiner.
-		[[nodiscard]] std::vector<Protocol::Ride> All() const
+		[[nodiscard]] std::vector<Item> All() const
 		{
-			std::vector<Protocol::Ride> out;
+			std::vector<Item> out;
 			out.reserve(rides.size());
 			for (const auto& [rider, held] : rides) {
 				out.push_back(held.ride);
@@ -84,12 +99,12 @@ namespace RideBook
 		}
 
 		// A player left: every ride their game said ends (their own, and those of the NPCs it ran), returned to pass on.
-		std::vector<Protocol::Ride> Leave(std::uint32_t a_player)
+		std::vector<Item> Leave(std::uint32_t a_player)
 		{
-			std::vector<Protocol::Ride> out;
+			std::vector<Item> out;
 			for (auto it = rides.begin(); it != rides.end();) {
 				if (it->second.sender == a_player || it->first.player == a_player) {
-					out.push_back(Off(it->first));
+					out.push_back(EndOf<Item>(it->first));
 					it = rides.erase(it);
 				} else {
 					++it;
@@ -100,7 +115,7 @@ namespace RideBook
 		}
 
 		// A change of a_sender's held back by its budget: its newest state goes later (Owed).
-		void Owe(std::uint32_t a_sender, const Protocol::Ride& a_ride) { owed[a_sender].insert(RiderOf(a_ride)); }
+		void Owe(std::uint32_t a_sender, const Item& a_ride) { owed[a_sender].insert(RiderOf(a_ride)); }
 
 		[[nodiscard]] bool Owes(std::uint32_t a_sender) const
 		{
@@ -109,7 +124,7 @@ namespace RideBook
 		}
 
 		// The newest state of one ride a_sender owes (taken off what it owes): the ride held, or its end. None owed: false.
-		bool NextOwed(std::uint32_t a_sender, Protocol::Ride& a_out)
+		bool NextOwed(std::uint32_t a_sender, Item& a_out)
 		{
 			const auto it = owed.find(a_sender);
 			if (it == owed.end() || it->second.empty()) {
@@ -118,7 +133,7 @@ namespace RideBook
 			const auto rider = *it->second.begin();
 			it->second.erase(it->second.begin());
 			const auto held = rides.find(rider);
-			a_out = held != rides.end() ? held->second.ride : Off(rider);
+			a_out = held != rides.end() ? held->second.ride : EndOf<Item>(rider);
 			return true;
 		}
 
@@ -135,11 +150,13 @@ namespace RideBook
 	private:
 		struct Held
 		{
-			Protocol::Ride ride;
-			std::uint32_t  sender = 0;
+			Item          ride;
+			std::uint32_t sender = 0;
 		};
 		std::map<Rider, Held>                        rides;
 		std::map<std::uint32_t, std::set<Rider>>     owed;
 		std::uint64_t                                refused = 0;
 	};
+
+	using Book = BookOf<Protocol::Ride>;
 }

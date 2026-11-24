@@ -3,6 +3,7 @@
 #include "DevLine.h"
 #include "FormIds.h"
 #include "game/CopyHealth.h"
+#include "game/Furniture.h"
 #include "game/Gait.h"
 #include "game/Gear.h"
 #include "game/LocalPlayer.h"
@@ -195,7 +196,9 @@ namespace NpcSync
 				return taken;
 			}
 			std::scoped_lock l{ eventLock };
-			if (runIds.contains(id)) {
+			// The engine's furniture play (sitting down, the idle, getting up) is not sent: each game plays its own
+			// (Furniture.h; it takes no lock).
+			if (runIds.contains(id) && !Furniture::EngineOwnsEvents(static_cast<RE::Actor*>(ref))) {
 				if (heard.size() < MAX_PENDING_EVENTS) {
 					heard.push_back({ id, Protocol::SentMs(Clock::now()), std::string{ name } });
 				} else {
@@ -1769,7 +1772,12 @@ namespace NpcSync
 				return false;
 			}
 		}
-		const bool seated = Riding::Seated(a_actor);
+		// Getting in or out of furniture (Furniture.h), the engine's own update runs for it (its sit procedure is the AI's),
+		// for a few seconds at most. In it, or waiting by furniture another actor is in, it is not placed, its walk not told.
+		if (Furniture::Assisted(a_actor)) {
+			return false;
+		}
+		const bool seated = Riding::Seated(a_actor) || Furniture::Held(a_actor);
 		{
 			std::scoped_lock l{ copyLock };
 			const auto       byActor = copyByActor.find(a_actor);

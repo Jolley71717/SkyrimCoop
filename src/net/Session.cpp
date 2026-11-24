@@ -7,6 +7,7 @@
 #include "Redact.h"
 #include "Server.h"
 #include "game/Face.h"
+#include "game/Furniture.h"
 #include "game/FaceRules.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
@@ -237,6 +238,7 @@ namespace Session
 					PlayerActions::Recording(true);
 					NpcSync::Started(playerId, hostId);
 					Riding::Started(playerId);
+					Furniture::Started(playerId);
 					Shots::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
@@ -257,6 +259,7 @@ namespace Session
 				if (const auto msg = Protocol::DecodePlayerLeft(a_data)) {
 					RemotePlayers::Left(msg->playerId);
 					Riding::Left(msg->playerId);
+					Furniture::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -323,6 +326,11 @@ namespace Session
 			case Protocol::MessageType::kRides:
 				if (const auto msg = Protocol::DecodeRides(a_data); msg && msg->sender != playerId) {
 					Riding::Rides(*msg);
+				}
+				break;
+			case Protocol::MessageType::kSits:
+				if (const auto msg = Protocol::DecodeSits(a_data); msg && msg->sender != playerId) {
+					Furniture::Sits(*msg);
 				}
 				break;
 			case Protocol::MessageType::kShots:
@@ -499,6 +507,7 @@ namespace Session
 		}
 		Shots::Clear();   // our launches ended while the stand-ins and copies that shot them are still there
 		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
+		Furniture::Clear();  // and sitters out of their furniture
 		NpcSync::Clear();
 		RemotePlayers::Clear();
 		Reset();
@@ -540,6 +549,7 @@ namespace Session
 			SendOurs(Clock::now());
 			NpcSync::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Riding::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Furniture::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();

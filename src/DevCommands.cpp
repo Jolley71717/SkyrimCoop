@@ -7,6 +7,7 @@
 #include "Redact.h"
 #include "game/Console.h"
 #include "game/Face.h"
+#include "game/Furniture.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
@@ -196,6 +197,13 @@ namespace DevCommands
 			return Riding::Command(a_args);
 		}
 
+		// sit [find <kind> [radius] | off <id>]: who sits in what, ours and each actor another game says is in furniture
+		// (Furniture::Command).
+		std::string SitCommand(std::string_view a_args)
+		{
+			return Furniture::Command(a_args);
+		}
+
 		// shots [find <kind> | last]: projectiles said and launched, natives ended (Shots::Command).
 		std::string ShotsCommand(std::string_view a_args)
 		{
@@ -249,6 +257,7 @@ namespace DevCommands
 			{ "faces", FacesCommand },
 			{ "swim", SwimCommand },
 			{ "ride", RideCommand },
+			{ "sit", SitCommand },
 			{ "shots", ShotsCommand },
 			{ "strays", Strays },
 			{ "npcs", Npcs },

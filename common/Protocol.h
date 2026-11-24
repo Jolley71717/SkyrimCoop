@@ -50,7 +50,10 @@ namespace Protocol
 	// 13: every projectile an actor launches (kShots, message type 57): a player's arrows, bolts, spells and shouts, and
 	//    those of the NPCs a game runs, so the others launch the same from the actor that shows the shooter, at the
 	//    shooter's origin and aim. (As with 9: whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 13;
+	// 14: who sits, lies, leans or works in what furniture (kSits, message type 58): a player's chair, bed or crafting
+	//    station, and those of the NPCs a game runs, so the others put the actor that shows them in the same one. (As
+	//    with 9: whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 14;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -118,6 +121,7 @@ namespace Protocol
 		kRides = 55,  // both ways, reliable: who rides what (a player, the NPCs a game runs); the server names the sender
 		// 56: the quest runs' (in its own change).
 		kShots = 57,  // both ways, reliable: projectiles our player and the NPCs a game runs launched; the server names the sender
+		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -742,6 +746,69 @@ namespace Protocol
 		std::vector<Shot> shots;
 		bool operator==(const Shots&) const = default;
 	};
+
+	// ---- furniture (docs/DESIGN.md, "Furniture") ----
+	// Who sits, lies, leans or works in what: a player in a chair, a bed or at a crafting station, an NPC at its work spot
+	// or a dragon on its perch. A game says its own player's and those of the NPCs it runs, each time one changes; the
+	// server passes on only a player's own and an NPC's runner's (common/SitBook.h) and keeps them for whoever joins after.
+
+	// At most this many in one message (a joiner's full list is sent in as many as it takes).
+	inline constexpr std::size_t MAX_SITS = 48;
+
+	// What the furniture is used for, as the sender's game has it (its sit or sleep state, the furniture's flags and its
+	// bench type): every kind is shown the same way (the engine's own way in); the kind is for the log, the developer
+	// channel and the rig.
+	enum class SitKind : std::uint8_t
+	{
+		kSit = 0,    // a chair, a bench, a stool, a throne
+		kSleep = 1,  // a bed, a bedroll, a coffin
+		kLean = 2,   // a railing, a wall, a counter
+		kWork = 3,   // a crafting station (forge, anvil, grindstone, workbench, tanning rack, smelter, alchemy, enchanting,
+		             // cooking pot) or a work spot (a chopping block, an ore vein, a mill)
+		kPerch = 4,  // a dragon's perch
+	};
+	inline constexpr std::uint8_t SIT_KIND_COUNT = 5;
+
+	// A furniture marker that is not known (the sender's game named none).
+	inline constexpr std::uint8_t NO_MARKER = 0xFF;
+
+	// One actor in one piece of furniture. player != 0: that player (from a game: its own id, which the server checks);
+	// else rider is the NPC. furniture: the reference (0: one that is not of the load order, a runtime one, or one the
+	// reader lacks), base: its record (0: one the reader lacks), x y z: where it stands in the sender's world, to find a
+	// runtime one, or one the reader lacks, by its base and place. marker: which of its markers (NO_MARKER: unknown).
+	// on false: it got up (it names no furniture then).
+	struct Sit
+	{
+		std::uint32_t player = 0;
+		NpcKey        rider;
+		std::uint32_t furniture = 0;
+		std::uint32_t base = 0;
+		float         x = 0, y = 0, z = 0;
+		std::uint8_t  marker = NO_MARKER;
+		SitKind       kind = SitKind::kSit;
+		bool          on = false;
+		bool operator==(const Sit&) const = default;
+	};
+
+	// sender: 0 from a game; the server names the game that sent them (0 on a joiner's list). full: the first of a
+	// joiner's list: a game forgets every sit it knew before it.
+	struct Sits
+	{
+		std::uint32_t    sender = 0;
+		bool             full = false;
+		std::vector<Sit> sits;
+		bool operator==(const Sits&) const = default;
+	};
+
+	// Whether a sit can be: one actor (a player and no NPC, or an NPC of id != 0), a known kind, a place a game can hold,
+	// and for an end no furniture.
+	[[nodiscard]] inline bool SitHolds(const Sit& a_sit)
+	{
+		const bool who = a_sit.player != 0 ? a_sit.rider == NpcKey{} : a_sit.rider.id != 0;
+		const bool place = InWorld(a_sit.x) && InWorld(a_sit.y) && InWorld(a_sit.z);
+		const bool end = a_sit.on || (a_sit.furniture == 0 && a_sit.base == 0);
+		return who && place && end && static_cast<std::uint8_t>(a_sit.kind) < SIT_KIND_COUNT;
+	}
 
 	// Whether a shot can be: one shooter (a player and no NPC, or an NPC of id != 0), a record, a known kind, hand and
 	// flags, an origin a game can hold, angles within a turn either way, and a power and scale from 0 to 10.
@@ -1937,6 +2004,72 @@ namespace Protocol
 	inline constexpr std::size_t SHOT_BYTES = 4 + 8 + 4 + 6 * 4 + 3 + 7 * 4;
 	inline constexpr std::size_t MAX_SHOTS_SIZE = 1 + 4 + 1 + MAX_SHOTS * SHOT_BYTES;
 	static_assert(MAX_SHOTS <= 0xFF && MAX_SHOTS_SIZE <= 4096, "a message of shots stays small");
+
+	inline std::vector<std::uint8_t> Encode(const Sits& a_msg)
+	{
+		Writer     w{ MessageType::kSits };
+		const auto count = (std::min)(a_msg.sits.size(), MAX_SITS);
+		w.U32(a_msg.sender);
+		w.U8(a_msg.full ? 1 : 0);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& sit = a_msg.sits[i];
+			w.U32(sit.player);
+			WriteKey(w, sit.player != 0 ? NpcKey{} : sit.rider);
+			// An end names no furniture: whatever the caller left in it is not written.
+			w.U32(sit.on ? sit.furniture : 0);
+			w.U32(sit.on ? sit.base : 0);
+			for (const auto v : { sit.x, sit.y, sit.z }) {
+				w.F32(v);
+			}
+			w.U8(sit.marker);
+			w.U8(static_cast<std::uint8_t>(sit.kind));
+			w.U8(sit.on ? 1 : 0);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_SITS, a sit that does not hold (SitHolds), or an on or a full that is not 0 or 1.
+	inline std::optional<Sits> DecodeSits(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Sits msg;
+		msg.sender = r.U32();
+		const auto full = r.U8();
+		const auto count = r.U8();
+		if (!r.Ok() || full > 1 || count > MAX_SITS) {
+			return std::nullopt;
+		}
+		msg.full = full == 1;
+		msg.sits.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			Sit sit;
+			sit.player = r.U32();
+			sit.rider = ReadKey(r);
+			sit.furniture = r.U32();
+			sit.base = r.U32();
+			for (auto* v : { &sit.x, &sit.y, &sit.z }) {
+				*v = r.F32();
+			}
+			sit.marker = r.U8();
+			sit.kind = static_cast<SitKind>(r.U8());
+			const auto on = r.U8();
+			sit.on = on == 1;
+			if (r.Ok() && (on > 1 || !SitHolds(sit))) {
+				return std::nullopt;
+			}
+			msg.sits.push_back(sit);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t SIT_BYTES = 4 + 8 + 4 + 4 + 3 * 4 + 3;
+	inline constexpr std::size_t MAX_SITS_SIZE = 1 + 4 + 1 + 1 + MAX_SITS * SIT_BYTES;
+	static_assert(MAX_SITS <= 0xFF && MAX_SITS_SIZE <= 2048, "a message of sits stays small");
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{
