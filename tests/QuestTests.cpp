@@ -74,6 +74,14 @@ TEST("quests: a batch goes to the server and back, its reporter named on the way
 	CHECK(back->entries == entries);
 	CHECK(back->playerId == 0);
 
+	const auto world = Protocol::Encode(QuestBatch{ 99, entries }, MT::kQuestWorld);  // the host's world: no player either
+	CHECK(Protocol::PeekType(world) == MT::kQuestWorld);
+	back = Protocol::DecodeQuestBatch(world);
+	REQUIRE(back);
+	CHECK(back->entries == entries);
+	CHECK(back->playerId == 0);
+	CHECK(FormTranslate::CarriesForms(MT::kQuestWorld));
+
 	const auto remote = Protocol::Encode(QuestBatch{ 3, entries }, MT::kRemoteQuests);
 	back = Protocol::DecodeQuestBatch(remote);
 	REQUIRE(back);
@@ -683,6 +691,7 @@ namespace
 		std::set<std::uint32_t>                           near;
 		std::map<std::uint32_t, std::uint16_t>            at;
 		std::set<std::uint32_t>                           started;
+		std::set<std::uint32_t>                           ended;  // quests the session's word has ended
 		bool                                              completed = false;
 
 		std::uint16_t Current(std::uint32_t a_quest) const
@@ -706,6 +715,7 @@ namespace
 			here.cls = radiant.contains(a_e.questId) ? QuestRules::Class::kRadiant : QuestRules::Class::kShared;
 			here.current = Current(a_e.questId);
 			here.started = here.current != 0 || started.contains(a_e.questId);
+			here.sessionEnded = ended.contains(a_e.questId);
 			if (a_e.kind == QuestEntry::kStage) {
 				here.has = done.contains({ a_e.questId, a_e.index }) || (a_e.index == here.current && here.current != 0);
 				if (moves.contains({ a_e.questId, a_e.index })) {
@@ -863,7 +873,8 @@ TEST("quest maker: a moving stage waits for the friend who did it to be near, ho
 	step = past.Next(T0, far.Looker());
 	REQUIRE(step);
 	CHECK(step->verdict == QuestRules::Verdict::kFarPast);
-	step = past.Next(T0, far.Looker());
+	CHECK(!past.Next(T0, far.Looker()));  // 60 would start the quest: the past may still say it ended (PAST_SETTLE)
+	step = past.Next(T0 + QuestRules::PAST_SETTLE, far.Looker());
 	REQUIRE(step);
 	CHECK(step->want.entry == Stage(0x10, 60));
 }
@@ -1256,7 +1267,7 @@ TEST("quests, two games: the host's world reaches a friend who joins, and the fr
 	std::vector<QuestRules::QuestRead> world;
 	world.push_back({ .questId = 0x0003372B, .current = 20, .done = { 20, 10 }, .objectives = { { 10, 3 }, { 20, 1 } } });
 	f.fake->Deliver(1, Protocol::Encode(QuestReset{}, false));
-	for (const auto& packet : Protocol::Batches(QuestRules::Snapshot(world), MT::kQuests)) {
+	for (const auto& packet : Protocol::Batches(QuestRules::Snapshot(world), MT::kQuestWorld)) {
 		f.fake->Deliver(1, packet);
 	}
 	REQUIRE(f.fake->WaitFor(1, Type(MT::kRemoteQuests)));
@@ -1373,4 +1384,256 @@ TEST("quests, two games: an end the session refused is not reported again every 
 	}
 	CHECK(reports == 1);
 	CHECK(bo.Kept() == 1);
+}
+
+// ---- quests the host's world ended ----------------------------------------------------------------------------------
+
+TEST("quest judge: the session's past on a quest it ended that this game never started is put aside; a live word or a started quest is made")
+{
+	using V = QuestRules::Verdict;
+	QuestRules::Here here;
+	here.exists = true;
+	here.cls = QuestRules::Class::kShared;
+	here.sessionEnded = true;
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 0, here) == V::kParked);
+	CHECK(QuestRules::Judge(Objective(0x10, 1, 3, 10), 0, here) == V::kParked);
+	CHECK(QuestRules::Judge(Completed(0x10), 0, here) == V::kParked);
+	CHECK(QuestRules::Judge(Failed(0x10), 0, here) == V::kParked);
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kMake);  // said live: a friend did it just now
+	CHECK(QuestRules::Judge(Completed(0x10), 2, here) == V::kNotStarted);
+
+	// Started here (its own play, or a stage made here): caught up to the session's end as ever.
+	here.started = true;
+	here.current = 5;
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 0, here) == V::kMake);
+	CHECK(QuestRules::Judge(Stage(0x10, 1), 0, here) == V::kPassed);
+	CHECK(QuestRules::Judge(Completed(0x10), 0, here) == V::kMake);
+	here.has = true;
+	CHECK(QuestRules::Judge(Completed(0x10), 0, here) == V::kHas);
+
+	// A quest the session has not ended is begun from its past as ever; what is not here stays not here.
+	here = {};
+	here.exists = true;
+	here.cls = QuestRules::Class::kShared;
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 0, here) == V::kMake);
+	here.sessionEnded = true;
+	here.cls = QuestRules::Class::kMisc;
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 0, here) == V::kNotHere);
+	here.exists = false;
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 0, here) == V::kMissing);
+	CHECK(QuestRules::VerdictName(V::kParked) == "parked");
+}
+
+TEST("quest maker: the past on an ended quest never started here waits aside, and is made in order once the quest starts here")
+{
+	using V = QuestRules::Verdict;
+	QuestRules::Maker maker;
+	FakeGame          game;
+	game.ended.insert(0x10);
+	auto now = T0;
+	// The host finished 0x10 before the session (two stages, an objective, its end); 0x20 runs there.
+	for (const auto& e : { Stage(0x10, 10), Stage(0x10, 20), Objective(0x10, 1, 3, 20), Completed(0x10), Stage(0x20, 5) }) {
+		maker.Add(e, 0, now);
+	}
+	auto steps = RunMaker(maker, game, now);
+	std::vector<std::pair<V, QuestEntry>> want{ { V::kParked, Stage(0x10, 10) }, { V::kParked, Stage(0x10, 20) }, { V::kParked, Objective(0x10, 1, 3, 20) },
+		{ V::kParked, Completed(0x10) }, { V::kMake, Stage(0x20, 5) } };
+	CHECK(steps == want);
+	CHECK(maker.Parked() == 4);
+	CHECK(maker.ParkedQuests() == 1);
+	CHECK(!game.done.contains({ 0x10, 10 }));
+	CHECK(!game.completed);
+	CHECK(maker.Unpark(0x20, now) == 0);  // nothing aside for it
+
+	// A newer word on a thing put aside takes its place (an objective's state goes forward only).
+	maker.Add(Objective(0x10, 1, 1, 20), 0, now);
+	steps = RunMaker(maker, game, now);
+	REQUIRE(steps.size() == 1);
+	CHECK(steps[0].first == V::kParked);
+	CHECK(maker.Parked() == 4);
+
+	// The friend starts 0x10 by its own play, and a friend's live word on it is heard after: the past goes first, in the
+	// order heard, the stages one at a time, then the objective and the end.
+	game.started.insert(0x10);
+	maker.Add(Stage(0x10, 30), 2, now);
+	CHECK(maker.Unpark(0x10, now) == 4);
+	CHECK(maker.Parked() == 0);
+	CHECK(maker.ParkedQuests() == 0);
+	CHECK(maker.Unparked() == 4);
+	CHECK(maker.Unpark(0x10, now) == 0);
+	steps = RunMaker(maker, game, now);
+	want = { { V::kMake, Stage(0x10, 10) }, { V::kMake, Stage(0x10, 20) }, { V::kMake, Stage(0x10, 30) }, { V::kMake, Objective(0x10, 1, 3, 20) },
+		{ V::kMake, Completed(0x10) } };
+	CHECK(steps == want);
+	CHECK(game.completed);
+
+	// A quest forgotten (a radiant run over) or a new world (the host's reset) leaves nothing aside.
+	game.ended.insert(0x30);
+	game.ended.insert(0x40);
+	maker.Add(Stage(0x30, 1), 0, now);
+	maker.Add(Stage(0x40, 1), 0, now);
+	RunMaker(maker, game, now);
+	CHECK(maker.Parked() == 2);
+	maker.Forget(0x30);
+	CHECK(maker.Parked() == 1);
+	CHECK(maker.Unpark(0x30, now) == 0);
+	maker.Clear();
+	CHECK(maker.Parked() == 0);
+	CHECK(maker.Unpark(0x40, now) == 0);
+}
+
+TEST("quest maker: a quest not started here is not begun from the past until it has come whole, so an end in a later batch is known")
+{
+	using V = QuestRules::Verdict;
+	QuestRules::Maker maker;
+	FakeGame          game;
+	// 0x70's stages came in one batch; its end comes in the next, a second later.
+	auto now = T0;
+	maker.Add(Stage(0x70, 10), 0, now);
+	maker.Add(Stage(0x70, 20), 0, now);
+	now += 1s;
+	CHECK(!maker.Next(now, game.Looker()));
+	game.ended.insert(0x70);
+	maker.Add(Completed(0x70), 0, now);
+	const auto steps = RunMaker(maker, game, now);
+	const std::vector<std::pair<V, QuestEntry>> want{ { V::kParked, Stage(0x70, 10) }, { V::kParked, Stage(0x70, 20) }, { V::kParked, Completed(0x70) } };
+	CHECK(steps == want);
+	CHECK(game.done.empty());
+
+	// A quest started here, and a live word, do not wait for the past to settle.
+	QuestRules::Maker other;
+	FakeGame          started;
+	started.started.insert(0x71);
+	other.Add(Stage(0x71, 10), 0, T0);
+	auto step = other.Next(T0, started.Looker());
+	REQUIRE(step);
+	CHECK(step->verdict == V::kMake);
+	other.Add(Stage(0x72, 10), 2, T0);
+	step = other.Next(T0 + QuestRules::MAKE_EVERY, started.Looker());
+	REQUIRE(step);
+	CHECK(step->want.entry == Stage(0x72, 10));
+	CHECK(step->verdict == V::kMake);
+}
+
+TEST("server: the host's world goes to the others as the session's word (player 0) and back to the host as its own; a friend's is ignored")
+{
+	Server::Options options;
+	options.hostIdentity = 0x4057;
+	Fixture f{ options };
+	f.fake->SetLocal(1);
+	const auto host = f.Join(1, Fixture::MakeHello("Host", 0x4057));
+	REQUIRE(host);
+	REQUIRE(f.Join(2, Fixture::MakeHello("Friend", 0x2222)));
+
+	// A friend's game cannot say the world.
+	f.fake->Deliver(2, Protocol::Encode(QuestBatch{ 0, { Stage(0x40, 10) } }, MT::kQuestWorld));
+	REQUIRE(f.LoggedSoon("is not the host: its quest world is ignored"));
+	REQUIRE(f.fake->Settle());
+	CHECK(CountOf(f.fake->Take(1), MT::kRemoteQuests) == 0);
+	CHECK(CountOf(f.fake->Take(2), MT::kRemoteQuests) == 0);
+
+	// The host's world after a load, a long game's: 100 batches, past play's burst of 64, and none of it answered busy.
+	std::vector<QuestEntry> world;
+	for (std::uint32_t q = 0; q < 100; ++q) {
+		for (std::uint16_t s = 1; s <= Protocol::MAX_QUEST_BATCH; ++s) {
+			world.push_back(Stage(0x1000 + q, s));
+		}
+	}
+	f.fake->Deliver(1, Protocol::Encode(QuestReset{}, false));
+	for (const auto& packet : Protocol::Batches(world, MT::kQuestWorld)) {
+		f.fake->Deliver(1, packet);
+	}
+	REQUIRE(f.fake->Settle());
+	const auto toHost = f.fake->Take(1);
+	const auto toFriend = f.fake->Take(2);
+	const auto atHost = EntriesIn(toHost);
+	const auto atFriend = EntriesIn(toFriend);
+	REQUIRE(atHost.size() == world.size());
+	REQUIRE(atFriend.size() == world.size());
+	CHECK(std::ranges::all_of(atHost, [&](const auto& a_e) { return a_e.first == host->playerId; }));
+	CHECK(std::ranges::all_of(atFriend, [](const auto& a_e) { return a_e.first == 0; }));
+	CHECK(atFriend.front().second == world.front());
+	CHECK(atFriend.back().second == world.back());
+	CHECK(EntriesIn(toHost, MT::kQuestAnswer).empty());
+
+	// Play after it is news as ever, with who did it.
+	f.fake->Deliver(1, Report({ Stage(0x40, 10) }));
+	const auto live = EntriesIn(f.fake->TakeThrough(2, Type(MT::kRemoteQuests)));
+	REQUIRE(live.size() == 1);
+	CHECK(live[0].first == host->playerId);
+}
+
+TEST("quests, two games: a quest the host finished before the session waits aside in a friend's game until it starts there; one behind catches up")
+{
+	Server::Options options;
+	options.hostIdentity = 0x4057;
+	Fixture f{ options };
+	f.fake->SetLocal(1);
+	REQUIRE(f.Join(1, Fixture::MakeHello("Host", 0x4057)));
+
+	// The host's world: 0x50 completed (stages 10 and 20, objective 1 completed), 0x60 running at stage 5.
+	std::vector<QuestRules::QuestRead> reads;
+	reads.push_back({ .questId = 0x50, .current = 20, .done = { 10, 20 }, .objectives = { { 1, 3 } }, .completed = true });
+	reads.push_back({ .questId = 0x60, .current = 5, .done = { 5 } });
+	f.fake->Deliver(1, Protocol::Encode(QuestReset{}, false));
+	for (const auto& packet : Protocol::Batches(QuestRules::Snapshot(reads), MT::kQuestWorld)) {
+		f.fake->Deliver(1, packet);
+	}
+	REQUIRE(f.fake->WaitFor(1, Type(MT::kRemoteQuests)));
+	REQUIRE(f.fake->Settle());
+
+	// Two friends join: one never started 0x50, one is at its stage 10.
+	REQUIRE(f.Join(2, Fixture::MakeHello("New", 0x2222)));
+	REQUIRE(f.Join(3, Fixture::MakeHello("Behind", 0x3333)));
+	using V = QuestRules::Verdict;
+	using Steps = std::vector<std::pair<V, QuestEntry>>;
+	const auto play = [&](PeerId a_peer, FakeGame& a_game) {
+		QuestRules::View  view;
+		QuestRules::Maker maker;
+		auto              now = T0;
+		for (const auto& [player, entry] : EntriesIn(f.fake->TakeThrough(a_peer, Type(MT::kRemoteQuests)))) {
+			CHECK(player == 0);
+			if (view.Heard(entry, false)) {
+				maker.Add(entry, player, now);
+			}
+			if (view.Known(Completed(entry.questId)) || view.Known(Failed(entry.questId))) {
+				a_game.ended.insert(entry.questId);
+			}
+		}
+		Steps steps = RunMaker(maker, a_game, now);
+		if (a_game.started.contains(0x50) || a_game.Current(0x50) != 0) {
+			return steps;
+		}
+		// it starts 0x50 by its own play: the session's word on it is made then
+		a_game.started.insert(0x50);
+		CHECK(maker.Unpark(0x50, now) == 4);
+		const auto more = RunMaker(maker, a_game, now);
+		steps.insert(steps.end(), more.begin(), more.end());
+		return steps;
+	};
+	const auto madeOf = [](const Steps& a_steps) {
+		std::vector<QuestEntry> made;
+		for (const auto& [verdict, entry] : a_steps) {
+			if (verdict == V::kMake) {
+				made.push_back(entry);
+			}
+		}
+		return made;
+	};
+
+	// The new friend: nothing of 0x50 before it starts there (0x60 is begun); then 0x50 caught up to its end.
+	FakeGame   fresh;
+	const auto first = play(2, fresh);
+	const std::vector<QuestEntry> wantFresh{ Stage(0x60, 5), Stage(0x50, 10), Stage(0x50, 20), Objective(0x50, 1, 3, 20), Completed(0x50) };
+	CHECK(madeOf(first) == wantFresh);
+	CHECK(fresh.completed);
+
+	// The friend behind in it: caught up as ever, nothing put aside.
+	FakeGame behind;
+	behind.done.insert({ 0x50, 10 });
+	const auto second = play(3, behind);
+	CHECK(std::ranges::none_of(second, [](const auto& a_s) { return a_s.first == V::kParked; }));
+	const std::vector<QuestEntry> wantBehind{ Stage(0x50, 20), Stage(0x60, 5), Objective(0x50, 1, 3, 20), Completed(0x50) };
+	CHECK(madeOf(second) == wantBehind);
+	CHECK(behind.completed);
 }

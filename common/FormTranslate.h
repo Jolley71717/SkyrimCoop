@@ -93,6 +93,7 @@ namespace FormTranslate
 		case MT::kRemoteActivate:
 		case MT::kRefRefused:
 		case MT::kQuests:
+		case MT::kQuestWorld:
 		case MT::kRemoteQuests:
 		case MT::kQuestAnswer:
 		case MT::kClock:
@@ -509,6 +510,7 @@ namespace FormTranslate
 			detail::ApplyRef<Protocol::RefRefusal>(a_packet, ctx, *type, Protocol::DecodeRefRefusal);
 			break;
 		case MT::kQuests:
+		case MT::kQuestWorld:
 		case MT::kRemoteQuests:
 		case MT::kQuestAnswer:
 			detail::ApplyQuests(a_packet, ctx, *type);

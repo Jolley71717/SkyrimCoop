@@ -64,6 +64,9 @@ namespace
 		// budget is answered busy, entry by entry, and the game sends it again later. Asks for every kept entry again, as
 		// for doors.
 		TokenBucket questBudget{ 64.0, 8.0 };
+		// The host's world (kQuestWorld) goes at once: up to 1024 batches (65536 entries: a long game's world, its ended
+		// quests too, is a few thousand), then 8 a second; past it, busy as ever. Only the host's game says it.
+		TokenBucket questWorldBudget{ 1024.0, 8.0 };
 		TokenBucket questAskBudget{ 2.0, 0.2 };
 		bool        questAsksOwed = false;
 		std::uint64_t questsDropped = 0;
@@ -573,14 +576,24 @@ void Server::Run()
 			}
 			break;
 		case MT::kQuests:
+		case MT::kQuestWorld:
 			// Each entry new to the session goes to every game, the reporter's too, with who said it; the rest go back to
 			// the reporter alone (kQuestAnswer), each with why: every entry is answered, so a game never waits for an
-			// echo that is not coming. A batch past the budget is answered busy, all of it.
+			// echo that is not coming. A batch past the budget is answered busy, all of it. The host's world (kQuestWorld,
+			// its snapshot at its welcome and after a load) is the session's word, not news of play: the others hear it as
+			// a joiner does (player 0), the host as its own.
 			if (const auto batch = Protocol::DecodeQuestBatch(a_data)) {
 				using E = Protocol::QuestEntry;
+				const bool world = *type == MT::kQuestWorld;
+				if (world && (a_peer.playerId != hostId || hostId == 0)) {
+					if (!std::exchange(a_peer.toldNotHost, true)) {
+						log(std::format("server: player {} is not the host: its quest world is ignored", a_peer.playerId));
+					}
+					break;
+				}
 				std::vector<E> news;
 				std::vector<E> answers;
-				if (!a_peer.questBudget.Take(Clock::now())) {
+				if (!(world ? a_peer.questWorldBudget : a_peer.questBudget).Take(Clock::now())) {
 					if (a_peer.questsDropped++ == 0) {
 						log(std::format("server: player {} reports quests faster than the server passes them on; the rest are answered busy", a_peer.playerId));
 					}
@@ -618,8 +631,17 @@ void Server::Run()
 						answers.push_back(answer);
 					}
 				}
-				for (const auto& packet : Protocol::Batches(news, MT::kRemoteQuests, a_peer.playerId)) {
-					broadcast(packet, true, nullptr);
+				if (world) {
+					for (const auto& packet : Protocol::Batches(news, MT::kRemoteQuests, a_peer.playerId)) {
+						send(a_key, packet, true);
+					}
+					for (const auto& packet : Protocol::Batches(news, MT::kRemoteQuests, 0)) {
+						broadcast(packet, true, &a_key);
+					}
+				} else {
+					for (const auto& packet : Protocol::Batches(news, MT::kRemoteQuests, a_peer.playerId)) {
+						broadcast(packet, true, nullptr);
+					}
 				}
 				for (const auto& packet : Protocol::Batches(answers, MT::kQuestAnswer)) {
 					send(a_key, packet, true);

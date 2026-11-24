@@ -63,7 +63,13 @@ namespace Protocol
 	//    talk with an NPC someone else talks with is closed. Written on top of 12 (quest runs) beside 12, 13 and 14 (riding,
 	//    projectiles and furniture, another branch): the number is above both lines' and is renumbered at merge; its messages
 	//    (59-62) clash with neither line's.
-	inline constexpr std::uint16_t VERSION = 15;
+	// 17: the host's world said whole (kQuestWorld; docs/DESIGN.md "Quests"): the host's snapshot (at its welcome and
+	//    after each load) is its own message, and also says the shared quests its world has ended; the server passes it
+	//    on as the session's word (player 0), as to a joiner, so a stage of it that moves a player is the past
+	//    everywhere, and a friend that never started a quest the host ended keeps its word aside until the quest starts
+	//    there. Written on top of 15 (conversations) beside 16 (mechanism outcomes, another branch, types 63-64): the
+	//    number is above both and is renumbered at merge; its message (65) clashes with neither.
+	inline constexpr std::uint16_t VERSION = 17;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -144,6 +150,8 @@ namespace Protocol
 		kRemoteLine = 60,  // server -> the others: that player's line (never kept: a joiner hears only what is said after)
 		kTalk = 61,        // client -> server, reliable: our player talks with this NPC (again every few seconds), or no longer
 		kTalkAnswer = 62,  // server -> the asker alone: who talks with that NPC (the asker: it is theirs)
+		// 63 and 64 are left for mechanism outcomes, written at the same time on another branch.
+		kQuestWorld = 65,  // host -> server, reliable: its world's quests, as kQuests: passed on as the session's word (player 0)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -449,7 +457,8 @@ namespace Protocol
 		bool operator==(const QuestEntry&) const = default;
 	};
 
-	// A batch of quest entries: kQuests (a game's news, playerId 0), kRemoteQuests (the server's word, with the player
+	// A batch of quest entries: kQuests (a game's news, playerId 0), kQuestWorld (the host's world, its snapshot: playerId
+	// 0), kRemoteQuests (the server's word, with the player
 	// who said it; 0 for the session's word sent again: to a joiner, or after a load), kQuestAnswer (to the reporter
 	// alone; each entry's value is its QuestEntry::Answer, so an objective's state is not said).
 	struct QuestBatch
@@ -1391,7 +1400,7 @@ namespace Protocol
 		return msg;
 	}
 
-	// kQuests, kRemoteQuests, kQuestAnswer: playerId (kRemoteQuests only), a count (1 to MAX_QUEST_BATCH), then each
+	// kQuests, kQuestWorld, kRemoteQuests, kQuestAnswer: playerId (kRemoteQuests only), a count (1 to MAX_QUEST_BATCH), then each
 	// entry: questId, kind, index, value, stage. None for an empty batch, a kind not known, an objective state past
 	// OBJECTIVE_STATE_MAX, or an answer past ANSWER_MAX. Encode writes at most MAX_QUEST_BATCH entries (Batches splits).
 	inline std::vector<std::uint8_t> Encode(const QuestBatch& a_msg, MessageType a_type)
@@ -1430,7 +1439,7 @@ namespace Protocol
 	inline std::optional<QuestBatch> DecodeQuestBatch(std::span<const std::uint8_t> a_data)
 	{
 		const auto type = PeekType(a_data);
-		if (type != MessageType::kQuests && type != MessageType::kRemoteQuests && type != MessageType::kQuestAnswer) {
+		if (type != MessageType::kQuests && type != MessageType::kQuestWorld && type != MessageType::kRemoteQuests && type != MessageType::kQuestAnswer) {
 			return std::nullopt;
 		}
 		Reader r{ a_data };
