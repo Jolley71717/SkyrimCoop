@@ -311,6 +311,15 @@ namespace NpcRules
 		return std::ranges::none_of(LOCAL_EVENTS, [&](std::string_view a_local) { return SameName(a_local, a_event); });
 	}
 
+	// A graph event to play again on a stand-in or a copy, and a stagger's size and way when it is one (set on the graph
+	// before it, so it staggers as far and the same way: game/ReactionRules.h).
+	struct Event
+	{
+		std::string                      name;
+		std::optional<Protocol::Stagger> stagger;
+		bool operator==(const Event&) const = default;
+	};
+
 	// A copy's events, each played when the copy is drawn at the moment its runner's graph took it: the copy is drawn a
 	// delay behind its states (StateBuffer), so an attack starts where the runner's NPC started it, not ahead of its
 	// walk. An event that says no time, or comes later than that point, plays at once; one that waited more than STALE
@@ -321,7 +330,9 @@ namespace NpcRules
 		static constexpr std::size_t MAX = 32;
 		static constexpr auto        STALE = 2s;
 
-		void Push(std::string a_event, std::optional<Clock::time_point> a_at, Clock::time_point a_now)
+		void Push(std::string a_event, std::optional<Clock::time_point> a_at, Clock::time_point a_now) { Push(Event{ std::move(a_event), std::nullopt }, a_at, a_now); }
+
+		void Push(Event a_event, std::optional<Clock::time_point> a_at, Clock::time_point a_now)
 		{
 			const auto at = (std::min)(a_at.value_or(a_now), a_now + STALE);  // a clock read wrong never holds the queue up
 			auto       pos = std::upper_bound(queue.begin(), queue.end(), at, [](Clock::time_point a_t, const Entry& a_e) { return a_t < a_e.at; });
@@ -332,10 +343,20 @@ namespace NpcRules
 			}
 		}
 
-		// The events due when the copy is drawn at a_drawn (now less the delay), in their order.
+		// The events due when the copy is drawn at a_drawn (now less the delay), in their order: their names.
 		[[nodiscard]] std::vector<std::string> Due(Clock::time_point a_drawn)
 		{
 			std::vector<std::string> out;
+			for (auto& event : DueEvents(a_drawn)) {
+				out.push_back(std::move(event.name));
+			}
+			return out;
+		}
+
+		// The same, each with its stagger.
+		[[nodiscard]] std::vector<Event> DueEvents(Clock::time_point a_drawn)
+		{
+			std::vector<Event> out;
 			while (!queue.empty() && queue.front().at <= a_drawn) {
 				if (a_drawn - queue.front().at > STALE) {
 					++dropped;
@@ -356,7 +377,7 @@ namespace NpcRules
 		struct Entry
 		{
 			Clock::time_point at;
-			std::string       event;
+			Event             event;
 		};
 		std::deque<Entry> queue;
 		std::uint64_t     dropped = 0;

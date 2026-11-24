@@ -62,7 +62,11 @@ namespace Protocol
 	// 27: a player brought down and helped up (kDowned, kHelpUp, message types 77-78): with a friend in the session a player
 	//    a blow would kill kneels and waits for help; a friend near helps them up. (Renumbered when it lands, as 21 and 24;
 	//    25 and 26 are other changes'.)
-	inline constexpr std::uint16_t VERSION = 27;
+	// 28: melee hit reactions shared (kNpcReactions, message type 79): a copy's stagger, recoil or blocked-hit reaction our
+	//    player's blow or block caused here goes to the NPC's runner, which plays it on its NPC; and a stagger event sent
+	//    as a player's or an NPC's action carries its size and way (Stagger), so it plays the same in every game.
+	//    (Renumbered when it lands, as 21, 24 and 27.)
+	inline constexpr std::uint16_t VERSION = 28;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -135,6 +139,7 @@ namespace Protocol
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
 		kDowned = 77,  // both ways, reliable: our player is down and waits for help, is getting up, or is up again; the server names the sender
 		kHelpUp = 78,  // client -> server: our player helps that downed player up; server -> that player alone: this player helped you
+		kNpcReactions = 79,  // client -> server: copies' hit reactions our player caused; server -> each NPC's runner alone, the player named
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -478,6 +483,18 @@ namespace Protocol
 		bool operator==(const NpcStates&) const = default;
 	};
 
+	// A stagger's size and way, as the graph that took it held them when it did (its staggerMagnitude, 0 to
+	// STAGGER_MOST in 255 steps, and its staggerDirection, a share of a turn from the way the actor faces, in 256 steps):
+	// set on the actor that plays the stagger again, so it plays as big and the same way (game/ReactionRules.h packs them).
+	inline constexpr float STAGGER_MOST = 2.0f;
+
+	struct Stagger
+	{
+		std::uint8_t magnitude = 0;
+		std::uint8_t direction = 0;
+		bool operator==(const Stagger&) const = default;
+	};
+
 	// An event its runner's graph took, when (the runner's clock, as PlayerState::sentMs), for a copy to play at the
 	// same point of its states.
 	struct NpcAction
@@ -485,6 +502,7 @@ namespace Protocol
 		NpcKey        key;
 		std::uint32_t sentMs = 0;
 		std::string   event;
+		std::optional<Stagger> stagger;  // a stagger's: its size and way
 		bool operator==(const NpcAction&) const = default;
 	};
 
@@ -567,6 +585,27 @@ namespace Protocol
 		bool operator==(const NpcHits&) const = default;
 	};
 
+	// A copy's hit reaction our player caused here (our blow staggered it, our block made it recoil, our blow landed on
+	// its block), for the NPC's runner to play on its NPC: the graph event, and a stagger's size and way. The runner
+	// plays only reactions (game/ReactionRules.h), so a name that is none is refused there, not here.
+	inline constexpr std::size_t MAX_NPC_REACTIONS = 16;
+
+	struct NpcReaction
+	{
+		NpcKey                 key;
+		std::string            event;
+		std::optional<Stagger> stagger;
+		bool operator==(const NpcReaction&) const = default;
+	};
+
+	// player: 0 from a game; the server names the player whose blow or block it was.
+	struct NpcReactions
+	{
+		std::uint32_t            player = 0;
+		std::vector<NpcReaction> reactions;
+		bool operator==(const NpcReactions&) const = default;
+	};
+
 	enum class HitVerdict : std::uint8_t
 	{
 		kApplied = 0,  // the runner took it off its NPC (share: the NPC's health after)
@@ -646,6 +685,7 @@ namespace Protocol
 	{
 		std::uint32_t sentMs = 0;  // the sender's clock when its graph took it (PlayerState::sentMs's clock; 0: not known)
 		std::string   event;
+		std::optional<Stagger> stagger;  // a stagger's: its size and way
 		bool operator==(const PlayerAction&) const = default;
 	};
 
@@ -1694,6 +1734,32 @@ namespace Protocol
 		return msg;
 	}
 
+	// An action's stagger: a byte 0 for none, 1 for one, then its size and way.
+	inline void WriteStagger(Writer& a_writer, const std::optional<Stagger>& a_stagger)
+	{
+		a_writer.U8(a_stagger ? 1 : 0);
+		if (a_stagger) {
+			a_writer.U8(a_stagger->magnitude);
+			a_writer.U8(a_stagger->direction);
+		}
+	}
+
+	// False for a mark that is neither.
+	inline bool ReadStagger(Reader& a_reader, std::optional<Stagger>& a_stagger)
+	{
+		const auto mark = a_reader.U8();
+		if (mark > 1) {
+			return false;
+		}
+		if (mark == 1) {
+			Stagger stagger;
+			stagger.magnitude = a_reader.U8();
+			stagger.direction = a_reader.U8();
+			a_stagger = stagger;
+		}
+		return true;
+	}
+
 	inline std::vector<std::uint8_t> Encode(const NpcActions& a_msg)
 	{
 		Writer     w{ MessageType::kNpcActions };
@@ -1704,11 +1770,12 @@ namespace Protocol
 			WriteKey(w, a_msg.actions[i].key);
 			w.U32(a_msg.actions[i].sentMs);
 			w.Str(a_msg.actions[i].event, MAX_EVENT_NAME);
+			WriteStagger(w, a_msg.actions[i].stagger);
 		}
 		return w.Data();
 	}
 
-	// None for more than MAX_NPC_ACTIONS, an NPC of id 0, or an empty or too long event name.
+	// None for more than MAX_NPC_ACTIONS, an NPC of id 0, an empty or too long event name, or a stagger mark past 1.
 	inline std::optional<NpcActions> DecodeNpcActions(std::span<const std::uint8_t> a_data)
 	{
 		Reader r{ a_data };
@@ -1725,6 +1792,9 @@ namespace Protocol
 			action.key = ReadKey(r);
 			action.sentMs = r.U32();
 			action.event = r.Str(MAX_EVENT_NAME);
+			if (!ReadStagger(r, action.stagger)) {
+				return std::nullopt;
+			}
 			if (r.Ok() && (action.key.id == 0 || action.event.empty())) {
 				return std::nullopt;
 			}
@@ -1824,6 +1894,51 @@ namespace Protocol
 				return std::nullopt;
 			}
 			msg.hits.push_back(hit);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const NpcReactions& a_msg)
+	{
+		Writer     w{ MessageType::kNpcReactions };
+		const auto count = (std::min)(a_msg.reactions.size(), MAX_NPC_REACTIONS);
+		w.U32(a_msg.player);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			WriteKey(w, a_msg.reactions[i].key);
+			w.Str(a_msg.reactions[i].event, MAX_EVENT_NAME);
+			WriteStagger(w, a_msg.reactions[i].stagger);
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_NPC_REACTIONS, an NPC of id 0, an empty or too long event name, a stagger mark past 1, or a
+	// byte too many. An empty list reads (the translation may leave every reaction out).
+	inline std::optional<NpcReactions> DecodeNpcReactions(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		NpcReactions msg;
+		msg.player = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_NPC_REACTIONS) {
+			return std::nullopt;
+		}
+		msg.reactions.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			NpcReaction reaction;
+			reaction.key = ReadKey(r);
+			reaction.event = r.Str(MAX_EVENT_NAME);
+			if (!ReadStagger(r, reaction.stagger)) {
+				return std::nullopt;
+			}
+			if (r.Ok() && (reaction.key.id == 0 || reaction.event.empty())) {
+				return std::nullopt;
+			}
+			msg.reactions.push_back(std::move(reaction));
 		}
 		if (!r.AtEnd()) {
 			return std::nullopt;
@@ -2304,10 +2419,11 @@ namespace Protocol
 		for (std::size_t i = 0; i < count; ++i) {
 			a_writer.U32(a_actions[i].sentMs);
 			a_writer.Str(a_actions[i].event, MAX_EVENT_NAME);
+			WriteStagger(a_writer, a_actions[i].stagger);
 		}
 	}
 
-	// None for more than MAX_PLAYER_ACTIONS, or an empty or too long event name.
+	// None for more than MAX_PLAYER_ACTIONS, an empty or too long event name, or a stagger mark past 1.
 	inline std::optional<std::vector<PlayerAction>> ReadPlayerActions(Reader& a_reader)
 	{
 		const auto count = a_reader.U8();
@@ -2320,6 +2436,9 @@ namespace Protocol
 			PlayerAction action;
 			action.sentMs = a_reader.U32();
 			action.event = a_reader.Str(MAX_EVENT_NAME);
+			if (!ReadStagger(a_reader, action.stagger)) {
+				return std::nullopt;
+			}
 			if (a_reader.Ok() && action.event.empty()) {
 				return std::nullopt;
 			}
@@ -2371,7 +2490,7 @@ namespace Protocol
 		return msg;
 	}
 
-	inline constexpr std::size_t MAX_PLAYER_ACTIONS_SIZE = 1 + 4 + 1 + MAX_PLAYER_ACTIONS * (4 + 1 + MAX_EVENT_NAME);
+	inline constexpr std::size_t MAX_PLAYER_ACTIONS_SIZE = 1 + 4 + 1 + MAX_PLAYER_ACTIONS * (4 + 1 + MAX_EVENT_NAME + 3);
 	static_assert(MAX_PLAYER_ACTIONS_SIZE <= 2048, "a message of a player's actions stays small");
 
 	// The most bytes each NPC message can be, every list at its longest (the tests encode those): each fits one message.
@@ -2379,12 +2498,14 @@ namespace Protocol
 	inline constexpr std::size_t STATE_BYTES = 4 + 4 + 4 + 4 * 5 + 1 + 4 + 1 + 1;
 	inline constexpr std::size_t MAX_NPC_OWNERS_SIZE = 1 + 1 + 2 + MAX_NPCS * (KEY_BYTES + 4);
 	inline constexpr std::size_t MAX_NPC_STATES_SIZE = 1 + 4 + 1 + MAX_NPC_STATES * (KEY_BYTES + 4 + STATE_BYTES);
-	inline constexpr std::size_t MAX_NPC_ACTIONS_SIZE = 1 + 4 + 1 + MAX_NPC_ACTIONS * (KEY_BYTES + 4 + 1 + MAX_EVENT_NAME);
+	inline constexpr std::size_t MAX_NPC_ACTIONS_SIZE = 1 + 4 + 1 + MAX_NPC_ACTIONS * (KEY_BYTES + 4 + 1 + MAX_EVENT_NAME + 3);
 	static_assert(MAX_NPC_OWNERS_SIZE <= MAX_MESSAGE_SIZE && MAX_NPC_ACTIONS_SIZE <= MAX_MESSAGE_SIZE);
 	static_assert(MAX_NPC_STATES_SIZE <= 1200, "a batch of NPC states stays about one datagram");
 	static_assert(MAX_NPCS <= 0xFFFF && MAX_NPC_CLAIMS <= 0xFFFF && MAX_NPC_STATES <= 0xFF && MAX_NPC_ACTIONS <= 0xFF);
 	inline constexpr std::size_t MAX_NPC_HITS_SIZE = 1 + 4 + 1 + MAX_NPC_HITS * (KEY_BYTES + 4 + 4 + 1);
 	inline constexpr std::size_t MAX_NPC_HIT_ANSWERS_SIZE = 1 + 1 + MAX_NPC_HITS * (KEY_BYTES + 4 + 4 + 1 + 4);
+	inline constexpr std::size_t MAX_NPC_REACTIONS_SIZE = 1 + 4 + 1 + MAX_NPC_REACTIONS * (KEY_BYTES + 1 + MAX_EVENT_NAME + 3);
+	static_assert(MAX_NPC_REACTIONS_SIZE <= 1200, "a batch of reactions stays about one datagram");
 	inline constexpr std::size_t MAX_NPC_HEALTHS_SIZE = 1 + 4 + 2 + MAX_NPCS * (KEY_BYTES + 4);
 	inline constexpr std::size_t MAX_NPC_DEATHS_SIZE = 1 + 4 + 1 + 2 + MAX_NPCS * (KEY_BYTES + 4 + 1);
 	static_assert(MAX_NPC_HEALTHS_SIZE <= MAX_MESSAGE_SIZE && MAX_NPC_DEATHS_SIZE <= MAX_MESSAGE_SIZE);

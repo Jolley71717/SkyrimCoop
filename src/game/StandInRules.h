@@ -151,8 +151,8 @@ namespace StandInRules
 		static constexpr double      BURST = 64.0;
 		static constexpr double      PER_SECOND = 32.0;
 
-		// False when it is not one to send, or it was dropped.
-		bool Heard(std::string_view a_event, std::uint32_t a_sentMs, Clock::time_point a_now)
+		// False when it is not one to send, or it was dropped. a_stagger: a stagger's size and way (ReactionRules).
+		bool Heard(std::string_view a_event, std::uint32_t a_sentMs, Clock::time_point a_now, std::optional<Protocol::Stagger> a_stagger = std::nullopt)
 		{
 			if (!NpcRules::Replayed(a_event)) {
 				return false;
@@ -163,7 +163,7 @@ namespace StandInRules
 				++dropped;
 				return false;
 			}
-			queue.push_back({ a_sentMs, std::string{ a_event } });
+			queue.push_back({ a_sentMs, std::string{ a_event }, a_stagger });
 			return true;
 		}
 

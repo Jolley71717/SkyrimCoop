@@ -3,6 +3,7 @@
 #include "DevLine.h"
 #include "game/Furniture.h"
 #include "game/Pairs.h"
+#include "game/Reactions.h"
 #include "game/Gear.h"
 #include "game/StandInRules.h"
 #include "game/VtableHook.h"
@@ -74,7 +75,7 @@ namespace PlayerActions
 				return taken;
 			}
 			std::scoped_lock l{ lock };
-			if (outbox.Heard(name, Protocol::SentMs(now), now)) {
+			if (outbox.Heard(name, Protocol::SentMs(now), now, Reactions::StaggerOf(player, name))) {
 				last = name;
 			}
 			return taken;

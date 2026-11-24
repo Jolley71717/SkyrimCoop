@@ -13,6 +13,7 @@
 #include "game/Furniture.h"
 #include "game/Pairs.h"
 #include "game/PeaceRules.h"
+#include "game/Reactions.h"
 #include "game/Retire.h"
 #include "game/Riding.h"
 #include "game/SpellRules.h"
@@ -440,7 +441,7 @@ namespace RemotePlayers
 		}
 
 		// Plays a friend's actions that are due on their stand-in's graph, and counts each by kind, played or turned away.
-		void PlayActions(RE::Actor* a_actor, std::uint32_t a_player, const std::vector<std::string>& a_events)
+		void PlayActions(RE::Actor* a_actor, std::uint32_t a_player, const std::vector<NpcRules::Event>& a_events)
 		{
 			if (a_events.empty()) {
 				return;
@@ -448,7 +449,7 @@ namespace RemotePlayers
 			std::vector<std::pair<std::string_view, bool>> results;
 			results.reserve(a_events.size());
 			for (const auto& event : a_events) {
-				results.emplace_back(event, a_actor->NotifyAnimationGraph(Name(event)));
+				results.emplace_back(event.name, Reactions::Play(a_actor, event));  // a stagger as far and the same way as its friend's
 			}
 			std::scoped_lock l{ lock };
 			const auto       player = players.find(a_player);
@@ -743,7 +744,7 @@ namespace RemotePlayers
 			Gait::Step                          step;
 			bool                                ours = false;
 			std::uint32_t                       playerId = 0;
-			std::vector<std::string>            actions;
+			std::vector<NpcRules::Event>        actions;
 			float                               aim = 0.0f;
 			const bool                          eventsHere = !eventsFromTick.load(std::memory_order_relaxed);
 			// Seated on the copy of its friend's horse (Riding.h): the engine carries it in the saddle, so it is not placed,
@@ -774,7 +775,7 @@ namespace RemotePlayers
 							// Its friend's actions, each at the moment it was done, as the stand-in is drawn (a delay behind),
 							// told its graph where its legs' events are (the tick, in tick mode: Frame).
 							if (eventsHere) {
-								actions = remote.actions.Due(Clock::now() - StateBuffer::Buffer::Delay());
+								actions = remote.actions.DueEvents(Clock::now() - StateBuffer::Buffer::Delay());
 							}
 							aim = remote.aim = StandInRules::AimPitch(sample->state);
 						}
@@ -1571,7 +1572,7 @@ namespace RemotePlayers
 			return;
 		}
 		for (const auto& action : a_actions) {
-			remote.actions.Push(action.event, action.sentMs ? remote.buffer.sender.At(action.sentMs) : std::nullopt, now);
+			remote.actions.Push(NpcRules::Event{ action.event, action.stagger }, action.sentMs ? remote.buffer.sender.At(action.sentMs) : std::nullopt, now);
 		}
 	}
 
@@ -1643,7 +1644,7 @@ namespace RemotePlayers
 			FixDraw(id, remote, actor.get(), sample->state, now);
 			if (eventsFromTick && actor->Is3DLoaded()) {
 				Gait::Step  step;
-				std::vector<std::string> actions;
+				std::vector<NpcRules::Event> actions;
 				{
 					std::scoped_lock l{ lock };
 					step = Gait::Next(remote.shown, sample->state, sample->held, SwimsAsMode(actor.get()));
@@ -1652,7 +1653,7 @@ namespace RemotePlayers
 					} else {
 						remote.shown = step.shown;
 					}
-					actions = remote.actions.Due(now - StateBuffer::Buffer::Delay());
+					actions = remote.actions.DueEvents(now - StateBuffer::Buffer::Delay());
 				}
 				TellGraph(actor.get(), id, step);
 				PlayActions(actor.get(), id, actions);  // its friend's actions from the tick too, as its legs' events

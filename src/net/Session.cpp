@@ -17,6 +17,7 @@
 #include "game/Riding.h"
 #include "game/Downed.h"
 #include "game/Pairs.h"
+#include "game/Reactions.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
 #include "game/Water.h"
@@ -245,6 +246,7 @@ namespace Session
 					Shots::Started(playerId);
 					Pairs::Started(playerId);
 					Downed::Started(playerId);
+					Reactions::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -358,6 +360,11 @@ namespace Session
 			case Protocol::MessageType::kHelpUp:
 				if (const auto msg = Protocol::DecodeHelpUp(a_data); msg && msg->player != playerId) {
 					Downed::HelpedBy(msg->player);
+				}
+				break;
+			case Protocol::MessageType::kNpcReactions:
+				if (const auto msg = Protocol::DecodeNpcReactions(a_data); msg && msg->player != playerId) {
+					Reactions::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -529,6 +536,7 @@ namespace Session
 		}
 		Pairs::Clear();   // actors held by a pair let go first
 		Downed::Clear();  // friends' downs forgotten; ours goes on (its clock ends it)
+		Reactions::Clear();
 		Shots::Clear();   // our launches ended while the stand-ins and copies that shot them are still there
 		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
 		Furniture::Clear();  // and sitters out of their furniture
@@ -578,6 +586,7 @@ namespace Session
 			Furniture::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Pairs::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Reactions::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Downed::Frame(RemotePlayers::Count(), [](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		} else {
 			Downed::Frame(0, {});
