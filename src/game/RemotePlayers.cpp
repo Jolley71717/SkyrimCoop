@@ -131,6 +131,16 @@ namespace RemotePlayers
 			return state ? std::optional{ static_cast<StandInRules::Weapon>(std::to_underlying(state->GetWeaponState())) } : std::nullopt;
 		}
 
+		// What asked a graph event or a weapon state change, for the rig's log: own calls (this plugin's) are marked.
+		thread_local int ownCalls = 0;
+		struct Own
+		{
+			Own() { ++ownCalls; }
+			~Own() { --ownCalls; }
+		};
+		std::atomic<int> traceLines{ 0 };
+		constexpr int    TRACE_MAX = 400;
+
 		// The middle-high process's hand model loads: pending (+0x1F8 right, +0x1FA left; 0xFFFF none) and last loaded
 		// (+0x304, +0x306), Skyrim SE 1.7.104 (StandInRules::EquipNudge). None without middle-high data.
 		struct EquipLoad
@@ -337,6 +347,7 @@ namespace RemotePlayers
 			}
 			std::string   refused;
 			std::uint64_t taken = 0;
+			const Own own;
 			for (const auto event : a_step.events) {
 				if (a_actor->NotifyAnimationGraph(Name(event))) {
 					++taken;
@@ -374,6 +385,7 @@ namespace RemotePlayers
 			if (a_events.empty()) {
 				return;
 			}
+			const Own own;
 			std::vector<std::pair<std::string_view, bool>> results;
 			results.reserve(a_events.size());
 			for (const auto& event : a_events) {
@@ -642,6 +654,9 @@ namespace RemotePlayers
 				if (const auto player = players.find(playerId); player != players.end() && player->second.standInId == a_this->GetFormID()) {
 					++player->second.drawsFinished;
 				}
+			}
+			if (sample) {
+				RemotePlayers::TraceState(a_this);
 			}
 		}
 
@@ -1042,6 +1057,7 @@ namespace RemotePlayers
 			const bool ready = a_remote.dressed && a_remote.checked && a_actor->Is3DLoaded();
 			// An equip whose hands' models stay pending holds every draw back (StandInRules::EquipNudge): finished the
 			// game's own way.
+			const Own own;
 			if (const auto load = EquipLoadOf(a_actor); ready && load && a_remote.equipNudge.Due(load->Pending(), a_now)) {
 				a_actor->OnItemEquipped(false);
 				const auto after = EquipLoadOf(a_actor);
@@ -1479,6 +1495,7 @@ namespace RemotePlayers
 	// friend's wish instead (StandInRules::FinishWish).
 	bool FinishDraw(RE::Actor* a_actor, std::optional<bool> a_friendDrawn)
 	{
+		const Own own;
 		const auto weapon = WeaponOf(a_actor);
 		const auto again = weapon ? StandInRules::FinishWish(*weapon, a_friendDrawn) : std::nullopt;
 		if (!again) {
@@ -1486,6 +1503,45 @@ namespace RemotePlayers
 		}
 		a_actor->DrawWeaponMagicHands(*again);
 		return true;
+	}
+
+	void TraceEvent(RE::TESObjectREFR* a_ref, const char* a_event, bool a_taken)
+	{
+		if (!a_event || !a_ref || a_ref->GetFormID() < 0xFF000000 || traceLines.load(std::memory_order_relaxed) >= TRACE_MAX || !Watching()) {
+			return;
+		}
+		const auto actor = a_ref->As<RE::Actor>();
+		if (!actor || actor == RE::PlayerCharacter::GetSingleton() || !IsStandInBase(actor->GetObjectReference())) {
+			return;
+		}
+		std::string lower{ a_event };
+		std::ranges::transform(lower, lower.begin(), [](unsigned char a_c) { return static_cast<char>(std::tolower(a_c)); });
+		constexpr std::array words{ "weap", "equip", "sheath", "draw", "attack", "cast", "block", "bash", "bow", "magic", "idle", "stagger", "interrupt" };
+		if (std::ranges::none_of(words, [&](std::string_view a_w) { return lower.contains(a_w); })) {
+			return;
+		}
+		++traceLines;
+		const auto weapon = WeaponOf(actor);
+		logs::info("Players: trace stand-in {:08X} graph event {} {} by {} (weapon state {}, thread {})", actor->GetFormID(), a_event, a_taken ? "taken" : "turned away",
+			ownCalls > 0 ? "us" : "the game", weapon ? static_cast<int>(std::to_underlying(*weapon)) : -1, GetCurrentThreadId());
+	}
+
+	void TraceState(RE::Actor* a_actor)
+	{
+		static std::mutex                     traceLock;
+		static std::unordered_map<RE::FormID, int> last;
+		const auto                            weapon = WeaponOf(a_actor);
+		const int                             now = weapon ? static_cast<int>(std::to_underlying(*weapon)) : -1;
+		if (traceLines.load(std::memory_order_relaxed) >= TRACE_MAX) {
+			return;
+		}
+		std::scoped_lock l{ traceLock };
+		const auto [it, added] = last.try_emplace(a_actor->GetFormID(), now);
+		if (!added && it->second != now) {
+			++traceLines;
+			logs::info("Players: trace stand-in {:08X} weapon state {} -> {} (thread {})", a_actor->GetFormID(), it->second, now, GetCurrentThreadId());
+			it->second = now;
+		}
 	}
 
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt)
@@ -1728,9 +1784,9 @@ namespace RemotePlayers
 			const auto& nodes = *behavior->activeNodes;
 			std::string out = std::format("{:08X} active={}:", actor->GetFormID(), nodes.size());
 			for (std::int32_t i = 0; i < nodes.size(); ++i) {
-				const auto node = nodes[i].nodeTemplate;
-				const char* name = node ? node->name.data() : nullptr;
-				out += std::format(" {}", name && *name ? name : "?");
+				// The node's name is not read: the layout of an active node's template is not one this build can trust (a
+				// bad pointer crashed the game here), so its address is all it says.
+				out += std::format(" {:X}", reinterpret_cast<std::uintptr_t>(nodes[i].nodeTemplate));
 				if (out.size() > 3000) {
 					out += " ...";
 					break;

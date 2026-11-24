@@ -87,6 +87,10 @@ namespace RemotePlayers
 	bool FinishDraw(RE::Actor* a_actor, std::optional<bool> a_friendDrawn = std::nullopt);
 	// An actor this game placed (a copy of a spawn) goes out of the world as a stand-in does: disabled, then deleted
 	// (Retire.h), its AI off meanwhile, taken out before a save and named in the co-save until it is gone.
+	// The rig's log of what moves a stand-in's weapon state: every graph event about weapons it is sent (by this plugin or the
+	// game) and every change of its state, capped.
+	void TraceEvent(RE::TESObjectREFR* a_ref, const char* a_event, bool a_taken);
+	void TraceState(RE::Actor* a_actor);
 	void TakeOut(RE::Actor* a_actor, std::chrono::steady_clock::time_point a_placedAt);
 
 	// Developer channel: `standins` (one line each), `strays` (placed actors of a preset base in the loaded game:
