@@ -55,7 +55,7 @@ namespace Bodies
 		struct Counts
 		{
 			std::uint64_t deaths = 0, fallsSent = 0, restsSent = 0, gaveUp = 0, noBones = 0, lost = 0;
-			std::uint64_t fallsHeard = 0, restsHeard = 0, catchUps = 0, fallsPushed = 0, laid = 0, left = 0, ours = 0, far = 0, badPoses = 0;
+			std::uint64_t fallsHeard = 0, restsHeard = 0, catchUps = 0, fallsPushed = 0, laid = 0, left = 0, ours = 0, tooFar = 0, badPoses = 0;
 		};
 		Counts counts;
 
@@ -314,7 +314,7 @@ namespace Bodies
 			for (const auto& one : bones) {
 				const auto it = std::find_if(a_rest.bones.begin(), a_rest.bones.end(), [&](const Protocol::Bone& a_bone) { return a_bone.name == one.bone.name; });
 				if (it != a_rest.bones.end() && ObjectRules::Distance(BodyRules::At(*it), BodyRules::At(one.bone)) > ObjectRules::WRITE_JUMP) {
-					++counts.far;
+					++counts.tooFar;
 					return true;  // a report never pulls a body across the map
 				}
 			}
@@ -460,6 +460,6 @@ namespace Bodies
 			"bodies active={} | ours deaths={} fallsSent={} restsSent={} gaveUp={} noBones={} lost={} watched={} | theirs fallsHeard={} restsHeard={} catchUps={} "
 			"fallsPushed={} fallsLate={} laid={} left={} ours={} far={} waitingRests={} waitingFalls={} waitingRefused={} | badPoses={}",
 			active ? 1 : 0, c.deaths, c.fallsSent, c.restsSent, c.gaveUp, c.noBones, c.lost, watches.size(), c.fallsHeard, c.restsHeard, c.catchUps, c.fallsPushed,
-			waiting.late, c.laid, c.left, c.ours, c.far, waiting.Rests(), waiting.Falls(), waiting.refused, c.badPoses);
+			waiting.late, c.laid, c.left, c.ours, c.tooFar, waiting.Rests(), waiting.Falls(), waiting.refused, c.badPoses);
 	}
 }
