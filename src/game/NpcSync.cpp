@@ -409,6 +409,18 @@ namespace NpcSync
 			return fly == FS::kTakeOff || fly == FS::kCruising || fly == FS::kHovering || fly == FS::kLanding || fly == FS::kAction;
 		}
 
+		// Whether a state's place is in a cell this game has loaded: inside, its cell is; outside, the exterior cell under it
+		// is attached (within the loaded grid).
+		bool OverLoadedCell(const Protocol::PlayerState& a_state)
+		{
+			if (a_state.cell != 0) {
+				return true;
+			}
+			const auto tes = RE::TES::GetSingleton();
+			const auto cell = tes ? tes->GetCell(RE::NiPoint3{ a_state.x, a_state.y, a_state.z }) : nullptr;
+			return cell && cell->IsAttached();
+		}
+
 		std::optional<Protocol::PlayerState> Read(RE::Actor* a_actor)
 		{
 			auto state = Space(a_actor);
@@ -1128,6 +1140,7 @@ namespace NpcSync
 				facts.riddenThere = ridden == RiddenBy::kTheirs;
 				facts.followsUs = facts.ridden || (player && FollowsUs(actor.get(), player));
 				facts.spawn = key.IsSpawn();
+				facts.crashing = npc.crash.Active();
 				const auto ask = NpcRules::Decide(facts, a_now);
 				if (ask == NpcRules::Ask::kNone) {
 					continue;
@@ -1327,7 +1340,10 @@ namespace NpcSync
 					}
 					const bool sameSpace = sample && a_here && SameSpace(sample->state, *a_here);
 					const bool inTheAir = sample && ((sample->state.flags & Protocol::kFlying) != 0 || NpcRules::HoldsDeath(copy.crashAt, copy.flyingAt, a_now));
-					const auto mode = NpcRules::CopyMode(sample.has_value() && othersRun, sameSpace, sameSpace ? std::optional{ Distance(sample->state, *a_here) } : std::nullopt, inTheAir);
+					const auto fromUs = sameSpace ? std::optional{ Distance(sample->state, *a_here) } : std::nullopt;
+					// A flyer past MIRROR_WITHIN is followed only over cells this game has loaded (NpcRules::FLYER_MIRROR_WITHIN).
+					const bool overLoaded = !(inTheAir && fromUs && *fromUs > NpcRules::MIRROR_WITHIN) || OverLoadedCell(sample->state);
+					const auto mode = NpcRules::CopyMode(sample.has_value() && othersRun, sameSpace, fromUs, inTheAir, overLoaded);
 					if (mode != copy.mode && copy.mode == NpcRules::Mode::kMirror) {
 						counts.fallbackSilent += mode == NpcRules::Mode::kSilent ? 1 : 0;
 						counts.fallbackElsewhere += mode == NpcRules::Mode::kElsewhere ? 1 : 0;

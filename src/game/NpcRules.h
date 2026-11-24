@@ -77,6 +77,9 @@ namespace NpcRules
 		// at once, not at the follower's pace), or by an NPC another game runs (riddenThere: that game runs it).
 		bool                             ridden = false;
 		bool                             riddenThere = false;
+		// A body we ran that died flying and still falls (Crash): kept until it lies still, so its crash states go on from
+		// one game (handed over now, its new runner would never send them).
+		bool                             crashing = false;
 		std::optional<Clock::time_point> lastClaim;     // our last claim of it, of any kind
 		// Our last kFollower claim of it, kept until we say kHave or kRelease of it: none, the book has not heard from us
 		// that it follows our player (or has heard that it stopped).
@@ -103,6 +106,9 @@ namespace NpcRules
 		}
 		switch (a_facts.owner) {
 		case Owner::kUs:
+			if (a_facts.crashing) {
+				return Ask::kNone;
+			}
 			if (a_facts.riddenThere && !a_facts.ridden) {
 				// A mount an NPC of another game's rides goes with its rider: that game asks for it (as its follower).
 				return since(CLAIM_EVERY) ? Ask::kRelease : Ask::kNone;
@@ -224,8 +230,9 @@ namespace NpcRules
 	inline constexpr float MIRROR_WITHIN = 8000.0f;
 	// A flyer in the air (its state says it flies, or it crashes: Crash) is followed further. A dragon circles wide over
 	// a fight, high up: left to its own AI past MIRROR_WITHIN it would fly its own way in each game, and come back to the
-	// fight from another side than its runner's (or land elsewhere). Within the loaded grid's reach (five cells across
-	// at the default grid, 4096 units each, from the cell our player is in) and the height a dragon circles at.
+	// fight from another side than its runner's (or land elsewhere). Up to FLYER_MIRROR_WITHIN, and only over cells this
+	// game has loaded: the loaded grid's edge can be as near as two cells (8192 u) along an axis at the default grid, and a
+	// copy placed beyond it would lose its 3D and its cell.
 	inline constexpr float FLYER_MIRROR_WITHIN = 12000.0f;
 
 	enum class Mode
@@ -233,10 +240,11 @@ namespace NpcRules
 		kMirror,
 		kSilent,     // no recent state
 		kElsewhere,  // its runner has it in another space than our player's
-		kFar,        // its runner has it further from our player than MIRROR_WITHIN (FLYER_MIRROR_WITHIN in the air)
+		kFar,        // its runner has it further from our player than MIRROR_WITHIN (in the air: FLYER_MIRROR_WITHIN, or not over a loaded cell)
 	};
 
-	[[nodiscard]] inline Mode CopyMode(bool a_recentState, bool a_sameSpace, std::optional<float> a_fromOurPlayer, bool a_inTheAir = false)
+	// a_overLoaded: where its runner has it is over a cell this game has loaded (asked only of a flyer past MIRROR_WITHIN).
+	[[nodiscard]] inline Mode CopyMode(bool a_recentState, bool a_sameSpace, std::optional<float> a_fromOurPlayer, bool a_inTheAir = false, bool a_overLoaded = true)
 	{
 		if (!a_recentState) {
 			return Mode::kSilent;
@@ -244,7 +252,10 @@ namespace NpcRules
 		if (!a_sameSpace) {
 			return Mode::kElsewhere;
 		}
-		if (!a_fromOurPlayer || *a_fromOurPlayer > (a_inTheAir ? FLYER_MIRROR_WITHIN : MIRROR_WITHIN)) {
+		if (!a_fromOurPlayer) {
+			return Mode::kFar;
+		}
+		if (*a_fromOurPlayer > MIRROR_WITHIN && !(a_inTheAir && a_overLoaded && *a_fromOurPlayer <= FLYER_MIRROR_WITHIN)) {
 			return Mode::kFar;
 		}
 		return Mode::kMirror;

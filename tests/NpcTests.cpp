@@ -510,6 +510,13 @@ TEST("npc rules: the runner lets go of an NPC its player left behind for a frien
 	CHECK(Decide(near, t) == Ask::kNone);
 	Facts behind{ .owner = Owner::kUs, .ours = HANDOFF_FAR + 1.0f, .nearestFriend = 200.0f };
 	CHECK(Decide(behind, t) == Ask::kRelease);
+	// A dragon's body still falling is kept by the game that sends its crash, then let go.
+	Facts crashing = behind;
+	crashing.crashing = true;
+	CHECK(Decide(crashing, t) == Ask::kNone);
+	Facts crashingRidden = crashing;
+	crashingRidden.riddenThere = true;
+	CHECK(Decide(crashingRidden, t) == Ask::kNone);
 	// Far, but the friend is no nearer by the margin: it stays.
 	Facts both{ .owner = Owner::kUs, .ours = HANDOFF_FAR + 1.0f, .nearestFriend = HANDOFF_FAR };
 	CHECK(Decide(both, t) == Ask::kNone);
@@ -640,6 +647,10 @@ TEST("npc rules: a copy follows its runner only with a recent state in our playe
 	CHECK(CopyMode(true, true, FLYER_MIRROR_WITHIN + 1.0f, true) == Mode::kFar);
 	CHECK(CopyMode(true, false, std::nullopt, true) == Mode::kElsewhere);
 	CHECK(CopyMode(false, true, 1000.0f, true) == Mode::kSilent);
+	// Past MIRROR_WITHIN only over a loaded cell: the loaded grid can end nearer than FLYER_MIRROR_WITHIN.
+	CHECK(CopyMode(true, true, MIRROR_WITHIN + 1.0f, true, false) == Mode::kFar);
+	CHECK(CopyMode(true, true, MIRROR_WITHIN, true, false) == Mode::kMirror);
+	CHECK(CopyMode(true, true, MIRROR_WITHIN + 1.0f, false, true) == Mode::kFar);
 	CHECK(ModeName(Mode::kMirror) == "mirror");
 	CHECK(ModeName(Mode::kFar) == "far");
 }
