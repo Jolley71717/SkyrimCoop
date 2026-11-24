@@ -291,7 +291,7 @@ namespace Conversations
 			std::string   voice;
 		};
 
-		std::optional<Response> InList(const RE::BSSimpleList<RE::DialogueResponse*>& a_list, const RE::TESTopicInfo* a_info, std::string_view a_text)
+		std::optional<Response> InList(RE::BSSimpleList<RE::DialogueResponse*>& a_list, const RE::TESTopicInfo* a_info, std::string_view a_text)
 		{
 			std::uint32_t number = 0;
 			for (const auto response : a_list) {
@@ -314,7 +314,7 @@ namespace Conversations
 		std::optional<Response> FindResponse(RE::Actor* a_actor, std::string_view a_text)
 		{
 			if (const auto high = a_actor->GetHighProcess(); high && high->greetTopic) {
-				const auto& greeting = *high->greetTopic;
+				auto& greeting = *high->greetTopic;  // not const: CommonLib's list has no const iteration
 				if (auto found = InList(greeting.responses, greeting.info, a_text)) {
 					return found;
 				}
