@@ -1,7 +1,7 @@
 {
  "release": "?",
  "known_issues": [],
- "updated": "2026-11-23T20:01:25+00:00",
+ "updated": "2026-11-24T00:10:23+00:00",
  "stages": [
   "Queued",
   "Looked into",
@@ -142,7 +142,7 @@
    "title": "Arrows and bolts fly and hit in both games",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
+   "stage": 2,
    "note": ""
   },
   {
@@ -401,7 +401,7 @@
    "title": "Fire, frost and shock spells hit in both games",
    "kind": "feature",
    "priority": 2,
-   "stage": 0,
+   "stage": 2,
    "note": ""
   },
   {
@@ -712,7 +712,7 @@
    "title": "Radiant quests: share the job the host's Story Manager picked",
    "kind": "feature",
    "priority": 3,
-   "stage": 2,
+   "stage": 3,
    "note": ""
   },
   {
@@ -720,7 +720,7 @@
    "title": "Riding: a friend on horseback is shown, mounting and getting off",
    "kind": "feature",
    "priority": 2,
-   "stage": 2,
+   "stage": 3,
    "note": "",
    "pr": 28
   },
