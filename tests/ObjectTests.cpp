@@ -66,6 +66,20 @@ namespace
 			a_kind == RestKind::kLetGo ? Vec{ 300.0f, 0.0f, 120.0f } : Vec{});
 	}
 
+	// A rest of an object of several bodies: a_parts loose links of a chain hanging below its place, all named "Link"
+	// (PartNames tells them apart).
+	Rest Several(std::uint32_t a_id, std::size_t a_parts)
+	{
+		auto                          rest = RestAt(a_id);
+		std::vector<std::string_view> nodes(a_parts, "Link");
+		const auto                    names = ObjectRules::PartNames(nodes);
+		for (std::size_t i = 0; i < a_parts; ++i) {
+			const auto k = static_cast<float>(i);
+			rest.parts.push_back({ names[i], rest.x + 4.0f * k, rest.y, rest.z - 8.0f * k, Turn({ 0, 0, 1 }, 0.1f * k) });
+		}
+		return rest;
+	}
+
 	Rest Gone(std::uint32_t a_id)
 	{
 		Rest gone;
@@ -194,7 +208,7 @@ TEST("object protocol: the longest fit; a rest's velocity is written only for a 
 	for (std::uint32_t i = 0; i < Protocol::MAX_OBJECT_RESTS; ++i) {
 		manyRests.rests.push_back(RestAt(0x00100000 + i, i % 2 ? RestKind::kRest : RestKind::kLetGo));
 	}
-	CHECK(Protocol::Encode(manyRests).size() == Protocol::MAX_OBJECT_RESTS_SIZE);
+	CHECK(Protocol::Encode(manyRests).size() == 1 + 4 + 1 + 1 + Protocol::MAX_OBJECT_RESTS * Protocol::OBJECT_REST_BYTES);
 	CHECK(Protocol::DecodeObjectRests(Protocol::Encode(manyRests)) == manyRests);
 
 	// A rest's velocity, left in by the caller, is not written.
@@ -545,7 +559,7 @@ TEST("object frames: a hold in the holder's frame is drawn at the same place bef
 	CHECK(Near(ObjectRules::Angle(q, Protocol::Quat{ -q.x, -q.y, -q.z, -q.w }), 0.0f));
 }
 
-TEST("object class: a loaded, enabled reference of the load order with one loose body; never an actor, a projectile, a static or door, a runtime one, an alias's, many bodies or a keyframed one")
+TEST("object class: a loaded, enabled reference of the load order with one to MAX_OBJECT_PARTS bodies, its lead loose; never an actor, a projectile, a static or door, a runtime one, an alias's, too many bodies or a keyframed lead")
 {
 	ObjectRules::Facts clutter;
 	clutter.has3D = true;
@@ -585,8 +599,15 @@ TEST("object class: a loaded, enabled reference of the load order with one loose
 	CHECK(!ObjectRules::Movable(f));
 	f = clutter;
 	f.bodies = 2;
+	CHECK(ObjectRules::Movable(f));  // a hanging chain, a cage, a heap of bones
+	f.bodies = Protocol::MAX_OBJECT_PARTS;
+	CHECK(ObjectRules::Movable(f));
+	f.bodies = Protocol::MAX_OBJECT_PARTS + 1;
 	CHECK(!ObjectRules::Movable(f));
 	f.bodies = 0;
+	CHECK(!ObjectRules::Movable(f));
+	f.bodies = 3;
+	f.motion = ObjectRules::Motion::kKeyframed;  // none of its bodies loose: its lead is its first
 	CHECK(!ObjectRules::Movable(f));
 }
 
@@ -1140,4 +1161,240 @@ TEST("object holds: a holder's hold heard just after its let-go or rest of the o
 	CHECK(ends.Late(0x00700000 + HoldEnds::MAX_ENDS + 9, 2, t + 1s + 10ms));
 	ends.Clear();
 	CHECK(ends.Size() == 0u);
+}
+
+TEST("object parts: a rest of an object of several bodies reads back with its parts, as protocol 25; parts only on a rest, at most MAX_OBJECT_PARTS, named once, near and turned")
+{
+	static_assert(Protocol::VERSION >= 25);
+	static_assert(Protocol::MAX_OBJECT_RESTS_SIZE <= 16384);
+	const Protocol::ObjectRests rests{ .sender = 2, .rests = { Several(TANKARD, 5), RestAt(BUCKET), Several(0x00100000, Protocol::MAX_OBJECT_PARTS) } };
+	CHECK(Protocol::DecodeObjectRests(Protocol::Encode(rests)) == rests);
+	CHECK(Protocol::Encode(Protocol::ObjectRests{ .rests = { Several(TANKARD, 2) } }).size() ==
+		  1 + 4 + 1 + 1 + Protocol::OBJECT_REST_BYTES + 2 * Protocol::OBJECT_PART_BYTES);
+
+	// Parts that do not hold.
+	auto letGo = Several(TANKARD, 2);
+	letGo.kind = RestKind::kLetGo;
+	CHECK(!Protocol::ObjectRestHolds(letGo));
+	const auto letGoRead = Protocol::DecodeObjectRests(Protocol::Encode(Protocol::ObjectRests{ .rests = { letGo } }));
+	REQUIRE(letGoRead);
+	CHECK(letGoRead->rests[0].parts.empty());  // not written for a let-go
+	auto tooMany = Several(TANKARD, Protocol::MAX_OBJECT_PARTS);
+	tooMany.parts.push_back({ ObjectRules::NameHash("Extra"), tooMany.x, tooMany.y, tooMany.z, Protocol::Quat{} });
+	CHECK(!Protocol::ObjectRestHolds(tooMany));
+	auto twice = Several(TANKARD, 3);
+	twice.parts[2].name = twice.parts[0].name;
+	CHECK(!Protocol::ObjectRestHolds(twice));
+	CHECK(!Protocol::DecodeObjectRests(Protocol::Encode(Protocol::ObjectRests{ .rests = { twice } })));
+	auto far = Several(TANKARD, 3);
+	far.parts[1].z += Protocol::MAX_PART_REACH + 100.0f;
+	CHECK(!Protocol::DecodeObjectRests(Protocol::Encode(Protocol::ObjectRests{ .rests = { far } })));
+	auto noName = Several(TANKARD, 3);
+	noName.parts[1].name = 0;
+	CHECK(!Protocol::DecodeObjectRests(Protocol::Encode(Protocol::ObjectRests{ .rests = { noName } })));
+	auto badTurn = Several(TANKARD, 3);
+	badTurn.parts[1].rot = { 0.0f, 0.0f, 0.0f, 3.0f };
+	CHECK(!Protocol::DecodeObjectRests(Protocol::Encode(Protocol::ObjectRests{ .rests = { badTurn } })));
+	auto nan = Several(TANKARD, 3);
+	nan.parts[1].x = std::nanf("");
+	CHECK(!Protocol::DecodeObjectRests(Protocol::Encode(Protocol::ObjectRests{ .rests = { nan } })));
+	// A part count past MAX_OBJECT_PARTS, or one cut short.
+	constexpr std::size_t PARTS_AT = 1 + 4 + 1 + 1 + Protocol::OBJECT_REST_BYTES - 1;
+	auto overCount = Protocol::Encode(Protocol::ObjectRests{ .rests = { RestAt(TANKARD) } });
+	REQUIRE(overCount.size() == PARTS_AT + 1);
+	overCount[PARTS_AT] = static_cast<std::uint8_t>(Protocol::MAX_OBJECT_PARTS + 1);
+	CHECK(!Protocol::DecodeObjectRests(overCount));
+	auto cut = Protocol::Encode(Protocol::ObjectRests{ .rests = { Several(TANKARD, 2) } });
+	cut.pop_back();
+	CHECK(!Protocol::DecodeObjectRests(cut));
+}
+
+TEST("object parts: one message holds at most MAX_PARTS_PER_MESSAGE parts; the writer stops before the next rest would pass it, and every rest fits somewhere")
+{
+	std::vector<Rest> chains;
+	for (std::uint32_t i = 0; i < 20; ++i) {
+		chains.push_back(Several(0x00200000 + i, Protocol::MAX_OBJECT_PARTS));
+	}
+	const auto perMessage = Protocol::MAX_PARTS_PER_MESSAGE / Protocol::MAX_OBJECT_PARTS;
+	CHECK(Protocol::ObjectRestsFit(chains, 0) == perMessage);
+	CHECK(Protocol::ObjectRestsFit(chains, 18) == 20u);
+	CHECK(Protocol::ObjectRestsFit(chains, 20) == 20u);  // none left
+	const auto written = Protocol::DecodeObjectRests(Protocol::Encode(Protocol::ObjectRests{ .rests = chains }));
+	REQUIRE(written);
+	CHECK(written->rests.size() == perMessage);
+	CHECK(Protocol::Encode(Protocol::ObjectRests{ .rests = chains }).size() <= Protocol::MAX_OBJECT_RESTS_SIZE);
+	// Rests of one body only are cut by count alone.
+	std::vector<Rest> plain;
+	for (std::uint32_t i = 0; i < Protocol::MAX_OBJECT_RESTS + 5; ++i) {
+		plain.push_back(RestAt(0x00300000 + i));
+	}
+	CHECK(Protocol::ObjectRestsFit(plain, 0) == Protocol::MAX_OBJECT_RESTS);
+	CHECK(Protocol::ObjectRestsFit(plain, Protocol::MAX_OBJECT_RESTS) == plain.size());
+	// Every rest of a long mixed list fits, in order, in as many messages as it takes.
+	std::vector<Rest> mixed;
+	for (std::uint32_t i = 0; i < 100; ++i) {
+		mixed.push_back(i % 3 ? RestAt(0x00400000 + i) : Several(0x00400000 + i, 1 + i % Protocol::MAX_OBJECT_PARTS));
+	}
+	std::vector<Rest> back;
+	for (std::size_t first = 0; first < mixed.size();) {
+		const auto end = Protocol::ObjectRestsFit(mixed, first);
+		REQUIRE(end > first);
+		const std::vector<Rest> part(mixed.begin() + static_cast<std::ptrdiff_t>(first), mixed.begin() + static_cast<std::ptrdiff_t>(end));
+		const auto              read = Protocol::DecodeObjectRests(Protocol::Encode(Protocol::ObjectRests{ .rests = part }));
+		REQUIRE(read);
+		CHECK(read->rests.size() == part.size());
+		back.insert(back.end(), read->rests.begin(), read->rests.end());
+		first = end;
+	}
+	CHECK(back == mixed);
+}
+
+TEST("object parts: the server passes and keeps an object's parts; a joiner's full list of many chains comes in as many messages as it takes")
+{
+	Fixture f;
+	AllIn(f, 2);
+	std::vector<Rest> chains;
+	for (std::uint32_t i = 0; i < 24; ++i) {
+		chains.push_back(Several(0x00600000 + i, Protocol::MAX_OBJECT_PARTS));
+	}
+	const auto perMessage = Protocol::MAX_PARTS_PER_MESSAGE / Protocol::MAX_OBJECT_PARTS;
+	for (std::size_t first = 0; first < chains.size(); first += perMessage) {
+		const std::vector<Rest> part(chains.begin() + static_cast<std::ptrdiff_t>(first), chains.begin() + static_cast<std::ptrdiff_t>(first + perMessage));
+		f.fake->Deliver(1, Protocol::Encode(Protocol::ObjectRests{ .rests = part }));
+	}
+	REQUIRE(f.fake->Settle());
+	std::vector<Rest> toBo;
+	for (const auto& msg : RestsTo(f, 2)) {
+		CHECK(msg.sender == 1u);
+		toBo.insert(toBo.end(), msg.rests.begin(), msg.rests.end());
+	}
+	CHECK(toBo == chains);
+
+	REQUIRE(f.Join(3, Fixture::MakeHello("Cy")));
+	REQUIRE(f.fake->Settle());
+	const auto toCy = RestsTo(f, 3);
+	REQUIRE(toCy.size() >= chains.size() / perMessage);
+	CHECK(toCy[0].full);
+	std::size_t heard = 0;
+	for (std::size_t i = 0; i < toCy.size(); ++i) {
+		CHECK(toCy[i].full == (i == 0));
+		for (const auto& rest : toCy[i].rests) {
+			CHECK(rest.parts.size() == Protocol::MAX_OBJECT_PARTS);
+		}
+		heard += toCy[i].rests.size();
+	}
+	CHECK(heard == chains.size());
+}
+
+TEST("object parts: names are a node's, case aside; a name met again is told apart by its count, the same in every game; a rest's parts are alike only when they name ours exactly")
+{
+	using ObjectRules::NameHash;
+	using ObjectRules::PartNames;
+	static_assert(NameHash("Link") == NameHash("LINK"));
+	CHECK(NameHash("") != 0u);
+
+	const auto chain = PartNames({ "Link", "Link", "Hook", "link" });
+	REQUIRE(chain.size() == 4u);
+	CHECK(chain[0] == NameHash("Link"));
+	CHECK(chain[1] == NameHash("Link#1"));
+	CHECK(chain[2] == NameHash("Hook"));
+	CHECK(chain[3] == NameHash("Link#2"));  // case aside, a third "Link"
+	CHECK(PartNames({ "Link", "Link", "Hook", "link" }) == chain);  // the same mesh names its parts alike in every game
+	// A "#k" that is another node's own name is still told apart.
+	const auto clash = PartNames({ "Link#1", "Link", "Link" });
+	CHECK(clash[0] != clash[2]);
+	CHECK(clash[1] != clash[2]);
+	CHECK(PartNames({}).empty());
+
+	auto rest = Several(TANKARD, 3);
+	const auto ours = PartNames({ "Link", "Link", "Link" });
+	CHECK(ObjectRules::PartsAlike(ours, rest.parts));
+	CHECK(ObjectRules::PartsAlike({ ours[2], ours[0], ours[1] }, rest.parts));  // in any order
+	CHECK(!ObjectRules::PartsAlike(PartNames({ "Link", "Link" }), rest.parts));  // a part we lack
+	CHECK(!ObjectRules::PartsAlike(PartNames({ "Link", "Link", "Link", "Link" }), rest.parts));  // one it lacks
+	CHECK(!ObjectRules::PartsAlike(PartNames({ "Link", "Link", "Ring" }), rest.parts));
+	CHECK(!ObjectRules::PartsAlike({}, {}));
+}
+
+TEST("object parts: a copy is put when any part lies elsewhere; a rest's parts are made from every loose body's pose or not at all")
+{
+	const auto rest = Several(TANKARD, 3);
+	std::vector<std::pair<std::uint32_t, Pose>> here;
+	for (const auto& part : rest.parts) {
+		here.emplace_back(part.name, ObjectRules::PoseOf(part));
+	}
+	CHECK(!ObjectRules::PartsNeedPut(here, rest.parts));
+	auto swung = here;
+	swung[2].second.at.x += 20.0f;  // the chain's end swung away
+	CHECK(ObjectRules::PartsNeedPut(swung, rest.parts));
+	auto turned = here;
+	turned[1].second.rot = Turn({ 1, 0, 0 }, 0.5f);
+	CHECK(ObjectRules::PartsNeedPut(turned, rest.parts));
+	auto lacking = here;
+	lacking.pop_back();
+	CHECK(ObjectRules::PartsNeedPut(lacking, rest.parts));
+
+	const auto names = ObjectRules::PartNames({ "Link", "Link" });
+	const auto made = ObjectRules::PartsOf(names, { Pose{ { 1, 2, 3 }, Turn({ 0, 0, 1 }, 0.2f) }, Pose{ { 4, 5, 6 }, Protocol::Quat{} } });
+	REQUIRE(made);
+	REQUIRE(made->size() == 2u);
+	CHECK((*made)[1].name == names[1]);
+	CHECK(Near(ObjectRules::PoseOf((*made)[0]).at, Vec{ 1, 2, 3 }));
+	CHECK(!ObjectRules::PartsOf(names, { Pose{}, std::nullopt }));  // a body gone NaN: none of it said
+	CHECK(!ObjectRules::PartsOf(names, { Pose{} }));
+}
+
+TEST("object parts: a knock that leaves the lead still is seen by the part that moved most; at rest only once every part is")
+{
+	using ObjectRules::NamedPoses;
+	const auto t = Steady::now();
+	const auto names = ObjectRules::PartNames({ "Link", "Link", "Link" });
+	const NamedPoses hanging{ { names[0], Pose{ { 0, 0, 100 } } }, { names[1], Pose{ { 0, 0, 80 } } }, { names[2], Pose{ { 0, 0, 60 } } } };
+
+	ObjectRules::PartsSeen seen;
+	CHECK(!seen.Look(TANKARD, hanging, t));  // the first look is the baseline
+	CHECK(!seen.Look(TANKARD, hanging, t + 250ms));
+	auto knocked = hanging;
+	knocked[1].second.at.x += 3.0f;
+	knocked[2].second.at.x += 12.0f;  // the far end swings most
+	const auto move = seen.Look(TANKARD, knocked, t + 500ms);
+	REQUIRE(move);
+	CHECK(Near(move->from, Vec{ 0, 0, 60 }));
+	CHECK(Near(move->to, Vec{ 12, 0, 60 }));
+	CHECK(!seen.Look(TANKARD, knocked, t + 750ms));  // the baseline moved with it
+	auto creep = knocked;
+	creep[2].second.at.x += 0.6f;
+	CHECK(!seen.Look(TANKARD, creep, t + 1s));
+	creep[2].second.at.x += 0.6f;  // a slow drift adds up against the kept baseline
+	CHECK(seen.Look(TANKARD, creep, t + 1250ms).has_value());
+	seen.Forget(TANKARD);
+	CHECK(!seen.Look(TANKARD, hanging, t + 1500ms));
+	seen.Prune(t + 1500ms + ObjectRules::PartsSeen::FORGET_AFTER + 1s);
+	CHECK(seen.Size() == 0u);
+	for (std::uint32_t i = 0; i < ObjectRules::PartsSeen::MAX_OBJECTS + 5; ++i) {
+		(void)seen.Look(0x00800000 + i, hanging, t);
+	}
+	CHECK(seen.Size() == ObjectRules::PartsSeen::MAX_OBJECTS);
+
+	// Settling: the lead still from the start, the far end swinging until 2 s.
+	ObjectRules::PartsSettle settle{ t };
+	auto swing = hanging;
+	bool rested = false;
+	for (int i = 1; i <= 8 && !rested; ++i) {
+		swing[2].second.at.x = (i % 2 ? 10.0f : -10.0f);
+		rested = settle.Look(swing, t + std::chrono::milliseconds(250 * i));
+	}
+	CHECK(!rested);
+	rested = settle.Look(swing, t + 2250ms);
+	CHECK(!rested);  // still for 250 ms only
+	CHECK(settle.Look(swing, t + 2000ms + ObjectRules::STILL_FOR));
+	CHECK(settle.Look(knocked, t + 9s));  // at rest stays so
+
+	// One that swings for ever is given up on.
+	ObjectRules::PartsSettle forever{ t };
+	for (int i = 1; i * 250ms < ObjectRules::GIVE_UP; ++i) {
+		swing[2].second.at.x = (i % 2 ? 10.0f : -10.0f);
+		CHECK(!forever.Look(swing, t + std::chrono::milliseconds(250 * i)));
+	}
+	CHECK(forever.Look(swing, t + ObjectRules::GIVE_UP));
 }

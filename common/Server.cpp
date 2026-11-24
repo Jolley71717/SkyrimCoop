@@ -253,19 +253,25 @@ void Server::Run()
 			}
 		}
 	};
-	// The same for loose objects' rests (MAX_OBJECT_RESTS each); sender 0 is the session's word.
+	// The same for loose objects' rests (as many as one message holds: Protocol::ObjectRestsFit, by count and parts);
+	// sender 0 is the session's word.
 	const auto sendObjectRests = [&](const PeerKey* a_to, const PeerKey* a_except, const std::vector<Protocol::ObjectRest>& a_rests, bool a_full, std::uint32_t a_sender = 0) {
-		for (std::size_t first = 0; first < a_rests.size() || (a_full && first == 0); first += Protocol::MAX_OBJECT_RESTS) {
-			Protocol::ObjectRests msg{ .sender = a_sender, .full = a_full && first == 0 };
-			const auto            end = (std::min)(a_rests.size(), first + Protocol::MAX_OBJECT_RESTS);
-			if (first < end) {
-				msg.rests.assign(a_rests.begin() + static_cast<std::ptrdiff_t>(first), a_rests.begin() + static_cast<std::ptrdiff_t>(end));
+		for (std::size_t first = 0;;) {
+			const auto end = Protocol::ObjectRestsFit(a_rests, first);
+			if (end == first && !(a_full && first == 0)) {
+				break;
 			}
+			Protocol::ObjectRests msg{ .sender = a_sender, .full = a_full && first == 0 };
+			msg.rests.assign(a_rests.begin() + static_cast<std::ptrdiff_t>(first), a_rests.begin() + static_cast<std::ptrdiff_t>(end));
 			if (a_to) {
 				send(*a_to, Protocol::Encode(msg), true);
 			} else {
 				broadcast(Protocol::Encode(msg), true, a_except);
 			}
+			if (end == first) {
+				break;  // a full list of none: its empty first alone
+			}
+			first = end;
 		}
 	};
 	// Bodies, MAX_BODIES a message; sender 0 is the session's word. Every body the session still has dead, to a_to.

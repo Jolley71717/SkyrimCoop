@@ -43,17 +43,8 @@ namespace BodyRules
 	inline constexpr float REF_SLACK = 8.0f;     // a copy's reference this far from the runner's is moved there with its bones
 	inline constexpr std::size_t MAX_WAITING = 512;
 
-	// FNV-1a over the name, lower-cased (a node's name is the same in every game; its case is not worth trusting).
-	[[nodiscard]] constexpr std::uint32_t NameHash(std::string_view a_name)
-	{
-		std::uint32_t hash = 2166136261u;
-		for (const char c : a_name) {
-			const auto lower = static_cast<unsigned char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-			hash ^= lower;
-			hash *= 16777619u;
-		}
-		return hash == 0 ? 1u : hash;  // 0 is no name
-	}
+	// A bone's name (ObjectRules::NameHash: FNV-1a over the node's name, lower-cased).
+	using ObjectRules::NameHash;
 
 	[[nodiscard]] inline Vec At(const Protocol::Bone& a_bone) { return { a_bone.x, a_bone.y, a_bone.z }; }
 
