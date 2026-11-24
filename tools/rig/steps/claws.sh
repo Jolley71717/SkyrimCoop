@@ -304,7 +304,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "reach: a stand-in out of reach is RIG, and no use is made" "$(grep -c '^RIG .*host: its stand-in of the vm comes within reach' <<<"$o"),$(fails "$o")" 1,0
 
 	# the step is wired into the harness: in STEPS before jobsreset, a session step, in the default run
-	t "claws is a step, before jobsreset" "$(case " $STEPS " in *" claws "*" jobsreset "*) echo yes;; esac)" yes
+	t "claws is a step, before jobsreset" "$(case " $STEPS " in *" claws jobsreset "*) echo yes;; esac)" yes
 	t "claws needs a session" "$(case " $SESSION_STEPS " in *" claws "*) echo yes;; esac)" yes
 	t "claws runs by default" "$(case " $OPTIN_STEPS " in *" claws "*) echo no;; *) echo yes;; esac)" yes
 	t "claws has its line" "$([ -n "${STEP_INFO[claws]:-}" ] && echo yes)" yes
