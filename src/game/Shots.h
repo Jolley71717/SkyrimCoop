@@ -7,6 +7,11 @@
 #include <string_view>
 #include <vector>
 
+namespace RE
+{
+	class Projectile;
+}
+
 // Projectiles, the game's side (docs/DESIGN.md, "Projectiles"; the rules are src/game/ShotRules.h). Every projectile an
 // actor launches is updated through the update of its class (arrow, missile, flame, beam, cone, lobber, barrier), which
 // this hooks:
@@ -33,6 +38,15 @@ namespace Shots
 
 	// At kDataLoaded: hooks the update of the seven projectile classes. False when none went in (the log says which).
 	bool Install();
+	// Whether every class's update is hooked (so a watcher of flights sees every projectile).
+	[[nodiscard]] bool AllHooked();
+
+	// Called after each update of every projectile that flies (any actor's, ours, a friend's launch shown here; never a
+	// native that is ended before it moves), in that update, on the thread that runs it: what it may read is the
+	// projectile's own. One watcher (LooseObjects: a projectile's path is a cause of what it knocks over). Set it at
+	// kDataLoaded; nullptr: none.
+	using FlightFn = void (*)(RE::Projectile*);
+	void WatchFlights(FlightFn a_watcher);
 
 	// Welcomed into a session as a_ourId.
 	void Started(std::uint32_t a_ourId);
