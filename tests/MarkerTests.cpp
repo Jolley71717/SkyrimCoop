@@ -71,10 +71,10 @@ namespace
 
 // ---- the wire ----
 
-TEST("status: this protocol is version 25 with statuses as message types 77 and 78, and both carry forms")
+TEST("status: this protocol is version 28 with statuses as message types 79 and 80, and both carry forms")
 {
-	static_assert(Protocol::VERSION >= 25);
-	static_assert(static_cast<int>(MT::kPlayerStatus) == 77 && static_cast<int>(MT::kRemoteStatus) == 78);
+	static_assert(Protocol::VERSION >= 28);
+	static_assert(static_cast<int>(MT::kPlayerStatus) == 79 && static_cast<int>(MT::kRemoteStatus) == 80);
 	CHECK(FormTranslate::CarriesForms(MT::kPlayerStatus));
 	CHECK(FormTranslate::CarriesForms(MT::kRemoteStatus));
 }

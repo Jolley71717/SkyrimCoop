@@ -59,11 +59,11 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	// 25: each player's status (kPlayerStatus, kRemoteStatus: message types 77-78): their health, whether a door or a fast
+	// 28: each player's status (kPlayerStatus, kRemoteStatus: message types 79-80): their health, whether a door or a fast
 	//    travel is taking them away, the place they are in and, inside, the way in on the map, so the others show them on
 	//    the compass and the maps and put their health on the name over their head. (As with 21: renumbered when it
-	//    lands; 24 is the kill moves' change.)
-	inline constexpr std::uint16_t VERSION = 25;
+	//    lands; 25 to 27 and types 77-78 are other changes'.)
+	inline constexpr std::uint16_t VERSION = 28;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -134,8 +134,8 @@ namespace Protocol
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
 		// 59-75: the other changes' messages (each in its own change).
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
-		kPlayerStatus = 77,  // client -> server, reliable: our player's health, travel and place on the map, when it changes
-		kRemoteStatus = 78,  // server -> the others (and to a joiner, each one there): that player's status
+		kPlayerStatus = 79,  // client -> server, reliable: our player's health, travel and place on the map, when it changes
+		kRemoteStatus = 80,  // server -> the others (and to a joiner, each one there): that player's status
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2224,7 +2224,7 @@ namespace Protocol
 		return msg;
 	}
 
-	// ---- player status (protocol 25) ------------------------------------------------------------------------------
+	// ---- player status (protocol 28) ------------------------------------------------------------------------------
 
 	enum StatusFlags : std::uint8_t
 	{

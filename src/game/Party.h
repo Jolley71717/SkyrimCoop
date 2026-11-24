@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-// Each player's status (protocol 25, kPlayerStatus/kRemoteStatus; docs/DESIGN.md, "Friends on the compass and the
+// Each player's status (protocol 28, kPlayerStatus/kRemoteStatus; docs/DESIGN.md, "Friends on the compass and the
 // maps"): what the others need beside the states to show a player where the states can't, and to put their health on
 // the name over their head.
 // - Ours: read a few times a second (Frame): our health in percent, whether a load door, a fast travel or a loading
