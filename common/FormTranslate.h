@@ -23,8 +23,9 @@
 // was in still goes, for every message carrying forms today:
 // - a place (a player state's cell and worldspace, as a pair) becomes "nowhere this game has" (both 0), so the reader
 //   shows no one there rather than someone in the wrong cell;
-// - an entry of a list is left out: a worn item;
-// - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has).
+// - an entry of a list is left out: a worn item, a head part of a face;
+// - a detail becomes 0, which the message reads as none: a race (the stand-in falls back to a race every game has), a
+//   face's hair colour, complexion or skin (the stand-in keeps its preset's);
 // - an NPC the other side lacks is left out of the NPC messages' lists, and so is an NPC's state in a place it lacks.
 // A runtime form (FF, FormIds::IsRuntime: made by one game as it ran) has no ID in any other game, so it is skipped the
 // same way, both ways, whatever the two load orders; the sender sends the plugin form it was made from instead where it
@@ -78,6 +79,8 @@ namespace FormTranslate
 		case MT::kNpcHitAnswers:
 		case MT::kNpcHealths:
 		case MT::kNpcDeaths:
+		case MT::kPlayerFace:
+		case MT::kRemoteFace:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -244,6 +247,19 @@ namespace FormTranslate
 			held(a_looks.ammo, Protocol::kAmmoUnnamed);
 			held(a_looks.voice, Protocol::kVoiceUnnamed);
 		}
+
+		// A face: a race the other side lacks reads 0 (the face is then put on no stand-in: it is for that race), a head
+		// part it lacks is left out (partTypes still says the friend has one of that kind: the stand-in keeps its preset's
+		// there), and a hair colour, complexion or skin it lacks reads 0 (the colour itself travels beside its form; the
+		// preset's complexion and skin stay).
+		inline void MapFace(Context& a_ctx, Protocol::PlayerFace& a_face)
+		{
+			a_ctx.Detail(a_face.race);
+			a_ctx.Ids(a_face.headParts);
+			a_ctx.Detail(a_face.hairColor);
+			a_ctx.Detail(a_face.faceDetails);
+			a_ctx.Detail(a_face.skin);
+		}
 	}
 
 	// a_packet as the other side numbers its forms. A packet that can't be read is left as it is (its reader refuses
@@ -270,6 +286,12 @@ namespace FormTranslate
 			break;
 		case MT::kRemoteLooks:
 			detail::Apply<Protocol::RemoteLooks>(a_packet, ctx, Protocol::DecodeRemoteLooks, [&](Protocol::RemoteLooks& a_msg) { detail::MapLooks(ctx, a_msg.looks); });
+			break;
+		case MT::kPlayerFace:
+			detail::Apply<Protocol::PlayerFace>(a_packet, ctx, Protocol::DecodePlayerFace, [&](Protocol::PlayerFace& a_face) { detail::MapFace(ctx, a_face); });
+			break;
+		case MT::kRemoteFace:
+			detail::Apply<Protocol::RemoteFace>(a_packet, ctx, Protocol::DecodeRemoteFace, [&](Protocol::RemoteFace& a_msg) { detail::MapFace(ctx, a_msg.face); });
 			break;
 		// NPCs: one the other side lacks (a mod's) is left out of every list; a state somewhere the other side lacks is
 		// left out too (no copy can stand there); a base it lacks reads 0 (a spawn of it can't be placed); gear of an NPC it

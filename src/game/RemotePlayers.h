@@ -12,8 +12,9 @@ namespace SKSE
 // send (docs/DESIGN.md, "The other players").
 //
 // A stand-in is a plain NPC of the friend's race and sex, wearing the armor they wear, named as they are. Its base is
-// one of the game's own character-creation presets (an NPC of the load order, never a form made at run time), and the
-// game never runs its AI: the actor update of every Character goes through our hook, which for a stand-in places it
+// one of the game's own character-creation presets (an NPC of the load order), or a copy of it made at run time with
+// its friend's face on it (src/game/Face.h); one on a copy has the preset back as its base before any save, so no save
+// holds an actor on a form made at run time. The game never runs its AI: the actor update of every Character goes through our hook, which for a stand-in places it
 // where its friend is (StateBuffer), turns it, runs the engine's no-AI update and drives its animation graph (Gait; the
 // graph's Speed and Direction through the engine's own channels for them, GaitDrive).
 //
@@ -40,6 +41,9 @@ namespace RemotePlayers
 	// What a player did (their graph's events: attacks, blocks, casts, shouts, draws), each played on their stand-in at
 	// the moment it is drawn at. Those of a player with no stand-in here are counted and dropped.
 	void Acted(std::uint32_t a_playerId, const std::vector<Protocol::PlayerAction>& a_actions);
+	// A player's face (head parts, sliders, tint layers): their stand-in is placed again on a copy of its preset with it,
+	// when it is for that preset's race and sex (src/game/FaceRules.h, Fits).
+	void Faced(std::uint32_t a_playerId, const Protocol::PlayerFace& a_face);
 
 	// Once a tick: places, dresses and takes away stand-ins as the players and this game's world say.
 	void Frame();
@@ -93,6 +97,13 @@ namespace RemotePlayers
 	// (its spells' effects refused, blows, casts, health taken and given back).
 	[[nodiscard]] std::string Actions();
 	[[nodiscard]] std::string Strays();
+	// Developer channel `faces` (the stand-ins' part): per player, the face that came (its hash, and a_sessionHash's: with
+	// its forms in the session's numbering, the same in every game), whether it goes on (fit=), the base the stand-in
+	// stands on, its preset and its copy, whether it has a head, its watch, what its built head shows (shown3d=: the
+	// copy's head parts under its face node, none of the preset's left out, its hair's tint) and how much of the face the
+	// copy holds (agree=1: all of it); and the faces given up, the presets put back and named for saves, and those put
+	// back while still loading.
+	[[nodiscard]] std::string Faces(const std::function<std::uint32_t(const Protocol::PlayerFace&)>& a_sessionHash);
 	[[nodiscard]] std::string Graph(std::string_view a_args);
 
 	// The co-save record's type: "SKST" (stand-ins).

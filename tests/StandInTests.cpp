@@ -136,7 +136,7 @@ TEST("stand-in protocol: actions carry no form, and this protocol is version 9 w
 {
 	CHECK(!FormTranslate::CarriesForms(MT::kPlayerActions));
 	CHECK(!FormTranslate::CarriesForms(MT::kRemoteActions));
-	static_assert(Protocol::VERSION == 9);
+	static_assert(Protocol::VERSION >= 9);  // 10 added faces (tests/FaceTests.cpp)
 	static_assert(static_cast<int>(MT::kPlayerActions) == 39 && static_cast<int>(MT::kRemoteActions) == 40);
 	// Through a mapper that changes forms, an actions packet is left as it is.
 	const auto host = Protocol::ComparedLoadOrder({ "Skyrim.esm", "A.esp" }, {});

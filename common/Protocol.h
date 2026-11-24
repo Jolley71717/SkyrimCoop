@@ -41,7 +41,9 @@ namespace Protocol
 	// 9: a friend's stand-in does what they do: the graph events of each player's actions (kPlayerActions,
 	//    kRemoteActions: message types 39-40), and the looks say what each hand, the quiver and the voice hold.
 	//    (Another change that lands first with 9 takes it; this one renumbers then.)
-	inline constexpr std::uint16_t VERSION = 9;
+	// 10: a friend's stand-in has their face: head parts, hair colour, complexion, skin, height, face sliders and tint
+	//    layers (kPlayerFace, kRemoteFace: message types 41-42). (As with 9: whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 10;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -103,6 +105,8 @@ namespace Protocol
 		kNpcDeaths = 38,      // runner -> server -> everyone, reliable: NPCs it runs that died (to a joiner: every one dead)
 		kPlayerActions = 39,  // client -> server, reliable: our player's graph events (attacks, blocks, casts, shouts...)
 		kRemoteActions = 40,  // server -> the others, reliable: that player's, for their stand-in to play
+		kPlayerFace = 41,     // client -> server, reliable: our character's face (again whenever it changes and settles)
+		kRemoteFace = 42,     // server -> the others (and to a joiner, each one there): that player's face
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -292,6 +296,75 @@ namespace Protocol
 		PlayerLooks   looks;
 		bool operator==(const RemoteLooks&) const = default;
 	};
+
+	// ---- faces (docs/DESIGN.md, "Players": "Its face") --------------------------------
+	// A player's face, as the others' stand-in of them shows it: what the game builds a character's head from. Form ids in
+	// the session's numbering: a head part the reading game lacks is left out (partTypes still says the sender had one
+	// of its kind, so the stand-in keeps the preset's there rather than show none), a colour form it lacks reads 0 (the
+	// colour itself is in hairRgb), a complexion or skin it lacks reads 0 (the preset's then).
+
+	inline constexpr std::size_t MAX_FACE_HEAD_PARTS = 32;  // a character has about seven (TESNPC's numHeadParts is a byte)
+	inline constexpr std::size_t MAX_FACE_TINTS = 64;       // a race has about forty tint masks
+	inline constexpr std::size_t FACE_MORPHS = 19;          // TESNPC::FaceData::Morphs::kTotal
+	inline constexpr std::size_t FACE_PRESETS = 4;          // TESNPC::FaceData::Parts::kTotal (nose, unknown, eyes, mouth)
+	inline constexpr std::uint8_t HEAD_PART_TYPES = 7;      // BGSHeadPart::HeadPartType: misc, face, eyes, hair, facial hair, scar, brows
+	inline constexpr std::uint8_t TINT_TYPES = 15;          // TintMask::Type: freckles ... dirt
+	// FaceData's own "not set" (its kDefault): a slider or a preset part the character never had one for.
+	inline constexpr std::uint32_t FACE_UNSET = 0x7F7FFFFF;
+
+	// A colour as four bytes: red, green, blue, alpha (lowest byte first).
+	[[nodiscard]] constexpr std::uint32_t PackColor(std::uint8_t a_r, std::uint8_t a_g, std::uint8_t a_b, std::uint8_t a_a)
+	{
+		return static_cast<std::uint32_t>(a_r) | (static_cast<std::uint32_t>(a_g) << 8) | (static_cast<std::uint32_t>(a_b) << 16) | (static_cast<std::uint32_t>(a_a) << 24);
+	}
+
+	// One tint layer (makeup, war paint, the skin tone, dirt...): which of the race's tint masks (its index, and the hash
+	// of its texture's path, so a race a mod renumbered still finds the same mask: FaceRules::TintIndexFor), its colour and
+	// how strongly it is laid on.
+	struct FaceTint
+	{
+		std::uint16_t index = 0;  // the race's tint mask index (TINI)
+		std::uint32_t path = 0;   // FaceRules::PathHash of the mask's texture
+		std::uint32_t color = 0;  // PackColor
+		std::uint8_t  value = 0;  // 0 to 100 (TINV)
+		std::uint8_t  type = 0;   // TintMask::Type, below TINT_TYPES
+		bool operator==(const FaceTint&) const = default;
+	};
+
+	struct PlayerFace
+	{
+		std::uint32_t              race = 0;  // the race the face is for: applied only to a stand-in of that race and sex
+		bool                       female = false;
+		std::vector<std::uint32_t> headParts;      // BGSHeadPart ids, at most MAX_FACE_HEAD_PARTS
+		std::uint8_t               partTypes = 0;  // bit n: the sender's character has a head part of type n
+		std::uint32_t              hairColor = 0;  // a BGSColorForm id (0: none, or one the reader lacks)
+		std::uint32_t              hairRgb = 0;    // its colour (PackColor): for a colour form the reader lacks, or a runtime one
+		std::uint32_t              faceDetails = 0;  // the complexion: a BGSTextureSet id
+		std::uint32_t              skin = 0;         // the body's skin: a TESObjectARMO id (0: the race's)
+		float                      height = 1.0f;
+		std::array<float, FACE_MORPHS>          morphs{};   // FaceData's sliders (any finite value, FACE_UNSET's bits too)
+		std::array<std::uint32_t, FACE_PRESETS> presets{};  // FaceData's preset parts (signed; FACE_UNSET: not set)
+		std::vector<FaceTint>      tints;         // at most MAX_FACE_TINTS
+		std::uint32_t              bodyTint = 0;  // the skin tone (PackColor)
+
+		bool operator==(const PlayerFace&) const = default;
+	};
+
+	// Another player's face, as the server passes it on.
+	struct RemoteFace
+	{
+		std::uint32_t playerId = 0;
+		PlayerFace    face;
+		bool operator==(const RemoteFace&) const = default;
+	};
+
+	// A preset part a reader may set: not set, none (-1), or one of the 64 a race can offer (its morph flags are 32 bits;
+	// twice that to spare). Any other number is refused: the engine indexes its race's variants by it.
+	[[nodiscard]] constexpr bool FacePresetOk(std::uint32_t a_value)
+	{
+		const auto v = static_cast<std::int32_t>(a_value);
+		return a_value == FACE_UNSET || (v >= -1 && v < 64);
+	}
 
 	// ---- NPCs (docs/DESIGN.md, "NPCs") ----------------------------------------------
 	// Each NPC near a player is run by one game, its AI included; the others show a copy of it, moved by the runner's
@@ -1061,6 +1134,141 @@ namespace Protocol
 		msg.looks = std::move(*looks);
 		return msg;
 	}
+
+	inline void WriteFace(Writer& a_writer, const PlayerFace& a_face)
+	{
+		a_writer.U32(a_face.race);
+		a_writer.U8(a_face.female ? 1 : 0);
+		const auto parts = (std::min)(a_face.headParts.size(), MAX_FACE_HEAD_PARTS);
+		a_writer.U8(static_cast<std::uint8_t>(parts));
+		for (std::size_t i = 0; i < parts; ++i) {
+			a_writer.U32(a_face.headParts[i]);
+		}
+		a_writer.U8(a_face.partTypes);
+		a_writer.U32(a_face.hairColor);
+		a_writer.U32(a_face.hairRgb);
+		a_writer.U32(a_face.faceDetails);
+		a_writer.U32(a_face.skin);
+		a_writer.F32(a_face.height);
+		for (const float v : a_face.morphs) {
+			a_writer.F32(v);
+		}
+		for (const auto v : a_face.presets) {
+			a_writer.U32(v);
+		}
+		const auto tints = (std::min)(a_face.tints.size(), MAX_FACE_TINTS);
+		a_writer.U8(static_cast<std::uint8_t>(tints));
+		for (std::size_t i = 0; i < tints; ++i) {
+			const auto& t = a_face.tints[i];
+			a_writer.U16(t.index);
+			a_writer.U32(t.path);
+			a_writer.U32(t.color);
+			a_writer.U8(t.value);
+			a_writer.U8(t.type);
+		}
+		a_writer.U32(a_face.bodyTint);
+	}
+
+	// A face no game could have is not read: a part count or a tint count past the limit, a kind of head part or tint no
+	// game knows, a slider or the height not a finite number (or a height no race has), a preset part the engine could
+	// not index, a tint laid on over 100.
+	inline std::optional<PlayerFace> ReadFace(Reader& a_reader)
+	{
+		PlayerFace face;
+		face.race = a_reader.U32();
+		const auto female = a_reader.U8();
+		const auto parts = a_reader.U8();
+		if (!a_reader.Ok() || female > 1 || parts > MAX_FACE_HEAD_PARTS) {
+			return std::nullopt;
+		}
+		face.female = female == 1;
+		face.headParts.reserve(parts);
+		for (std::size_t i = 0; i < parts; ++i) {
+			face.headParts.push_back(a_reader.U32());
+		}
+		face.partTypes = a_reader.U8();
+		face.hairColor = a_reader.U32();
+		face.hairRgb = a_reader.U32();
+		face.faceDetails = a_reader.U32();
+		face.skin = a_reader.U32();
+		face.height = a_reader.F32();
+		for (auto& v : face.morphs) {
+			v = a_reader.F32();
+		}
+		for (auto& v : face.presets) {
+			v = a_reader.U32();
+		}
+		const auto tints = a_reader.U8();
+		if (!a_reader.Ok() || tints > MAX_FACE_TINTS || (face.partTypes >> HEAD_PART_TYPES) != 0 || !std::isfinite(face.height) || face.height < 0.25f ||
+			face.height > 4.0f || !std::ranges::all_of(face.morphs, [](float a_v) { return std::isfinite(a_v); }) ||
+			!std::ranges::all_of(face.presets, [](std::uint32_t a_v) { return FacePresetOk(a_v); })) {
+			return std::nullopt;
+		}
+		face.tints.reserve(tints);
+		for (std::size_t i = 0; i < tints; ++i) {
+			FaceTint t;
+			t.index = a_reader.U16();
+			t.path = a_reader.U32();
+			t.color = a_reader.U32();
+			t.value = a_reader.U8();
+			t.type = a_reader.U8();
+			if (t.value > 100 || t.type >= TINT_TYPES) {
+				return std::nullopt;
+			}
+			face.tints.push_back(t);
+		}
+		face.bodyTint = a_reader.U32();
+		if (!a_reader.Ok()) {
+			return std::nullopt;
+		}
+		return face;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const PlayerFace& a_msg)
+	{
+		Writer w{ MessageType::kPlayerFace };
+		WriteFace(w, a_msg);
+		return w.Data();
+	}
+
+	inline std::optional<PlayerFace> DecodePlayerFace(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		auto face = ReadFace(r);
+		if (!face || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		return face;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const RemoteFace& a_msg)
+	{
+		Writer w{ MessageType::kRemoteFace };
+		w.U32(a_msg.playerId);
+		WriteFace(w, a_msg.face);
+		return w.Data();
+	}
+
+	inline std::optional<RemoteFace> DecodeRemoteFace(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		RemoteFace msg;
+		msg.playerId = r.U32();
+		auto face = ReadFace(r);
+		if (!face || !r.AtEnd()) {
+			return std::nullopt;
+		}
+		msg.face = std::move(*face);
+		return msg;
+	}
+
+	// The most bytes a face can be, every list at its longest (the tests encode one); a kRemoteFace is 4 more.
+	inline constexpr std::size_t MAX_FACE_SIZE = 1 + 4 + 1 + 1 + MAX_FACE_HEAD_PARTS * 4 + 1 + 4 * 4 + 4 + FACE_MORPHS * 4 + FACE_PRESETS * 4 + 1 +
+	                                             MAX_FACE_TINTS * (2 + 4 + 4 + 1 + 1) + 4;
+	static_assert(MAX_FACE_SIZE + 4 <= 2048, "a face stays small");
+	static_assert(MAX_FACE_HEAD_PARTS <= 0xFF && MAX_FACE_TINTS <= 0xFF && HEAD_PART_TYPES <= 8);
 
 	inline std::vector<std::uint8_t> Encode(const PluginTable& a_msg)
 	{
