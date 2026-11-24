@@ -957,6 +957,77 @@ public static class MoveScan
         return sb.ToString();
     }
 
+    // ---- choices kept in script variables ---------------------------------------------------------------------------
+
+    // Every quest a session may share whose script property is written by a dialogue line's or a scene's fragment
+    // (TIF__, SF_ scripts: they run only in the game whose player talks or watches, unlike a stage's fragment) and read
+    // by the quest's stage fragments or its own scripts: a choice the quest keeps in a variable and branches on later.
+    // Also each GlobalVariable those fragments set (by the property's name: the forms are in the dialogue records).
+    public static string Choices(string a_data)
+    {
+        Game.Load(a_data);
+        var writes = new Dictionary<string, Dictionary<string, HashSet<string>>>(StringComparer.OrdinalIgnoreCase);  // quest -> property -> writers
+        var globals = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        int fragments = 0;
+        foreach (var script in Game.scripts.Values)
+        {
+            var name = script.Obj.Name;
+            bool tif = name.StartsWith("TIF__", StringComparison.OrdinalIgnoreCase), scene = name.StartsWith("SF_", StringComparison.OrdinalIgnoreCase);
+            if (!tif && !scene) continue;
+            ++fragments;
+            foreach (var f in script.Funcs.Values)
+                foreach (var i in f.Code)
+                {
+                    if (i.Op == 29 && i.Args.Count >= 2)  // propset name object value
+                    {
+                        var type = TypeOf(f, i.Args[1]);
+                        SkyrimFiles.Quest q;
+                        if (type == null || !Game.questOfScript.TryGetValue(type, out q) || !Game.Typed(q)) continue;
+                        Dictionary<string, HashSet<string>> props;
+                        if (!writes.TryGetValue(q.Edid, out props)) writes[q.Edid] = props = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                        HashSet<string> who;
+                        if (!props.TryGetValue(i.Args[0], out who)) props[i.Args[0]] = who = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        who.Add(name);
+                    }
+                    else if (i.Op == SkyrimFiles.CALLMETHOD && (Is(i.Args[0], "SetValue") || Is(i.Args[0], "SetValueInt") || Is(i.Args[0], "Mod")) &&
+                             string.Equals(TypeOf(f, i.Args[1]), "GlobalVariable", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int n;
+                        globals.TryGetValue(i.Args[1], out n);
+                        globals[i.Args[1]] = n + 1;
+                    }
+                }
+        }
+        var sb = new StringBuilder();
+        int quests = 0, read = 0;
+        foreach (var kv in writes.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            var q = Game.byEdid[kv.Key];
+            ++quests;
+            foreach (var p in kv.Value.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                // read: a propget of it in the quest's stage fragments, or its auto property's variable in the quest's scripts
+                bool isRead = false;
+                foreach (var sname in q.Scripts.Concat(new[] { q.FragmentScript }).Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    Game.Script sc;
+                    if (!Game.scripts.TryGetValue(sname, out sc)) continue;
+                    foreach (var f in sc.Funcs.Values)
+                        if (f.Code.Any(i => (i.Op == 28 && Is(i.Args[0], p.Key)) || i.Args.Any(a => Is(a, "::" + p.Key + "_var"))))
+                        { isRead = true; break; }
+                    if (isRead) break;
+                }
+                if (isRead) ++read;
+                sb.AppendLine(string.Format("{0} {1:X8} {2}.{3} written by {4}{5}", isRead ? "branch" : "kept  ", q.Id, q.Edid, p.Key,
+                    string.Join(",", p.Value.OrderBy(x => x).Take(4).ToArray()), p.Value.Count > 4 ? " (+" + (p.Value.Count - 4) + ")" : ""));
+            }
+        }
+        foreach (var g in globals.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)) sb.AppendLine(string.Format("global {0} set by {1} fragments", g.Key, g.Value));
+        sb.AppendLine(string.Format("# dialogue and scene fragment scripts={0} quests={1} properties={2} read by the quest={3} globals={4}", fragments, quests,
+            writes.Values.Sum(v => v.Count), read, globals.Count));
+        return sb.ToString();
+    }
+
     // ---- the audit (src/game/QuestAudit.h, docs/QUEST-AUDIT.md) ----------------------------------------------------
 
     // QuestRules::OWN_QUESTS (src/game/QuestRules.h): tests/QuestTests.cpp checks the two agree, through the audit.
