@@ -782,6 +782,19 @@ namespace LootSync
 		ledger.Disconnected();
 		Forget();
 	}
+
+	bool SharesPut(std::uint32_t a_holder, std::uint32_t a_item)
+	{
+		std::lock_guard guard{ stateLock };
+		const auto ref = Find(a_holder);
+		const auto item = a_item != 0 ? RE::TESForm::LookupByID<RE::TESBoundObject>(a_item) : nullptr;
+		if (!ref || !item) {
+			return false;
+		}
+		// As the user's game judges our player's put there (LootSync::Look), with no barter: a script made it.
+		return LootRules::Of(HolderOf(ref), ItemOf(item, ref, 0), false) == LootRules::Scope::kShared;
+	}
+
 	namespace
 	{
 		template <class T>

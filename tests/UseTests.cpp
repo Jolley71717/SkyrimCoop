@@ -577,3 +577,127 @@ TEST("use: a flood of effects keeps at most MAX_PENDING_EFFECTS waiting, and the
 	ring.Clear();
 	CHECK(ring.Of(RING).empty());
 }
+
+// ---- review fixes: a use read as it is made, a late own run, a lent item handed on, carryable items -----------------
+
+TEST("use: a reference read as the use was made is the baseline, so a script's change before the first scan is an effect")
+{
+	UseRules::EnableWatch watch;
+	// The activate event's sink read the wall enabled; the script disabled it before the tick's first scan.
+	watch.Baseline(WALL, false);
+	watch.Baseline(0, false);  // no reference: not kept
+	CHECK(watch.Size() == 1);
+	watch.BeginScan();
+	CHECK(watch.Seen(WALL, true));
+	watch.EndScan();
+
+	// A reference an earlier watch reads already keeps its read: the sink's read of it does not replace it.
+	watch.Baseline(WALL, false);
+	watch.BeginScan();
+	CHECK(!watch.Seen(WALL, true));  // unchanged since the last scan's read
+	watch.EndScan();
+}
+
+TEST("use: a fixed reference's enable and disable are effects; a carryable item's enable only (its disable is a pickup)")
+{
+	using UseRules::Placed;
+	CHECK(UseRules::EnableSays(Placed::kFixed, true));
+	CHECK(UseRules::EnableSays(Placed::kFixed, false));
+	CHECK(UseRules::EnableSays(Placed::kCarryable, false));  // a reward gem put out, a brazier's carryable torch shown
+	CHECK(!UseRules::EnableSays(Placed::kCarryable, true));
+	CHECK(!UseRules::EnableSays(Placed::kNot, false));
+	CHECK(!UseRules::EnableSays(Placed::kNot, true));
+}
+
+TEST("use: a friend's use made here by our stand-in waits MATCH_WAIT_MADE for our own run, which is then matched")
+{
+	UseRules::Mirror mirror;
+	const auto       t0 = Clock::now();
+	mirror.UseHeard(2, 9, t0);
+	mirror.MadeHere(2, 9);
+	mirror.MadeHere(3, 1);  // no such use: nothing
+	mirror.Heard(Batch(2, 9, { Anim(RING, "Trans01", 100) }), t0 + milliseconds(600));
+	CHECK(mirror.Due(t0 + milliseconds(600) + UseRules::MATCH_WAIT).empty());  // not yet: our run is under way
+	CHECK(mirror.toMake == 0);
+	mirror.Own(RING, "Trans01", t0 + seconds(3));  // our run, 3 s late (a slow game): still a match
+	CHECK(mirror.Due(t0 + milliseconds(600) + UseRules::MATCH_WAIT_MADE).empty());
+	CHECK(mirror.matched == 1);
+	CHECK(mirror.toMake == 0);
+	CHECK(mirror.doubled == 0);
+
+	// A use not made here (refused, no stand-in) keeps MATCH_WAIT.
+	mirror.UseHeard(2, 10, t0 + seconds(10));
+	mirror.Heard(Batch(2, 10, { Anim(RING, "Trans02", 0) }), t0 + seconds(10));
+	CHECK(mirror.Due(t0 + seconds(10) + UseRules::MATCH_WAIT).size() == 1);
+}
+
+TEST("use: our own run's repeat of an animation made here is held back once per make, never one an effect waits for")
+{
+	UseRules::Mirror mirror;
+	const auto       t0 = Clock::now();
+	mirror.Heard(Batch(3, 1, { Anim(RING, "Trans01", 0) }), t0);
+	REQUIRE(mirror.Due(t0 + UseRules::MATCH_WAIT).size() == 1);
+	mirror.Made(RING, "Trans01", t0 + UseRules::MATCH_WAIT);
+	// Our own run, late: its event is held back (the graph never gets it), and not taken as played.
+	CHECK(mirror.Repeat(RING, "Trans01", t0 + seconds(4)));
+	CHECK(mirror.doubled == 1);
+	CHECK(!mirror.Repeat(RING, "Trans01", t0 + seconds(5)));  // one per make: a second is the game's own again
+	CHECK(!mirror.Repeat(RING, "Trans02", t0 + seconds(5)));  // another event
+	CHECK(!mirror.Repeat(WALL, "Trans01", t0 + seconds(5)));  // another reference
+	mirror.Made(RING, "Trans01", t0 + seconds(6));
+	CHECK(!mirror.Repeat(RING, "Trans01", t0 + seconds(6) + UseRules::DOUBLE_WINDOW + milliseconds(1)));  // too late to be one
+
+	// A make the graph did not take holds nothing back.
+	mirror.Made(CLAW_DOOR, "Open", t0 + seconds(20));
+	mirror.Unmade(CLAW_DOOR, "Open");
+	CHECK(!mirror.Repeat(CLAW_DOOR, "Open", t0 + seconds(21)));
+
+	// An event an effect waits for is the game's own run of that use, not a repeat.
+	mirror.UseHeard(3, 2, t0 + seconds(30));
+	mirror.Made(CLAW_DOOR, "Open", t0 + seconds(30));
+	mirror.Heard(Batch(3, 2, { Anim(CLAW_DOOR, "Open", 0) }), t0 + seconds(30));
+	CHECK(!mirror.Repeat(CLAW_DOOR, "Open", t0 + seconds(31)));
+	mirror.Played(CLAW_DOOR, "Open", t0 + seconds(31));
+	CHECK(mirror.Due(t0 + seconds(33)).empty());
+	CHECK(mirror.matched == 1);
+
+	// Our player's own use: what follows is our player's doing, never held back.
+	mirror.Made(RING, "Trans03", t0 + seconds(40));
+	mirror.OurUse();
+	CHECK(!mirror.Repeat(RING, "Trans03", t0 + seconds(41)));
+	CHECK(mirror.doubled == 1);
+}
+
+TEST("use: a lent item the stand-in's run hands on leaves the loan, oldest first; the rest of a move is the stand-in's own")
+{
+	UseRules::Loans loans;
+	const auto      t0 = Clock::now();
+	constexpr std::uint32_t STAND_IN = 0xFF000801;
+	loans.Lent(STAND_IN, { { GOLDEN_CLAW, 1 } }, t0);
+	loans.Lent(STAND_IN, { { GOLDEN_CLAW, 2 } }, t0 + seconds(1));
+	CHECK(loans.Lends(STAND_IN, GOLDEN_CLAW));
+	CHECK(!loans.Lends(STAND_IN, 0x20));
+	CHECK(!loans.Lends(0xFF000802, GOLDEN_CLAW));
+
+	CHECK(loans.Moved(STAND_IN, GOLDEN_CLAW, 2) == 2);  // the first loan and one of the second
+	CHECK(loans.Out() == 1);
+	CHECK(loans.Moved(STAND_IN, GOLDEN_CLAW, 5) == 1);  // the last lent; four of its own
+	CHECK(loans.Out() == 0);
+	CHECK(!loans.Lends(STAND_IN, GOLDEN_CLAW));
+	CHECK(loans.Moved(STAND_IN, GOLDEN_CLAW, 1) == 0);
+	CHECK(loans.Due(t0 + seconds(20)).empty());  // nothing left to take back from it
+
+	// Moved out of the early ones too (past MAX_LOANS).
+	for (std::uint32_t i = 0; i < UseRules::MAX_LOANS + 1; ++i) {
+		loans.Lent(STAND_IN, { { 0x30, 1 } }, t0);
+	}
+	CHECK(loans.Moved(STAND_IN, 0x30, 1) == 1);
+	CHECK(loans.Out() == UseRules::MAX_LOANS);
+
+	// Only a holder whose moves the session shares has the stand-in's copy taken back out (loot brings the user's).
+	CHECK(UseRules::TakeOutOfHolder(UseRules::LentWent::kSharedHolder));
+	CHECK(!UseRules::TakeOutOfHolder(UseRules::LentWent::kOwnHolder));
+	CHECK(!UseRules::TakeOutOfHolder(UseRules::LentWent::kDropped));
+	CHECK(!UseRules::TakeOutOfHolder(UseRules::LentWent::kUsedUp));
+	CHECK(std::string{ UseRules::LentWentName(UseRules::LentWent::kSharedHolder) } == "put in a holder the session shares");
+}

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <iterator>
 #include <string>
 #include <string_view>
@@ -140,6 +141,36 @@ namespace UseRules
 			return out;
 		}
 
+		// Whether a_standIn holds a loan of a_base now (the container event's sink asks, for each move from a stand-in).
+		[[nodiscard]] bool Lends(std::uint32_t a_standIn, std::uint32_t a_base) const
+		{
+			const auto of = [&](const Loan& a_loan) { return a_loan.standIn == a_standIn && a_loan.base == a_base; };
+			return std::ranges::any_of(loans, of) || std::ranges::any_of(early, of);
+		}
+
+		// The stand-in's own run of the use moved a_count of a_base out of it (a script handed it on: into a holder, onto
+		// the ground, or used it up): how many of those were lent, out of the book (oldest loan first), so they are
+		// neither taken back from it later nor counted as gone. Its own items of that base (a stand-in may carry some)
+		// are the rest.
+		[[nodiscard]] std::uint32_t Moved(std::uint32_t a_standIn, std::uint32_t a_base, std::uint32_t a_count)
+		{
+			std::uint32_t lent = 0;
+			for (auto* book : { &early, &loans }) {
+				for (auto& loan : *book) {
+					if (lent >= a_count) {
+						break;
+					}
+					if (loan.standIn == a_standIn && loan.base == a_base) {
+						const auto n = (std::min<std::uint32_t>)(loan.count, a_count - lent);
+						loan.count = static_cast<std::uint16_t>(loan.count - n);
+						lent += n;
+					}
+				}
+				std::erase_if(*book, [](const Loan& a_loan) { return a_loan.count == 0; });
+			}
+			return lent;
+		}
+
 		[[nodiscard]] std::size_t Out() const { return loans.size() + early.size(); }
 		void                      Clear()
 		{
@@ -154,6 +185,38 @@ namespace UseRules
 		std::vector<Loan> loans;
 		std::vector<Loan> early;
 	};
+
+	// Where a lent item the stand-in's run handed on went, and what this game does about it. The user's game made the
+	// same move with the user's own item and says it as that class says our player's moves: a put into a holder the
+	// session shares goes through loot sync (LootSync, LootRules::Of), so the holder here gets it from there, and the
+	// stand-in's copy is taken back out of it (else the holder would hold two). A put that loot sync leaves each game's
+	// own (a key, a book, a living actor, a merchant's chest), a drop onto the ground (a script's drop is no player's
+	// drop: DropSync says only those) and an item used up stay as the script left them: this game's run of the script is
+	// the only one that makes that move here, as the user's made it there.
+	enum class LentWent : std::uint8_t
+	{
+		kUsedUp,        // to nobody, nothing placed: the script used it up
+		kDropped,       // to nobody, placed in the world
+		kSharedHolder,  // into a holder whose moves the session shares
+		kOwnHolder,     // into a holder each game keeps its own
+	};
+
+	[[nodiscard]] constexpr bool TakeOutOfHolder(LentWent a_went) { return a_went == LentWent::kSharedHolder; }
+
+	[[nodiscard]] constexpr const char* LentWentName(LentWent a_went)
+	{
+		switch (a_went) {
+		case LentWent::kUsedUp:
+			return "used up";
+		case LentWent::kDropped:
+			return "dropped";
+		case LentWent::kSharedHolder:
+			return "put in a holder the session shares";
+		case LentWent::kOwnHolder:
+			return "put in a holder each game keeps";
+		}
+		return "?";
+	}
 
 	// ---- what our player's use did, in our game -------------------------------------------------------------------
 
@@ -271,13 +334,38 @@ namespace UseRules
 		std::vector<Watch> watches;
 	};
 
+	// What a placed reference is, for its enabling or disabling as a use's effect.
+	enum class Placed : std::uint8_t
+	{
+		kNot,        // never an effect: an actor, our player, a reference made as the game ran, a deleted one
+		kFixed,      // a wall, a bridge, a light that can't be carried, a static, an activator: both ways
+		kCarryable,  // an item (a weapon, a gem, a book, a light that can be carried): its enabling only
+	};
+
+	// Whether a reference of that kind going enabled (a_disabled false) or disabled is a use's effect. A carryable item
+	// disabled is most often one picked up, which loot and drops own, so only its enabling is said: a script putting out
+	// a reward (a gem on a pedestal, a key on a table) is.
+	[[nodiscard]] constexpr bool EnableSays(Placed a_kind, bool a_disabled)
+	{
+		return a_kind == Placed::kFixed || (a_kind == Placed::kCarryable && !a_disabled);
+	}
+
 	// Enabled or not, of the references near a watched use, read every scan: a change between two reads in a row is an
-	// effect; a reference first read (it came within reach, or the watch began) says nothing. The first scan is made as
-	// the watch begins, before the mechanism's script has run.
+	// effect; a reference first read (it came within reach, or the watch began) says nothing. The first read is made as
+	// the use is made, in the activate event's sink, before the mechanism's script has run (Baseline).
 	class EnableWatch
 	{
 	public:
 		void BeginScan() { ++generation; }
+
+		// A reference read as the use was made: taken as read in the last scan, so the next scan's read of it is compared
+		// with it. One read already keeps its read (older, and as good a baseline).
+		void Baseline(std::uint32_t a_ref, bool a_disabled)
+		{
+			if (a_ref != 0) {
+				last.try_emplace(a_ref, Entry{ a_disabled, generation });
+			}
+		}
 
 		bool Seen(std::uint32_t a_ref, bool a_disabled)
 		{
@@ -312,6 +400,7 @@ namespace UseRules
 	// ---- what a friend's use did, made here ------------------------------------------------------------------------
 
 	inline constexpr auto        MATCH_WAIT = std::chrono::milliseconds(1500);  // after an effect's moment, for ours to match it
+	inline constexpr auto        MATCH_WAIT_MADE = std::chrono::seconds(5);      // ... when our stand-in made the use here
 	inline constexpr auto        OWN_SLACK = std::chrono::seconds(1);           // an event of ours this much before the use still matches
 	inline constexpr auto        OWN_KEEP = std::chrono::seconds(20);
 	inline constexpr auto        DOUBLE_WINDOW = std::chrono::seconds(10);
@@ -323,9 +412,12 @@ namespace UseRules
 	// A friend's uses and what they did: each effect waits until MATCH_WAIT after the moment it happened in the user's
 	// game (timed from when the use reached this game, where the stand-in made it), then is made unless this game's own
 	// run of the use did it already (an animation event played here on that reference since the use, which it takes).
-	// Enables and disables are judged by the game: a reference already so is left alone. An animation made here and
-	// then played again by this game's own script, with no effect waiting for it, is a double: counted (the rig fails on
-	// it), not undone.
+	// Enables and disables are judged by the game: a reference already so is left alone. When our stand-in made the use
+	// here, an effect waits MATCH_WAIT_MADE instead: its own run of the script does it all as a rule, and a modded game's
+	// script lag or a slow frame rate makes it seconds late. An animation made here and then sent again by this game's
+	// own run within DOUBLE_WINDOW, with no effect waiting for it, is a repeat: the animation hook does not pass it to
+	// the graph (Repeat), so a late run never turns a pillar twice. Our player's own use of a mechanism ends that
+	// (OurUse): what follows it is our player's doing.
 	class Mirror
 	{
 	public:
@@ -337,12 +429,22 @@ namespace UseRules
 		};
 
 		// A friend's use reached this game now (its stand-in made it, or not): its effects are timed from now here.
-		void UseHeard(std::uint32_t a_player, std::uint32_t a_seq, Clock::time_point a_now)
+		// a_madeHere: our stand-in of them made it (its own run of the script is under way), so its effects wait longer.
+		void UseHeard(std::uint32_t a_player, std::uint32_t a_seq, Clock::time_point a_now, bool a_madeHere = false)
 		{
 			if (uses.size() >= MAX_USES_KEPT) {
 				uses.erase(uses.begin());
 			}
-			uses.push_back({ a_player, a_seq, a_now });
+			uses.push_back({ a_player, a_seq, a_now, a_madeHere });
+		}
+
+		// ... our stand-in of them has made it since (the game took the stand-in's activation).
+		void MadeHere(std::uint32_t a_player, std::uint32_t a_seq)
+		{
+			const auto use = std::ranges::find_if(uses, [&](const Use& a_use) { return a_use.player == a_player && a_use.seq == a_seq; });
+			if (use != uses.end()) {
+				use->madeHere = true;
+			}
 		}
 
 		// What a friend's use did in its user's game.
@@ -359,27 +461,50 @@ namespace UseRules
 				// a use that never reached this game (its message lost to a budget, or sent before we joined): timed as if
 				// it had, when this effect is heard
 				const auto base = use != uses.end() ? use->at : a_now - at;
-				pending.push_back({ Make{ a_msg.playerId, a_msg.seq, effect }, base, (std::max)(a_now, base + at) + MATCH_WAIT });
+				const Clock::duration wait = use != uses.end() && use->madeHere ? Clock::duration{ MATCH_WAIT_MADE } : Clock::duration{ MATCH_WAIT };
+				pending.push_back({ Make{ a_msg.playerId, a_msg.seq, effect }, base, (std::max)(a_now, base + at) + wait });
 			}
 		}
 
-		// An animation event played here on a reference, not by our Make.
-		void Own(std::uint32_t a_ref, std::string_view a_event, Clock::time_point a_at)
+		// An animation event this game is about to send to a reference's graph, not by our Make: true when it is this
+		// game's own repeat of one we made (within DOUBLE_WINDOW, no effect waiting for it), which is then not sent. Each
+		// make holds back one repeat (counted as doubled).
+		[[nodiscard]] bool Repeat(std::uint32_t a_ref, std::string_view a_event, Clock::time_point a_at)
 		{
 			const bool awaited = std::ranges::any_of(pending, [&](const Pending& a_p) { return a_p.make.effect.what == UseEffect::kAnim && a_p.make.effect.ref == a_ref && a_p.make.effect.event == a_event; });
-			if (!awaited) {
-				const auto made = std::ranges::find_if(madeEvents, [&](const Event& a_e) { return !a_e.used && a_e.ref == a_ref && a_e.event == a_event && a_at >= a_e.at && a_at - a_e.at <= DOUBLE_WINDOW; });
-				if (made != madeEvents.end()) {
-					made->used = true;
-					++doubled;
-					return;
-				}
+			if (awaited) {
+				return false;
 			}
+			const auto made = std::ranges::find_if(madeEvents, [&](const Event& a_e) { return !a_e.used && a_e.ref == a_ref && a_e.event == a_event && a_at >= a_e.at && a_at - a_e.at <= DOUBLE_WINDOW; });
+			if (made == madeEvents.end()) {
+				return false;
+			}
+			made->used = true;
+			++doubled;
+			return true;
+		}
+
+		// An animation event played here on a reference (its graph took it), not by our Make: what matches an effect.
+		void Played(std::uint32_t a_ref, std::string_view a_event, Clock::time_point a_at)
+		{
 			if (own.size() >= MAX_OWN) {
 				own.erase(own.begin());
 			}
 			own.push_back({ a_ref, std::string{ a_event }, a_at, false });
 		}
+
+		// Both at once: a repeat is held back (true), anything else is played.
+		bool Own(std::uint32_t a_ref, std::string_view a_event, Clock::time_point a_at)
+		{
+			if (Repeat(a_ref, a_event, a_at)) {
+				return true;
+			}
+			Played(a_ref, a_event, a_at);
+			return false;
+		}
+
+		// Our player used a mechanism: what is sent after it is our player's doing, never a repeat to hold back.
+		void OurUse() { madeEvents.clear(); }
 
 		// Due now, in the order they happened: the animations no event of ours matched, and every enable and disable.
 		[[nodiscard]] std::vector<Make> Due(Clock::time_point a_now)
@@ -409,14 +534,26 @@ namespace UseRules
 			return out;
 		}
 
-		// We played this animation (a Make): one played here after it by this game itself, within DOUBLE_WINDOW and with
-		// no effect waiting for it, is a double.
+		// We are playing this animation (a Make; said before it is sent, so a repeat racing it is caught): one this game
+		// itself sends after it, within DOUBLE_WINDOW and with no effect waiting for it, is a repeat (Repeat).
 		void Made(std::uint32_t a_ref, std::string_view a_event, Clock::time_point a_now)
 		{
 			if (madeEvents.size() >= MAX_OWN) {
 				madeEvents.erase(madeEvents.begin());
 			}
 			madeEvents.push_back({ a_ref, std::string{ a_event }, a_now, false });
+		}
+
+		// ... and its graph did not take it: nothing played, so no repeat of it is held back.
+		void Unmade(std::uint32_t a_ref, std::string_view a_event)
+		{
+			for (auto it = madeEvents.end(); it != madeEvents.begin();) {
+				--it;
+				if (!it->used && it->ref == a_ref && it->event == a_event) {
+					madeEvents.erase(it);
+					return;
+				}
+			}
 		}
 
 		// Whether animation events played here are worth reading now: a friend's use was heard lately, an effect waits, or
@@ -440,7 +577,7 @@ namespace UseRules
 		std::uint64_t heard = 0;    // effects heard
 		std::uint64_t matched = 0;  // ... done here already by our own run of the use
 		std::uint64_t toMake = 0;   // ... handed to the game to make
-		std::uint64_t doubled = 0;  // animations made here, then played again by our own run
+		std::uint64_t doubled = 0;  // animations made here, then sent again by our own run: held back (Repeat)
 		std::uint64_t cut = 0;      // past MAX_PENDING_EFFECTS
 
 	private:
@@ -449,6 +586,7 @@ namespace UseRules
 			std::uint32_t     player = 0;
 			std::uint32_t     seq = 0;
 			Clock::time_point at{};
+			bool              madeHere = false;
 		};
 		struct Pending
 		{

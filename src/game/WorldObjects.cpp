@@ -3,6 +3,7 @@
 #include "DevLine.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
+#include "game/LootSync.h"
 #include "game/RefRules.h"
 #include "game/RemotePlayers.h"
 #include "game/UseRules.h"
@@ -35,6 +36,12 @@ namespace WorldObjects
 			Kind        kind = Kind::kOpenClose;
 			RE::FormID  ref = 0;
 			bool        byOurPlayer = false;
+			// Our player's use of a mechanism, read in the activate event's sink as it was made, before the mechanism's
+			// script ran (UseRules: "what a use did"): when, what it lends, and the references near it enabled or not.
+			bool                                         read = false;
+			Clock::time_point                            at{};
+			UseRules::LendPick                           pick;
+			std::vector<std::pair<std::uint32_t, bool>>  baseline;
 		};
 
 		std::mutex         queueLock;
@@ -73,7 +80,8 @@ namespace WorldObjects
 			std::uint64_t resent = 0;    // ... of them sent again (busy)
 			std::uint64_t settled = 0;   // words held, and changes here not reported, while a friend's use settled
 			std::uint64_t scanned = 0;   // open-state changes found by the scan, not by an event
-			std::uint64_t offMain = 0;   // game writes made off the game's main thread (the tick: GameThread.h)
+			// game writes made off the game's main thread (the tick: GameThread.h); from SKSE's save message too
+			std::atomic<std::uint64_t> offMain{ 0 };
 		};
 		Counts      counts;
 		std::string lastRefused = "none";
@@ -82,15 +90,106 @@ namespace WorldObjects
 		std::uint32_t         useSeq = 0;  // our player's uses of a mechanism, numbered from 1
 		UseRules::Capture     capture;     // what our player's uses did near their mechanisms
 		UseRules::EnableWatch enables;     // ... the references near them enabled or not, read every scan
-		UseRules::Mirror      mirror;      // what friends' uses did, made here where our stand-in's use did not
-		// Items lent to stand-ins for a friend's use: from the tick, and from SKSE's save message (BeforeSave), which is
-		// not on the tick's thread until the frame hook is written; so under a lock.
+		// What friends' uses did, made here where our stand-in's use did not: from the tick, and from the animation hook
+		// (on whichever thread sends an event: a script's, the main one), which holds back this game's own repeat of an
+		// animation made here before the graph gets it; so under a lock. No game call is made while it is held.
+		struct LockedMirror
+		{
+			struct MirrorCounts
+			{
+				std::uint64_t heard = 0;
+				std::uint64_t matched = 0;
+				std::uint64_t doubled = 0;
+				std::size_t   waiting = 0;
+			};
+
+			void UseHeard(std::uint32_t a_player, std::uint32_t a_seq, Clock::time_point a_now)
+			{
+				std::lock_guard guard{ lock };
+				book.UseHeard(a_player, a_seq, a_now);
+			}
+			void MadeHere(std::uint32_t a_player, std::uint32_t a_seq)
+			{
+				std::lock_guard guard{ lock };
+				book.MadeHere(a_player, a_seq);
+			}
+			void Heard(const Protocol::UseEffects& a_msg, Clock::time_point a_now)
+			{
+				std::lock_guard guard{ lock };
+				book.Heard(a_msg, a_now);
+			}
+			[[nodiscard]] std::vector<UseRules::Mirror::Make> Due(Clock::time_point a_now)
+			{
+				std::lock_guard guard{ lock };
+				return book.Due(a_now);
+			}
+			void Made(std::uint32_t a_ref, std::string_view a_event, Clock::time_point a_now)
+			{
+				std::lock_guard guard{ lock };
+				book.Made(a_ref, a_event, a_now);
+			}
+			void Unmade(std::uint32_t a_ref, std::string_view a_event)
+			{
+				std::lock_guard guard{ lock };
+				book.Unmade(a_ref, a_event);
+			}
+			// The hook's: only while a friend's use is heard lately, an effect waits or one was made lately.
+			[[nodiscard]] bool Repeat(std::uint32_t a_ref, std::string_view a_event, Clock::time_point a_now)
+			{
+				std::lock_guard guard{ lock };
+				return book.Listening(a_now) && book.Repeat(a_ref, a_event, a_now);
+			}
+			void Played(std::uint32_t a_ref, std::string_view a_event, Clock::time_point a_now)
+			{
+				std::lock_guard guard{ lock };
+				if (book.Listening(a_now)) {
+					book.Played(a_ref, a_event, a_now);
+				}
+			}
+			void OurUse()
+			{
+				std::lock_guard guard{ lock };
+				book.OurUse();
+			}
+			[[nodiscard]] bool Listening(Clock::time_point a_now)
+			{
+				std::lock_guard guard{ lock };
+				return book.Listening(a_now);
+			}
+			[[nodiscard]] MirrorCounts Read()
+			{
+				std::lock_guard guard{ lock };
+				return { book.heard, book.matched, book.doubled, book.Waiting() };
+			}
+			void Clear()
+			{
+				std::lock_guard guard{ lock };
+				book.Clear();
+			}
+
+		private:
+			std::mutex       lock;
+			UseRules::Mirror book;
+		};
+		LockedMirror mirror;
+		// Items lent to stand-ins for a friend's use: from the tick, from SKSE's save message (BeforeSave, on the main
+		// thread) and from the container event's sink (which asks whether a stand-in lends what it moved); so under a lock.
 		struct LockedLoans
 		{
 			void Lent(std::uint32_t a_standIn, const std::vector<Protocol::LentItem>& a_items, Clock::time_point a_now)
 			{
 				std::lock_guard guard{ lock };
 				book.Lent(a_standIn, a_items, a_now);
+			}
+			[[nodiscard]] bool Lends(std::uint32_t a_standIn, std::uint32_t a_base)
+			{
+				std::lock_guard guard{ lock };
+				return book.Lends(a_standIn, a_base);
+			}
+			[[nodiscard]] std::uint32_t Moved(std::uint32_t a_standIn, std::uint32_t a_base, std::uint32_t a_count)
+			{
+				std::lock_guard guard{ lock };
+				return book.Moved(a_standIn, a_base, a_count);
 			}
 			[[nodiscard]] std::vector<UseRules::Loan> Due(Clock::time_point a_now)
 			{
@@ -124,20 +223,37 @@ namespace WorldObjects
 		// stand-in would; what the use did then comes by its effects alone (the rig's leg for that).
 		bool refuseUses = false;
 
+		// Atomics: the tick and SKSE's save message (BeforeSave, on the main thread) both count the loans taken back.
 		struct UseCounts
 		{
-			std::uint64_t lentSent = 0;      // items our uses lent (said with the use)
-			std::uint64_t keptNamed = 0;     // ... named and held, of a kind never lent (an NPC would equip or use it)
-			std::uint64_t lentHere = 0;      // items lent here to a stand-in for a friend's use
-			std::uint64_t lentBack = 0;      // ... taken back
-			std::uint64_t lentGone = 0;      // ... not there to take back (its stand-in gone, or the script took it)
-			std::uint64_t effectBatches = 0; // what our uses did, batches sent
-			std::uint64_t made = 0;          // a friend's use's effects made here
-			std::uint64_t already = 0;       // ... found so here already (an enable or disable)
-			std::uint64_t unloaded = 0;      // ... on a reference not loaded here (not made)
-			std::uint64_t notes = 0;         // animation events read (while a use was watched or made here)
+			using N = std::atomic<std::uint64_t>;
+			N lentSent{ 0 };       // items our uses lent (said with the use)
+			N keptNamed{ 0 };      // ... named and held, of a kind never lent (an NPC would equip or use it)
+			N lentHere{ 0 };       // items lent here to a stand-in for a friend's use
+			N lentBack{ 0 };       // ... taken back
+			N lentGone{ 0 };       // ... not there to take back (its stand-in gone, or the script took it)
+			N lentMoved{ 0 };      // ... handed on by the stand-in's run of the script (into a holder, dropped, used up)
+			N lentUndone{ 0 };     // ... of them taken back out of a holder the session shares (loot brings the user's)
+			N effectBatches{ 0 };  // what our uses did, batches sent
+			N made{ 0 };           // a friend's use's effects made here
+			N already{ 0 };        // ... found so here already (an enable or disable)
+			N unloaded{ 0 };       // ... on a reference not loaded here (not made)
+			N refusedKind{ 0 };    // ... an enable or disable this game does not make of that kind (a carryable's disable)
+			N notes{ 0 };          // animation events read (while a use was watched or made here)
+			N early{ 0 };          // ... of them read before the tick began the use's watch (the sink's start counts)
 		};
 		UseCounts useCounts;
+
+		// The last time our player used a mechanism (the activate event's sink, Clock ticks; 0 for never): the hook reads
+		// animation events for LISTEN_GRACE after it, whether or not the tick has set `listening` yet.
+		std::atomic<Clock::rep> ownUseAt{ 0 };
+		constexpr auto          LISTEN_GRACE = std::chrono::seconds(5);
+
+		bool OwnUseRecent(Clock::time_point a_now)
+		{
+			const auto at = ownUseAt.load(std::memory_order_relaxed);
+			return at != 0 && a_now.time_since_epoch().count() - at < std::chrono::duration_cast<Clock::duration>(LISTEN_GRACE).count();
+		}
 
 		// Animation events sent to a plain reference's graph, queued by the hook (below) for the next frame.
 		struct AnimNote
@@ -156,23 +272,38 @@ namespace WorldObjects
 		// IAnimationGraphManagerHolder::NotifyAnimationGraph (its vtable's slot 1) of a plain reference: TESObjectREFR's
 		// own vtable, which activators, doors, containers, statics and movable statics have (actors and projectiles have
 		// their own). An animation event sent to the reference's graph, by a script (PlayAnimation) or by the engine. Only
-		// while `listening`, and only queued here (the caller's thread is any: a script's, the main one): the frame reads
-		// it on the tick.
+		// while `listening` (or just after our player's use, which the activate event's sink marks before the mechanism's
+		// script runs): this game's own repeat of an animation made here for a friend's use is not passed to the graph
+		// (UseRules::Mirror::Repeat; answered as not taken, so a script's PlayAnimationAndWait does not wait for it), and
+		// what the graph took is queued (the caller's thread is any: a script's, the main one) for the frame to read on
+		// the tick.
 		struct NotifyHook
 		{
 			static bool Thunk(RE::IAnimationGraphManagerHolder* a_this, const RE::BSFixedString& a_event)
 			{
+				if (!a_this || making) {
+					return Original(a_this, a_event);
+				}
+				const auto now = Clock::now();
+				if (!listening.load(std::memory_order_relaxed) && !OwnUseRecent(now)) {
+					return Original(a_this, a_event);
+				}
+				const char* name = a_event.c_str();
+				if (!name || name[0] == '\0') {
+					return Original(a_this, a_event);
+				}
+				const auto id = static_cast<RE::TESObjectREFR*>(a_this)->GetFormID();
+				if (mirror.Repeat(id, name, now)) {
+					return false;  // made here already for a friend's use: the graph never plays it twice
+				}
 				const bool taken = Original(a_this, a_event);
-				if (taken && a_this && !making && listening.load(std::memory_order_relaxed)) {
-					const auto  ref = static_cast<RE::TESObjectREFR*>(a_this);
-					const char* name = a_event.c_str();
-					if (name && name[0] != '\0') {
-						std::lock_guard guard{ notesLock };
-						if (notes.size() < MAX_NOTES) {
-							notes.push_back({ ref->GetFormID(), name, Clock::now() });
-						} else {
-							++notesDropped;
-						}
+				if (taken) {
+					mirror.Played(id, name, now);
+					std::lock_guard guard{ notesLock };
+					if (notes.size() < MAX_NOTES) {
+						notes.push_back({ id, name, now });
+					} else {
+						++notesDropped;
 					}
 				}
 				return taken;
@@ -507,6 +638,56 @@ namespace WorldObjects
 			}
 		}
 
+		// A stand-in's move of an item it holds on loan (the container event's sink queues it; the tick or the save
+		// message reads it): the stand-in's run of the mechanism's script handed it on.
+		struct LentMove
+		{
+			std::uint32_t standIn = 0;
+			std::uint32_t base = 0;
+			std::uint32_t count = 0;
+			std::uint32_t to = 0;       // the holder it went into; 0 for none
+			bool          placed = false;  // to none, as a reference placed in the world (a drop)
+		};
+		std::mutex            movesLock;
+		std::vector<LentMove> lentMoves;  // under movesLock
+		constexpr std::size_t MAX_LENT_MOVES = 256;
+
+		// Each lent item a stand-in's run handed on, out of the loans (not taken back from the stand-in later), and
+		// taken back out of the holder it went into when that holder's moves are the session's: the user's game says its
+		// own move there through loot sync, so the holder here gets it from there (UseRules::LentWent).
+		void ReadLentMoves()
+		{
+			std::vector<LentMove> moves;
+			{
+				std::lock_guard guard{ movesLock };
+				moves = std::exchange(lentMoves, {});
+			}
+			for (const auto& move : moves) {
+				const auto lent = loans.Moved(move.standIn, move.base, move.count);
+				if (lent == 0) {
+					continue;  // the stand-in's own item of that base, or a loan already taken back
+				}
+				useCounts.lentMoved += lent;
+				const auto went = move.to == 0 ? (move.placed ? UseRules::LentWent::kDropped : UseRules::LentWent::kUsedUp) :
+				                  LootSync::SharesPut(move.to, move.base) ? UseRules::LentWent::kSharedHolder :
+				                                                             UseRules::LentWent::kOwnHolder;
+				std::int32_t undone = 0;
+				if (UseRules::TakeOutOfHolder(went)) {
+					const auto holder = Find(move.to);
+					const auto base = RE::TESForm::LookupByID<RE::TESBoundObject>(move.base);
+					undone = static_cast<std::int32_t>(std::clamp<std::int64_t>(Held(holder, base), 0, lent));
+					if (undone > 0) {
+						NoteThread("an item lent to a stand-in taken back out of the holder its script put it in");
+						holder->RemoveItem(base, undone, RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+						useCounts.lentUndone += static_cast<std::uint64_t>(undone);
+					}
+				}
+				logs::info("World: {} lent {:08X} handed on by the stand-in {:08X}'s use: {}{}{}", lent, move.base, move.standIn, UseRules::LentWentName(went),
+					move.to != 0 ? std::format(" {:08X}", move.to) : std::string{},
+					UseRules::TakeOutOfHolder(went) ? std::format("; {} taken back out of it (the user's own put comes by loot)", undone) : std::string{});
+			}
+		}
+
 		// Whether an animation event on a_ref can be a use's effect: an activator's or a movable static's (a claw door, a
 		// pillar, a gate built as one), or the used mechanism's own; not a reference whose open state is shared as a
 		// door's (its animation follows its open state in every game), nor an actor's (they have their own vtable).
@@ -524,17 +705,48 @@ namespace WorldObjects
 			return type == RE::FormType::Activator || type == RE::FormType::MovableStatic;
 		}
 
-		// Whether a_ref's enabling or disabling can be a use's effect: a placed reference of a plugin that is neither an
-		// actor (NPC sync's), nor an item (picked up: loot's and drops'), nor our player.
-		bool EnableEffectOf(RE::TESObjectREFR* a_ref)
+		// What a_ref is, for its enabling or disabling as a use's effect (UseRules::EnableSays): a placed reference of a
+		// plugin that is not an actor (NPC sync's) nor our player is fixed (a wall, a bridge, a light that can't be
+		// carried) or carryable (an item, a light that can be: only its enabling is an effect, its disabling is most often
+		// a pickup, loot's and drops').
+		UseRules::Placed PlacedOf(RE::TESObjectREFR* a_ref)
 		{
 			const auto base = a_ref ? a_ref->GetBaseObject() : nullptr;
-			return base && a_ref != Player() && RefRules::Shareable(a_ref->GetFormID()) && !a_ref->IsDeleted() && !a_ref->Is(RE::FormType::ActorCharacter) &&
-			       KindOf(base) == UseRules::ItemKind::kNotItem && !base->Is(RE::FormType::Note);
+			if (!base || a_ref == Player() || !RefRules::Shareable(a_ref->GetFormID()) || a_ref->IsDeleted() || a_ref->Is(RE::FormType::ActorCharacter)) {
+				return UseRules::Placed::kNot;
+			}
+			if (const auto light = base->As<RE::TESObjectLIGH>()) {
+				return light->CanBeCarried() ? UseRules::Placed::kCarryable : UseRules::Placed::kFixed;
+			}
+			const bool item = KindOf(base) != UseRules::ItemKind::kNotItem || base->Is(RE::FormType::Note) || base->Is(RE::FormType::Apparatus);
+			return item ? UseRules::Placed::kCarryable : UseRules::Placed::kFixed;
 		}
 
-		// The animation events read since the last frame: each to the ring, to the mirror (one a friend's effect waits
-		// for), and, while our player's use is watched, to the use whose mechanism is nearest in time and within reach.
+		// The references within a use's reach of a_mechanism whose enabling can be an effect, each enabled or not (as
+		// the sink reads them at a use, and every scan of a watched use does).
+		std::vector<std::pair<std::uint32_t, bool>> EnableReads(RE::TESObjectREFR* a_mechanism)
+		{
+			std::vector<std::pair<std::uint32_t, bool>> out;
+			const auto tes = RE::TES::GetSingleton();
+			if (!tes || !a_mechanism || !a_mechanism->Is3DLoaded()) {
+				return out;
+			}
+			tes->ForEachReferenceInRange(a_mechanism, UseRules::EFFECT_REACH, [&](RE::TESObjectREFR* a_ref) {
+				if (PlacedOf(a_ref) != UseRules::Placed::kNot && Distance(a_mechanism, a_ref) >= 0.0f) {
+					out.emplace_back(a_ref->GetFormID(), a_ref->IsDisabled());
+				}
+				return RE::BSContainer::ForEachResult::kContinue;
+			});
+			return out;
+		}
+
+		// The tick time the newest use's watch began at: animation events read before it were caught only because the
+		// activate event's sink began listening (counted as early).
+		Clock::time_point lastBegunAt{};
+
+		// The animation events read since the last frame: each to the ring, and, while our player's use is watched, to the
+		// use whose mechanism is nearest in time and within reach. (The mirror's matches and repeats are read by the hook
+		// itself, as each is sent.)
 		void ReadNotes(Clock::time_point a_now)
 		{
 			auto read = TakeNotes();
@@ -550,13 +762,9 @@ namespace WorldObjects
 				return;
 			}
 			const auto watched = capture.Watched(a_now);
-			const bool hearing = mirror.Listening(a_now);
 			for (const auto& note : read) {
 				++useCounts.notes;
 				animRing.Add(note.ref, note.event, false, note.at);
-				if (hearing) {
-					mirror.Own(note.ref, note.event, note.at);
-				}
 				if (watched.empty() || !RefRules::Shareable(note.ref)) {
 					continue;
 				}
@@ -568,45 +776,41 @@ namespace WorldObjects
 					const auto mechanism = Find(use.mechanism);
 					const auto distance = Distance(mechanism, ref);
 					if (note.ref == use.mechanism || (distance >= 0.0f && distance <= UseRules::EFFECT_REACH && AnimEffectOf(ref))) {
-						capture.Add(use.seq, note.ref, Protocol::UseEffect::kAnim, note.event, note.at);
+						if (capture.Add(use.seq, note.ref, Protocol::UseEffect::kAnim, note.event, note.at) && note.at < lastBegunAt) {
+							++useCounts.early;
+						}
 						break;
 					}
 				}
 			}
 		}
 
-		// The references near each watched use, enabled or not: a change since the last scan is that use's effect. One
-		// whose enable parent changed too follows its parent (the engine moves it), so only the parent is said.
+		// The references near each watched use, enabled or not: a change since the last read (the sink's at the use, then
+		// each scan's) is that use's effect, when its kind says it (UseRules::EnableSays). One whose enable parent changed
+		// too follows its parent (the engine moves it), so only the parent is said.
 		void ScanEnables(Clock::time_point a_now)
 		{
-			const auto tes = RE::TES::GetSingleton();
 			const auto watched = capture.Watched(a_now);
-			if (!tes || watched.empty()) {
+			if (watched.empty()) {
 				enables.Clear();
 				return;
 			}
 			struct Change
 			{
-				std::uint32_t seq;
+				std::uint32_t      seq;
 				RE::TESObjectREFR* ref;
-				bool disabled;
+				bool               disabled;
 			};
 			std::vector<Change> changed;
 			enables.BeginScan();
 			for (const auto& use : watched) {
-				const auto mechanism = Find(use.mechanism);
-				if (!mechanism || !mechanism->Is3DLoaded()) {
-					continue;
-				}
-				tes->ForEachReferenceInRange(mechanism, UseRules::EFFECT_REACH, [&](RE::TESObjectREFR* a_ref) {
-					if (EnableEffectOf(a_ref) && Distance(mechanism, a_ref) >= 0.0f) {
-						const bool disabled = a_ref->IsDisabled();
-						if (enables.Seen(a_ref->GetFormID(), disabled)) {
-							changed.push_back({ use.seq, a_ref, disabled });
+				for (const auto& [id, disabled] : EnableReads(Find(use.mechanism))) {
+					if (enables.Seen(id, disabled)) {
+						if (const auto ref = Find(id)) {
+							changed.push_back({ use.seq, ref, disabled });
 						}
 					}
-					return RE::BSContainer::ForEachResult::kContinue;
-				});
+				}
 			}
 			enables.EndScan();
 			for (const auto& change : changed) {
@@ -614,6 +818,9 @@ namespace WorldObjects
 				const auto parentRef = parent ? parent->parent.get() : RE::NiPointer<RE::TESObjectREFR>{};
 				if (parentRef && std::ranges::any_of(changed, [&](const Change& a_c) { return a_c.ref == parentRef.get(); })) {
 					continue;
+				}
+				if (!UseRules::EnableSays(PlacedOf(change.ref), change.disabled)) {
+					continue;  // a carryable item gone: a pickup, loot's and drops'
 				}
 				capture.Add(change.seq, change.ref->GetFormID(), change.disabled ? Protocol::UseEffect::kDisable : Protocol::UseEffect::kEnable, {}, a_now);
 			}
@@ -636,10 +843,13 @@ namespace WorldObjects
 						continue;
 					}
 					NoteThread("a friend's use's animation played");
+					mirror.Made(effect.ref, effect.event, a_now);  // before it is sent: a repeat racing it is held back too
 					making = true;
 					const bool taken = ref->NotifyAnimationGraph(RE::BSFixedString{ effect.event.c_str() });
 					making = false;
-					mirror.Made(effect.ref, effect.event, a_now);
+					if (!taken) {
+						mirror.Unmade(effect.ref, effect.event);  // nothing played: nothing to hold back
+					}
 					animRing.Add(effect.ref, effect.event, true, a_now);
 					++useCounts.made;
 					logs::info("World: player {}'s use {} played {:08X}'s '{}' in their game; played here{}", make.player, make.seq, effect.ref, effect.event,
@@ -647,6 +857,10 @@ namespace WorldObjects
 					continue;
 				}
 				const bool wantDisabled = effect.what == Protocol::UseEffect::kDisable;
+				if (!UseRules::EnableSays(PlacedOf(ref), wantDisabled)) {
+					++useCounts.refusedKind;  // checked again here: a session's word never takes away an item lying here
+					continue;
+				}
 				if (ref->IsDisabled() == wantDisabled) {
 					++useCounts.already;
 					continue;
@@ -698,9 +912,13 @@ namespace WorldObjects
 			const auto shares = RefRules::Of(facts);
 			if (a_event.kind == Event::Kind::kUse) {
 				if (shares.use && a_event.byOurPlayer) {
-					// The items its scripts name that our player holds go with it (lent to the stand-in that makes it in
-					// the others), and what it does near it is watched from now (its effects, said after).
-					const auto pick = LendFor(ref);
+					// The items its scripts name that our player held as it used it go with it (lent to the stand-in that
+					// makes it in the others), and what it does near it is watched from the moment it was made (its
+					// effects, said after). Both were read in the activate event's sink, before the mechanism's script ran
+					// (a script that takes the item, plays an animation or disables a wall in that frame is caught); read
+					// now only when the sink did not.
+					const auto pick = a_event.read ? a_event.pick : LendFor(ref);
+					const auto at = a_event.read ? a_event.at : a_now;
 					Protocol::Activation use{ .refId = a_event.ref, .seq = ++useSeq, .lent = pick.lent };
 					a_send(Protocol::Encode(use));
 					++counts.usesSent;
@@ -708,10 +926,14 @@ namespace WorldObjects
 						useCounts.lentSent += item.count;
 					}
 					useCounts.keptNamed += pick.kept;
-					capture.Begin(use.seq, a_event.ref, a_now);
+					capture.Begin(use.seq, a_event.ref, at);
+					lastBegunAt = a_now;
 					listening.store(true, std::memory_order_relaxed);
+					for (const auto& [id, disabled] : a_event.baseline) {
+						enables.Baseline(id, disabled);
+					}
 					nextEnableScan = a_now + RefRules::SCAN_EVERY;
-					ScanEnables(a_now);  // the first read, before the mechanism's script has run
+					ScanEnables(a_now);  // what changed since the sink's read (else the first read)
 					logs::info("World: our player used {:08X} ({}), use {}; the others' stand-ins of them use it too{}", a_event.ref, RefRules::KindName(facts), use.seq,
 						pick.lent.empty() ? "" : std::format(", holding the {} item(s) its scripts name that our player holds", pick.lent.size()));
 					if (pick.kept != 0 && useCounts.keptNamed == pick.kept) {
@@ -785,9 +1007,39 @@ namespace WorldObjects
 		{
 			std::lock_guard guard{ queueLock };
 			if (queue.size() < MAX_QUEUED) {
-				queue.push_back(a_event);
+				queue.push_back(std::move(a_event));
 			} else {
 				++queueDropped;
+			}
+		}
+
+		// Our player's use of a_ref, read as it is made (the activate event's sink, inside the game's activation and
+		// before the mechanism's script gets its OnActivate): from now the animation hook reads what is sent, and what it
+		// lends and the enabled states near it are read before the script can change them. Only for a mechanism whose use
+		// is shared (as Look checks again on the tick).
+		void ReadUse(RE::TESObjectREFR* a_ref, Event& a_event)
+		{
+			if (!a_ref || !RefRules::Shareable(a_ref->GetFormID()) || !a_ref->Is3DLoaded() || !RefRules::Of(FactsOf(a_ref)).use) {
+				return;
+			}
+			a_event.at = Clock::now();
+			ownUseAt.store(a_event.at.time_since_epoch().count(), std::memory_order_relaxed);
+			mirror.OurUse();
+			a_event.pick = LendFor(a_ref);
+			a_event.baseline = EnableReads(a_ref);
+			a_event.read = true;
+		}
+
+		// A stand-in's move of an item: queued when it holds a loan of it (ReadLentMoves).
+		void QueueLentMove(const RE::TESContainerChangedEvent& a_event)
+		{
+			if (!loans.Lends(a_event.oldContainer, a_event.baseObj)) {
+				return;
+			}
+			const bool placed = a_event.newContainer == 0 && static_cast<bool>(a_event.reference.get());
+			std::lock_guard guard{ movesLock };
+			if (lentMoves.size() < MAX_LENT_MOVES) {
+				lentMoves.push_back({ a_event.oldContainer, a_event.baseObj, static_cast<std::uint32_t>(a_event.itemCount), a_event.newContainer, placed });
 			}
 		}
 
@@ -799,7 +1051,8 @@ namespace WorldObjects
 		class Sinks :
 			public RE::BSTEventSink<RE::TESOpenCloseEvent>,
 			public RE::BSTEventSink<RE::TESLockChangedEvent>,
-			public RE::BSTEventSink<RE::TESActivateEvent>
+			public RE::BSTEventSink<RE::TESActivateEvent>,
+			public RE::BSTEventSink<RE::TESContainerChangedEvent>
 		{
 		public:
 			RE::BSEventNotifyControl ProcessEvent(const RE::TESOpenCloseEvent* a_event, RE::BSTEventSource<RE::TESOpenCloseEvent>*) override
@@ -824,7 +1077,20 @@ namespace WorldObjects
 			{
 				// Only our player's uses: a stand-in's use (a friend's, made here) or an NPC's is not reported.
 				if (a_event && a_event->objectActivated && IsOurPlayer(a_event->actionRef.get())) {
-					Queue({ .kind = Event::Kind::kUse, .ref = a_event->objectActivated->GetFormID(), .byOurPlayer = true });
+					const auto ref = a_event->objectActivated.get();
+					Event use{ .kind = Event::Kind::kUse, .ref = ref ? ref->GetFormID() : 0, .byOurPlayer = true };
+					ReadUse(ref, use);
+					Queue(std::move(use));
+				}
+				return RE::BSEventNotifyControl::kContinue;
+			}
+
+			RE::BSEventNotifyControl ProcessEvent(const RE::TESContainerChangedEvent* a_event, RE::BSTEventSource<RE::TESContainerChangedEvent>*) override
+			{
+				// A stand-in handing on an item lent to it for a friend's use (its run of the mechanism's script did):
+				// anything else moved, by anyone, is not this class's.
+				if (a_event && a_event->oldContainer != 0 && a_event->oldContainer != a_event->newContainer && a_event->baseObj != 0 && a_event->itemCount > 0) {
+					QueueLentMove(*a_event);
 				}
 				return RE::BSEventNotifyControl::kContinue;
 			}
@@ -882,6 +1148,7 @@ namespace WorldObjects
 		events->AddEventSink<RE::TESOpenCloseEvent>(&sinks);
 		events->AddEventSink<RE::TESLockChangedEvent>(&sinks);
 		events->AddEventSink<RE::TESActivateEvent>(&sinks);
+		events->AddEventSink<RE::TESContainerChangedEvent>(&sinks);
 		installed = true;
 		logs::info("World: watching doors, locks and mechanisms (open, close, lock and use events)");
 		if (!hooked) {
@@ -915,6 +1182,10 @@ namespace WorldObjects
 			enables.Clear();
 			mirror.Clear();
 			loans.Clear();
+			{
+				std::lock_guard guard{ movesLock };
+				lentMoves.clear();
+			}
 			TakeNotes();
 			listening.store(false, std::memory_order_relaxed);
 		}
@@ -959,6 +1230,7 @@ namespace WorldObjects
 			++useCounts.effectBatches;
 		}
 		MakeEffects(now);
+		ReadLentMoves();
 		TakeBack(loans.Due(now));
 		listening.store(capture.Active(now) || mirror.Listening(now), std::memory_order_relaxed);
 		// Held a while (paced), or answered busy by the server: what the parts they were about read now goes, if the
@@ -1062,6 +1334,7 @@ namespace WorldObjects
 			return;
 		}
 		settle.Used(Clock::now());
+		mirror.MadeHere(a_use.playerId, a_use.seq);  // its own run does what the use did, as a rule: its effects wait longer
 		++counts.usesMade;
 		logs::info("World: player {} used {:08X} ({}), use {}; their stand-in used it here{}", a_use.playerId, a_use.refId, RefRules::KindName(facts), a_use.seq,
 			a_use.lent.empty() ? "" : std::format(", holding {} lent item(s) while it does", a_use.lent.size()));
@@ -1076,7 +1349,10 @@ namespace WorldObjects
 	void BeforeSave()
 	{
 		// No stand-in is in a save (RemotePlayers::BeforeSave takes them out next), nor anything lent to one: what is out
-		// is taken back now, while they are still there.
+		// is taken back now, while they are still there (what a stand-in's run handed on first, so it is not taken twice).
+		// On the main thread, while the tick may run on the task pool: the loans, the moves and the counts it touches are
+		// locked or atomic.
+		ReadLentMoves();
 		const auto out = loans.All();
 		if (!out.empty()) {
 			TakeBack(out);
@@ -1106,20 +1382,25 @@ namespace WorldObjects
 				std::lock_guard guard{ queueLock };
 				dropped = queueDropped;
 			}
+			const auto seen = mirror.Read();
 			return std::format("installed={} book={} outstanding={} pending={} held={} events={} sent={} paced={} heard={} applied={} same={} waited={} stale={} "
 							   "dropped={} uses={}/{}/{} lastRefused={} asks={} notTaken={} resent={} settled={} scanned={} watched={} eventsDropped={} offmain={}",
 				installed ? 1 : 0, book.Size(), book.Outstanding(), pending.Size(), outbox.Held(), Counted(counts.events), Counted(counts.sent), Counted(counts.paced),
 				Counted(counts.heard), Counted(counts.applied), Counted(counts.same), Counted(counts.waited), Counted(counts.stale), Counted(pending.Dropped()),
 				Counted(counts.usesSent), Counted(counts.usesMade), Counted(counts.usesRefused), lastRefused, Counted(counts.asks), Counted(counts.notTaken),
 				Counted(counts.resent), Counted(counts.settled), Counted(counts.scanned), watch.Size(), Counted(dropped), Counted(counts.offMain)) +
-			       // what uses did: lent=sent/kept/here/back/gone/out (items our uses lent; named, never lent; lent here to
-			       // stand-ins, taken back, not there to take back, still out), effects=captured/cut/batches (our uses'),
-			       // mirror=heard/matched/made/already/unloaded/doubled/waiting (friends' uses' effects here)
-			       std::format(" lent={}/{}/{}/{}/{}/{} effects={}/{}/{} mirror={}/{}/{}/{}/{}/{}/{} notes={} refuse={} hooked={}", Counted(useCounts.lentSent),
-					   Counted(useCounts.keptNamed), Counted(useCounts.lentHere), Counted(useCounts.lentBack), Counted(useCounts.lentGone), loans.Out(),
-					   Counted(capture.captured), Counted(capture.cut), Counted(useCounts.effectBatches), Counted(mirror.heard), Counted(mirror.matched),
-					   Counted(useCounts.made), Counted(useCounts.already), Counted(useCounts.unloaded), Counted(mirror.doubled), mirror.Waiting(),
-					   Counted(useCounts.notes), refuseUses ? 1 : 0, hooked ? 1 : 0);
+			       // what uses did: lent=sent/kept/here/back/gone/out/moved/undone (items our uses lent; named, never lent;
+			       // lent here to stand-ins, taken back, not there to take back, still out, handed on by the stand-in's run,
+			       // of them taken back out of a holder the session shares), effects=captured/cut/batches/early (our uses';
+			       // early: animations read before the tick began the watch), mirror=heard/matched/made/already/unloaded/
+			       // doubled/waiting/kind (friends' uses' effects here; doubled: our own run's repeats held back; kind: an
+			       // enable or disable not made for its kind)
+			       std::format(" lent={}/{}/{}/{}/{}/{}/{}/{} effects={}/{}/{}/{} mirror={}/{}/{}/{}/{}/{}/{}/{} notes={} refuse={} hooked={}",
+					   Counted(useCounts.lentSent), Counted(useCounts.keptNamed), Counted(useCounts.lentHere), Counted(useCounts.lentBack),
+					   Counted(useCounts.lentGone), loans.Out(), Counted(useCounts.lentMoved), Counted(useCounts.lentUndone), Counted(capture.captured),
+					   Counted(capture.cut), Counted(useCounts.effectBatches), Counted(useCounts.early), Counted(seen.heard), Counted(seen.matched),
+					   Counted(useCounts.made), Counted(useCounts.already), Counted(useCounts.unloaded), Counted(seen.doubled), seen.waiting,
+					   Counted(useCounts.refusedKind), Counted(useCounts.notes), refuseUses ? 1 : 0, hooked ? 1 : 0);
 		}
 		if (words[0] == "refuse") {
 			if (words.size() != 2 || (words[1] != "on" && words[1] != "off")) {
@@ -1269,7 +1550,7 @@ namespace WorldObjects
 		std::size_t                inRange = 0;
 		std::vector<std::uint32_t> disabled;
 		tes->ForEachReferenceInRange(origin, static_cast<float>(*radius), [&](RE::TESObjectREFR* a_ref) {
-			if (EnableEffectOf(a_ref) && Distance(origin, a_ref) >= 0.0f) {
+			if (PlacedOf(a_ref) != UseRules::Placed::kNot && Distance(origin, a_ref) >= 0.0f) {
 				++inRange;
 				if (a_ref->IsDisabled()) {
 					disabled.push_back(a_ref->GetFormID());
