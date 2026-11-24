@@ -30,8 +30,9 @@
 //   animation event (a reader that lacks the record, a mod's kill move, finds it by the event: EventIndex), whether it
 //   is a kill, and where it began. The game knows one began by the attacker's graph taking a paired idle's event
 //   (RoleOf: the idles' events begin "pa_"; a kill move's hold "KillMove"); an actor its kill move flag says is in one,
-//   whose event was never heard, is said by the idle its process played last, unless the other actor's names the same
-//   idle (then neither can be told the attacker: Ambiguous).
+//   whose event was never heard, is said by the idle its process played last only when that idle is fresh (it changed
+//   since its flag was last down: an old pair's idle stays an actor's until its next idle), it is not held by a friend's
+//   pair, and the other actor does not look like the attacker too (JudgeByFlag).
 // - Not played twice: an actor in a pair (its kill move flag, a paired event lately, or held by one here) sends none of
 //   its graph's events to the others as actions while it lasts; each game plays the whole pair itself.
 // - Played: at the sender's moment plus the stand-in delay (Inbox), on the actors that show both sides here, when Judge
@@ -41,7 +42,10 @@
 //   near each other and near where it began.
 // - Held: while the pair plays here its two actors are not placed by the update hooks and the engine's own update runs
 //   for them (its pairing places them), from the play until both are out of it (Hold), at least MIN_HOLD and at most
-//   MAX_HOLD; a pair that never took (neither in it by TAKE_WITHIN) is let go at once.
+//   MAX_HOLD; a pair that never took (neither in it by TAKE_WITHIN) is let go at once. The same for a pair the engine
+//   plays here on one of ours with a copy (the copy victim of our player's sneak kill, of our follower's kill move, or
+//   one handed over mid-move): the copy is held by the same rules, and its runner's actions meanwhile dropped. A friend's
+//   pair that would hold more than MAX_HELD actors is not played (Full).
 // Deaths are not this change's: the runner's word is the one death (a copy in a kill move is left to the move; one the
 // move killed while its runner's NPC lives is raised, CopyHealth.h).
 namespace PairRules
@@ -247,23 +251,99 @@ namespace PairRules
 		std::deque<Protocol::Pair>                                             queue;
 	};
 
-	// An attacker found by its kill move flag alone (no event of its heard): said by the idle its process played last when
-	// that idle is a pair's and the other actor's last idle is not the same one (both naming it, neither can be told the
-	// attacker: the engine may give the victim the idle too).
+	// An attacker found by its kill move flag alone (no event of its heard), judged by the idle its process played last.
+	// That idle stays the actor's until its next one, so it can be an old pair's: a player who did a kill move minutes ago
+	// and is now a draugr's victim still names that kill move's idle. So it is said only when:
+	// - it is not held by a pair played here (then it is in a friend's pair, not one of its own);
+	// - its last idle is a pair's attacker idle;
+	// - that idle is fresh: it changed since its flag was last down (IdleMemory; one never seen with its flag down is not
+	//   known fresh);
+	// - the other actor's last idle is not the same one (both naming it, neither can be told the attacker: the engine may
+	//   give the victim the idle too);
+	// - the other actor is not itself in a kill move with a pair's attacker idle that may be fresh (two that each look
+	//   like the attacker: neither is said). An actor of ours whose idle is stale is no rival, so the order the actors are
+	//   judged in never changes who is said.
+	struct FlagSide
+	{
+		std::uint32_t       idle = 0;  // the idle its process played last (0: none)
+		std::string_view    event;     // that idle's animation event
+		bool                inKillMove = false;
+		std::optional<bool> fresh;         // ours: its idle changed since its flag was last down; none: not ours (not known)
+		bool                held = false;  // held by a pair played here
+	};
+
 	enum class ByFlag : std::uint8_t
 	{
 		kSay,
 		kNotPaired,  // its last idle is no pair's (it is the victim, or its idle is not known)
-		kAmbiguous,  // both name the same idle
+		kAmbiguous,  // both name the same idle, or the other looks like the attacker too
+		kStale,      // its pair's idle is an old one (it did not change since its flag was last down)
+		kHeld,       // a pair played here holds it: a friend's pair
 	};
 
-	[[nodiscard]] inline ByFlag JudgeByFlag(std::uint32_t a_ownIdle, std::string_view a_ownEvent, std::uint32_t a_otherIdle)
+	[[nodiscard]] inline ByFlag JudgeByFlag(const FlagSide& a_own, const FlagSide& a_other)
 	{
-		if (a_ownIdle == 0 || RoleOf(a_ownEvent) != Role::kAttacker) {
+		if (a_own.held) {
+			return ByFlag::kHeld;
+		}
+		if (a_own.idle == 0 || RoleOf(a_own.event) != Role::kAttacker) {
 			return ByFlag::kNotPaired;
 		}
-		return a_otherIdle == a_ownIdle ? ByFlag::kAmbiguous : ByFlag::kSay;
+		if (a_own.fresh != true) {
+			return ByFlag::kStale;
+		}
+		if (a_other.idle == a_own.idle) {
+			return ByFlag::kAmbiguous;
+		}
+		if (a_other.inKillMove && a_other.idle != 0 && RoleOf(a_other.event) == Role::kAttacker && a_other.fresh != false) {
+			return ByFlag::kAmbiguous;
+		}
+		return ByFlag::kSay;
 	}
+
+	// Each of ours' idle at rest, for JudgeByFlag's freshness: the idle it had when its kill move flag last fell (or when it
+	// was first seen with it down), and any idle it took since that is no pair's (a pair's idle taken while the flag is
+	// still down is the one about to begin: not taken as at rest). Its idle is fresh when it is not that one.
+	class IdleMemory
+	{
+	public:
+		// Once a tick for each of ours: its kill move flag, its last idle and whether that idle is a pair's attacker idle.
+		void Note(std::uint32_t a_id, bool a_inKillMove, std::uint32_t a_idle, bool a_pairIdle)
+		{
+			auto& one = rest[a_id];
+			if (!a_inKillMove && (!one.known || one.wasUp || !a_pairIdle)) {
+				one.idle = a_idle;
+				one.known = true;
+			}
+			one.wasUp = a_inKillMove;
+		}
+
+		// Whether a_idle is not the one a_id had at rest (false when it was never seen at rest).
+		[[nodiscard]] bool Fresh(std::uint32_t a_id, std::uint32_t a_idle) const
+		{
+			const auto it = rest.find(a_id);
+			return it != rest.end() && it->second.known && it->second.idle != a_idle;
+		}
+
+		// Forgets each actor a_gone says is no longer ours.
+		template <class Gone>
+		void Forget(Gone a_gone)
+		{
+			std::erase_if(rest, [&](const auto& a_entry) { return a_gone(a_entry.first); });
+		}
+
+		void Clear() { rest.clear(); }
+		[[nodiscard]] std::size_t Size() const { return rest.size(); }
+
+	private:
+		struct Rest
+		{
+			std::uint32_t idle = 0;
+			bool          known = false;
+			bool          wasUp = false;
+		};
+		std::unordered_map<std::uint32_t, Rest> rest;
+	};
 
 	// ---- finding an idle by its event ----
 
@@ -381,6 +461,7 @@ namespace PairRules
 		float drift = 0.0f;           // u: the attacker here from where the pair began
 		bool  kill = false;           // the pair kills its victim (Protocol::kPairKill)
 		bool  idleFound = false;      // the idle, by its record or its event
+		bool  full = false;           // no room left to hold both actors (MAX_HELD)
 	};
 
 	enum class Verdict : std::uint8_t
@@ -395,10 +476,11 @@ namespace PairRules
 		kBusy,
 		kFar,
 		kNoIdle,
+		kFull,            // MAX_HELD actors held already: not played, rather than played unheld and pulled apart by its states
 		kCount,
 	};
 	inline constexpr std::array<std::string_view, static_cast<std::size_t>(Verdict::kCount)> VERDICT_NAMES{ "play", "noAttacker", "noVictim", "attackerOurs",
-		"victimOurPlayer", "victimOurs", "dead", "busy", "far", "noIdle" };
+		"victimOurPlayer", "victimOurs", "dead", "busy", "far", "noIdle", "full" };
 
 	[[nodiscard]] constexpr std::string_view NameOf(Verdict a_verdict)
 	{
@@ -434,6 +516,9 @@ namespace PairRules
 		}
 		if (!a_facts.idleFound) {
 			return Verdict::kNoIdle;
+		}
+		if (a_facts.full) {
+			return Verdict::kFull;
 		}
 		return Verdict::kPlay;
 	}

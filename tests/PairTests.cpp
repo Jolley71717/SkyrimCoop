@@ -417,14 +417,103 @@ TEST("pair rules: outbox: an attacker's pair on a victim said once in SAY_AGAIN;
 	CHECK(!outbox.SaidLately(PlayerSide(1), now + 10s));
 }
 
-TEST("pair rules: by its flag alone an actor is said only when its last idle is a pair's and the other's is not the same")
+namespace
 {
-	CHECK(PairRules::JudgeByFlag(0x000E1E6D, "pa_KillMove1HMDecap", 0) == PairRules::ByFlag::kSay);
-	CHECK(PairRules::JudgeByFlag(0x000E1E6D, "pa_KillMove1HMDecap", 0x00012345) == PairRules::ByFlag::kSay);
-	CHECK(PairRules::JudgeByFlag(0x000E1E6D, "pa_KillMove1HMDecap", 0x000E1E6D) == PairRules::ByFlag::kAmbiguous);
-	CHECK(PairRules::JudgeByFlag(0, "", 0x000E1E6D) == PairRules::ByFlag::kNotPaired);           // the victim: no idle of its own
-	CHECK(PairRules::JudgeByFlag(0x00011111, "IdleStop", 0) == PairRules::ByFlag::kNotPaired);    // an idle that is no pair's
-	CHECK(PairRules::JudgeByFlag(0x00011111, "PairedKillTarget", 0) == PairRules::ByFlag::kNotPaired);
+	using PairRules::ByFlag;
+	using PairRules::FlagSide;
+
+	constexpr std::uint32_t DECAP = 0x000E1E6D;      // a kill move's idle
+	constexpr std::uint32_t DRAUGR_KM = 0x000F2A10;  // a draugr's kill move's idle
+
+	// One of ours in a kill move, its idle fresh (changed since its flag was last down) or not.
+	FlagSide Ours(std::uint32_t a_idle, std::string_view a_event, bool a_fresh, bool a_inKillMove = true)
+	{
+		return FlagSide{ .idle = a_idle, .event = a_event, .inKillMove = a_inKillMove, .fresh = a_fresh };
+	}
+
+	// An actor that is not ours (a copy, a stand-in): its idle's freshness is not known.
+	FlagSide Theirs(std::uint32_t a_idle, std::string_view a_event, bool a_inKillMove = true)
+	{
+		return FlagSide{ .idle = a_idle, .event = a_event, .inKillMove = a_inKillMove };
+	}
+}
+
+TEST("pair rules: by its flag alone an actor is said only when its last idle is a fresh pair's and the other's is not the same")
+{
+	CHECK(PairRules::JudgeByFlag(Ours(DECAP, "pa_KillMove1HMDecap", true), FlagSide{}) == ByFlag::kSay);
+	CHECK(PairRules::JudgeByFlag(Ours(DECAP, "pa_KillMove1HMDecap", true), Theirs(0x00012345, "IdleStop")) == ByFlag::kSay);
+	CHECK(PairRules::JudgeByFlag(Ours(DECAP, "pa_KillMove1HMDecap", true), Theirs(DECAP, "pa_KillMove1HMDecap")) == ByFlag::kAmbiguous);
+	CHECK(PairRules::JudgeByFlag(Ours(0, "", true), Theirs(DECAP, "pa_KillMove1HMDecap")) == ByFlag::kNotPaired);  // the victim: no idle of its own
+	CHECK(PairRules::JudgeByFlag(Ours(0x00011111, "IdleStop", true), FlagSide{}) == ByFlag::kNotPaired);         // an idle that is no pair's
+	CHECK(PairRules::JudgeByFlag(Ours(0x00011111, "PairedKillTarget", true), FlagSide{}) == ByFlag::kNotPaired);
+	// The other in no kill move with a pair's old idle is no rival (it is not in this pair as its attacker).
+	CHECK(PairRules::JudgeByFlag(Ours(DECAP, "pa_KillMove1HMDecap", true), Theirs(DRAUGR_KM, "pa_KillMoveDraugrA", false)) == ByFlag::kSay);
+}
+
+TEST("pair rules: by its flag, an old pair's idle is never said: the victim of an NPC's kill move who did one earlier is not the attacker")
+{
+	// Our player did a kill move minutes ago: its last idle is still that one. Now a draugr (a copy here, run by the other
+	// game) kill-moves it. The player's flag is up and no attacker event of its was heard.
+	const auto player = Ours(DECAP, "pa_KillMove1HMDecap", false);
+	CHECK(PairRules::JudgeByFlag(player, Theirs(DRAUGR_KM, "pa_KillMoveDraugrA")) == ByFlag::kStale);
+	CHECK(PairRules::JudgeByFlag(player, Theirs(0, "")) == ByFlag::kStale);  // a copy whose process played no idle
+	// Its freshness not known (never seen with its flag down): not said either.
+	CHECK(PairRules::JudgeByFlag(FlagSide{ .idle = DECAP, .event = "pa_KillMove1HMDecap", .inKillMove = true }, FlagSide{}) == ByFlag::kStale);
+	// Fresh, but the other is in it with a pair's attacker idle that may be fresh: either could be the attacker.
+	CHECK(PairRules::JudgeByFlag(Ours(DECAP, "pa_KillMove1HMDecap", true), Theirs(DRAUGR_KM, "pa_KillMoveDraugrA")) == ByFlag::kAmbiguous);
+	CHECK(PairRules::JudgeByFlag(Ours(DECAP, "pa_KillMove1HMDecap", true), Ours(DRAUGR_KM, "pa_KillMoveDraugrA", true)) == ByFlag::kAmbiguous);
+	// One held by a pair played here (an NPC we run, the victim of a friend's pair) is never said back, whatever its idle.
+	auto held = Ours(DECAP, "pa_KillMove1HMDecap", true);
+	held.held = true;
+	CHECK(PairRules::JudgeByFlag(held, FlagSide{}) == ByFlag::kHeld);
+}
+
+TEST("pair rules: by its flag, the order two of ours are judged in never changes who is said")
+{
+	// Two NPCs we run: the attacker's idle fresh, the victim's an old pair's (it did a kill move earlier).
+	const auto attacker = Ours(DRAUGR_KM, "pa_KillMoveDraugrA", true);
+	const auto victim = Ours(DECAP, "pa_KillMove1HMDecap", false);
+	const auto judge = [](const FlagSide& a_first, const FlagSide& a_second) {
+		return std::pair{ PairRules::JudgeByFlag(a_first, a_second), PairRules::JudgeByFlag(a_second, a_first) };
+	};
+	CHECK((judge(attacker, victim) == std::pair{ ByFlag::kSay, ByFlag::kStale }));
+	CHECK((judge(victim, attacker) == std::pair{ ByFlag::kStale, ByFlag::kSay }));
+	// Both fresh with different pairs' idles: neither can be told the attacker, in either order.
+	const auto other = Ours(DECAP, "pa_KillMove1HMDecap", true);
+	CHECK((judge(attacker, other) == std::pair{ ByFlag::kAmbiguous, ByFlag::kAmbiguous }));
+	CHECK((judge(other, attacker) == std::pair{ ByFlag::kAmbiguous, ByFlag::kAmbiguous }));
+}
+
+TEST("pair rules: idle memory: an idle is fresh when it changed since the flag last fell; a pair's idle taken while it is down is not at rest")
+{
+	PairRules::IdleMemory memory;
+	constexpr std::uint32_t ME = 0x14;
+	constexpr std::uint32_t WALK = 0x00011111;
+	CHECK(!memory.Fresh(ME, DECAP));  // never seen: not known fresh
+	// First seen at rest with an old kill move's idle.
+	memory.Note(ME, false, DECAP, true);
+	CHECK(!memory.Fresh(ME, DECAP));  // the same idle: an old pair's (the victim's case)
+	CHECK(memory.Fresh(ME, DRAUGR_KM));
+	// Its process takes the next pair's idle a tick before its flag rises: still fresh once the flag is up.
+	memory.Note(ME, false, DRAUGR_KM, true);
+	CHECK(memory.Fresh(ME, DRAUGR_KM));
+	memory.Note(ME, true, DRAUGR_KM, true);
+	CHECK(memory.Fresh(ME, DRAUGR_KM));
+	// Its flag falls: that idle is at rest now, an old one.
+	memory.Note(ME, false, DRAUGR_KM, true);
+	CHECK(!memory.Fresh(ME, DRAUGR_KM));
+	// An idle that is no pair's taken at rest is at rest: the same kill move again later is fresh.
+	memory.Note(ME, false, WALK, false);
+	CHECK(memory.Fresh(ME, DRAUGR_KM));
+	CHECK(!memory.Fresh(ME, WALK));
+	// First seen already in a kill move: not known.
+	memory.Note(0x00012345, true, DECAP, true);
+	CHECK(!memory.Fresh(0x00012345, DECAP));
+	CHECK(memory.Size() == 2u);
+	memory.Forget([](std::uint32_t a_id) { return a_id != ME; });
+	CHECK(memory.Size() == 1u);
+	memory.Clear();
+	CHECK(memory.Size() == 0u);
 }
 
 TEST("pair rules: event index: the lowest idle of an event, in any case; none for another")
@@ -515,6 +604,9 @@ TEST("pair rules: judge: a stand-in's or a copy's pair plays on a stand-in or a 
 	CHECK(with([](auto& f) { f.drift = PairRules::REACH + 1.0f; }) == Verdict::kFar);
 	CHECK(with([](auto& f) { f.drift = std::nanf(""); }) == Verdict::kFar);
 	CHECK(with([](auto& f) { f.idleFound = false; }) == Verdict::kNoIdle);
+	// No room to hold both (MAX_HELD): refused, never played unheld (its states would pull it apart).
+	CHECK(with([](auto& f) { f.full = true; }) == Verdict::kFull);
+	CHECK(PairRules::NameOf(Verdict::kFull) == "full");
 
 	PairRules::VerdictCounts counts;
 	CHECK(counts.Refused() == "none");

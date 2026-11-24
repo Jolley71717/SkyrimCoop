@@ -20,6 +20,11 @@
 //   an NPC this game runs only as the victim of a kill), with the engine's own paired idle (AIProcess::PlayIdle, with the
 //   other actor as its target), when PairRules::Judge says so. While it plays, both are held: the update hooks neither
 //   place them nor tell them their walk, and the engine's own update runs for them (Held), until both are out of it.
+// - Held too: a copy (an NPC another game runs) in a pair the engine plays here with one of ours (the victim of our
+//   player's sneak kill or our follower's kill move on an NPC the other game runs, or one handed over mid-move), from the
+//   pair's say or its flag until the flag falls, by the same rules; its runner's actions are dropped meanwhile.
+// - Not said: an actor a pair played here holds (it is in a friend's pair), nor one whose kill move flag is up with an
+//   old pair's idle (PairRules::JudgeByFlag).
 //
 // Main thread, but Noted, EventsStay and Held (the graph notify and update hooks, on the game's job threads).
 namespace Pairs
@@ -60,7 +65,9 @@ namespace Pairs
 	// Developer channel `pairs`: ours (pair events heard by role, said by event and by flag, by kind, coalesced, what was
 	// not said and why, events kept here) | theirs (heard, played by kind, refused by verdict, failed, took, ended, never
 	// took, given up, released, held now, late) | the load order's paired idles. `pairs last`: the last said and played.
-	// `pairs list`: each pair held here. `pairs find <kill|feed|any>`: the lowest-id paired idle of that kind (a kill
+	// `pairs list`: each pair held here (a friend's played here, or a copy held as our actor's partner: from=here), with
+	// whether each actor is in it now and was ever, and how far apart they are. `pairs holds`: the last of each let go (sawA,
+	// sawV: each side seen in it; apartMax: the most they were apart while both were). `pairs find <kill|feed|any>`: the lowest-id paired idle of that kind (a kill
 	// move's event holds "KillMove", a feeding's "Feed"), for the rig. `pairs play <idle> <victim> [<attacker>]`: our
 	// player (or an NPC this game runs, by its local id) plays that paired idle on the victim (local ids, hex): the rig's
 	// set-up, as its injected attacks are.

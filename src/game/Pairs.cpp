@@ -69,11 +69,28 @@ namespace Pairs
 			std::uint32_t                  victimPlayer = 0;
 			bool                           kill = false;
 			bool                           took = false;
+			// A pair the engine plays here on one of ours (the attacker side here) with a copy (the victim side): only the
+			// copy is held, so its runner's states do not pull it out of the engine's pairing (HoldPartner).
+			bool                           ours = false;
+			bool                           sawA = false;  // the attacker side was seen in it (its kill move flag)
+			bool                           sawV = false;  // ... the victim side
+			float                          apartMax = -1.0f;  // u: the most the two were apart while both were in it (-1: never both)
 			std::optional<bool>            inNow;  // Tend: either actor in it now (none: an actor is gone)
 			Clock::time_point              since;
 			std::string                    event;
 		};
 		std::vector<Played> played;
+		std::string         lastHoldTheirs = "none";  // the last pair played here that was let go (`pairs holds`)
+		std::string         lastHoldOurs = "none";    // ... the last copy held as our actor's partner
+
+		std::size_t HeldCount()
+		{
+			std::size_t n = 0;
+			for (const auto& pair : played) {
+				n += pair.ours ? 1 : 2;
+			}
+			return n;
+		}
 
 		PairRules::Outbox     outbox;
 		PairRules::Inbox      inbox;
@@ -88,12 +105,15 @@ namespace Pairs
 		};
 		std::vector<Idle> idles;
 
-		std::unordered_map<RE::FormID, Clock::time_point> flagSince;  // ours in a kill move, since
-		std::unordered_set<RE::FormID>                    flagTried;  // ... and judged by its flag once
+		std::unordered_map<RE::FormID, Clock::time_point> flagSince;    // ours in a kill move, since
+		std::unordered_set<RE::FormID>                    flagTried;    // ... and judged by its flag once
+		std::unordered_set<RE::FormID>                    partnerHeld;  // ... and its copy partner held once (HoldPartner)
+		PairRules::IdleMemory                             idleMemory;   // ours' idles at rest (JudgeByFlag's freshness)
 
 		struct Counts
 		{
-			std::uint64_t byEvent = 0, byFlag = 0, ambiguous = 0, notPaired = 0, noPartner = 0, victimStandIn = 0, unshared = 0, gone = 0;
+			std::uint64_t byEvent = 0, byFlag = 0, ambiguous = 0, notPaired = 0, stale = 0, heldNotSaid = 0, noPartner = 0, victimStandIn = 0, unshared = 0, gone = 0;
+			std::uint64_t copyHolds = 0, copyHoldsEnded = 0, holdFull = 0;
 			std::uint64_t heard = 0, failed = 0, second = 0, took = 0, ended = 0, noTake = 0, gaveUp = 0, released = 0, playedOnOurs = 0;
 			PairRules::KindCounts    said;
 			PairRules::KindCounts    playedKinds;
@@ -123,10 +143,13 @@ namespace Pairs
 			std::vector<std::uint32_t> ids;
 			ids.reserve(played.size() * 2);
 			for (const auto& pair : played) {
-				ids.push_back(pair.attackerId);
+				if (!pair.ours) {
+					ids.push_back(pair.attackerId);
+				}
 				ids.push_back(pair.victimId);
 			}
 			if (!heldIds.Assign(ids)) {
+				// (never: a friend's pair is not played and a copy not held past MAX_HELD)
 				logs::warn("Pairs: more actors held by pairs than {}: the rest are placed by their states", PairRules::MAX_HELD);
 			}
 			anyHeld.store(!played.empty(), std::memory_order_release);
@@ -182,6 +205,44 @@ namespace Pairs
 			kFlag,
 		};
 
+		bool HeldHere(RE::FormID a_id)
+		{
+			return std::ranges::any_of(played, [&](const Played& a_pair) { return a_pair.victimId == a_id || (!a_pair.ours && a_pair.attackerId == a_id); });
+		}
+
+		// The engine plays a pair here on a_ours (our player or an NPC we run) and a_partner. When a_partner is a copy (an
+		// NPC another game runs, placed by its runner's states: the victim of our player's sneak kill on an NPC the other
+		// game runs, of our follower's kill move, or one handed over mid-move), it is held like a friend's pair played here:
+		// not placed, its walk not told and its runner's actions dropped (NpcSync::UpdateCopy), the engine's update run, by
+		// HoldStep's rules. True when it is held now (or was already).
+		bool HoldPartner(RE::Actor* a_ours, RE::Actor* a_partner, std::string_view a_event, bool a_kill, Clock::time_point a_now)
+		{
+			if (!a_ours || !a_partner || !NpcSync::Mirrored(a_partner)) {
+				return false;
+			}
+			const auto id = a_partner->GetFormID();
+			if (HeldHere(id)) {
+				return true;
+			}
+			if (HeldCount() + 1 > PairRules::MAX_HELD) {
+				++counts.holdFull;
+				logs::info("Pairs: {:08X} in a pair with {:08X} here, not held: {} actors held already", id, a_ours->GetFormID(), PairRules::MAX_HELD);
+				return false;
+			}
+			played.push_back({ .attacker = a_ours->GetHandle(),
+				.victim = a_partner->GetHandle(),
+				.attackerId = a_ours->GetFormID(),
+				.victimId = id,
+				.kill = a_kill,
+				.ours = true,
+				.since = a_now,
+				.event = std::string{ a_event } });
+			Publish();
+			++counts.copyHolds;
+			logs::info("Pairs: the copy {:08X} held while in a pair with {:08X} here ({})", id, a_ours->GetFormID(), a_event.empty() ? "by its flag" : a_event);
+			return true;
+		}
+
 		// a_actor (ours) began a pair, by a_event: said, with its partner as the session names it.
 		void Say(RE::Actor* a_actor, const Side& a_side, std::string_view a_event, How a_how, Clock::time_point a_now)
 		{
@@ -191,6 +252,9 @@ namespace Pairs
 				++counts.noPartner;
 				return;
 			}
+			const bool kill = a_actor->IsInKillMove() || partner->IsInKillMove() || PairRules::Lower(a_event).find("killmove") != std::string::npos;
+			// A copy partner is held from now, whatever is said (the engine's pairing places it here, not its runner's states).
+			HoldPartner(a_actor, partner.get(), a_event, kill, a_now);
 			Side victim;
 			if (partner.get() == player) {
 				victim.player = ourId.load();
@@ -214,7 +278,6 @@ namespace Pairs
 			} else {
 				pair.idle = index.Find(a_event).value_or(0);
 			}
-			const bool kill = a_actor->IsInKillMove() || partner->IsInKillMove() || PairRules::Lower(a_event).find("killmove") != std::string::npos;
 			pair.flags = static_cast<std::uint8_t>((kill ? Protocol::kPairKill : 0) | (a_actor->IsSneaking() ? Protocol::kPairSneak : 0));
 			const auto at = a_actor->GetPosition();
 			pair.x = at.x;
@@ -248,11 +311,17 @@ namespace Pairs
 					++counts.gone;
 					continue;
 				}
+				// One a pair played here holds is in a friend's pair (an NPC we run, its victim): never said back.
+				if (Held(actor)) {
+					++counts.heldNotSaid;
+					continue;
+				}
 				if (const auto side = OursOf(actor, player)) {
 					Say(actor, *side, one.event, How::kEvent, a_now);
 				}
 			}
-			// Ours in a kill move whose event was never heard: said by the idle its process played last.
+			// Ours: each one's idle at rest noted (JudgeByFlag's freshness), and each in a kill move its copy partner held
+			// (HoldPartner) and, when its event was never heard, said by the idle its process played last.
 			std::vector<RE::NiPointer<RE::Actor>> ours;
 			if (player) {
 				ours.emplace_back(player);
@@ -262,25 +331,48 @@ namespace Pairs
 					ours.push_back(actor);
 				}
 			}
+			std::unordered_set<RE::FormID> oursIds;
 			std::unordered_set<RE::FormID> inKill;
 			for (const auto& actor : ours) {
 				const auto id = actor->GetFormID();
-				if (!actor->IsInKillMove()) {
+				const bool up = actor->IsInKillMove();
+				const auto idle = LastIdle(actor.get());
+				oursIds.insert(id);
+				idleMemory.Note(id, up, idle ? idle->GetFormID() : 0, PairRules::RoleOf(EventOf(idle)) == PairRules::Role::kAttacker);
+				if (up) {
+					inKill.insert(id);
+				}
+			}
+			idleMemory.Forget([&](std::uint32_t a_id) { return !oursIds.contains(a_id); });
+			const auto flagSideOf = [&](RE::Actor* a_actor) {
+				const auto idle = LastIdle(a_actor);
+				PairRules::FlagSide side{ .idle = idle ? idle->GetFormID() : 0, .event = EventOf(idle), .inKillMove = a_actor->IsInKillMove(), .held = Held(a_actor) };
+				if (OursOf(a_actor, player)) {
+					side.fresh = idleMemory.Fresh(a_actor->GetFormID(), side.idle);
+				}
+				return side;
+			};
+			for (const auto& actor : ours) {
+				const auto id = actor->GetFormID();
+				if (!inKill.contains(id)) {
 					continue;
 				}
-				inKill.insert(id);
 				const auto since = flagSince.try_emplace(id, a_now).first->second;
+				const auto partner = PartnerOf(actor.get());
+				// Its copy partner held once while its flag is up (from its say, or now: our follower's kill move, a hand-over).
+				if (partner && !partnerHeld.contains(id) && (HoldPartner(actor.get(), partner.get(), EventOf(LastIdle(actor.get())), true, a_now) || HeldHere(partner->GetFormID()))) {
+					partnerHeld.insert(id);
+				}
 				const auto side = OursOf(actor.get(), player);
 				if (!side || flagTried.contains(id) || a_now - since < PairRules::FLAG_GRACE || outbox.SaidLately(*side, a_now) || outbox.VictimLately(*side, a_now)) {
 					continue;
 				}
 				flagTried.insert(id);
-				const auto own = LastIdle(actor.get());
-				const auto partner = PartnerOf(actor.get());
-				const auto other = partner ? LastIdle(partner.get()) : nullptr;
-				switch (PairRules::JudgeByFlag(own ? own->GetFormID() : 0, EventOf(own), other ? other->GetFormID() : 0)) {
+				const auto own = flagSideOf(actor.get());
+				const auto other = partner ? flagSideOf(partner.get()) : PairRules::FlagSide{};
+				switch (PairRules::JudgeByFlag(own, other)) {
 				case PairRules::ByFlag::kSay:
-					Say(actor.get(), *side, EventOf(own), How::kFlag, a_now);
+					Say(actor.get(), *side, own.event, How::kFlag, a_now);
 					break;
 				case PairRules::ByFlag::kAmbiguous:
 					++counts.ambiguous;
@@ -288,10 +380,17 @@ namespace Pairs
 				case PairRules::ByFlag::kNotPaired:
 					++counts.notPaired;
 					break;
+				case PairRules::ByFlag::kStale:
+					++counts.stale;
+					break;
+				case PairRules::ByFlag::kHeld:
+					++counts.heldNotSaid;
+					break;
 				}
 			}
 			std::erase_if(flagSince, [&](const auto& a_entry) { return !inKill.contains(a_entry.first); });
 			std::erase_if(flagTried, [&](RE::FormID a_id) { return !inKill.contains(a_id); });
+			std::erase_if(partnerHeld, [&](RE::FormID a_id) { return !inKill.contains(a_id); });
 			outbox.Prune(a_now);
 			for (auto& msg : outbox.Take()) {
 				a_send(Protocol::Encode(msg), true);
@@ -350,7 +449,11 @@ namespace Pairs
 			const auto attacker = HereOf(a_pair.attacker);
 			const auto victim = HereOf(a_pair.victim);
 			const auto idle = IdleFor(a_pair);
-			PairRules::Facts facts{ .attacker = attacker.shown, .victim = victim.shown, .kill = (a_pair.flags & Protocol::kPairKill) != 0, .idleFound = idle != nullptr };
+			PairRules::Facts facts{ .attacker = attacker.shown,
+				.victim = victim.shown,
+				.kill = (a_pair.flags & Protocol::kPairKill) != 0,
+				.idleFound = idle != nullptr,
+				.full = HeldCount() + 2 > PairRules::MAX_HELD };
 			if (attacker.actor && victim.actor) {
 				facts.attackerAlive = !attacker.actor->IsDead();
 				facts.victimAlive = !victim.actor->IsDead();
@@ -406,31 +509,54 @@ namespace Pairs
 					pair.inNow.reset();
 					continue;
 				}
-				const bool in = attacker->IsInKillMove() || victim->IsInKillMove();
+				const bool inA = attacker->IsInKillMove();
+				const bool inV = victim->IsInKillMove();
+				const bool in = inA || inV;
 				if (in && !pair.took) {
 					pair.took = true;
-					++counts.took;
+					counts.took += pair.ours ? 0 : 1;
+				}
+				pair.sawA = pair.sawA || inA;
+				pair.sawV = pair.sawV || inV;
+				// Both in it: the pairing places the second against the first (the rig reads the most they were apart).
+				if (inA && inV) {
+					pair.apartMax = (std::max)(pair.apartMax, attacker->GetPosition().GetDistance(victim->GetPosition()));
 				}
 				pair.inNow = in;
 			}
+			// What each pair let go was, for `pairs holds`.
+			const auto summary = [&](const Played& a_pair, std::string_view a_end) {
+				auto& last = a_pair.ours ? lastHoldOurs : lastHoldTheirs;
+				last = std::format("event={} attacker={:08X} victim={:08X} kill={} took={} sawA={} sawV={} apartMax={} ms={} end={}", a_pair.event.empty() ? "-" : a_pair.event,
+					a_pair.attackerId, a_pair.victimId, a_pair.kill ? 1 : 0, a_pair.took ? 1 : 0, a_pair.sawA ? 1 : 0, a_pair.sawV ? 1 : 0,
+					a_pair.apartMax < 0.0f ? std::string{ "none" } : std::format("{:.0f}", a_pair.apartMax),
+					std::chrono::duration_cast<std::chrono::milliseconds>(a_now - a_pair.since).count(), a_end);
+				if (a_pair.ours) {
+					++counts.copyHoldsEnded;
+				}
+			};
 			std::erase_if(played, [&](const Played& a_pair) {
 				const auto in = a_pair.inNow;
 				if (!in) {
-					++counts.released;
+					counts.released += a_pair.ours ? 0 : 1;
+					summary(a_pair, "released");
 					return true;
 				}
 				switch (PairRules::HoldStep(a_pair.since, a_now, a_pair.kill, *in, a_pair.took)) {
 				case PairRules::Hold::kHold:
 					return false;
 				case PairRules::Hold::kEnded:
-					++counts.ended;
+					counts.ended += a_pair.ours ? 0 : 1;
+					summary(a_pair, "ended");
 					return true;
 				case PairRules::Hold::kNoTake:
-					++counts.noTake;
+					counts.noTake += a_pair.ours ? 0 : 1;
+					summary(a_pair, "noTake");
 					logs::info("Pairs: {} on {:08X} and {:08X} never took (neither in a kill move); let go", a_pair.event, a_pair.attackerId, a_pair.victimId);
 					return true;
 				case PairRules::Hold::kGaveUp:
-					++counts.gaveUp;
+					counts.gaveUp += a_pair.ours ? 0 : 1;
+					summary(a_pair, "gaveUp");
 					logs::info("Pairs: {} on {:08X} and {:08X} still playing after {} s; let go", a_pair.event, a_pair.attackerId, a_pair.victimId,
 						std::chrono::duration_cast<std::chrono::seconds>(PairRules::MAX_HOLD).count());
 					return true;
@@ -446,11 +572,12 @@ namespace Pairs
 		{
 			return std::format(
 				"pairs ours attackerEvents={} victimEvents={} endEvents={} said={} byEvent={} byFlag={} saidKinds={} coalesced={} outboxDropped={} ambiguous={} notPaired={} "
-				"noPartner={} victimStandIn={} unshared={} gone={} notedLost={} eventsKept={} | theirs heard={} played={} playedKinds={} refused={} failed={} second={} "
-				"took={} ended={} noTake={} gaveUp={} released={} playedOnOurs={} heldNow={} waiting={} late={} dropped={} | idles={} events={}",
+				"stale={} heldNotSaid={} noPartner={} victimStandIn={} unshared={} gone={} notedLost={} eventsKept={} copyHolds={} copyHoldsEnded={} holdFull={} | theirs heard={} "
+				"played={} playedKinds={} refused={} failed={} second={} took={} ended={} noTake={} gaveUp={} released={} playedOnOurs={} heldNow={} waiting={} late={} dropped={} "
+				"| idles={} events={}",
 				heardByRole[1].load(), heardByRole[2].load(), heardByRole[3].load(), outbox.said, counts.byEvent, counts.byFlag, counts.said.Line(), outbox.coalesced,
-				outbox.dropped, counts.ambiguous, counts.notPaired, counts.noPartner, counts.victimStandIn, counts.unshared, counts.gone, notedLost.load(), eventsKept.load(),
-				counts.heard, counts.playedKinds.Total(), counts.playedKinds.Line(), counts.verdicts.Refused(), counts.failed, counts.second, counts.took, counts.ended,
+				outbox.dropped, counts.ambiguous, counts.notPaired, counts.stale, counts.heldNotSaid, counts.noPartner, counts.victimStandIn, counts.unshared, counts.gone,
+				notedLost.load(), eventsKept.load(), counts.copyHolds, counts.copyHoldsEnded, counts.holdFull, counts.heard, counts.playedKinds.Total(), counts.playedKinds.Line(), counts.verdicts.Refused(), counts.failed, counts.second, counts.took, counts.ended,
 				counts.noTake, counts.gaveUp, counts.released, counts.playedOnOurs, played.size(), inbox.Size(), inbox.late, inbox.dropped, idles.size(), index.Size());
 		}
 
@@ -461,9 +588,12 @@ namespace Pairs
 			for (const auto& pair : played) {
 				const auto attacker = pair.attacker.get();
 				const auto victim = pair.victim.get();
-				out += std::format(" | event={} attacker={:08X} victim={:08X} from={} ageMs={} kill={} took={} inA={} inV={} deadV={}", pair.event, pair.attackerId, pair.victimId,
-					pair.sender, std::chrono::duration_cast<std::chrono::milliseconds>(now - pair.since).count(), pair.kill ? 1 : 0, pair.took ? 1 : 0,
-					attacker && attacker->IsInKillMove() ? 1 : 0, victim && victim->IsInKillMove() ? 1 : 0, victim && victim->IsDead() ? 1 : 0);
+				const auto apart = attacker && victim ? std::format("{:.0f}", attacker->GetPosition().GetDistance(victim->GetPosition())) : std::string{ "none" };
+				out += std::format(" | event={} attacker={:08X} victim={:08X} {} ageMs={} kill={} took={} inA={} inV={} sawA={} sawV={} apart={} deadV={}",
+					pair.event.empty() ? "-" : pair.event, pair.attackerId, pair.victimId, pair.ours ? std::string{ "from=here copy=held" } : std::format("from={}", pair.sender),
+					std::chrono::duration_cast<std::chrono::milliseconds>(now - pair.since).count(), pair.kill ? 1 : 0, pair.took ? 1 : 0,
+					attacker && attacker->IsInKillMove() ? 1 : 0, victim && victim->IsInKillMove() ? 1 : 0, pair.sawA ? 1 : 0, pair.sawV ? 1 : 0, apart,
+					victim && victim->IsDead() ? 1 : 0);
 			}
 			return out;
 		}
@@ -606,6 +736,8 @@ namespace Pairs
 		inbox.Clear();
 		flagSince.clear();
 		flagTried.clear();
+		partnerHeld.clear();
+		idleMemory.Clear();
 		{
 			std::scoped_lock l{ lock };
 			noted.clear();
@@ -622,6 +754,8 @@ namespace Pairs
 		inbox.Clear();
 		flagSince.clear();
 		flagTried.clear();
+		partnerHeld.clear();
+		idleMemory.Clear();
 		std::scoped_lock l{ lock };
 		noted.clear();
 		lastPairEvent.clear();
@@ -707,6 +841,9 @@ namespace Pairs
 		if (words[0] == "list") {
 			return List();
 		}
+		if (words[0] == "holds") {
+			return std::format("holds theirs {} | ours {}", lastHoldTheirs, lastHoldOurs);
+		}
 		if (words[0] == "find") {
 			if (words.size() != 2 || (words[1] != "kill" && words[1] != "feed" && words[1] != "any")) {
 				return "usage: pairs find <kill|feed|any>";
@@ -716,6 +853,6 @@ namespace Pairs
 		if (words[0] == "play") {
 			return PlayCommand(words);
 		}
-		return "usage: pairs [last | list | find <kill|feed|any> | play <idle> <victim> [attacker]]";
+		return "usage: pairs [last | list | holds | find <kill|feed|any> | play <idle> <victim> [attacker]]";
 	}
 }
