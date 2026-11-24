@@ -8,15 +8,18 @@
 #   bash tools/rig/steps/pickups.sh selftest     the step's reading and its checks with both games faked (CI runs it)
 #
 # What it does (the replies are the plugin's dev commands `pickups` (counts), `pickups pick <item|book|flora|tree> [radius]`
-# (the nearest one of that sort that is not a crime to take), `pickups ref <ref>` (what became of a reference, with what its
-# 3D shows: loaded3d=, shown=<drawn geometry count>:<hash of their names>) and `pickups take <ref>` (our player's
-# activation of it, as the activate key does, refused out of reach)):
+# (the nearest one of that sort a player may take: not a crime, its 3D loaded, its activation not blocked by a script; a
+# light only if it can be carried, a book only one that can be taken and teaches nothing), `pickups ref <ref>` (what became
+# of a reference, with what its 3D shows: loaded3d=, shown=<drawn geometry count>:<hash of their names>) and
+# `pickups take <ref>` (our player's activation of it, as the activate key does, refused out of reach); `where` gives the
+# open menus):
 #   1. Both players are put in each of PICKUPS_CELLS in turn (coc: console placement, said) until each finds a loose item
 #      it may take that the other's world holds too.
 #   2. An item each way (host to VM, then VM to host): the picker walks up to it (walkto, real movement) and takes it. Its
 #      own world: out (in its inventory, or no longer in memory) and told to the session (sent= up). Within PICKUPS_WAIT
 #      the other's world has it out (disabled), never deleted.
-#   3. A book (a note, a journal) each way: the picker takes one; it stays in the other's world for PICKUPS_WAIT (each
+#   3. A book (a note, a journal) each way: the picker takes one as a player does: activating it opens the Book Menu to
+#      read it, and Take there (the pad, PICKUPS_BOOK_TAKE) takes it. It stays in the other's world for PICKUPS_WAIT (each
 #      player reads their own), and the picker counts it as its own (judged= book).
 #   4. A taker's friend loads: the VM saves, the host takes an item, the VM loads its save (from before the take): the VM
 #      asks the session again (asks= up) and the item goes out of its world again.
@@ -34,6 +37,9 @@
 #   8. A harvest kept in a save: once the host harvested a plant, the VM saves, leaves, loads that save alone: the plant
 #      reads harvested there (the change is the save's). The VM joins again.
 #   9. Both are put back in the harness's cell (coc).
+# After every leg that takes or harvests, RIG or not, no box may be left open in the taker's game (a Book Menu left up
+# pauses it, and the legs after it could not walk): one still open is shut with pad b (a HEAL), or the leg after it would
+# meet it (RIGFAULT).
 # One way only, by the rig's rules: legs 4, 5, 6 and 8 save, load, leave or rejoin, which only the VM may do (no save or
 # load on the host, and the host leaving ends the session); the host is the other side of each.
 # Not checked here (follow-ups): ore veins (their count is a script's, each player's own), and an item under an enable
@@ -44,6 +50,8 @@ PICKUPS_FLORA_CELL=${PICKUPS_FLORA_CELL:-Riverwood}  # an exterior with plants (
 PICKUPS_WAIT=${PICKUPS_WAIT:-20}                     # s: a pickup is told, passed on and made (four batches a second)
 PICKUPS_RADIUS=${PICKUPS_RADIUS:-1500}               # how far the picker looks for an item
 PICKUPS_FLORA_RADIUS=${PICKUPS_FLORA_RADIUS:-4000}   # ... and for a plant
+PICKUPS_BOOK_TAKE=${PICKUPS_BOOK_TAKE:-"a x"}        # pad buttons tried in turn for Take in the Book Menu (each only while the
+                                                     # menu is up and the book still there; b shuts it)
 
 # ---- the reading, free of the rig (selftest) ----------------------------------------------------------------------
 
@@ -73,6 +81,25 @@ pk_shows() { [ "$(pk_shape "$(pk_ref "$1" "$2")")" = "$3" ]; }
 pk_ge() { local n; n=$(pk_count "$1" "$2"); [ "$n" -ge "$3" ] 2>/dev/null; }
 # pk_stays <s> <check...>: the check holds at every look over that time
 pk_stays() { local i t=$1; shift; for ((i = 0; i < t; i++)); do "$@" || return 1; sleep 1; done; "$@"; }
+# pk_book_menu <who>: that game shows the Book Menu. pk_box <who>: a box is up there (the Book Menu, or any modal menu: a
+# game in either cannot walk, and the Book Menu pauses it). pk_no_box: none.
+pk_book_menu() { [[ $(field menus "$(dc "$1" where)") == *Book_Menu* ]]; }
+pk_box() { local w; w=$(dc "$1" where); [[ $(field menus "$w") == *Book_Menu* ]] || [ "$(field modal "$w")" = 1 ]; }
+pk_no_box() { ! pk_box "$1"; }
+
+# pk_shut <who> <leg>: after a leg, RIG or not, no box is left up in that game: one is shut with pad b (a HEAL: the leg
+# left it, and the legs after it need the player to walk), or a RIGFAULT when b does not shut it.
+pk_shut() {
+	local who=$1 m i
+	pk_box "$who" || return 0
+	m=$(field menus "$(dc "$who" where)")
+	for ((i = 0; i < 3; i++)); do
+		dc "$who" 'pad button b' >/dev/null
+		wait_until 3 pk_no_box "$who" && break
+	done
+	if pk_box "$who"; then rig_unhealed state "$who: no box left up after $2" "menus=$m; still $(dc "$who" where | cut -c1-160) after pad b three times"; return 1; fi
+	healed "$who: no box left up after $2" "menus=$m: shut with pad b"
+}
 
 # pk_pick <who> <sort> <radius>: prints the nearest reference of that sort that game may take, which the other's world
 # holds too, of the same base, in the world (and for a plant, not harvested there, its 3D loaded); 1 when there is none
@@ -101,10 +128,35 @@ pk_take() {
 	return 0
 }
 
+# pk_book_take <who> <ref>: that game's player takes a book as a player does: walks up and activates it, which opens the
+# Book Menu to read it (the book is still in the world), then presses Take there with the pad (PICKUPS_BOOK_TAKE in turn,
+# each only while the menu is up and the book still there: a press in the world would do something else). Taking it shuts
+# the menu. 0 once the book is out of its world (one taken on its activation, as a mod may do, too); 1 and a RIG when not.
+# The leg shuts a menu left up (pk_shut).
+pk_book_take() {
+	local who=$1 ref=$2 b r
+	pk_take "$who" "$ref" || return 1
+	if ! wait_until 5 pk_book_menu "$who"; then
+		wait_until 3 pk_gone "$who" "$ref" && return 0
+		rig_fault input "$who: activating the book $ref opens the Book Menu" "$(dc "$who" where | cut -c1-160); $(pk_ref "$who" "$ref" | cut -c1-120)"
+		return 1
+	fi
+	for b in $PICKUPS_BOOK_TAKE; do
+		{ pk_book_menu "$who" && ! pk_gone "$who" "$ref"; } || break
+		r=$(dc "$who" "pad button $b")
+		[[ $r == button* ]] || { rig_fault input "$who: presses $b (Take) in the Book Menu" "the pad replied '$r'"; return 1; }
+		wait_until 3 pk_gone "$who" "$ref" && return 0
+	done
+	wait_until 3 pk_gone "$who" "$ref" && return 0
+	rig_fault input "$who: took the book $ref with Take in the Book Menu (pad: $PICKUPS_BOOK_TAKE)" "$(pk_ref "$who" "$ref" | cut -c1-120); menus=$(field menus "$(dc "$who" where)")"
+	return 1
+}
+
 # pk_item <who>: that game's player takes a loose item; it is out of its world and told, and out of the other's (disabled)
 # within PICKUPS_WAIT. PK_REF: the reference (empty when none was taken).
 PK_REF=""
-pk_item() {
+pk_item() { _pk_item "$@"; local rc=$?; pk_shut "$1" "its item leg"; return $rc; }
+_pk_item() {
 	local who=$1 o ref s0 a0
 	o=$(other "$who"); PK_REF=""
 	ref=$(pk_pick "$who" item "$PICKUPS_RADIUS") || { rig_fault state "$who: finds a loose item to take that $o's world holds too" "$(dc "$who" "pickups pick item $PICKUPS_RADIUS" | cut -c1-200)"; return 1; }
@@ -121,13 +173,14 @@ pk_item() {
 }
 
 # pk_book <who>: that game's player takes a book; it stays in the other's world, and the picker judges it its own
-pk_book() {
+pk_book() { _pk_book "$@"; local rc=$?; pk_shut "$1" "its book leg"; return $rc; }
+_pk_book() {
 	local who=$1 o ref b0
 	o=$(other "$who")
 	ref=$(pk_pick "$who" book "$PICKUPS_RADIUS") || { rig_fault state "$who: finds a book to take that $o's world holds too" "$(dc "$who" "pickups pick book $PICKUPS_RADIUS" | cut -c1-200)"; return; }
 	b0=$(pk_judged "$(dc "$who" pickups)" book)
-	pk_take "$who" "$ref" || return
-	wait_until 10 pk_gone "$who" "$ref" || { rig_fault input "$who: took the book $ref" "$(pk_ref "$who" "$ref" | cut -c1-160)"; return; }
+	pk_book_take "$who" "$ref" || return
+	pass "$who: took the book $ref out of its world (Take in the Book Menu)" "$(pk_ref "$who" "$ref" | cut -c1-160)"
 	if pk_stays "$PICKUPS_WAIT" pk_in "$o" "$ref"; then pass "$o: the book $ref the other took stays in its world (${PICKUPS_WAIT} s): each player reads their own" ""
 	else fail "$o: the book $ref the other took stays in its world (${PICKUPS_WAIT} s): each player reads their own" "$(pk_ref "$o" "$ref" | cut -c1-160)"; fi
 	expect_ge "$who: judged the book its own (judged= book)" "$(pk_judged "$(dc "$who" pickups)" book)" $((b0 + 1))
@@ -185,6 +238,7 @@ pk_rejoin() {
 	r=$(dc vm 'session leave'); [[ $r == left* ]] || { fail "vm: leaves" "$r"; return; }
 	pk_take host "$ref" || { r=$(vm_join); wait_until 90 joined_both; return; }
 	wait_until 10 pk_gone host "$ref" || rig_fault input "host: took $ref" "$(pk_ref host "$ref" | cut -c1-160)"
+	pk_shut host "its take while the VM was away"
 	if pk_in vm "$ref"; then pass "vm: $ref is in its world while it is out of the session" ""; else fail "vm: $ref is in its world while it is out of the session" "$(pk_ref vm "$ref" | cut -c1-160)"; fi
 	c0=$(pk_count vm catchUps)
 	if r=$(vm_join) && wait_until 90 joined_both; then pass "vm: joins again" "$(dc vm 'session status' | cut -c1-80)"; else fail "vm: joins again" "$r"; return; fi
@@ -196,7 +250,8 @@ pk_rejoin() {
 # pk_plant <who> <flora|tree>: that game's player harvests a plant of that sort; it reads harvested there and told, and in
 # the other's within PICKUPS_WAIT, still in the world, showing what the harvester's own 3D shows after its harvest. PK_REF:
 # the plant.
-pk_plant() {
+pk_plant() { _pk_plant "$@"; local rc=$?; pk_shut "$1" "its $2 leg"; return $rc; }
+_pk_plant() {
 	local who=$1 sort=$2 o ref s0 b0 b1 r
 	o=$(other "$who"); PK_REF=""
 	ref=$(pk_pick "$who" "$sort" "$PICKUPS_FLORA_RADIUS") || { rig_fault state "$who: finds a $sort to harvest, not harvested in $o's world either, its 3D loaded in both" "$(dc "$who" "pickups pick $sort $PICKUPS_FLORA_RADIUS" | cut -c1-200)"; return 1; }
@@ -318,10 +373,13 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	# off, harv, flag); SHARE=1 is the mod at work (a take or harvest is made in the other world), 0 a mod that shares
 	# nothing; LEAK=1 a mod that shares a book too; FLAT=1 a mod that sets a harvest's flag but never makes its 3D again
 	# (flag: reads harvested, shows the growing plant); FREE=1 the engine frees a picked-up reference (gone: found=0);
-	# SAME=1 a plant whose harvest the shape reading sees no change in.
+	# SAME=1 a plant whose harvest the shape reading sees no change in. Books as the game takes them: activating one opens
+	# the Book Menu and takes nothing (MENU=1; MENU=0 a mod that takes it on activation), Take in the menu is pad TAKEBTN
+	# ("none": no button takes it) and shuts the menu, b shuts it (STUCK=1: it never shuts). A press with no menu up is
+	# counted (worldpress: a press in the world, never wanted).
 	fake() {
-		FK=$d/fake; rm -rf "$FK"; mkdir -p "$FK"; SHARE=$1; LEAK=${2:-0}; FLAT=${3:-0}; FREE=${4:-0}; SAME=${5:-0}
-		for w in host vm; do for r in 000A0001 000B0001 000F0001 000E0001; do echo in > "$FK/$w.$r"; done; for c in sent harvestsSent applied asks catchUps book; do echo 0 > "$FK/$w.$c"; done; done
+		FK=$d/fake; rm -rf "$FK"; mkdir -p "$FK"; SHARE=$1; LEAK=${2:-0}; FLAT=${3:-0}; FREE=${4:-0}; SAME=${5:-0}; F_MENU=${MENU:-1}; F_TAKEBTN=${TAKEBTN:-a}; F_STUCK=${STUCK:-0}
+		for w in host vm; do for r in 000A0001 000B0001 000F0001 000E0001; do echo in > "$FK/$w.$r"; done; for c in sent harvestsSent applied asks catchUps book worldpress; do echo 0 > "$FK/$w.$c"; done; echo none > "$FK/$w.menu"; echo > "$FK/$w.presses"; done
 	}
 	get() { cat "$FK/$1.$2" 2>/dev/null || echo 0; }
 	put() { echo "$3" > "$FK/$1.$2"; }
@@ -337,11 +395,19 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		local r; case "$2" in item) r=000A0001 ;; book) r=000B0001 ;; flora) r=000F0001 ;; tree) r=000E0001 ;; esac
 		if [ "$(get "$1" "$r")" = in ]; then echo "ref=$r base=$(base "$r") sort=$2 harvested=0 quest=0 runtime=0 crime=0 aimed=0 dist=300"; else echo none; fi
 	}
+	fbook() { put "$1" "$2" held; up "$1" book; [ "$LEAK" = 1 ] && put "$(other "$1")" "$2" off; }  # the book taken
+	fpress() {  # fpress <who> <button>: a pad press
+		local b=$2; put "$1" presses "$(get "$1" presses)$b"
+		if [ "$(get "$1" menu)" = none ]; then up "$1" worldpress
+		elif [ "$b" = b ]; then [ "$F_STUCK" = 1 ] || put "$1" menu none
+		elif [ "$b" = "$F_TAKEBTN" ]; then fbook "$1" 000B0001; put "$1" menu none; fi
+		echo "button $b"
+	}
 	ftake() {  # ftake <who> <ref>: an activation
 		local o; o=$(other "$1")
 		case "$2" in
 			000F* | 000E*) put "$1" "$2" harv; up "$1" harvestsSent; [ "$SHARE" = 1 ] && put "$o" "$2" "$([ "$FLAT" = 1 ] && echo flag || echo harv)" ;;
-			000B*) put "$1" "$2" held; up "$1" book; [ "$LEAK" = 1 ] && put "$o" "$2" off ;;
+			000B*) if [ "$F_MENU" = 1 ]; then put "$1" menu Book_Menu; else fbook "$1" "$2"; fi ;;
 			*) put "$1" "$2" "$([ "$FREE" = 1 ] && echo gone || echo held)"; up "$1" sent; [ "$SHARE" = 1 ] && { put "$o" "$2" off; up "$o" applied; } ;;
 		esac
 		echo activated
@@ -356,6 +422,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 			"walkto "*) [ "${a[1]}" = stop ] && echo stopped || echo "walking to ${a[1]}" ;;
 			walkto) echo "not walking" ;;
 			"pad off") echo off ;;
+			"pad button "*) fpress "$w" "${a[2]}" ;;
+			where) echo "cell=0000ABCD world=00000000 pos=(1,2,3) heading=0 speed=0 menus=HUD_Menu$([ "$(get "$w" menu)" = none ] || echo ",$(get "$w" menu)") modal=0" ;;
 			*) echo "error: the fake has no '$c'" ;;
 		esac
 	}
@@ -366,6 +434,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "item: taken, told, out of the other's world, counted there: passes" "$(verdicts "$o")" "PASS=4 "
 	t "item: ... its reference" "$(grep -o '^ref=.*' <<<"$o")" ref=000A0001
 	t "item: ... the states" "$(get host 000A0001),$(get vm 000A0001)" held,off
+	t "item: ... no menu left up, nothing pressed, nothing to heal" "$(get host presses),$(get host menu),$(grep -c '^HEAL ' <<<"$o")" ,none,0
 	fake 1 0 0 1; o=$(run 9 pk_item vm)
 	t "item: a picked-up reference the engine freed (found=0) is out for the picker: passes" "$(verdicts "$o")" "PASS=4 "
 	fake 0; o=$(run 2 pk_item vm)
@@ -373,9 +442,22 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	fake 1; put vm 000A0001 held; o=$(run 3 pk_item host)
 	t "item: one the other's world lacks is no test (RIG), never FAIL" "$(verdicts "$o" | grep -c FAIL),$(grep -c '^RIG' <<<"$o")" 0,1
 	fake 1; o=$(run 4 pk_book host)
-	t "book host to VM: stays in the other's world, judged its own: passes" "$(verdicts "$o")" "PASS=2 "
+	t "book host to VM: taken with Take in the Book Menu, stays in the other's world, judged its own: passes" "$(verdicts "$o")" "PASS=3 "
+	t "book: ... Take pressed in the menu, nothing in the world, no menu left up, nothing to heal" "$(get host presses),$(get host worldpress),$(get host menu),$(grep -c '^HEAL ' <<<"$o")" a,0,none,0
 	fake 1; o=$(run 10 pk_book vm)
-	t "book VM to host: stays in the other's world, judged its own: passes" "$(verdicts "$o")" "PASS=2 "
+	t "book VM to host: taken with Take in the Book Menu, stays in the other's world, judged its own: passes" "$(verdicts "$o")" "PASS=3 "
+	TAKEBTN=x fake 1; o=$(run 15 pk_book vm)
+	t "book: a game whose Take is the next button: a tried, then x; passes" "$(verdicts "$o")" "PASS=3 "
+	t "book: ... a then x, only while the menu was up" "$(get vm presses),$(get vm worldpress),$(get vm menu)" ax,0,none
+	TAKEBTN=none fake 1; o=$(run 16 pk_book host)
+	t "book: a Book Menu no button takes it from is a RIG, never PASS or FAIL; the menu is shut after the leg (HEAL)" "$(grep -c '^RIG ' <<<"$o"),$(grep -c '^HEAL ' <<<"$o"),$(grep -cE '^(PASS|FAIL) ' <<<"$o")" 1,1,0
+	t "book: ... the book still there, the menu shut with b, no press in the world" "$(get host 000B0001),$(get host menu),$(get host presses),$(get host worldpress)" in,none,axb,0
+	TAKEBTN=none STUCK=1 fake 1; o=$(run 17 pk_book vm)
+	t "book: a menu b does not shut is a RIGFAULT (the legs after it could not walk)" "$(grep -c '^RIGFAULT vm: no box left up after its book leg' <<<"$o")" 1
+	MENU=0 fake 1; o=$(run 18 pk_book host)
+	t "book: one taken on its activation (no menu: a mod's way) passes too, nothing pressed" "$(verdicts "$o")|$(get host presses)" "PASS=3 |"
+	fake 1; put host 000B0001 held; o=$(run 19 pk_book vm)
+	t "book: one the other's world lacks is no test (RIG), never FAIL" "$(verdicts "$o" | grep -c FAIL),$(grep -c '^RIG ' <<<"$o")" 0,1
 	fake 1 1; o=$(run 5 pk_book host)
 	t "book: one the other's world loses fails" "$(grep -c '^FAIL vm: the book 000B0001 the other took stays' <<<"$o")" 1
 	fake 1 1; o=$(run 11 pk_book vm)

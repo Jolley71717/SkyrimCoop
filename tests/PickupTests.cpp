@@ -602,7 +602,7 @@ TEST("pickup rules: a harvest is read from our player's activation, before or af
 
 	// The activation's event came before the harvest: watched until it reads harvested.
 	world[0xA1] = false;
-	harvests.Activated(0xA1, NIRNROOT, false, T0);
+	harvests.Activated(0xA1, NIRNROOT, false, true, T0);
 	auto due = harvests.Tend(T0 + 16ms, read);
 	CHECK(due.refs.empty());
 	CHECK(harvests.Watched() == 1);
@@ -616,14 +616,14 @@ TEST("pickup rules: a harvest is read from our player's activation, before or af
 
 	// The event came after: harvested already, and a harvest of its produce within PAIR makes it ours.
 	world[0xA2] = true;
-	harvests.Activated(0xA2, NIRNROOT, true, T0 + 10s);
+	harvests.Activated(0xA2, NIRNROOT, true, true, T0 + 10s);
 	harvests.Harvested(NIRNROOT, T0 + 10s + 5ms);
 	due = harvests.Tend(T0 + 10s + 16ms, read);
 	CHECK((due.refs == std::vector<std::uint32_t>{ 0xA2 }));
 
 	// Harvested before (it gives nothing, no harvest comes): not ours, forgotten after WATCH.
 	world[0xA3] = true;
-	harvests.Activated(0xA3, NIRNROOT, true, T0 + 20s);
+	harvests.Activated(0xA3, NIRNROOT, true, true, T0 + 20s);
 	CHECK(harvests.Tend(T0 + 21s, read).refs.empty());
 	CHECK(harvests.Watched() == 1);
 	CHECK(harvests.Tend(T0 + 24s, read).refs.empty());
@@ -631,22 +631,22 @@ TEST("pickup rules: a harvest is read from our player's activation, before or af
 
 	// Not harvested, and never: forgotten after WATCH. Gone from memory: forgotten at once.
 	world[0xA4] = false;
-	harvests.Activated(0xA4, NIRNROOT, false, T0 + 30s);
+	harvests.Activated(0xA4, NIRNROOT, false, true, T0 + 30s);
 	CHECK(harvests.Tend(T0 + 34s, read).refs.empty());
 	CHECK(harvests.Watched() == 0);
-	harvests.Activated(0xA5, NIRNROOT, false, T0 + 40s);
+	harvests.Activated(0xA5, NIRNROOT, false, true, T0 + 40s);
 	CHECK(harvests.Tend(T0 + 40s + 16ms, read).refs.empty());
 	CHECK(harvests.Watched() == 0);
 
 	// A plant of a leveled produce (0) pairs with whatever item the harvest names.
 	world[0xA6] = true;
-	harvests.Activated(0xA6, 0, true, T0 + 50s);
+	harvests.Activated(0xA6, 0, true, true, T0 + 50s);
 	harvests.Harvested(0x0006BC00, T0 + 50s + 10ms);
 	CHECK((harvests.Tend(T0 + 50s + 16ms, read).refs == std::vector<std::uint32_t>{ 0xA6 }));
 
 	// A harvest of a produce another plant's activation does not pair with: unexplained, so a scan (once a produce).
 	world[0xA7] = true;
-	harvests.Activated(0xA7, NIRNROOT, true, T0 + 60s);
+	harvests.Activated(0xA7, NIRNROOT, true, true, T0 + 60s);
 	harvests.Harvested(0x0003AD5B, T0 + 60s);
 	harvests.Harvested(0x0003AD5B, T0 + 60s + 100ms);
 	harvests.Harvested(0x0004DA22, T0 + 60s + 100ms);
@@ -662,12 +662,78 @@ TEST("pickup rules: a harvest is read from our player's activation, before or af
 
 	// Watched once a reference: a second activation replaces the first. Clear forgets all.
 	world[0xA8] = false;
-	harvests.Activated(0xA8, NIRNROOT, false, T0 + 70s);
-	harvests.Activated(0xA8, NIRNROOT, false, T0 + 70s + 100ms);
+	harvests.Activated(0xA8, NIRNROOT, false, true, T0 + 70s);
+	harvests.Activated(0xA8, NIRNROOT, false, true, T0 + 70s + 100ms);
 	CHECK(harvests.Watched() == 1);
-	harvests.Activated(0, NIRNROOT, false, T0 + 70s);
+	harvests.Activated(0, NIRNROOT, false, true, T0 + 70s);
 	CHECK(harvests.Watched() == 1);
 	harvests.Clear();
+	CHECK(harvests.Watched() == 0);
+}
+
+TEST("pickup rules: a mod's activation of a plant harvested long ago never takes the event of the plant it really harvests")
+{
+	PickupRules::Harvests harvests;
+	PickupRules::Plants   plants;
+	std::map<std::uint32_t, std::optional<bool>> world;
+	const auto read = [&](std::uint32_t a_ref) -> std::optional<bool> {
+		const auto it = world.find(a_ref);
+		return it != world.end() ? it->second : std::nullopt;
+	};
+	// What the tick does with an activation: watched by what Plants saw of it.
+	const auto activated = [&](std::uint32_t a_ref, std::uint32_t a_produce, Clock::time_point a_at) {
+		return harvests.Activated(a_ref, a_produce, world[a_ref].value_or(false), plants.SeenGrowing(a_ref), a_at);
+	};
+
+	// The save's harvest (first seen harvested) and a plant seen growing. A mod that harvests in a radius activates both:
+	// the old one first. The activations' events come after the harvest, so both read harvested.
+	world[0xD1] = true;
+	plants.Saw(0xD1, true);
+	world[0xD2] = false;
+	plants.Saw(0xD2, false);
+	world[0xD2] = true;  // the mod's harvest
+	CHECK(!activated(0xD1, NIRNROOT, T0));  // an old harvest: not watched
+	CHECK(activated(0xD2, NIRNROOT, T0 + 5ms));
+	CHECK(harvests.Watched() == 1);
+	harvests.Harvested(NIRNROOT, T0 + 10ms);
+	auto due = harvests.Tend(T0 + 16ms, read);
+	CHECK((due.refs == std::vector<std::uint32_t>{ 0xD2 }));  // the plant really harvested is the one told
+	CHECK(harvests.Tend(T0 + 5s, read).scans.empty());
+
+	// The same with the real plant's event before its harvest (read growing as it came).
+	world[0xD3] = false;
+	plants.Saw(0xD3, false);
+	CHECK(!activated(0xD1, NIRNROOT, T0 + 10s));
+	CHECK(activated(0xD3, NIRNROOT, T0 + 10s + 5ms));
+	world[0xD3] = true;
+	harvests.Harvested(NIRNROOT, T0 + 10s + 10ms);
+	due = harvests.Tend(T0 + 10s + 16ms, read);
+	CHECK((due.refs == std::vector<std::uint32_t>{ 0xD3 }));
+	CHECK(harvests.Tend(T0 + 15s, read).scans.empty());
+
+	// A leveled produce (0 pairs with any harvest): the old one is still not watched, so a harvest with no activation of
+	// its own goes to a scan (which reports only plants seen growing), never to the old plant.
+	world[0xD4] = true;
+	plants.Saw(0xD4, true);
+	CHECK(!activated(0xD4, 0, T0 + 20s));
+	harvests.Harvested(0x0006BC00, T0 + 20s + 10ms);
+	CHECK(harvests.Tend(T0 + 20s + 16ms, read).refs.empty());
+	due = harvests.Tend(T0 + 23s, read);
+	CHECK(due.refs.empty());
+	CHECK((due.scans == std::vector<std::uint32_t>{ 0x0006BC00 }));
+
+	// An old plant's activation drops an earlier watch of it; a plant seen growing, harvested by the census's next look
+	// before the event (not reported yet), is still watched.
+	world[0xD5] = false;
+	plants.Saw(0xD5, false);
+	CHECK(activated(0xD5, NIRNROOT, T0 + 30s));
+	world[0xD5] = true;
+	plants.Saw(0xD5, true);
+	CHECK(plants.SeenGrowing(0xD5));
+	CHECK(activated(0xD5, NIRNROOT, T0 + 30s + 100ms));
+	CHECK(harvests.Watched() == 1);
+	plants.Reported(0xD5);
+	CHECK(!activated(0xD5, NIRNROOT, T0 + 31s));
 	CHECK(harvests.Watched() == 0);
 }
 

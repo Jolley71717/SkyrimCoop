@@ -87,6 +87,7 @@ namespace Pickups
 		{
 			std::uint64_t takes = 0;          // our player's pickups of a loose reference the sink queued
 			std::uint64_t activations = 0;    // our player's activations of a plant
+			std::uint64_t oldActivations = 0;  // ... of one read harvested, never seen growing: an old harvest, not watched
 			std::uint64_t harvestEvents = 0;  // the engine's word of our player's harvests
 			std::uint64_t sent = 0;           // taken entries told to the session
 			std::uint64_t harvestsSent = 0;   // harvests told to the session
@@ -162,7 +163,12 @@ namespace Pickups
 			case RE::FormType::Scroll:
 				return ItemKind::kScroll;
 			case RE::FormType::Light:
-				return ItemKind::kLight;
+				{
+					// Only a light that can be carried (a torch) is an item: a lantern on a post or a fire's light source is
+					// part of the place, and activating it takes nothing (as WorldObjects' PlacedOf tells them apart).
+					const auto light = a_form->As<RE::TESObjectLIGH>();
+					return light && light->CanBeCarried() ? ItemKind::kLight : ItemKind::kOther;
+				}
 			case RE::FormType::Apparatus:
 				return ItemKind::kApparatus;
 			default:
@@ -330,8 +336,9 @@ namespace Pickups
 		}
 
 		// The plants near our player of a_produce (any, for a leveled one) that read harvested now, were seen growing
-		// before (a harvest since: never one from the save, or our own from before the last load) and that the session was
-		// not told of: a harvest no activation explained (a mod's, by script).
+		// before and not reported since (Plants: a harvest since, never one from the save or our own from before the last
+		// load; one the session told us of or that we told it is reported, and is news again only once it grew back): a
+		// harvest no activation explained (a mod's, by script).
 		void Scan(RE::FormID a_produce)
 		{
 			const auto player = Player();
@@ -342,7 +349,7 @@ namespace Pickups
 			++counts.scans;
 			std::vector<RE::TESObjectREFR*> found;
 			tes->ForEachReferenceInRange(player, SCAN_RADIUS, [&](RE::TESObjectREFR* a_ref) {
-				if (!a_ref || a_ref == player || !IsHarvested(a_ref) || known.Has(a_ref->GetFormID()) || !plants.SeenGrowing(a_ref->GetFormID())) {
+				if (!a_ref || a_ref == player || !IsHarvested(a_ref) || !plants.SeenGrowing(a_ref->GetFormID())) {
 					return RE::BSContainer::ForEachResult::kContinue;
 				}
 				bool       plant = false;
@@ -411,6 +418,9 @@ namespace Pickups
 					++counts.bothTook;
 					logs::info("Pickups: player {} and our player both {} {:08X} before either heard of the other", a_entry.playerId,
 						a_entry.kind == Pickup::kHarvested ? "harvested" : "took", a_entry.ref);
+				}
+				if (a_entry.kind == Pickup::kHarvested) {
+					plants.Reported(a_entry.ref);  // the session holds this harvest: a scan never says it again (until it grows back)
 				}
 				known.Theirs(a_entry.ref);
 				break;
@@ -666,7 +676,9 @@ namespace Pickups
 			// Our player's harvests.
 			for (const auto& activation : activations) {
 				++counts.activations;
-				harvests.Activated(activation.ref, activation.produce, activation.harvested, now);
+				if (!harvests.Activated(activation.ref, activation.produce, activation.harvested, plants.SeenGrowing(activation.ref), now) && activation.harvested) {
+					++counts.oldActivations;  // harvested long ago (the save's, or before a load): it takes no harvest's event
+				}
 			}
 			for (const auto produce : harvestEvents) {
 				++counts.harvestEvents;
@@ -867,9 +879,12 @@ namespace Pickups
 		}
 
 		// pick <item|book|key|flora|tree> [radius]: the nearest one of that sort the session would share a take of (of the
-		// load order, no quest's, in the world; a plant not harvested, with its 3D loaded), and not a crime to take (the rig
-		// never steals: a bounty would set the town's guards on the players). "item": any shared item kind; "flora": a flora
-		// (FLOR); "tree": a tree with something to harvest.
+		// load order, no quest's, in the world, its 3D loaded: never a marker-like reference with nothing drawn; a plant not
+		// harvested), that our player's activation takes as a player's does (not blocked by a script, which would take it
+		// its own way or not at all; a light only if it can be carried, KindOf; a book that can be taken and teaches
+		// nothing, so reading it in the rig's game changes no skill or spell), and not a crime to take (the rig never steals:
+		// a bounty would set the town's guards on the players). "item": any shared item kind; "flora": a flora (FLOR);
+		// "tree": a tree with something to harvest.
 		std::string PickCommand(const std::vector<std::string_view>& a_words)
 		{
 			constexpr auto USAGE = "error: usage: pickups pick <item|book|key|flora|tree> [radius]";
@@ -887,14 +902,15 @@ namespace Pickups
 			const auto aimed = Aimed();
 			for (const auto& spot : FindNear(*radius)) {
 				if (FormIds::IsRuntime(spot.ref->GetFormID()) || QuestAlias(spot.ref) || !spot.ref->GetParentCell() || spot.distance < 0.0f ||
-					spot.ref->IsCrimeToActivate()) {
+					spot.ref->IsCrimeToActivate() || spot.ref->IsActivationBlocked() || !spot.ref->Is3DLoaded()) {
 					continue;
 				}
 				bool match = false;
 				if (sort == "flora" || sort == "tree") {
-					match = spot.plant && spot.tree == (sort == "tree") && !IsHarvested(spot.ref) && spot.ref->Is3DLoaded();
+					match = spot.plant && spot.tree == (sort == "tree") && !IsHarvested(spot.ref);
 				} else if (sort == "book") {
-					match = !spot.plant && spot.item == ItemKind::kBook;
+					const auto book = spot.plant ? nullptr : spot.ref->GetBaseObject()->As<RE::TESObjectBOOK>();
+					match = book && spot.item == ItemKind::kBook && book->CanBeTaken() && !book->TeachesSpell() && !book->TeachesSkill();
 				} else if (sort == "key") {
 					match = !spot.plant && spot.item == ItemKind::kKey;
 				} else {
@@ -1052,13 +1068,13 @@ namespace Pickups
 			};
 			using State = PickupRules::Waiting::State;
 			return std::format("installed={} us={} session={} queued={} waiting={} parkedNow={} madeNow={} loadedNow={} known={} plants={} heardQueued={} "
-							   "watched={} takes={} takesNoRef={} takesOtherBase={} activations={} harvestEvents={} sent={} harvestsSent={} paired={} scans={} "
+							   "watched={} takes={} takesNoRef={} takesOtherBase={} activations={} oldActivations={} harvestEvents={} sent={} harvestsSent={} paired={} scans={} "
 							   "scanned={} censuses={} heard={} catchUps={} applied={} harvestsApplied={} already={} bothTook={} parked={} reapplied={} held={} "
 							   "waited={} attached={} ownTakesWatched={} asks={} overflow={} refused={} eventsDropped={} heardDropped={} plantsForgot={} "
 							   "judged={} skipped={} respawnHours={:.0f} offmain={}",
 				installed ? 1 : 0, ourId, active ? 1 : 0, outbox.Size(), waiting.Count(State::kWaiting), waiting.Count(State::kParked),
 				waiting.Count(State::kMade), waiting.Loaded(), known.Size(), plants.Size(), heard.size(), harvests.Watched(), Counted(counts.takes), Counted(noRef),
-				Counted(otherBase), Counted(counts.activations), Counted(counts.harvestEvents), Counted(counts.sent), Counted(counts.harvestsSent),
+				Counted(otherBase), Counted(counts.activations), Counted(counts.oldActivations), Counted(counts.harvestEvents), Counted(counts.sent), Counted(counts.harvestsSent),
 				Counted(counts.paired), Counted(counts.scans), Counted(counts.scanned), Counted(counts.censuses), Counted(counts.heard), Counted(counts.catchUps),
 				Counted(counts.applied), Counted(counts.harvestsApplied), Counted(counts.already), Counted(counts.bothTook), Counted(counts.parked),
 				Counted(counts.reapplied), Counted(counts.held), Counted(counts.waited), Counted(counts.attached), Counted(counts.ownTakesWatched),

@@ -184,9 +184,13 @@ namespace PickupRules
 	// - A plant not harvested when our player activated it is watched for WATCH: it is ours once it reads harvested (the
 	//   event came before the harvest; a harvest that gave nothing counts too).
 	// - A plant already harvested as the event came (the event came after the harvest) is ours when a harvest of its
-	//   produce comes within PAIR of it (activating a plant harvested before gives nothing, so no harvest comes).
+	//   produce comes within PAIR of it (activating a plant harvested before gives nothing, so no harvest comes). Only a
+	//   plant seen growing before (Plants::SeenGrowing) is watched so: one harvested long ago (the save's, or ours before
+	//   a load) that a mod activates along with the plant it really harvests would otherwise take that harvest's event and
+	//   be told as news, and the plant really harvested never would be.
 	// - A harvest no activation explains within PAIR (a mod that harvests by script or by walking past) asks for a scan:
-	//   the plants near our player of that produce that read harvested and that the session was not told of yet.
+	//   the plants near our player of that produce that read harvested and were seen growing since the last report of
+	//   them (Plants).
 	class Harvests
 	{
 	public:
@@ -196,17 +200,24 @@ namespace PickupRules
 		static constexpr std::size_t MAX_EVENTS = 64;
 
 		// Our player activated a plant: its reference, its produce (0: any, for a plant whose produce is a leveled list: the
-		// engine's harvest may name the item it gave), and whether it read harvested as the event came.
-		void Activated(std::uint32_t a_ref, std::uint32_t a_produce, bool a_harvested, Clock::time_point a_now)
+		// engine's harvest may name the item it gave), whether it read harvested as the event came, and whether it was seen
+		// growing before (Plants::SeenGrowing). False when it is not watched: none, or a plant that read harvested as the
+		// event came and was never seen growing (an old harvest: activating it gives nothing, and it must never take the
+		// event of a harvest another plant made).
+		bool Activated(std::uint32_t a_ref, std::uint32_t a_produce, bool a_harvested, bool a_seenGrowing, Clock::time_point a_now)
 		{
 			if (a_ref == 0) {
-				return;
+				return false;
 			}
 			std::erase_if(watched, [&](const Watch& a_watch) { return a_watch.ref == a_ref; });
+			if (a_harvested && !a_seenGrowing) {
+				return false;
+			}
 			if (watched.size() >= MAX_WATCHED) {
 				watched.pop_front();
 			}
 			watched.push_back({ a_ref, a_produce, a_now, a_harvested });
+			return true;
 		}
 
 		// The engine says our player harvested a_produce.
@@ -604,9 +615,9 @@ namespace PickupRules
 		std::uint64_t                            forgot = 0;
 	};
 
-	// The references this game told the session of or made from its word since the welcome or the load: a scan for an
-	// unexplained harvest passes them over (it would say again what the session holds), and a friend's word on one our
-	// player took too is counted as both having taken it.
+	// The references this game told the session of or made from its word since the welcome or the load: a friend's word on
+	// one our player took too is counted as both having taken it. (A scan for an unexplained harvest goes by Plants, not
+	// by this: a plant told of that grew back since is news when it is harvested again.)
 	class Known
 	{
 	public:
