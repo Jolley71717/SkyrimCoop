@@ -3,6 +3,7 @@
 #include "FormIds.h"
 #include "Protocol.h"
 #include "TokenBucket.h"
+#include "game/Gait.h"
 #include "game/NpcRules.h"
 
 #include <algorithm>
@@ -491,11 +492,16 @@ namespace StandInRules
 
 	// The pitch a stand-in aims at, in the game's radians (down positive, as an actor's angle x holds it): its friend's
 	// while a weapon or a spell is out (a bow aimed up at a dragon, a spell down at a skeever), level otherwise (a pitch
-	// on an actor that is only walking would tilt its head for nothing). Held within MAX_AIM either way.
+	// on an actor that is only walking would tilt its head for nothing). Held within MAX_AIM_DEGREES.
+	// In water under the surface it is the pitch its friend swims at instead, drawn or not (Gait::DivePitch, held within
+	// Gait::MAX_DIVE_DEGREES): a dive shows as one.
 	inline constexpr float MAX_AIM_DEGREES = 60.0f;
 
 	[[nodiscard]] inline float AimPitch(const Protocol::PlayerState& a_state)
 	{
+		if (const auto dive = Gait::DivePitch(a_state)) {
+			return *dive;
+		}
 		if ((a_state.flags & Protocol::kWeaponDrawn) == 0) {
 			return 0.0f;
 		}

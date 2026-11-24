@@ -10,6 +10,7 @@
 #include "game/RemotePlayers.h"
 #include "game/StateBuffer.h"
 #include "game/VtableHook.h"
+#include "game/Water.h"
 
 #include <array>
 #include <atomic>
@@ -107,6 +108,11 @@ namespace NpcSync
 			std::uint64_t         played = 0;   // runner's events its graph took
 			std::uint64_t         refused = 0;  // runner's events its graph turned away
 			std::uint64_t         walkRefused = 0;  // the walk's own events (Gait.h) its graph turned away
+			std::uint64_t         swimTaken = 0;    // of those, the swim events taken and turned away, the changes given up
+			std::uint64_t         swimRefused = 0;
+			std::uint64_t         swimGivenUp = 0;
+			std::uint64_t         refloats = 0;  // the water moved it off the height it is shown at (RemotePlayers::HoldDepth)
+			float                 drift = 0.0f;  // the engine's last update's move off its height while swimming
 			std::string           lastRefused;
 		};
 		std::mutex                                copyLock;
@@ -357,6 +363,7 @@ namespace NpcSync
 			flags |= actorState && actorState->IsSprinting() ? Protocol::kSprinting : 0;
 			flags |= actorState && actorState->IsWeaponDrawn() ? Protocol::kWeaponDrawn : 0;
 			flags |= actorState && actorState->IsSwimming() ? Protocol::kSwimming : 0;
+			flags |= Water::Under(a_actor, (flags & Protocol::kSwimming) != 0) ? Protocol::kUnderwater : 0;
 			flags |= a_actor->IsInMidair() ? Protocol::kJumping : 0;
 			flags |= a_actor->IsOnMount() ? Protocol::kMounted : 0;
 			flags |= Flying(a_actor) ? Protocol::kFlying : 0;
@@ -438,29 +445,27 @@ namespace NpcSync
 		}
 
 		// ---- moving a copy (the hook) ----
-		void SetMoveFlags(RE::Actor* a_actor, const Gait::Step& a_step, const Protocol::PlayerState& a_state)
-		{
-			const auto state = a_actor->AsActorState();
-			if (!state) {
-				return;
-			}
-			auto& flags = state->actorState1;
-			flags.sneaking = a_step.shown.sneaking ? 1 : 0;
-			flags.sprinting = a_step.shown.sprinting ? 1 : 0;
-			flags.running = a_step.shown.moving && !a_step.shown.sprinting && a_state.speed > 200.0f ? 1 : 0;
-			flags.walking = a_step.shown.moving && a_state.speed <= 200.0f ? 1 : 0;
-			flags.movingForward = a_step.shown.moving ? 1 : 0;
-		}
-
-		void TellCopy(RE::Actor* a_actor, const Key& a_key, const std::vector<std::string_view>& a_walk, const std::vector<std::string>& a_events)
+		// Tells a copy's graph its walk's events (a_step's) and its runner's (a_events), and counts what it took and turned
+		// away. A walk event turned away is not asked again (a creature's graph may have no sneak or sprint at all), but a
+		// swim event is, SWIM_TRIES times for one change (Gait::Settle).
+		void TellCopy(RE::Actor* a_actor, const Key& a_key, const Gait::Step& a_step, const std::vector<std::string>& a_events)
 		{
 			std::uint64_t played = 0;
 			std::uint64_t refused = 0;
 			std::uint64_t walkRefused = 0;
+			std::uint64_t swimTaken = 0;
+			std::uint64_t swimRefused = 0;
 			std::string   lastRefused;
-			for (const auto event : a_walk) {
-				if (!a_actor->NotifyAnimationGraph(Name(event))) {
+			std::vector<std::pair<std::string_view, bool>> results;
+			results.reserve(a_step.events.size());
+			for (const auto event : a_step.events) {
+				const bool ok = a_actor->NotifyAnimationGraph(Name(event));
+				results.emplace_back(event, ok);
+				if (!ok) {
 					++walkRefused;
+				}
+				if (event == Gait::SWIM_START || event == Gait::SWIM_STOP) {
+					++(ok ? swimTaken : swimRefused);
 				}
 			}
 			for (const auto& event : a_events) {
@@ -471,16 +476,26 @@ namespace NpcSync
 					lastRefused = event;
 				}
 			}
-			if (played == 0 && refused == 0 && walkRefused == 0) {
+			if (played == 0 && refused == 0 && results.empty()) {
 				return;
 			}
+			const auto       settled = Gait::Settle(a_step.shown, results, false);
 			std::scoped_lock l{ copyLock };
 			if (const auto it = copies.find(a_key); it != copies.end()) {
-				it->second.played += played;
-				it->second.refused += refused;
-				it->second.walkRefused += walkRefused;
+				auto& copy = it->second;
+				copy.played += played;
+				copy.refused += refused;
+				copy.walkRefused += walkRefused;
+				copy.swimTaken += swimTaken;
+				copy.swimRefused += swimRefused;
+				if (settled.swimGivenUp) {
+					++copy.swimGivenUp;
+				}
+				if (copy.actorId == a_actor->GetFormID()) {
+					copy.shown = settled;
+				}
 				if (!lastRefused.empty()) {
-					it->second.lastRefused = lastRefused;
+					copy.lastRefused = lastRefused;
 				}
 			}
 		}
@@ -1717,25 +1732,39 @@ namespace NpcSync
 			if (!sample) {
 				return false;
 			}
-			step = Gait::Next(copy.shown, sample->state, sample->held);
+			step = Gait::Next(copy.shown, sample->state, sample->held, RemotePlayers::SwimsAsMode(a_actor));
 			copy.shown = step.shown;
 			events = copy.actions.Due(now - StateBuffer::Buffer::Delay());
 			copy.lastDrawn = sample->state;
 			copy.hasDrawn = true;
 			++copy.drawn;
 		}
-		// Its AI does not run: where its runner has it, turned its way (a flyer pitched too), its legs its runner's.
+		// Its AI does not run: where its runner has it, turned its way (a flyer pitched too, and a swimmer under water),
+		// its legs its runner's.
 		a_actor->SetPosition({ sample->state.x, sample->state.y, sample->state.z }, true);
-		if ((sample->state.flags & Protocol::kFlying) != 0) {
-			const float pitch = -static_cast<float>(sample->state.pitch) * std::numbers::pi_v<float> / 180.0f;
+		// Its pitch is set every frame (Gait::CopyPitch: a flyer's, a diver's, else level), so a dragon that lands or a
+		// swimmer taken out of the water from under it is level at once.
+		const float pitch = Gait::CopyPitch(sample->state);
+		if (pitch != 0.0f) {
 			a_actor->SetAngle({ pitch, 0.0f, sample->state.heading });
 		} else {
 			a_actor->SetHeading(sample->state.heading);
+			a_actor->data.angle.x = 0.0f;
 		}
-		SetMoveFlags(a_actor, step, sample->state);
+		RemotePlayers::ShowMoves(a_actor, Gait::Bits(step, sample->state));
 		RemotePlayers::DriveLegs(a_actor, { step.speed, step.direction });
 		a_actor->UpdateNoAI(a_delta);
-		TellCopy(a_actor, key, step.events, events);
+		// In water, at its runner's depth: the water's pull to the surface does not lift it.
+		float      drift = 0.0f;
+		const bool held = RemotePlayers::HoldDepth(a_actor, sample->state, &drift);
+		if ((sample->state.flags & Protocol::kSwimming) != 0) {
+			std::scoped_lock l{ copyLock };
+			if (const auto it = copies.find(key); it != copies.end() && it->second.actorId == a_actor->GetFormID()) {
+				it->second.drift = drift;
+				it->second.refloats += held ? 1 : 0;
+			}
+		}
+		TellCopy(a_actor, key, step, events);
 		return true;
 	}
 
@@ -1920,5 +1949,61 @@ namespace NpcSync
 			}
 		}
 		return out;
+	}
+
+	std::string Swim()
+	{
+		constexpr std::size_t MAX_SWIM_LISTED = 8;
+		std::size_t           swimming = 0;  // copies whose runner's newest state drawn has them swimming
+		std::size_t           under = 0;
+		std::size_t           shown = 0;  // ... shown swimming (their graph told so)
+		std::uint64_t         taken = 0, refused = 0, givenUp = 0, refloats = 0;
+		std::string           list;
+		std::size_t           listed = 0;
+		std::scoped_lock      l{ copyLock };
+		for (const auto& [key, copy] : copies) {
+			taken += copy.swimTaken;
+			refused += copy.swimRefused;
+			givenUp += copy.swimGivenUp;
+			refloats += copy.refloats;
+			if (!copy.hasDrawn) {
+				continue;
+			}
+			const auto actor = copy.handle.get();
+			const bool here = actor && actor->GetFormID() == copy.actorId;
+			const bool runnerSwims = (copy.lastDrawn.flags & Protocol::kSwimming) != 0;
+			const bool walks = !here || RemotePlayers::SwimsAsMode(actor.get());
+			// Listed: each copy whose runner has it swimming, and each copy of a race that does not walk (a fish, whose
+			// graph is never told to swim: the rig checks it was told nothing).
+			if (!runnerSwims && walks) {
+				continue;
+			}
+			if (runnerSwims) {
+				++swimming;
+				under += (copy.lastDrawn.flags & Protocol::kUnderwater) != 0 ? 1 : 0;
+				shown += copy.shown.swimming ? 1 : 0;
+			}
+			if (listed < MAX_SWIM_LISTED) {
+				// What the engine says of it (its own flags and its character controller's state; 5 is swimming), not
+				// only what the plugin set and told its graph.
+				int engineSwimming = -1;
+				int charState = -1;
+				if (here) {
+					engineSwimming = actor->GetActorRuntimeData().boolBits.all(RE::Actor::BOOL_BITS::kSwimming) ? 1 : 0;
+					if (const auto controller = actor->GetCharController()) {
+						charState = static_cast<int>(std::to_underlying(controller->context.currentState));
+					}
+				}
+				list += std::format(" | copy {:08X}{} base={:08X} walks={} runnerSwims={} shown={} under={} engineSwimming={} charState={} swimTaken={} swimRefused={}"
+									" swimGivenUp={} refloats={} drift={:.0f} z={} runnerZ={:.0f} depthErr={}",
+					key.id, key.IsSpawn() ? std::format(" spawner={}", key.spawner) : "", copy.base, walks ? 1 : 0, runnerSwims ? 1 : 0,
+					copy.shown.swimming ? "w" : "-", (copy.lastDrawn.flags & Protocol::kUnderwater) != 0 ? 1 : 0, engineSwimming, charState, copy.swimTaken,
+					copy.swimRefused, copy.swimGivenUp, copy.refloats, copy.drift, here ? std::format("{:.0f}", actor->GetPositionZ()) : "none", copy.lastDrawn.z,
+					here ? std::format("{:.0f}", actor->GetPositionZ() - copy.lastDrawn.z) : "none");
+				++listed;
+			}
+		}
+		return std::format(" | copies swimming={} under={} shownSwimming={} swimTaken={} swimRefused={} swimGivenUp={} refloats={}{}", swimming, under, shown, taken,
+			refused, givenUp, refloats, list);
 	}
 }

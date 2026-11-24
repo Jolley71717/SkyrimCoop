@@ -69,4 +69,11 @@ namespace NpcSync
 	// Developer channel: `npcs` (counts), `npcs list` (each NPC: who runs it, its kind, where it is and where its copy
 	// is), `npcs <form id>` (one NPC).
 	[[nodiscard]] std::string Describe(std::string_view a_args);
+	// Developer channel `swim` (the copies' part, after ours and the stand-ins': Water::Command): how many copies' runners
+	// have them swimming and under water, how many are shown swimming, the swim events their graphs took and turned
+	// away and the changes given up, how often the water moved one off its height; then each copy whose runner has it
+	// swimming, and each copy of a race that does not walk (a fish), at most MAX_SWIM_LISTED: its base, whether its race
+	// walks, what it is shown doing, what the engine says (its swimming flag, its character controller's state), its own
+	// swim events and refloats, the engine's last move of it off its depth, and its height against its runner's.
+	[[nodiscard]] std::string Swim();
 }

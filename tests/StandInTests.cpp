@@ -512,6 +512,21 @@ TEST("stand-in rules: a stand-in aims where its friend does while drawn, held wi
 	CHECK(std::fabs(StandInRules::AimPitch(state) - radians(StandInRules::MAX_AIM_DEGREES)) < 1e-5f);
 }
 
+TEST("stand-in rules: a friend swimming under water is pitched as it swims, weapon out or not; at the surface it is level")
+{
+	const auto            radians = [](float a_degrees) { return a_degrees * std::numbers::pi_v<float> / 180.0f; };
+	Protocol::PlayerState state;
+	state.pitch = -70;  // diving steeply
+	state.flags = Protocol::kSwimming | Protocol::kUnderwater;
+	CHECK(std::fabs(StandInRules::AimPitch(state) - radians(70.0f)) < 1e-5f);
+	state.flags = Protocol::kSwimming | Protocol::kUnderwater | Protocol::kWeaponDrawn;
+	CHECK(std::fabs(StandInRules::AimPitch(state) - radians(70.0f)) < 1e-5f);  // the dive's hold (75), not the aim's (60)
+	state.pitch = -89;
+	CHECK(std::fabs(StandInRules::AimPitch(state) - radians(Gait::MAX_DIVE_DEGREES)) < 1e-5f);
+	state.flags = Protocol::kSwimming;  // at the surface, sheathed
+	CHECK(StandInRules::AimPitch(state) == 0.0f);
+}
+
 // ---- what the game shows our player doing (the rig's proof a press did something) ----
 
 TEST("stand-in rules: each kind of action our player begins is seen once, by the state the game shows")

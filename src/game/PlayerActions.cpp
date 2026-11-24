@@ -4,6 +4,7 @@
 #include "game/Gear.h"
 #include "game/StandInRules.h"
 #include "game/VtableHook.h"
+#include "game/Water.h"
 #include "net/FormsCommand.h"
 
 #include <atomic>
@@ -41,19 +42,27 @@ namespace PlayerActions
 		bool NotifyHook(RE::IAnimationGraphManagerHolder* a_this, const RE::BSFixedString& a_event)
 		{
 			const bool taken = originalNotify(a_this, a_event);
-			if (!taken || !recording.load(std::memory_order_relaxed)) {
+			if (!taken) {
 				return taken;
 			}
+			const bool inSession = recording.load(std::memory_order_relaxed);
 			const auto player = RE::PlayerCharacter::GetSingleton();
 			if (!player || a_this != static_cast<RE::IAnimationGraphManagerHolder*>(player)) {
-				notOurs.fetch_add(1, std::memory_order_relaxed);
+				if (inSession) {
+					notOurs.fetch_add(1, std::memory_order_relaxed);
+				}
 				return taken;
 			}
 			const auto name = a_event.c_str();
 			if (!name) {
 				return taken;
 			}
-			const auto       now = Clock::now();
+			const auto now = Clock::now();
+			// Kept for the rig's `swim` (the events the game's own swimming sends our graph), session or not.
+			Water::Heard(name, now);
+			if (!inSession) {
+				return taken;
+			}
 			std::scoped_lock l{ lock };
 			if (outbox.Heard(name, Protocol::SentMs(now), now)) {
 				last = name;

@@ -43,7 +43,9 @@ namespace Protocol
 	//    (Another change that lands first with 9 takes it; this one renumbers then.)
 	// 10: a friend's stand-in has their face: head parts, hair colour, complexion, skin, height, face sliders and tint
 	//    layers (kPlayerFace, kRemoteFace: message types 41-42). (As with 9: whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 10;
+	// 11: a state says whether the one it is of swims with its head under water (StateFlags::kUnderwater), for the dive
+	//    its stand-in or copy shows. (As with 9: whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 11;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -125,6 +127,7 @@ namespace Protocol
 		kSwimming = 1 << 4,
 		kMounted = 1 << 5,
 		kFlying = 1 << 6,  // an NPC in flight (a dragon): its height and pitch are its own, not the ground's
+		kUnderwater = 1 << 7,  // swimming with its head under water: its pitch is the one it swims at (Gait::DivePitch)
 	};
 
 	// A player's transform and movement, sampled on the owning client.

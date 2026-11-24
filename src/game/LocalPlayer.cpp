@@ -2,6 +2,7 @@
 
 #include "FormIds.h"
 #include "game/Gear.h"
+#include "game/Water.h"
 
 #include <algorithm>
 #include <numbers>
@@ -104,6 +105,9 @@ namespace LocalPlayer
 		}
 		if (actorState && actorState->IsSwimming()) {
 			flags |= Protocol::kSwimming;
+			if (Water::Under(player, true)) {
+				flags |= Protocol::kUnderwater;  // its pitch is where it swims (Gait::DivePitch)
+			}
 		}
 		if (player->IsInMidair()) {
 			flags |= Protocol::kJumping;
