@@ -100,6 +100,7 @@ TEST("quests: a batch goes to the server and back, its reporter named on the way
 	CHECK(FormTranslate::CarriesForms(MT::kQuestAnswer));
 	CHECK(!FormTranslate::CarriesForms(MT::kAskQuests));
 	CHECK(!FormTranslate::CarriesForms(MT::kQuestReset));
+	CHECK(!FormTranslate::CarriesForms(MT::kQuestResetSeen));
 }
 
 TEST("quests: a batch that can't be read is none: empty, a kind not known, a state or an answer out of range, short or long")
@@ -586,6 +587,39 @@ TEST("quest view: what the session would not take stays this game's own and is n
 	view.Clear();
 	CHECK(view.Kept() == 0);
 	CHECK(view.Offer(Completed(0x10)));
+}
+
+TEST("quest view: at the host's reset a friend's reports out are dropped, so none takes the answer to a report of the new world")
+{
+	// A friend reported objective 1 and stage 20 of 0x10; the host loaded a save before the server took them, so the
+	// server drops both unanswered (heard before the friend said it heard the reset).
+	QuestRules::View view;
+	REQUIRE(view.Offer(Objective(0x10, 1, 1, 10)));
+	REQUIRE(view.Offer(Stage(0x10, 20)));
+	CHECK(view.Outstanding() == 2);
+
+	// Kept out (what the reset did before): the same objective in the new world is never offered, a completed one never
+	// moves on, so it is lost.
+	auto kept = view;
+	kept.Clear();
+	CHECK(!kept.Offer(Objective(0x10, 1, 1, 10)));
+
+	// Dropped at the reset: the new world's reports go, and each answer is its own report's.
+	view.Clear();
+	CHECK(view.DropOut() == 2);
+	CHECK(view.Outstanding() == 0);
+	REQUIRE(view.Offer(Objective(0x10, 1, 1, 10)));
+	REQUIRE(view.Offer(Stage(0x10, 20)));
+	const auto busy = view.Answered({ 0x10, QuestEntry::kObjective, 1, QuestEntry::kBusy });
+	REQUIRE(busy);
+	CHECK(*busy == Objective(0x10, 1, 1, 10));
+	CHECK(view.Offer(Objective(0x10, 1, 1, 10)));  // busy: sent again, not refused as still out
+	const auto same = view.Answered({ 0x10, QuestEntry::kStage, 20, QuestEntry::kSame });
+	REQUIRE(same);
+	CHECK(*same == Stage(0x10, 20));
+	CHECK(view.Outstanding() == 1);
+	CHECK(view.DropOut() == 1);
+	CHECK(view.DropOut() == 0);
 }
 
 TEST("quest view: what this game held when the session's word was new to it (a welcome, the host's reset, a load) is its base, never reported")
@@ -1207,7 +1241,13 @@ TEST("server: the host's reset clears the session's quests and tells the others;
 	REQUIRE(Protocol::DecodeQuestReset(*reset, true));
 	CHECK(Protocol::DecodeQuestReset(*reset, true)->playerId == host->playerId);
 	CHECK(Protocol::PeekType(toFriend.back()) == MT::kRemoteQuests);  // the reset first, then the host's quests
-	CHECK(CountOf(f.fake->TakeThrough(1, Type(MT::kRemoteQuests)), MT::kQuestReset) == 0);  // not back to the host
+	// ... and the host hears its reset back, with its own id, before its quests
+	const auto toHost = f.fake->TakeThrough(1, Type(MT::kRemoteQuests));
+	REQUIRE(CountOf(toHost, MT::kQuestReset) == 1);
+	const auto echo = std::ranges::find_if(toHost, [](const auto& a_packet) { return Protocol::PeekType(a_packet) == MT::kQuestReset; });
+	REQUIRE(Protocol::DecodeQuestReset(*echo, true));
+	CHECK(Protocol::DecodeQuestReset(*echo, true)->playerId == host->playerId);
+	CHECK(Protocol::PeekType(toHost.back()) == MT::kRemoteQuests);
 	f.fake->Deliver(2, Protocol::Writer{ MT::kAskQuests }.Data());
 	const auto book = EntriesIn(f.fake->TakeThrough(2, Type(MT::kRemoteQuests)));
 	REQUIRE(book.size() == 1);
@@ -1648,4 +1688,95 @@ TEST("quests, two games: a quest the host finished before the session waits asid
 	const std::vector<QuestEntry> wantBehind{ Stage(0x50, 20), Stage(0x60, 5), Objective(0x50, 1, 3, 20), Completed(0x50) };
 	CHECK(madeOf(second) == wantBehind);
 	CHECK(behind.completed);
+}
+
+// ---- the host's reset: a line no quest word crosses -------------------------------------------------------------------
+
+TEST("server: a game's quest report sent before it heard the host's reset is dropped; once it says it heard it, its reports are taken")
+{
+	Server::Options options;
+	options.hostIdentity = 0x4057;
+	Fixture f{ options };
+	f.fake->SetLocal(1);
+	const auto host = f.Join(1, Fixture::MakeHello("Host", 0x4057));
+	REQUIRE(host);
+	const auto friendOne = f.Join(2, Fixture::MakeHello("Friend", 0x2222));
+	REQUIRE(friendOne);
+	REQUIRE(f.Join(3, Fixture::MakeHello("Third", 0x3333)));
+	REQUIRE(f.fake->Settle());
+	f.fake->Take(1);
+	f.fake->Take(2);
+	f.fake->Take(3);
+
+	// The host loads a save; the friend's report of the old world was in flight and reaches the server after the reset.
+	f.fake->Deliver(1, Protocol::Encode(QuestReset{}, false));
+	f.fake->Deliver(2, Report({ Stage(0x40, 30) }));
+	REQUIRE(f.LoggedSoon("reported quests of the world before the host's reset"));
+	REQUIRE(f.fake->Settle());
+	const auto toHost = f.fake->Take(1);
+	CHECK(CountOf(toHost, MT::kQuestReset) == 1);  // its own reset back
+	CHECK(EntriesIn(toHost).empty());              // the old world's stage is not made in the new one
+	const auto toFriend = f.fake->Take(2);
+	CHECK(CountOf(toFriend, MT::kQuestReset) == 1);
+	CHECK(CountOf(toFriend, MT::kQuestAnswer) == 0);  // nothing waits for an answer: its view went with the reset
+	CHECK(EntriesIn(f.fake->Take(3)).empty());
+
+	// The friend's game heard the reset and says so: its next report is of the new world, and taken.
+	f.fake->Deliver(2, Protocol::Writer{ MT::kQuestResetSeen }.Data());
+	f.fake->Deliver(2, Report({ Stage(0x40, 10) }));
+	auto news = EntriesIn(f.fake->TakeThrough(1, Type(MT::kRemoteQuests)));
+	REQUIRE(news.size() == 1);
+	CHECK(news[0].first == friendOne->playerId);
+	CHECK(news[0].second == Stage(0x40, 10));
+
+	// The third game owes one reset, then two: each must be said heard before its reports are taken again.
+	f.fake->Deliver(3, Report({ Stage(0x41, 1) }));
+	f.fake->Deliver(1, Protocol::Encode(QuestReset{}, false));
+	f.fake->Deliver(3, Protocol::Writer{ MT::kQuestResetSeen }.Data());
+	f.fake->Deliver(3, Report({ Stage(0x41, 2) }));  // one reset still not heard there
+	f.fake->Deliver(3, Protocol::Writer{ MT::kQuestResetSeen }.Data());
+	f.fake->Deliver(3, Report({ Stage(0x41, 3) }));
+	news = EntriesIn(f.fake->TakeThrough(1, Type(MT::kRemoteQuests)));
+	REQUIRE(news.size() == 1);
+	CHECK(news[0].second == Stage(0x41, 3));
+
+	// A word that it heard a reset it does not owe is nothing; the host's own reports are never held.
+	f.fake->Deliver(3, Protocol::Writer{ MT::kQuestResetSeen }.Data());
+	f.fake->Deliver(3, Report({ Stage(0x41, 4) }));
+	news = EntriesIn(f.fake->TakeThrough(1, Type(MT::kRemoteQuests)));
+	REQUIRE(news.size() == 1);
+	CHECK(news[0].second == Stage(0x41, 4));
+	REQUIRE(f.fake->Settle());
+	f.fake->Take(3);  // its own reports' news, heard back
+	f.fake->Deliver(1, Protocol::Encode(QuestReset{}, false));
+	f.fake->Deliver(1, Report({ Stage(0x42, 1) }));
+	news = EntriesIn(f.fake->TakeThrough(3, Type(MT::kRemoteQuests)));
+	REQUIRE(news.size() == 1);
+	CHECK(news[0].first == host->playerId);
+}
+
+TEST("quest judge: a quest stopped here without ending is not started again: its stages below the stop are passed, the rest stopped")
+{
+	using V = QuestRules::Verdict;
+	QuestRules::Here here;
+	here.exists = true;
+	here.cls = QuestRules::Class::kShared;
+	here.current = 30;  // stopped at 30: not running, not ended
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 0, here) == V::kPassed);
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kPassed);
+	CHECK(QuestRules::Judge(Stage(0x10, 40), 2, here) == V::kStopped);  // setstage would start it again (another branch)
+	CHECK(QuestRules::Judge(Stage(0x10, 30), 0, here) == V::kStopped);
+	CHECK(QuestRules::Judge(Completed(0x10), 2, here) == V::kStopped);
+	here.sessionEnded = true;  // ran here: not put aside as never started
+	CHECK(QuestRules::Judge(Stage(0x10, 40), 0, here) == V::kStopped);
+	CHECK(QuestRules::Judge(Completed(0x10), 0, here) == V::kStopped);
+	here.sessionEnded = false;
+	CHECK(QuestRules::Judge(Objective(0x10, 1, 1, 10), 2, here) == V::kStopped);
+	CHECK(QuestRules::VerdictName(V::kStopped) == "stopped");
+	here.started = true;  // running at 30: made as ever
+	CHECK(QuestRules::Judge(Stage(0x10, 40), 2, here) == V::kMake);
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kPassed);
+	here.started = false;
+	here.current = 0;  // never run here
+	CHECK(QuestRules::Judge(Stage(0x10, 10), 2, here) == V::kMake);
 }

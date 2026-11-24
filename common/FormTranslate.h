@@ -127,6 +127,7 @@ namespace FormTranslate
 		case MT::kAskRefStates:
 		case MT::kAskQuests:
 		case MT::kQuestReset:
+		case MT::kQuestResetSeen:
 			return false;
 		}
 		return false;  // a type this version does not know
