@@ -24,9 +24,14 @@
 //   regeneration) is set back once it has stood JUDGE_AFTER: those are the runner's game's to deal, to its NPC.
 //   An NPC's blow is dealt in the game that runs the NPC it lands on, by the attacker's copy there, so a fight between
 //   NPCs two games run (a follower and a bandit) is counted once, never twice.
-// - Only the runner's death counts. A copy our player killed (its killer is our player, however late its hit event came)
-//   stays dead here and its killing blow goes to the runner as at least all it stood at; a copy the runner's death
-//   reaches is killed here, after any kill move it is in.
+// - Only the runner's death counts, and a copy dies here only on it (DiesHere). A blow that would kill a copy here (an
+//   NPC's of this game, a friend's stand-in's shot, a fall, our player's) is held at one point of health instead; our
+//   player's goes to the runner as a killing blow of all it stood at (Seen::heldByUs), and the copy dies when the
+//   runner's death comes. A copy that died here first would run its own death scripts at once (a dragon's soul given,
+//   its skin turned to bones; a kill counted; a quest's stage) for an NPC that may live on, and be raised after.
+//   Our player's kill move is the one kill a copy takes here first (the paired move needs its victim to die): its
+//   killing blow goes as at least all it stood at. A copy the runner's death reaches is killed here, after any kill move
+//   it is in.
 // No game here: tests/NpcCombatTests.cpp.
 namespace CopyHealth
 {
@@ -57,7 +62,16 @@ namespace CopyHealth
 		float floor = 0;
 		float ourDrain = 0;
 		bool  killedByUs = false;
+		bool  heldByUs = false;  // our player's blow would have killed it here since the last look, and it was held (DiesHere)
 	};
+
+	// Whether a copy of an NPC another game runs may die here: on its runner's word (or the session's: it is dead in the
+	// session), or in our player's kill move with it (the paired move kills its victim; its killing blow is sent). Any
+	// other kill (a blow, a fall, a script's) is held: the copy is left at one point of health.
+	[[nodiscard]] constexpr bool DiesHere(bool a_onRunnersWord, bool a_inOurKillMove)
+	{
+		return a_onRunnersWord || a_inOurKillMove;
+	}
 
 	// Our player's last hit on the copy (a hit event of theirs on it, or the kill move they are in with it, paired).
 	struct OurHit
@@ -93,6 +107,7 @@ namespace CopyHealth
 		std::uint64_t kills = 0;      // copies killed for their runner's death
 		std::uint64_t revived = 0;    // copies raised for their runner's NPC living
 		std::uint64_t saveKills = 0;  // bodies of the host's save its runner had alive: killing blows sent
+		std::uint64_t heldKills = 0;  // our player's blows that would have killed a copy here, held: killing blows sent
 		bool operator==(const Counts&) const = default;
 	};
 
@@ -173,6 +188,9 @@ namespace CopyHealth
 				a_counts.lost += before - inFlight.size();
 				setOwed = true;
 			}
+			if (heldKill && std::ranges::none_of(inFlight, [&](const Flying& a_f) { return a_f.seq == *heldKill; })) {
+				heldKill.reset();  // answered or given up on: a later held blow of ours is sent again
+			}
 			std::optional<OurHit> ours;
 			if (a_ourHit && a_now - a_ourHit->at <= HIT_REACH) {
 				ours = a_ourHit;
@@ -244,6 +262,22 @@ namespace CopyHealth
 				word = std::clamp(a_seen.share, 0.0f, 1.0f);  // no word yet: what it shows is where it starts
 				return {};
 			}
+			// Our player's blow would have killed it, and it was held at one point: a killing blow of all it stood at goes to
+			// its runner, once while it is on its way; the copy stays at its floor until the answer (applied: the runner's death
+			// kills it here; refused or lost: given back).
+			if (a_seen.heldByUs && !heldKill) {
+				const auto left = *Expected();
+				if (left > EPSILON) {
+					if (ours) {
+						bookedHit = ours->at;  // its drop is this blow's: not booked again
+					}
+					const auto flags = ours ? ours->flags : std::uint8_t{ 0 };
+					auto       step = book(left, static_cast<std::uint8_t>(flags | Protocol::kHitKilling));
+					heldKill = step.hit.seq;
+					++a_counts.heldKills;
+					return step;
+				}
+			}
 			const auto expected = (std::max)(*Expected(), a_seen.floor);
 			const auto diff = a_seen.share - expected;
 			// A drop our player's hit explains: booked and sent at once. A hit event explains one drop (a runner's word that
@@ -306,6 +340,7 @@ namespace CopyHealth
 		bool                             setOwed = false;
 		bool                             seenAlive = false;
 		bool                             killBooked = false;  // dead here: our killing blow went (once a death)
+		std::optional<std::uint32_t>     heldKill;  // alive here: our held killing blow on its way (its number)
 		std::optional<Clock::time_point> bookedHit;  // the hit event whose drop was booked last
 		std::optional<Clock::time_point> lastLook;
 		float                            drainCredit = 0;  // what our lasting effects on it may still take (a share)

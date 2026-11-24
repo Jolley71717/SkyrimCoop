@@ -460,6 +460,17 @@ namespace NpcRules
 		std::uint64_t     dropped = 0;
 	};
 
+	// A spawn's copy that lies dead here (a summoned or commanded dragon, shot down) is kept, though its runner sends no
+	// more states for it, while our player is in its space within MIRROR_WITHIN of it, for at most SPAWN_BODY_KEEP. Its own
+	// death scripts run here as a load-order NPC's body's do (a dragon's soul absorbed once our player comes near, its skin
+	// turned to bones; docs/DESIGN.md, "Dragon souls and word walls"), and taking it away would cut them off.
+	inline constexpr auto SPAWN_BODY_KEEP = std::chrono::seconds{ 300 };
+
+	[[nodiscard]] inline bool KeepsSpawnBody(bool a_dead, std::optional<float> a_fromOurPlayer, Clock::duration a_deadFor)
+	{
+		return a_dead && a_fromOurPlayer && *a_fromOurPlayer <= MIRROR_WITHIN && a_deadFor < SPAWN_BODY_KEEP;
+	}
+
 	// ---- its gear ----
 
 	// Whether a copy is dressed in its runner's gear now. A body is not: each game's own death scripts change what a body

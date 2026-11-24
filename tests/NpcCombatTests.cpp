@@ -631,6 +631,76 @@ TEST("copy health: a copy our player killed sends its killing blow once, as all 
 	CHECK(move.hit.flags == (Protocol::kHitKilling | Protocol::kHitKillMove));
 }
 
+TEST("copy health: a copy dies here only on its runner's word, or in our player's kill move with it")
+{
+	CHECK(CopyHealth::DiesHere(true, false));
+	CHECK(CopyHealth::DiesHere(false, true));
+	CHECK(!CopyHealth::DiesHere(false, false));
+}
+
+TEST("copy health: our player's blow that would have killed a copy is held: a killing blow goes, and it dies on its runner's word")
+{
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(0.4f);
+	r.Look({ .share = 0.4f, .floor = floor });
+	// Our blow took it to nothing; it was held at one point, alive.
+	const auto blow = r.Hit(Protocol::kHitPower);
+	const auto kill = r.Look({ .share = floor, .floor = floor, .heldByUs = true }, blow);
+	CHECK(kill.what == Do::kSend);
+	CHECK(Near(kill.hit.share, 0.4f));
+	CHECK(kill.hit.flags == (Protocol::kHitPower | Protocol::kHitKilling));
+	CHECK(r.counts.heldKills == 1u);
+	// Held at its floor while the blow is on its way: no second blow (another held one of ours, a frame later), no set back.
+	r.t += 16ms;
+	CHECK(r.Look({ .share = floor, .floor = floor, .heldByUs = true }, blow).what == Do::kNothing);
+	r.t += CopyHealth::JUDGE_AFTER;
+	CHECK(r.Look({ .share = floor, .floor = floor }).what == Do::kNothing);
+	CHECK(r.counts.sent == 1u);
+	// Applied: its runner's NPC died. The death word kills it here, never before.
+	r.copy.Answer(kill.hit.seq, Verdict::kApplied, 0.0f, r.counts);
+	r.copy.Died();
+	CHECK(r.Look({ .share = floor, .floor = floor }).what == Do::kKill);
+	CHECK(r.counts.kills == 1u);
+	CHECK(r.counts.revived == 0u);
+}
+
+TEST("copy health: a held killing blow refused is given back, and the next held blow of ours is sent again; another's held blow is set back")
+{
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(0.5f);
+	r.Look({ .share = 0.5f, .floor = floor });
+	const auto kill = r.Look({ .share = floor, .floor = floor, .heldByUs = true }, r.Hit());
+	CHECK(kill.what == Do::kSend);
+	r.copy.Answer(kill.hit.seq, Verdict::kNotHere, 0.0f, r.counts);
+	const auto back = r.Look({ .share = floor, .floor = floor });
+	CHECK(back.what == Do::kSet);
+	CHECK(Near(back.share, 0.5f));
+	r.t += 2s;
+	const auto again = r.Look({ .share = floor, .floor = floor, .heldByUs = true }, r.Hit());
+	CHECK(again.what == Do::kSend);
+	CHECK((again.hit.flags & Protocol::kHitKilling) != 0);
+	CHECK(r.counts.heldKills == 2u);
+	// Never answered: given back after LOST_AFTER.
+	r.t += CopyHealth::LOST_AFTER;
+	CHECK(r.Look({ .share = floor, .floor = floor }).what == Do::kSet);
+
+	// A guard's blow (an NPC this game runs) held it at one point: not ours, so set back once it has stood; nothing sent.
+	Run g;
+	g.Look({ .share = 1.0f, .floor = floor });
+	g.copy.Word(0.7f);
+	g.Look({ .share = 0.7f, .floor = floor });
+	CHECK(g.Look({ .share = floor, .floor = floor }).what == Do::kNothing);
+	g.t += CopyHealth::JUDGE_AFTER;
+	const auto setBack = g.Look({ .share = floor, .floor = floor });
+	CHECK(setBack.what == Do::kSet);
+	CHECK(Near(setBack.share, 0.7f));
+	CHECK(g.counts.sent == 0u);
+}
+
 TEST("copy health: our player's kill counts however late its hit event; a kill by anyone else is not ours, and is raised")
 {
 	// Our player's arrow killed it, its hit event long gone (or never seen): its killer says it is ours.

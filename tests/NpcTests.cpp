@@ -728,6 +728,17 @@ TEST("npc rules: a copy holds its runner's death while crash states come, or its
 	CHECK(HoldsDeath(t0 + 400ms, t0, t0 + 600ms));
 }
 
+TEST("npc rules: a spawn's copy lying dead near our player is kept a while, for its death scripts; far, elsewhere or long dead it goes")
+{
+	using namespace NpcRules;
+	CHECK(KeepsSpawnBody(true, 1000.0f, std::chrono::seconds{ 10 }));
+	CHECK(KeepsSpawnBody(true, MIRROR_WITHIN, SPAWN_BODY_KEEP - std::chrono::seconds{ 1 }));
+	CHECK(!KeepsSpawnBody(false, 1000.0f, std::chrono::seconds{ 10 }));          // alive: mirrored or not, as ever
+	CHECK(!KeepsSpawnBody(true, MIRROR_WITHIN + 1.0f, std::chrono::seconds{ 10 }));  // our player went far
+	CHECK(!KeepsSpawnBody(true, std::nullopt, std::chrono::seconds{ 10 }));       // another space
+	CHECK(!KeepsSpawnBody(true, 1000.0f, SPAWN_BODY_KEEP));
+}
+
 TEST("npc rules: a body is not dressed in its runner's gear, and a copy that stands again is dressed again")
 {
 	using namespace NpcRules;
