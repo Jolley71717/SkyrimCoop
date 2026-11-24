@@ -911,6 +911,21 @@ namespace ObjectRules
 	// drawn, or our copy would be taken out of its flight. At most MAX_ENDS kept (the oldest forgotten).
 	inline constexpr auto LATE_HOLD = 500ms;
 
+	// A friend's held copy is carried into its holder's cell (moved to their stand-in) when the two are in another
+	// interior or worldspace (a door both went through), or outside CARRY_CELLS or more cells apart (before the copy's
+	// own cell is left unloaded behind). Nearer it is drawn where it lies: telekinesis holds an object up to a cell from
+	// its holder, and a carry each time would pop it to the holder's feet. a_cellsApart: the exterior cells' grid
+	// distance, none when either is not an exterior.
+	inline constexpr std::int32_t CARRY_CELLS = 2;
+	[[nodiscard]] constexpr bool CarryDue(bool a_sameSpace, std::optional<std::int32_t> a_cellsApart)
+	{
+		return !a_sameSpace || (a_cellsApart && *a_cellsApart >= CARRY_CELLS);
+	}
+	// A friend's rest of an object that lies in an exterior cell not loaded here, within this of our player: our copy
+	// is brought to it (its cell is far: a carry outside, or a door into the same worldspace). The rest's own cell is
+	// then loaded (a cell's width), so a copy that lay there would be loaded.
+	inline constexpr float CARRY_OVER_NEAR = 4096.0f;
+
 	class HoldEnds
 	{
 	public:

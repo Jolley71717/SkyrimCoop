@@ -1106,6 +1106,19 @@ TEST("object causes: an object of ours in flight, or a friend's, claims what it 
 	CHECK(!theirs.Judge(BUCKET, { 190, 20, 0 }, { 260, 40, 0 }, t + 250ms).Ours());
 }
 
+TEST("object holds: a held copy is carried into its holder's cell through a door, or two exterior cells or more apart; not nearer, or with no grid")
+{
+	using ObjectRules::CarryDue;
+	CHECK(CarryDue(false, std::nullopt));  // another interior or worldspace: a door
+	CHECK(CarryDue(false, 0));
+	CHECK(!CarryDue(true, std::nullopt));
+	CHECK(!CarryDue(true, 0));
+	CHECK(!CarryDue(true, 1));  // telekinesis holds it up to a cell from its holder: drawn where it lies
+	CHECK(CarryDue(true, ObjectRules::CARRY_CELLS));
+	CHECK(CarryDue(true, ObjectRules::CARRY_CELLS + 3));
+	static_assert(ObjectRules::CARRY_OVER_NEAR <= ObjectRules::APPLY_RANGE);
+}
+
 TEST("object holds: a holder's hold heard just after its let-go or rest of the object is late; another holder's, or one later, is not")
 {
 	using namespace ObjectRules;

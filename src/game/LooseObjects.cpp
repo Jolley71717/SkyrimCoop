@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <format>
 #include <map>
 #include <mutex>
@@ -316,7 +317,7 @@ namespace LooseObjects
 		struct Counts
 		{
 			std::uint64_t holdsSent = 0, holdsHeard = 0, holdsDrawn = 0, holdsRefused = 0, grabsDropped = 0, holdsEnded = 0;
-			std::uint64_t telekinesisHolds = 0, lateHolds = 0, parted = 0, carried = 0, carriedOver = 0, leftBehind = 0;
+			std::uint64_t telekinesisHolds = 0, lateHolds = 0, parted = 0, carried = 0, carriedOver = 0, leftBehind = 0, notMovable = 0;
 			std::uint64_t letGosSent = 0, letGosHeard = 0, letGosApplied = 0;
 			std::uint64_t restsSaid = 0, restsSent = 0, restsHeard = 0, restsApplied = 0, restsLeft = 0, answers = 0, catchUps = 0;
 			std::uint64_t placesApplied = 0, goneSent = 0, goneHeard = 0;
@@ -810,7 +811,8 @@ namespace LooseObjects
 			if (!pose) {
 				// Gone from what is loaded as the hands left it (our player went through a door, or out of the cell, and it
 				// stayed behind): it lies where it was held last, in the cell it was held in.
-				if (!ref && (done.cell != 0 || done.worldspace != 0)) {
+				const auto form = RE::TESForm::LookupByID<RE::TESObjectREFR>(done.id);
+				if (!ref && form && !form->IsDisabled() && !form->IsDeleted() && (done.cell != 0 || done.worldspace != 0)) {
 					pacer.Push(ObjectRules::RestOf(done.id, Protocol::RestKind::kRest, done.cell, done.worldspace, done.from), a_now);
 					++counts.leftBehind;
 					++counts.restsSaid;
@@ -865,6 +867,15 @@ namespace LooseObjects
 			}
 			for (const auto id : takenPickups) {
 				watches.erase(id);
+				// Picked up as (or just after) it left the hands: no let-go and no hold of it is said any more.
+				if (letGo && letGo->id == id) {
+					letGo.reset();
+				}
+				if (ourHold && *ourHold == id) {
+					ourHold.reset();
+					ourHoldPose.reset();
+					holdPace.Reset();
+				}
 				waiting.Forget({ Protocol::ObjectKind::kRef, id });
 				Protocol::ObjectRest gone;
 				gone.key = { Protocol::ObjectKind::kRef, id };
@@ -1069,6 +1080,17 @@ namespace LooseObjects
 
 		// ---- theirs ----
 
+		// Two exterior cells' grid distance (none when either is not an exterior).
+		std::optional<std::int32_t> CellsApart(RE::TESObjectCELL* a_a, RE::TESObjectCELL* a_b)
+		{
+			const auto a = a_a->IsExteriorCell() ? a_a->GetCoordinates() : nullptr;
+			const auto b = a_b->IsExteriorCell() ? a_b->GetCoordinates() : nullptr;
+			if (!a || !b) {
+				return std::nullopt;
+			}
+			return (std::max)(std::abs(a->cellX - b->cellX), std::abs(a->cellY - b->cellY));
+		}
+
 		// Draws each friend's hold in front of their stand-in.
 		void DrawHolds(Clock::time_point a_now, float a_dt)
 		{
@@ -1086,6 +1108,12 @@ namespace LooseObjects
 				if (!ref) {
 					continue;
 				}
+				// Only one of the class here, before anything moves it: a hold names what its holder's game calls loose,
+				// and a plugin only one game has may make that reference a door, a static, a quest's item or an actor
+				// here. Such a one is never drawn, released or carried (it was drawn before: what it was is known).
+				if (!MayCarry(ref) || (!hold.motion && !LooseBody(ref))) {
+					continue;
+				}
 				// The holder is not here (gone through a door, out of what is loaded): our copy falls where it is, and is
 				// drawn again once the stand-in is back. The holder's rest says where it ends.
 				if (!standIn || !standIn->Is3DLoaded() || standIn->IsDisabled()) {
@@ -1097,10 +1125,13 @@ namespace LooseObjects
 					}
 					continue;
 				}
-				// Carried into another cell (an exterior cell's border, or a door both went through): our copy goes into
-				// the stand-in's cell first, then is drawn there (its 3D may be made again: keyframed and out of
-				// collisions anew).
-				if (ref->GetParentCell() != standIn->GetParentCell() && standIn->GetParentCell()) {
+				// Carried into another cell (a door both went through, or far across exterior cells: ObjectRules::CarryDue):
+				// our copy goes into the stand-in's cell first, then is drawn there (its 3D may be made again: keyframed and
+				// out of collisions anew).
+				const auto copyCell = ref->GetParentCell();
+				const auto standInCell = standIn->GetParentCell();
+				if (copyCell && standInCell && copyCell != standInCell &&
+					ObjectRules::CarryDue(SpaceOf(ref) == SpaceOf(standIn.get()), CellsApart(copyCell, standInCell))) {
 					if (!hold.carried || a_now - *hold.carried >= CARRY_EVERY) {
 						hold.carried = a_now;
 						ref->MoveTo(standIn.get());
@@ -1109,9 +1140,6 @@ namespace LooseObjects
 						++counts.carried;
 					}
 					continue;
-				}
-				if (!hold.keyframed && !hold.motion && !LooseBody(ref)) {
-					continue;  // not one of the class here
 				}
 				if (BodiesOf(ref).count != 1) {
 					continue;
@@ -1160,15 +1188,23 @@ namespace LooseObjects
 			const Vec  restAt{ a_rest.x, a_rest.y, a_rest.z };
 			// Carried through a door in the sender's game: it rests in another cell than our copy lies in. When that is
 			// our player's, our copy is brought into it (then put once its 3D is there); else it waits until we are there.
+			// Outside, the same: a rest near our player of an object whose cell is not loaded here (carried far across
+			// exterior cells).
+			const auto farOutside = [&](RE::TESObjectREFR* a_form) {
+				const auto cell = a_form->GetParentCell();
+				return SameSpace(a_form, a_rest.cell, a_rest.worldspace) && a_rest.worldspace != 0 && cell && !cell->IsAttached() &&
+				       ObjectRules::Distance(restAt, At(a_player)) <= ObjectRules::CARRY_OVER_NEAR;
+			};
 			if (const auto form = RE::TESForm::LookupByID<RE::TESObjectREFR>(id);
-				form && MayCarry(form) && SpaceOf(form) != std::pair<std::uint32_t, std::uint32_t>{} && !SameSpace(form, a_rest.cell, a_rest.worldspace) &&
-				SameSpace(a_player, a_rest.cell, a_rest.worldspace) &&
-				ObjectRules::Distance(restAt, At(a_player)) <= ObjectRules::APPLY_RANGE) {
+				form && MayCarry(form) && SpaceOf(form) != std::pair<std::uint32_t, std::uint32_t>{} && SameSpace(a_player, a_rest.cell, a_rest.worldspace) &&
+				ObjectRules::Distance(restAt, At(a_player)) <= ObjectRules::APPLY_RANGE && (!SameSpace(form, a_rest.cell, a_rest.worldspace) || farOutside(form))) {
 				if (auto held = friendHolds.find(id); held != friendHolds.end()) {
 					Release(id, held->second);
 					friendHolds.erase(held);
 				}
 				form->MoveTo(a_player);
+				// It lands at our player's feet until it is put: our physics shoving it there is not ours to say.
+				quiet.Hush(id, a_now + ObjectRules::QUIET);
 				++counts.carriedOver;
 				logs::info("Objects: {:08X} rests in another cell in its mover's game: brought into ours", id);
 				return false;
@@ -1424,6 +1460,12 @@ namespace LooseObjects
 			if (a_msg.sender == ourId) {
 				continue;
 			}
+			// Not one that may be moved here (a plugin only one game has makes it a door, a static, a quest's item or an
+			// actor): never drawn.
+			if (const auto form = RE::TESForm::LookupByID<RE::TESObjectREFR>(id); form && !MayCarry(form)) {
+				++counts.notMovable;
+				continue;
+			}
 			// Late: its holder let go of it or it came to rest a moment ago (the holds' channel is not the rests').
 			if (!friendHolds.contains(id) && holdEnds.Late(id, a_msg.sender, now)) {
 				++counts.lateHolds;
@@ -1591,12 +1633,12 @@ namespace LooseObjects
 		}
 		const auto& c = counts;
 		return std::format(
-			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} telekinesis={} late={} parted={} carried={} carriedOver={} leftBehind={} | letGos sent={} heard={} applied={} | "
+			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} telekinesis={} late={} parted={} carried={} carriedOver={} leftBehind={} notMovable={} | letGos sent={} heard={} applied={} | "
 			"rests said={} sent={} heard={} applied={} left={} answers={} placesApplied={} catchUps={} waiting={} waitingRefused={} | gone sent={} heard={} | "
 			"scans={} started={} notOurs={} hushed={} followOns={} lost={} gaveUp={} watched={} seen={} causes={} paced={} pacedDropped={} echoStopped={} | "
 			"blasts={} hits={} pickups={} | flights watched={} heard={} dropped={} stretches={} stretchesDropped={} cones={} | bodyFalls={} ourPaths={} theirPaths={} causesJoined={} causesDropped={} | writes={} refWrites={} refUnwritten={} bodyOnly={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
 			active.load() ? 1 : 0, explosionHooked ? 1 : 0, c.holdsSent, c.holdsHeard, c.holdsDrawn, c.holdsRefused, c.grabsDropped, c.holdsEnded, c.keyframes, c.releases,
-			c.telekinesisHolds, c.lateHolds, c.parted, c.carried, c.carriedOver, c.leftBehind,
+			c.telekinesisHolds, c.lateHolds, c.parted, c.carried, c.carriedOver, c.leftBehind, c.notMovable,
 			c.letGosSent, c.letGosHeard, c.letGosApplied, c.restsSaid, c.restsSent, c.restsHeard, c.restsApplied, c.restsLeft, c.answers, c.placesApplied, c.catchUps,
 			waiting.Size(), waiting.refused, c.goneSent, c.goneHeard, c.scans, c.started, c.notOurs, c.hushed, c.followOns, c.lost, c.gaveUp, watches.size(), seen.Size(),
 			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), Shots::AllHooked() ? 1 : 0,
