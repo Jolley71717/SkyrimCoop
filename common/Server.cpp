@@ -5,6 +5,7 @@
 #include "Name.h"
 #include "NpcBook.h"
 #include "NpcFates.h"
+#include "ObjectBook.h"
 #include "Redact.h"
 #include "RideBook.h"
 #include "SitBook.h"
@@ -71,6 +72,11 @@ namespace
 		// is dropped, never kept: its flight is over by the time a budget would let it go.
 		TokenBucket shotBudget{ 96.0, 48.0 };
 		bool        toldShotsDropped = false;
+		// Loose objects (common/ObjectBook.h): holds of what the player holds, 20 a second (a game sends 15 while it
+		// moves), past it dropped (the next one says it); let-gos and rests, a burst of 24, then 6 a second (a blast
+		// throws a room's clutter about), past it kept and owed, never dropped.
+		TokenBucket objectHoldBudget{ 20.0, 20.0 };
+		TokenBucket objectRestBudget{ 24.0, 6.0 };
 		bool        toldUnknown = false;
 	};
 
@@ -181,6 +187,8 @@ void Server::Run()
 	RideBook::Book rides;
 	// Who is in what furniture (common/SitBook.h), for whoever joins after.
 	SitBook::Book sits;
+	// Loose objects: who holds or threw what, and where each came to rest (common/ObjectBook.h), for whoever joins after.
+	ObjectBook::Book objects;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -239,6 +247,41 @@ void Server::Run()
 			}
 		}
 	};
+	// The same for loose objects' rests (MAX_OBJECT_RESTS each); sender 0 is the session's word.
+	const auto sendObjectRests = [&](const PeerKey* a_to, const PeerKey* a_except, const std::vector<Protocol::ObjectRest>& a_rests, bool a_full, std::uint32_t a_sender = 0) {
+		for (std::size_t first = 0; first < a_rests.size() || (a_full && first == 0); first += Protocol::MAX_OBJECT_RESTS) {
+			Protocol::ObjectRests msg{ .sender = a_sender, .full = a_full && first == 0 };
+			const auto            end = (std::min)(a_rests.size(), first + Protocol::MAX_OBJECT_RESTS);
+			if (first < end) {
+				msg.rests.assign(a_rests.begin() + static_cast<std::ptrdiff_t>(first), a_rests.begin() + static_cast<std::ptrdiff_t>(end));
+			}
+			if (a_to) {
+				send(*a_to, Protocol::Encode(msg), true);
+			} else {
+				broadcast(Protocol::Encode(msg), true, a_except);
+			}
+		}
+	};
+	// A player's let-gos and rests judged by the book (common/ObjectBook.h): those that stand go to the others (the
+	// sender named), and a rest that came second is answered with the one that stands, to its game alone.
+	const auto judgeObjectRests = [&](const PeerKey& a_key, const Peer& a_peer, const std::vector<Protocol::ObjectRest>& a_rests, Clock::time_point a_now) {
+		std::vector<Protocol::ObjectRest> pass;
+		std::vector<Protocol::ObjectRest> answers;
+		for (const auto& rest : a_rests) {
+			const auto answer = objects.Rest(a_peer.playerId, rest, a_now);
+			if (answer.Passes()) {
+				pass.push_back(rest);
+			} else if (answer.rest) {
+				answers.push_back(*answer.rest);
+			}
+		}
+		if (!pass.empty()) {
+			sendObjectRests(nullptr, &a_key, pass, false, a_peer.playerId);
+		}
+		if (!answers.empty()) {
+			sendObjectRests(&a_key, nullptr, answers, false);
+		}
+	};
 	// A joined player is gone: the others hear it.
 	const auto left = [&](const PeerKey& a_key, const Peer& a_peer, std::string_view a_why) {
 		log(std::format("server: player {} left ({})", a_peer.playerId, a_why));
@@ -266,6 +309,8 @@ void Server::Run()
 		if (auto ended = sits.Leave(a_peer.playerId); !ended.empty()) {
 			sendSits(nullptr, &a_key, std::move(ended), false);
 		}
+		// What they held or threw is nobody's now (the others' games end a hold that stops coming).
+		objects.Leave(a_peer.playerId);
 	};
 
 	const auto onHello = [&](const PeerKey& a_key, Peer& a_peer, std::span<const std::uint8_t> a_data) {
@@ -323,6 +368,7 @@ void Server::Run()
 			fates.Clear();         // and the deaths and wounds of the last one are not this one's
 			rides.Clear();         // nor its rides
 			sits.Clear();          // nor who sat where
+			objects.Clear();       // nor where its loose objects lay
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -394,6 +440,10 @@ void Server::Run()
 		// Who is in what furniture (after the owners, as the rides).
 		if (auto all = sits.All(); !all.empty()) {
 			sendSits(&a_key, nullptr, std::move(all), true);
+		}
+		// Where the session's loose objects came to rest (the session's word: sender 0).
+		if (auto all = objects.All(); !all.empty()) {
+			sendObjectRests(&a_key, nullptr, all, true);
 		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
@@ -667,6 +717,49 @@ void Server::Run()
 				}
 			}
 			break;
+		case MT::kObjectHolds:
+			// What a player holds: passed on with the holder named, unless another player holds it (that game alone hears
+			// the holder's last hold, reliably, so it lets go); past the budget dropped (the next hold says it).
+			if (const auto msg = Protocol::DecodeObjectHolds(a_data)) {
+				const auto                       now = Clock::now();
+				std::vector<Protocol::ObjectHold> pass;
+				for (const auto& hold : msg->holds) {
+					if (!a_peer.objectHoldBudget.Take(now)) {
+						continue;
+					}
+					const auto answer = objects.Hold(a_peer.playerId, hold, now);
+					if (answer.Passes()) {
+						pass.push_back(hold);
+					} else if (answer.hold) {
+						send(a_key, Protocol::Encode(Protocol::ObjectHolds{ .sender = answer.holder, .holds = { *answer.hold } }), true);
+					}
+				}
+				if (!pass.empty()) {
+					broadcast(Protocol::Encode(Protocol::ObjectHolds{ .sender = a_peer.playerId, .holds = std::move(pass) }), false, &a_key);
+				}
+			}
+			break;
+		case MT::kObjectRests:
+			// Let-gos, rests and pickups of a player's game: judged and passed on within the budget, the rest owed.
+			if (const auto msg = Protocol::DecodeObjectRests(a_data); msg && !msg->full) {
+				const auto                        now = Clock::now();
+				std::vector<Protocol::ObjectRest> due;
+				for (const auto& rest : msg->rests) {
+					if (!objects.Owes(a_peer.playerId) && a_peer.objectRestBudget.Take(now)) {
+						due.push_back(rest);
+					} else {
+						objects.Owe(a_peer.playerId, rest);
+					}
+				}
+				judgeObjectRests(a_key, a_peer, due, now);
+			}
+			break;
+		case MT::kAskObjectRests:
+			// After a load: every kept place again, the whole list (a game forgets the places it was waiting to put).
+			if (Protocol::DecodeAskObjectRests(a_data)) {
+				sendObjectRests(&a_key, nullptr, objects.All(), true);
+			}
+			break;
 		case MT::kShots:
 			// To the others, the sender named: a player's own shots and those of the NPCs its game runs, each within the
 			// sender's budget (past it dropped, said once).
@@ -765,6 +858,16 @@ void Server::Run()
 				}
 				if (!pass.empty()) {
 					sendSits(nullptr, &key, std::move(pass), false, peer.playerId);
+				}
+			}
+			if (peer.joined && objects.Owes(peer.playerId)) {
+				std::vector<Protocol::ObjectRest> due;
+				Protocol::ObjectRest              rest;
+				while (due.size() < Protocol::MAX_OBJECT_RESTS && objects.Owes(peer.playerId) && peer.objectRestBudget.Take(now) && objects.NextOwed(peer.playerId, rest)) {
+					due.push_back(rest);
+				}
+				if (!due.empty()) {
+					judgeObjectRests(key, peer, due, now);
 				}
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {

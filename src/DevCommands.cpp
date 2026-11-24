@@ -8,6 +8,7 @@
 #include "game/Console.h"
 #include "game/Face.h"
 #include "game/Furniture.h"
+#include "game/LooseObjects.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
@@ -204,6 +205,13 @@ namespace DevCommands
 			return Furniture::Command(a_args);
 		}
 
+		// objects [probe <id> | near [radius] | grab]: loose objects' holds, let-gos and rests, ours and the friends'
+		// (LooseObjects::Command).
+		std::string ObjectsCommand(std::string_view a_args)
+		{
+			return LooseObjects::Command(a_args);
+		}
+
 		// shots [find <kind> | last]: projectiles said and launched, natives ended (Shots::Command).
 		std::string ShotsCommand(std::string_view a_args)
 		{
@@ -258,6 +266,7 @@ namespace DevCommands
 			{ "swim", SwimCommand },
 			{ "ride", RideCommand },
 			{ "sit", SitCommand },
+			{ "objects", ObjectsCommand },
 			{ "shots", ShotsCommand },
 			{ "strays", Strays },
 			{ "npcs", Npcs },
@@ -280,7 +289,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | objects [probe <id> | near [radius] | grab] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)
