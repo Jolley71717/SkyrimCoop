@@ -82,6 +82,11 @@ namespace
 		TokenBucket                     downBudget{ 8.0, 2.0 };
 		TokenBucket                     helpBudget{ 4.0, 1.0 };
 		bool                            toldDownsDropped = false;
+		// Copies' hit reactions sent on to their runners (kNpcReactions): a burst of 32, then 16 a second (a blow staggers one
+		// NPC once, a block makes one recoil; a fight with a few NPCs sends a few a second). Past it one is dropped, never
+		// kept: the moment is over by the time a budget would let it go.
+		TokenBucket reactionBudget{ 32.0, 16.0 };
+		bool        toldReactionsDropped = false;
 		bool        toldUnknown = false;
 	};
 
@@ -571,6 +576,35 @@ void Server::Run()
 				}
 				if (!answers.answers.empty()) {
 					send(a_key, Protocol::Encode(answers), true);
+				}
+			}
+			break;
+		case MT::kNpcReactions:
+			// Each reaction to its NPC's runner alone, by the server's own book, the player named. One of an NPC nobody runs, the
+			// sender runs (its copy was the NPC a moment ago: what it showed stands), or the session has dead goes nowhere.
+			if (const auto msg = Protocol::DecodeNpcReactions(a_data)) {
+				const auto                                       now = Clock::now();
+				std::map<std::uint32_t, Protocol::NpcReactions> toRunners;
+				for (const auto& reaction : msg->reactions) {
+					const auto runner = npcs.Owner(reaction.key);
+					if (runner == 0 || runner == a_peer.playerId || fates.IsDead(reaction.key) || !peerOf(runner)) {
+						continue;
+					}
+					if (!a_peer.reactionBudget.Take(now)) {
+						if (!a_peer.toldReactionsDropped) {
+							a_peer.toldReactionsDropped = true;
+							log(std::format("server: player {} sends hit reactions faster than they are passed on: the rest are dropped (said once)", a_peer.playerId));
+						}
+						continue;
+					}
+					auto& out = toRunners[runner];
+					out.player = a_peer.playerId;
+					out.reactions.push_back(reaction);
+				}
+				for (const auto& [runner, reactions] : toRunners) {
+					if (const auto to = peerOf(runner)) {
+						send(*to, Protocol::Encode(reactions), true);
+					}
 				}
 			}
 			break;

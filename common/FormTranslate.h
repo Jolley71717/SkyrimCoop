@@ -76,6 +76,7 @@ namespace FormTranslate
 		case MT::kNpcActions:
 		case MT::kNpcGear:
 		case MT::kNpcHits:
+		case MT::kNpcReactions:
 		case MT::kNpcHitAnswers:
 		case MT::kNpcHealths:
 		case MT::kNpcDeaths:
@@ -366,6 +367,11 @@ namespace FormTranslate
 		case MT::kNpcHits:
 			detail::Apply<Protocol::NpcHits>(a_packet, ctx, Protocol::DecodeNpcHits, [&](Protocol::NpcHits& a_msg) {
 				ctx.Entries(a_msg.hits, [&](Protocol::NpcHit& a_hit) { return ctx.Npc(a_hit.key); });
+			});
+			break;
+		case MT::kNpcReactions:
+			detail::Apply<Protocol::NpcReactions>(a_packet, ctx, Protocol::DecodeNpcReactions, [&](Protocol::NpcReactions& a_msg) {
+				ctx.Entries(a_msg.reactions, [&](Protocol::NpcReaction& a_reaction) { return ctx.Npc(a_reaction.key); });
 			});
 			break;
 		case MT::kNpcHitAnswers:

@@ -6,6 +6,7 @@
 #include "game/Furniture.h"
 #include "game/PairRules.h"
 #include "game/Pairs.h"
+#include "game/Reactions.h"
 #include "game/Gait.h"
 #include "game/Gear.h"
 #include "game/LocalPlayer.h"
@@ -143,6 +144,7 @@ namespace NpcSync
 			RE::FormID    id = 0;
 			std::uint32_t sentMs = 0;
 			std::string   event;
+			std::optional<Protocol::Stagger> stagger;  // a stagger's size and way (Reactions::StaggerOf)
 		};
 		std::mutex                    eventLock;
 		std::unordered_set<RE::FormID> runIds;  // the actors whose events are kept: those we run
@@ -172,7 +174,7 @@ namespace NpcSync
 		struct Counts
 		{
 			std::uint64_t claims = 0, granted = 0, refused = 0, released = 0, hands = 0, letGo = 0, graphsReset = 0;
-			std::uint64_t statesSent = 0, statesIn = 0, actionsSent = 0, actionsIn = 0, gearSent = 0, gearIn = 0, gearMissing = 0, gearSkipped = 0, gearTakenOff = 0;
+			std::uint64_t statesSent = 0, statesIn = 0, actionsSent = 0, actionsIn = 0, echoesSkipped = 0, gearSent = 0, gearIn = 0, gearMissing = 0, gearSkipped = 0, gearTakenOff = 0;
 			std::uint64_t spawnsPlaced = 0, spawnsTaken = 0, unshared = 0, lookDiffers = 0;
 			std::uint64_t fallbackSilent = 0, fallbackElsewhere = 0, fallbackFar = 0;
 			// A friend's hits on NPCs we run: came, applied; the healths and deaths we said and heard; NPCs killed as
@@ -233,6 +235,12 @@ namespace NpcSync
 		bool NotifyHook(RE::IAnimationGraphManagerHolder* a_this, const RE::BSFixedString& a_event)
 		{
 			const bool taken = originalNotify(a_this, a_event);
+			// A copy's hit reaction our player may have caused, kept for its runner (Reactions; it filters the rest).
+			if (taken) {
+				if (const auto name = a_event.c_str()) {
+					Reactions::HeardGraph(static_cast<RE::Actor*>(static_cast<RE::TESObjectREFR*>(a_this)), name);
+				}
+			}
 			if (!taken || recording.load(std::memory_order_relaxed) == 0) {
 				return taken;
 			}
@@ -252,7 +260,7 @@ namespace NpcSync
 			}
 			if (runIds.contains(id) && !Furniture::EngineOwnsEvents(actor) && !Pairs::EventsStay(actor)) {
 				if (heard.size() < MAX_PENDING_EVENTS) {
-					heard.push_back({ id, Protocol::SentMs(Clock::now()), std::string{ name } });
+					heard.push_back({ id, Protocol::SentMs(Clock::now()), std::string{ name }, Reactions::StaggerOf(actor, name) });
 				} else {
 					eventsLost.fetch_add(1, std::memory_order_relaxed);
 				}
@@ -505,7 +513,7 @@ namespace NpcSync
 		// Tells a copy's graph its walk's events (a_step's) and its runner's (a_events), and counts what it took and turned
 		// away. A walk event turned away is not asked again (a creature's graph may have no sneak or sprint at all), but a
 		// swim event is, SWIM_TRIES times for one change (Gait::Settle).
-		void TellCopy(RE::Actor* a_actor, const Key& a_key, const Gait::Step& a_step, const std::vector<std::string>& a_events)
+		void TellCopy(RE::Actor* a_actor, const Key& a_key, const Gait::Step& a_step, const std::vector<NpcRules::Event>& a_events)
 		{
 			std::uint64_t played = 0;
 			std::uint64_t refused = 0;
@@ -529,16 +537,16 @@ namespace NpcSync
 				}
 			}
 			for (const auto& event : a_events) {
-				const bool cast = SpellRules::CastEvent(event);
-				if (a_actor->NotifyAnimationGraph(Name(event))) {
+				const bool cast = SpellRules::CastEvent(event.name);
+				if (Reactions::Play(a_actor, event)) {
 					++played;
 					if (cast) {
 						++castsPlayed;
-						lastCast = event;
+						lastCast = event.name;
 					}
 				} else {
 					++refused;
-					lastRefused = event;
+					lastRefused = event.name;
 					castsRefused += cast ? 1 : 0;
 				}
 			}
@@ -1208,7 +1216,7 @@ namespace NpcSync
 					++loaded[key->second].castsSent;
 				}
 				pairActionsSent += PairRules::PairEvent(event.event) ? 1 : 0;  // (Pairs::EventsStay keeps them: the rig reads 0)
-				actions.actions.push_back({ key->second, event.sentMs, std::move(event.event) });
+				actions.actions.push_back({ key->second, event.sentMs, std::move(event.event), event.stagger });
 				if (actions.actions.size() >= Protocol::MAX_NPC_ACTIONS) {
 					counts.actionsSent += actions.actions.size();
 					a_send(Protocol::Encode(actions), true);
@@ -1956,7 +1964,12 @@ namespace NpcSync
 			if (it == copies.end() || it->second.feed.runner != a_msg.runner || !NpcRules::Replayed(action.event)) {
 				continue;
 			}
-			it->second.actions.Push(action.event, it->second.buffer.sender.At(action.sentMs), now);
+			// Our own reaction on this copy coming back from its runner: the copy played it already (Reactions).
+			if (Reactions::Echo(action.key, action.event, now)) {
+				++counts.echoesSkipped;
+				continue;
+			}
+			it->second.actions.Push(NpcRules::Event{ action.event, action.stagger }, it->second.buffer.sender.At(action.sentMs), now);
 			++counts.actionsIn;
 		}
 	}
@@ -2086,7 +2099,7 @@ namespace NpcSync
 		Key                                 key;
 		std::optional<StateBuffer::Sampled> sample;
 		Gait::Step                          step;
-		std::vector<std::string>            events;
+		std::vector<NpcRules::Event>        events;
 		// A copy our player sits on is ridden here: the engine moves it until its runner hands it over (a mount goes
 		// with its rider, NpcRules::Facts::ridden). A copy seated on its mount (Riding.h) is carried by the engine: not
 		// placed, and its walk not told.
@@ -2136,7 +2149,7 @@ namespace NpcSync
 			} else {
 				copy.shown = step.shown;
 			}
-			events = copy.actions.Due(now - StateBuffer::Buffer::Delay());
+			events = copy.actions.DueEvents(now - StateBuffer::Buffer::Delay());
 			copy.lastDrawn = sample->state;
 			copy.hasDrawn = true;
 			++copy.drawn;
@@ -2260,12 +2273,12 @@ namespace NpcSync
 		if (words.empty()) {
 			return std::format(
 				"active={} loaded={} run={} owners={} copies={} shown={} mirrored={} spawnCopies={} kinds={} claims={} granted={} refused={} released={} hands={} letGo={} graphsReset={} statesSent={} statesIn={} "
-				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
+				"actionsSent={} actionsIn={} echoesSkipped={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
 				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
 				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={} "
 				"pairActionsSent={} heldActionsDropped={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
-				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
+				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, counts.echoesSkipped, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
 				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad,

@@ -18,6 +18,7 @@
 #include "game/Riding.h"
 #include "game/Downed.h"
 #include "game/Pairs.h"
+#include "game/Reactions.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
 #include "game/VirtualPad.h"
@@ -185,6 +186,7 @@ namespace
 		if (!NpcSync::Install()) {
 			logs::warn("NPCs: copies of the NPCs this game runs show no actions in the others' games (the graph notify is not hooked)");
 		}
+		Reactions::Install();  // our player's hits, for the copies' hit reactions they cause
 		Shots::Install();  // every projectile an actor launches, said and shown (says why if not)
 		Pairs::Install();  // the load order's paired idles, by their events (kill moves said and played)
 		PlayerActions::Install();  // our player's attacks, casts and shouts, for the others' stand-in of us (says why if not)
