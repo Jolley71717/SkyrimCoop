@@ -16,6 +16,7 @@
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
 #include "game/Pairs.h"
+#include "game/Knocks.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
 #include "game/Water.h"
@@ -243,6 +244,7 @@ namespace Session
 					Furniture::Started(playerId);
 					Shots::Started(playerId);
 					Pairs::Started(playerId);
+					Knocks::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -264,6 +266,7 @@ namespace Session
 					Riding::Left(msg->playerId);
 					Furniture::Left(msg->playerId);
 					Pairs::Left(msg->playerId);
+					Knocks::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -345,6 +348,11 @@ namespace Session
 			case Protocol::MessageType::kPairs:
 				if (const auto msg = Protocol::DecodePairs(a_data); msg && msg->sender != playerId) {
 					Pairs::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kKnocks:
+				if (const auto msg = Protocol::DecodeKnocks(a_data); msg && msg->sender != playerId) {
+					Knocks::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -514,6 +522,7 @@ namespace Session
 				Steam::Leave();
 			}
 		}
+		Knocks::Clear();  // actors held by a knock let go (their Paralysis values taken back)
 		Pairs::Clear();   // actors held by a pair let go first
 		Shots::Clear();   // our launches ended while the stand-ins and copies that shot them are still there
 		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
@@ -563,6 +572,7 @@ namespace Session
 			Furniture::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Pairs::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Knocks::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 		StandInPeace::Frame();  // after the stand-ins are placed: actors fighting one told to stop

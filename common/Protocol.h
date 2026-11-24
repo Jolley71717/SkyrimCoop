@@ -59,7 +59,11 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	inline constexpr std::uint16_t VERSION = 24;
+	// 32: knockdowns (kKnocks, message type 85): a living actor knocked down or ragdolled (a push, an explosion, a giant's
+	//    blow, a fall, a paralysis) is said by the game that runs it as it goes down and as it gets up, and every other
+	//    game knocks the actor that shows it the same way and keeps it down until then; a knock one game gives a copy is
+	//    asked of the copy's runner. (As with 21: renumbered when it lands; 25-31 are other changes'.)
+	inline constexpr std::uint16_t VERSION = 32;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -130,6 +134,8 @@ namespace Protocol
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
 		// 59-75: the other changes' messages (each in its own change).
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
+		// 77-84: the other changes' messages (each in its own change).
+		kKnocks = 85,  // both ways, reliable: knockdowns of our player and the NPCs a game runs; a knock asked of an NPC's runner
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -874,6 +880,75 @@ namespace Protocol
 		                   std::ranges::none_of(a_pair.event, [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7F; });
 		return sides && event && (a_pair.flags & ~kPairAllFlags) == 0 && InWorld(a_pair.x) && InWorld(a_pair.y) && InWorld(a_pair.z) &&
 		       std::isfinite(a_pair.heading) && std::fabs(a_pair.heading) <= 7.0f;
+	}
+
+	// ---- knockdowns (docs/DESIGN.md, "Knockdowns") ----
+	// A living actor knocked down or ragdolled: pushed (Unrelenting Force, an explosion, a giant's or a mammoth's blow, a
+	// power bash's knockdown, a fall) or paralysed (a spell, a poison, Ice Form). The game that runs it (its player's, an
+	// NPC's runner) says it as it goes down and as it gets up; every other game knocks the actor that shows it there the
+	// same way and keeps it down until it gets up. A knock a game gives a copy of an NPC another game runs is asked of that
+	// runner, which knocks its NPC the same way (and then says it as its own).
+
+	// At most this many in one message (a game sends what a tick saw).
+	inline constexpr std::size_t MAX_KNOCKS = 32;
+	// u/s: the fastest launch a knock says (a giant's club sends one flying at a few thousand).
+	inline constexpr float MAX_KNOCK_SPEED = 8000.0f;
+
+	enum class KnockPhase : std::uint8_t
+	{
+		kDown = 1,  // knocked down: where it began, its launch
+		kUp = 2,    // getting up: where it rests
+		kAsk = 3,   // a knock a game gave a copy, to the NPC's runner: where it began, its launch
+	};
+
+	enum class KnockKind : std::uint8_t
+	{
+		kPush = 0,       // thrown or fallen: a launch (maybe none: a fall in place)
+		kParalysis = 1,  // paralysed: falls where it stands, down until its paralysis ends
+	};
+
+	// One knock. actor: a player (player != 0: the sender's own, which the server checks) or an NPC (npc.id != 0) as the
+	// session names it. x y z: where it began (down, ask) or where it rests (up), in the sender's world; vx vy vz: its
+	// launch, u/s (down, ask; none for an up).
+	struct Knock
+	{
+		PairSide      actor;
+		std::uint32_t sentMs = 0;
+		KnockPhase    phase = KnockPhase::kDown;
+		KnockKind     kind = KnockKind::kPush;
+		float         x = 0, y = 0, z = 0;
+		float         vx = 0, vy = 0, vz = 0;
+		bool operator==(const Knock&) const = default;
+	};
+
+	// sender: 0 from a game; the server names the game that sent them.
+	struct Knocks
+	{
+		std::uint32_t      sender = 0;
+		std::vector<Knock> knocks;
+		bool operator==(const Knocks&) const = default;
+	};
+
+	// Whether a knock can be: one actor, a known phase and kind, an ask only of an NPC, a place a game can hold, a launch
+	// finite and at most MAX_KNOCK_SPEED, and none for an up.
+	[[nodiscard]] inline bool KnockHolds(const Knock& a_knock)
+	{
+		const auto phase = static_cast<std::uint8_t>(a_knock.phase);
+		const auto kind = static_cast<std::uint8_t>(a_knock.kind);
+		if (!PairSideHolds(a_knock.actor) || phase < 1 || phase > 3 || kind > 1) {
+			return false;
+		}
+		if (a_knock.phase == KnockPhase::kAsk && a_knock.actor.player != 0) {
+			return false;
+		}
+		if (!InWorld(a_knock.x) || !InWorld(a_knock.y) || !InWorld(a_knock.z)) {
+			return false;
+		}
+		if (!std::isfinite(a_knock.vx) || !std::isfinite(a_knock.vy) || !std::isfinite(a_knock.vz)) {
+			return false;
+		}
+		const float speed = std::sqrt(a_knock.vx * a_knock.vx + a_knock.vy * a_knock.vy + a_knock.vz * a_knock.vz);
+		return a_knock.phase == KnockPhase::kUp ? speed == 0.0f : speed <= MAX_KNOCK_SPEED;
 	}
 
 	// Whether a sit can be: one actor (a player and no NPC, or an NPC of id != 0), a known kind, a place a game can hold,
@@ -2221,6 +2296,61 @@ namespace Protocol
 	inline constexpr std::size_t PAIR_BYTES = 2 * (4 + 8) + 4 + 4 + 1 + MAX_EVENT_NAME + 1 + 4 * 4;
 	inline constexpr std::size_t MAX_PAIRS_SIZE = 1 + 4 + 1 + MAX_PAIRS * PAIR_BYTES;
 	static_assert(MAX_PAIRS <= 0xFF && MAX_PAIRS_SIZE <= 2048, "a message of pairs stays small");
+
+	inline std::vector<std::uint8_t> Encode(const Knocks& a_msg)
+	{
+		Writer     w{ MessageType::kKnocks };
+		const auto count = (std::min)(a_msg.knocks.size(), MAX_KNOCKS);
+		w.U32(a_msg.sender);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& knock = a_msg.knocks[i];
+			WritePairSide(w, knock.actor);
+			w.U32(knock.sentMs);
+			w.U8(static_cast<std::uint8_t>(knock.phase));
+			w.U8(static_cast<std::uint8_t>(knock.kind));
+			for (const auto v : { knock.x, knock.y, knock.z, knock.vx, knock.vy, knock.vz }) {
+				w.F32(v);
+			}
+		}
+		return w.Data();
+	}
+
+	// None for more than MAX_KNOCKS, or a knock that does not hold (KnockHolds).
+	inline std::optional<Knocks> DecodeKnocks(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Knocks msg;
+		msg.sender = r.U32();
+		const auto count = r.U8();
+		if (!r.Ok() || count > MAX_KNOCKS) {
+			return std::nullopt;
+		}
+		msg.knocks.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			Knock knock;
+			knock.actor = ReadPairSide(r);
+			knock.sentMs = r.U32();
+			knock.phase = static_cast<KnockPhase>(r.U8());
+			knock.kind = static_cast<KnockKind>(r.U8());
+			for (auto* v : { &knock.x, &knock.y, &knock.z, &knock.vx, &knock.vy, &knock.vz }) {
+				*v = r.F32();
+			}
+			if (r.Ok() && !KnockHolds(knock)) {
+				return std::nullopt;
+			}
+			msg.knocks.push_back(knock);
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t KNOCK_BYTES = (4 + 8) + 4 + 1 + 1 + 6 * 4;
+	inline constexpr std::size_t MAX_KNOCKS_SIZE = 1 + 4 + 1 + MAX_KNOCKS * KNOCK_BYTES;
+	static_assert(MAX_KNOCKS <= 0xFF && MAX_KNOCKS_SIZE <= 2048, "a message of knocks stays small");
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

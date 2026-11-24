@@ -62,12 +62,13 @@ declare -A STEP_INFO=(
 	[peace]="in each game, its stand-in of the other player is a ghost in no fight with the four hooks in; that game's player walks up to it with its virtual pad and swings a sword, casts Flames and Firebolt (console) at it: nothing lands, no bounty, no fight, no actor turns on it; a wolf placed at it (console) never picks it in 15 s, and made to fight it with the console is turned away or told to stop (steps/peace.sh)"
 	[npcspells]="each way, a person one game runs is armed with spells and a power (dev set-up) and the other game's copy of it, taught them by the console, holds each; a spell the copy does not know is never taught to it (lacks); the copy's summon cast from the console is refused by the effect hook, and one let through is ended by the scan; set on its runner's player, the copy plays its runner's casts (steps/npcspells.sh)"
 	[pairs]="each way, the mover's player plays a kill move idle on a person the mover runs (dev set-up, as an injected attack), an NPC of the mover's on another, and the mover's player on a person the watcher runs: the mover says the pair once (and holds its copy of a victim it does not run), the watcher plays it on the stand-in and the copies (or its own NPC) and both halves take it close together, none of its events is sent as an action or said back, the victim dies once in both games (the mover's player its killer), and the actors are let go and the stand-in placed again (steps/pairs.sh)"
+	[knocks]="each way, a person, a creature and the player the mover runs pushed down and a person paralysed (dev set-up, as an injected attack): the mover says it down and up, the watcher knocks its copy or stand-in the same way, holds it, keeps a paralysed copy down (and through a VM save) and lets it go, none of its events is sent as an action or said back, and a push of the mover's copy of the watcher's NPC is asked of the watcher, which knocks its NPC (steps/knocks.sh)"
 	[forms]="(only when named) the VM's plugins in another order: it joins, and an armor each puts on is on the other's stand-in as that game's own form (steps/forms.sh)"
 	[final]="both games still up, no stray stand-ins, the plugin logs (errors, privacy), the host never saved or loaded, no crash"
 )
-STEPS="preflight world join see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots sit peace npcspells pairs forms final"
+STEPS="preflight world join see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots sit peace npcspells pairs knocks forms final"
 # Steps that need the two games in one session; the state guard puts them back in one first (smoke.sh run()).
-SESSION_STEPS="see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots sit peace npcspells pairs forms"
+SESSION_STEPS="see move_vm move_host gait save_rejoin npcs npccombat actions faces swim ride shots sit peace npcspells pairs knocks forms"
 # Steps a run makes only when --only names them: they change a game's files for a while (each puts them back, and the
 # set-up heals what a run that died left), which the maintainer agrees to before they run by default.
 OPTIN_STEPS="forms"
@@ -500,6 +501,7 @@ declare -F step_sit >/dev/null || . "$RIG/steps/sit.sh"
 declare -F step_peace >/dev/null || . "$RIG/steps/peace.sh"
 declare -F step_npcspells >/dev/null || . "$RIG/steps/npcspells.sh"
 declare -F step_pairs >/dev/null || . "$RIG/steps/pairs.sh"
+declare -F step_knocks >/dev/null || . "$RIG/steps/knocks.sh"
 
 # --- self-test: the steps' reading of the games, both games faked ------------------------------------------------
 if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then

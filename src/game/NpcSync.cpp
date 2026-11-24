@@ -6,6 +6,7 @@
 #include "game/Furniture.h"
 #include "game/PairRules.h"
 #include "game/Pairs.h"
+#include "game/Knocks.h"
 #include "game/Gait.h"
 #include "game/Gear.h"
 #include "game/LocalPlayer.h"
@@ -25,6 +26,7 @@
 #include <mutex>
 #include <numbers>
 #include <set>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -250,7 +252,7 @@ namespace NpcSync
 			if (runIds.contains(id)) {
 				Pairs::Noted(actor, name);
 			}
-			if (runIds.contains(id) && !Furniture::EngineOwnsEvents(actor) && !Pairs::EventsStay(actor)) {
+			if (runIds.contains(id) && !Furniture::EngineOwnsEvents(actor) && !Pairs::EventsStay(actor) && !Knocks::EventsStay(actor)) {
 				if (heard.size() < MAX_PENDING_EVENTS) {
 					heard.push_back({ id, Protocol::SentMs(Clock::now()), std::string{ name } });
 				} else {
@@ -2102,8 +2104,9 @@ namespace NpcSync
 			return false;
 		}
 		// Its runner's actions meanwhile are dropped: they are its walk and its fight from before the pair, and played once
-		// it is let go they would pull it out of the pair's end (its death, or where the pairing left it).
-		if (Pairs::Held(a_actor)) {
+		// it is let go they would pull it out of the pair's end (its death, or where the pairing left it). The same knocked
+		// down (Knocks.h): the engine's ragdoll and get-up place it, and its runner's own knock is played here.
+		if (Pairs::Held(a_actor) || Knocks::Held(a_actor)) {
 			std::scoped_lock l{ copyLock };
 			if (const auto byActor = copyByActor.find(a_actor); byActor != copyByActor.end()) {
 				if (const auto it = copies.find(byActor->second); it != copies.end() && it->second.actorId == a_actor->GetFormID()) {
@@ -2446,6 +2449,26 @@ namespace NpcSync
 				continue;
 			}
 			if (auto actor = npc.handle.get(); actor && actor->GetFormID() == npc.id) {
+				out.emplace_back(key, std::move(actor));
+			}
+		}
+		return out;
+	}
+
+	std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> CopyActors()
+	{
+		std::vector<std::tuple<Protocol::NpcKey, RE::ActorHandle, RE::FormID>> mirrored;
+		{
+			std::scoped_lock l{ copyLock };
+			for (const auto& [key, copy] : copies) {
+				if (copy.mirror && copy.actorId != 0) {
+					mirrored.emplace_back(key, copy.handle, copy.actorId);
+				}
+			}
+		}
+		std::vector<std::pair<Protocol::NpcKey, RE::NiPointer<RE::Actor>>> out;
+		for (const auto& [key, handle, id] : mirrored) {
+			if (auto actor = handle.get(); actor && actor->GetFormID() == id) {
 				out.emplace_back(key, std::move(actor));
 			}
 		}

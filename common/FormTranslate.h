@@ -85,6 +85,7 @@ namespace FormTranslate
 		case MT::kShots:
 		case MT::kSits:
 		case MT::kPairs:
+		case MT::kKnocks:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -428,6 +429,12 @@ namespace FormTranslate
 				for (auto& pair : a_msg.pairs) {
 					ctx.Detail(pair.idle);
 				}
+			});
+			break;
+		// Knockdowns: one of an NPC the other side lacks is left out (no copy to knock); a player's is kept.
+		case MT::kKnocks:
+			detail::Apply<Protocol::Knocks>(a_packet, ctx, Protocol::DecodeKnocks, [&](Protocol::Knocks& a_msg) {
+				ctx.Entries(a_msg.knocks, [&](Protocol::Knock& a_knock) { return a_knock.actor.player != 0 || ctx.Npc(a_knock.actor.npc); });
 			});
 			break;
 		default:
