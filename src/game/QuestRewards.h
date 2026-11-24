@@ -14,6 +14,9 @@
 // sees the item come to its player from nothing while the Dialogue Menu is open, names the quest by the topic info said
 // last, and says it (kQuestReward); every other game gives its player the same (`player.additem`) once the quest's
 // stages from the session are made there, less what its player got from them already.
+// Not a reward: an item a stage gave (any stage made in that game in the talk: every game's stage gives its own),
+// one bought (gold paid near it), a key. Not shared at all: what is not an item (a spell, a perk, a shout, a skill a
+// line teaches) and what an NPC hands over from its own inventory (it comes from a container: that NPC's, in each world).
 //
 // Quest items stay each world's own: an item the quest holds in an alias comes as a reference, not from nothing, and is
 // not a reward here (whoever holds it hands it in, and the quest's stages follow for everyone).
@@ -38,8 +41,12 @@ namespace QuestRewards
 	// From the session: another player's reward (kRemoteQuestReward).
 	void Heard(const Protocol::QuestReward& a_reward);
 
-	// A save was loaded or a new game started: what our player got before is of another world.
+	// A save was loaded or a new game started: what our player got before is of another world. In the host's game the
+	// rewards heard and not given yet go too (its world is from before them); a friend's keep them.
 	void AfterLoad();
+	// From the session: the host's world is new (kQuestReset of another player): the rewards heard and not given yet are
+	// of the world before, and dropped.
+	void HostReset(std::uint32_t a_hostId);
 
 	// The session ended.
 	void Clear();

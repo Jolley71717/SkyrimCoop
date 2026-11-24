@@ -24,14 +24,21 @@
 // - of a quest the session shares here: the quest of the topic info said last, no longer than INFO_WINDOW before;
 // - an item kind a reward shares: anything a player carries but a key (a key is a door's: the quest gives it to who
 //   opens it);
-// - not given by a stage of that quest this game made from the session's word just before (MADE_GRACE): that stage is
-//   another player's step, made in every game, so every game's fragment gave it already.
+// - not bought: no gold left our player for nothing or to whom it talks with within PAID_GRACE of it (a line that sells
+//   something, or a service paid for in a line, is our player's purchase, not a gift to everyone);
+// - not a stage's: no stage of any quest was made in this game in the talk or just before it (MADE_GRACE). A stage is
+//   made in every game (ours by the game, another player's from the session's word), so whatever its fragment gives
+//   (an item of a leveled list, rolled in each game on its own, as much as a fixed one) each game's own fragment gives
+//   its own player; said here as well, it would be given twice. From the stage to the talk's end, not a fixed time: a
+//   fragment may run late. An info that sets a stage before giving its own item has that item counted as the stage's,
+//   so too little is shared, never too much.
 // Such an item is said to the session as that quest's reward (several of the same item within SEND_AFTER are one), and
-// every other game gives its player the same. The stage the conversation set may give a reward of its own in each game
-// (its fragment), and the two cannot be told apart in the talker's game, so a game gives only what its player did not
-// get already: it waits until the quest's stages from the session are made here and SETTLE has passed since the last
-// (their fragments ran), then gives the reward less what its player got from nothing since that stage was made
-// (Ledger). A reward from the conversation alone is given whole; one its stage gave everywhere is given nowhere twice.
+// every other game gives its player the same. A game gives only what its player did not get already: it waits until
+// the quest's stages from the session are made here and SETTLE has passed since the last (their fragments ran), then
+// gives the reward less what its player got from nothing since that stage was made (Ledger: anything of the same item,
+// whatever gave it, so it may give too little, never twice). It never gives while its own player talks (or did up to
+// TALK_GRACE ago): our give would come from nothing in our talk, and be taken for our own reward. A reward heard from a
+// world the host left (its load, its reset) is dropped by the game (QuestRewards), never given.
 namespace RewardRules
 {
 	using Clock = std::chrono::steady_clock;
@@ -39,7 +46,8 @@ namespace RewardRules
 
 	inline constexpr auto TALK_GRACE = 2s;   // an item this long after the Dialogue Menu shut is still the talk's
 	inline constexpr auto TRADE_GRACE = 1s;  // a trading menu shut this long ago: still a trade
-	inline constexpr auto MADE_GRACE = 2s;   // an item this long after a stage of the quest made here from the session's word is that stage's
+	inline constexpr auto MADE_GRACE = 2s;   // an item this long after a stage made here is that stage's (and all of the talk after a stage made in it)
+	inline constexpr auto PAID_GRACE = 2s;   // an item this near gold our player paid in the talk is bought
 	inline constexpr auto INFO_WINDOW = 10s;  // the topic info said last names the quest when said this long before at most
 	inline constexpr auto SEND_AFTER = 1s;   // a reward goes this long after its last item (its stage is reported first)
 	inline constexpr auto SETTLE = 5s;       // given this long after the quest's last stage made here (its fragments ran)
@@ -52,6 +60,7 @@ namespace RewardRules
 	inline constexpr std::size_t   MAX_OUTBOX = 64;
 	inline constexpr std::size_t   MAX_LEDGER = 512;
 	inline constexpr std::size_t   MAX_WAITING = 64;
+	inline constexpr std::size_t   MAX_MARKS = 16;  // the stages made and the gold paid lately that a talk keeps (the newest)
 
 	// The item kinds a reward shares: anything a player carries but a key.
 	[[nodiscard]] constexpr bool KindShared(LootRules::ItemKind a_kind)
@@ -61,15 +70,71 @@ namespace RewardRules
 
 	// ---- the talker's game: is this item a reward -------------------------------------------------------------------
 
-	// What our game saw of our player's talk, read each tick (the menus) and from the game's topic info event.
+	// Times something happened lately, oldest first, the newest MAX_MARKS kept.
+	class Marks
+	{
+	public:
+		void Add(Clock::time_point a_at)
+		{
+			if (!at.empty() && a_at < at.back()) {
+				a_at = at.back();  // the events' times come from several threads: kept in order
+			}
+			if (at.size() >= MAX_MARKS) {
+				at.pop_front();
+			}
+			at.push_back(a_at);
+		}
+
+		// The newest at a_at or before.
+		[[nodiscard]] std::optional<Clock::time_point> Before(Clock::time_point a_at) const
+		{
+			for (auto it = at.rbegin(); it != at.rend(); ++it) {
+				if (*it <= a_at) {
+					return *it;
+				}
+			}
+			return std::nullopt;
+		}
+
+		// Whether one is within a_grace of a_at, before or after.
+		[[nodiscard]] bool Near(Clock::time_point a_at, Clock::duration a_grace) const
+		{
+			return std::ranges::any_of(at, [&](const auto& a_t) { return a_t <= a_at + a_grace && a_at <= a_t + a_grace; });
+		}
+
+		[[nodiscard]] std::size_t Size() const { return at.size(); }
+		void Clear() { at.clear(); }
+
+	private:
+		std::deque<Clock::time_point> at;
+	};
+
+	// What our game saw of our player's talk, read each tick (the menus) and from the game's events.
 	struct Talk
 	{
 		std::optional<Clock::time_point> dialogue;  // the Dialogue Menu last seen open
+		std::optional<Clock::time_point> opened;    // when this talk began (the menu seen open after none for TALK_GRACE)
 		std::optional<Clock::time_point> trade;     // a barter, gift, container or training menu last seen open
 		std::uint32_t                    infoQuest = 0;  // the quest of the topic info said last, if the session shares it here
 		std::optional<Clock::time_point> infoAt;         // when that info was said
-		std::optional<Clock::time_point> madeAt;         // the last stage of that quest made here from the session's word
+		Marks                            staged;  // a stage of any quest made in this game (ours, or from the session's word)
+		Marks                            paid;    // gold left our player for nothing or to whom it talks with
+
+		// The Dialogue Menu seen open at a_now.
+		void Open(Clock::time_point a_now)
+		{
+			if (!dialogue || a_now - *dialogue > TALK_GRACE) {
+				opened = a_now;
+			}
+			dialogue = a_now;
+		}
 	};
+
+	// Whether our player talks at a_now (the Dialogue Menu open, or shut less than TALK_GRACE ago).
+	[[nodiscard]] inline bool Talking(const Talk& a_talk, Clock::time_point a_now)
+	{
+		return a_talk.dialogue && a_now - *a_talk.dialogue <= TALK_GRACE;
+	}
 
 	// Why an item that came from nothing is or isn't a reward (counted by name in `rewards`).
 	enum class Why : std::uint8_t
@@ -79,9 +144,10 @@ namespace RewardRules
 		kTrading,     // a trading menu open or just shut
 		kNoQuest,     // no topic info said lately, or its quest is not shared here
 		kKind,        // a key, or no item a player carries
-		kMade,        // a stage of the quest made here from the session's word just gave it (another player's step)
+		kMade,        // a stage made here in the talk or just before gave it: every game's stage gives its own
+		kBought,      // our player paid gold for it in the talk
 	};
-	inline constexpr std::size_t WHY_COUNT = static_cast<std::size_t>(Why::kMade) + 1;
+	inline constexpr std::size_t WHY_COUNT = static_cast<std::size_t>(Why::kBought) + 1;
 
 	[[nodiscard]] constexpr const char* WhyName(Why a_why)
 	{
@@ -98,6 +164,8 @@ namespace RewardRules
 			return "kind";
 		case Why::kMade:
 			return "made";
+		case Why::kBought:
+			return "bought";
 		}
 		return "?";
 	}
@@ -108,7 +176,7 @@ namespace RewardRules
 		if (!KindShared(a_kind)) {
 			return Why::kKind;
 		}
-		if (!a_talk.dialogue || a_at - *a_talk.dialogue > TALK_GRACE) {
+		if (!Talking(a_talk, a_at)) {
 			return Why::kNotTalking;
 		}
 		if (a_talk.trade && a_at - *a_talk.trade <= TRADE_GRACE) {
@@ -117,8 +185,14 @@ namespace RewardRules
 		if (a_talk.infoQuest == 0 || !a_talk.infoAt || a_at - *a_talk.infoAt > INFO_WINDOW) {
 			return Why::kNoQuest;
 		}
-		if (a_talk.madeAt && a_at >= *a_talk.madeAt && a_at - *a_talk.madeAt <= MADE_GRACE) {
-			return Why::kMade;
+		if (a_talk.paid.Near(a_at, PAID_GRACE)) {
+			return Why::kBought;
+		}
+		// The stage's: made just before, or made in this talk (or just before it began) and the item came later in it.
+		if (const auto stage = a_talk.staged.Before(a_at)) {
+			if (a_at - *stage <= MADE_GRACE || (a_talk.opened && *stage + MADE_GRACE >= *a_talk.opened)) {
+				return Why::kMade;
+			}
 		}
 		return Why::kReward;
 	}
@@ -270,11 +344,15 @@ namespace RewardRules
 		std::uint32_t had = 0;   // with kGive: how many our player got already (from the ledger, used up)
 	};
 
-	// What to do with a heard reward now. With kGive the ledger's share of it is used up.
-	[[nodiscard]] inline Decision Judge(const Heard& a_heard, const QuestHere& a_quest, Ledger& a_ledger, Clock::time_point a_now)
+	// What to do with a heard reward now (a_weTalk: our own player talks, Talking). With kGive the ledger's share of it is
+	// used up.
+	[[nodiscard]] inline Decision Judge(const Heard& a_heard, const QuestHere& a_quest, Ledger& a_ledger, Clock::time_point a_now, bool a_weTalk = false)
 	{
 		if (!a_quest.shared) {
 			return { Verdict::kNotShared };
+		}
+		if (a_weTalk) {
+			return { Verdict::kWait };  // given after: in our talk it would be taken for our own reward and said back
 		}
 		if (a_now - a_heard.at >= GIVE_UP) {
 			return { Verdict::kStale };

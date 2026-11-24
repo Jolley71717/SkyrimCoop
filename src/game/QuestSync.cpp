@@ -1373,6 +1373,8 @@ namespace QuestSync
 
 	bool HearsOthers() { return resetsOut == 0; }
 
+	bool HostsWorld() { return host && ourId != 0; }
+
 	bool Install()
 	{
 		if (installed) {
