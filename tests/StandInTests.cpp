@@ -474,6 +474,42 @@ TEST("stand-in rules: what the game's own update asks again: a draw or a sheathe
 	}
 }
 
+TEST("stand-in rules: a stand-in still wanting is told its friend's wish, which can undo the want (a sheathe wanted while its friend draws)")
+{
+	using W = StandInRules::Weapon;
+	const std::optional<bool> drawn{ true }, away{ false }, unknown;
+	CHECK(StandInRules::FinishWish(W::kWantToDraw, drawn) == drawn);
+	CHECK(StandInRules::FinishWish(W::kWantToSheathe, drawn) == drawn);  // the game turns it to drawn at once
+	CHECK(StandInRules::FinishWish(W::kWantToDraw, away) == away);       // and this to sheathed
+	CHECK(StandInRules::FinishWish(W::kWantToSheathe, away) == away);
+	CHECK(StandInRules::FinishWish(W::kWantToDraw, unknown) == drawn);   // a copy: what the game's update would ask
+	CHECK(StandInRules::FinishWish(W::kWantToSheathe, unknown) == away);
+	for (const auto state : { W::kSheathed, W::kDrawing, W::kDrawn, W::kSheathing }) {
+		CHECK(!StandInRules::FinishWish(state, drawn).has_value());
+		CHECK(!StandInRules::FinishWish(state, unknown).has_value());
+	}
+}
+
+TEST("stand-in rules: an equip whose model load stays pending is finished after a second, at most once a second")
+{
+	StandInRules::EquipNudge nudge;
+	const auto               t = Steady::now();
+	CHECK(!nudge.Due(false, t));
+	CHECK(!nudge.Due(true, t));                        // pending from now
+	CHECK(!nudge.Due(true, t + 900ms));
+	CHECK(nudge.Due(true, t + 1s));                    // a second pending
+	CHECK(!nudge.Due(true, t + 1500ms));               // not again within a second
+	CHECK(nudge.Due(true, t + 2s));
+	CHECK(nudge.nudges == 2);
+	CHECK(!nudge.Due(false, t + 2500ms));              // done: forgotten
+	CHECK(!nudge.Due(true, t + 3100ms));               // pending again: a fresh second
+	CHECK(nudge.Due(true, t + 4100ms));
+	nudge.Reset();
+	CHECK(!nudge.Due(true, t + 4200ms));
+	CHECK(nudge.Due(true, t + 5200ms));
+	CHECK(nudge.nudges == 4);
+}
+
 TEST("stand-in rules: a stand-in is told to draw the moment its friend draws, once it holds what its friend holds")
 {
 	using W = StandInRules::Weapon;

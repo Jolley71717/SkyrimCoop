@@ -474,6 +474,58 @@ namespace StandInRules
 		return std::nullopt;
 	}
 
+	// What a stand-in still wanting to draw or put away is told on its update: its friend's wish when known (a draw
+	// left wanting is turned to a sheathe when its friend put it away, and the other way; the game turns a wanted
+	// sheathe into drawn at once when told to draw), else what the game's own update would ask (AskAgain). Nothing when
+	// it wants nothing.
+	[[nodiscard]] constexpr std::optional<bool> FinishWish(Weapon a_state, std::optional<bool> a_friendDrawn)
+	{
+		const auto again = AskAgain(a_state);
+		return again && a_friendDrawn ? a_friendDrawn : again;
+	}
+
+	// Skyrim SE 1.7.104: an actor's draw is only asked of its graph once the models of what its hands hold have loaded.
+	// While an equip's model load is pending (the middle-high process's hand load ids, +0x1F8 and +0x1FA, not 0xFFFF),
+	// DrawWeaponMagicHands leaves it wanting to draw without asking. Actor::OnItemEquipped (vfunc 0xB2) checks the load
+	// and, once it is done, finishes the equip: the hands' 3D and graph variables, the draw, and the ids back to 0xFFFF.
+	// A stand-in whose load stays pending past WAIT is given that call, no oftener than every COOL (nudges: the rig's
+	// equipNudges=).
+	class EquipNudge
+	{
+	public:
+		static constexpr auto WAIT = 1s;
+		static constexpr auto COOL = 1s;
+
+		[[nodiscard]] bool Due(bool a_pending, Clock::time_point a_now)
+		{
+			if (!a_pending) {
+				since.reset();
+				return false;
+			}
+			if (!since) {
+				since = a_now;
+			}
+			if (a_now - *since < WAIT || (last && a_now - *last < COOL)) {
+				return false;
+			}
+			last = a_now;
+			++nudges;
+			return true;
+		}
+
+		void Reset()
+		{
+			since.reset();
+			last.reset();
+		}
+
+		std::uint64_t nudges = 0;
+
+	private:
+		std::optional<Clock::time_point> since;
+		std::optional<Clock::time_point> last;
+	};
+
 	// Drawn or put away, done or under way: where the state stands or is heading (kDrawing, kDrawn and kWantToDraw
 	// toward drawn).
 	[[nodiscard]] constexpr bool TowardDrawn(Weapon a_state)

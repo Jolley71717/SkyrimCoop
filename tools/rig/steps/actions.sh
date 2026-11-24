@@ -29,8 +29,8 @@
 #          did, and the hook heard none, is a FAIL (the events go some way the hook does not see); it did nothing is the
 #          press's (a rig fault).
 #        - the watcher's stand-in played that kind (its byKind=) within ACTIONS_WAIT: FAIL if not.
-#      The weapon drawn and put away is read on the stand-in itself (drawn=; a FAIL says its weaponState=, process= and
-#      responses=), and a draw the stand-in had to be told again (drawFixes= up: the first did not hold) is a WARN.
+#      The weapon drawn and put away is read on the stand-in itself (drawn=; a FAIL says its weaponState=, process=,
+#      responses=, equipLoad= and equipNudges=, and the run says its graph's weapon variables and active nodes), and a draw the stand-in had to be told again (drawFixes= up: the first did not hold) is a WARN.
 #   3. It deals nothing here: the mover walks up to the watcher's player with its virtual pad (`walkto` the stand-in of
 #      it, ACTIONS_REACH u; a walk that does not get there facing it is a rig fault), casts Flames at it (magicka spent,
 #      or a rig fault), then looses an arrow at it, then shouts at it. In the watcher's game, its stand-in cast
@@ -72,6 +72,8 @@ act_heard() { act_kind "$(field byKind "$(act_own "$(dc "$1" actions)")")" "$2";
 act_played() { act_kind "$(field byKind "$(act_friend "$(dc "$1" actions)")")" "$2"; }
 # act_field <who> <name>: a field of that game's stand-in's part
 act_field() { field "$2" "$(act_friend "$(dc "$1" actions)")"; }
+# act_friend_id <who>: the player id of that game's stand-in of its friend
+act_friend_id() { act_friend "$(dc "$1" actions)" | awk '{print $2}'; }
 # act_own_field <who> <name>: a field of that game's own part (our player)
 act_own_field() { field "$2" "$(act_own "$(dc "$1" actions)")"; }
 # act_own_holds <who> <hand|ammo|voice> <id>: that game's own player holds the id there, as its game reads it back
@@ -171,6 +173,13 @@ act_try() {
 		fail "$label: the $w's stand-in plays it" "the $m sent $((h1 - h0)) $kind event(s); the $w's stand-in played none in $ACTIONS_WAIT s ($(act_friend "$(dc "$w" actions)" | cut -c1-200))"
 }
 
+# act_draw_why <watcher>: after a draw FAIL, what the stand-in's graph and hands say (said in the run, not judged)
+act_draw_why() {
+	local id; id=$(act_friend_id "$1")
+	[ -n "$id" ] || return 0
+	say "actions: $1's stand-in of player $id: $(dc "$1" graph "$id" weapon | head -c 1500)"
+	say "actions: $1's stand-in of player $id: $(dc "$1" graph "$id" active | head -c 1500)"
+}
 # act_draw <mover> <watcher> <label> <0|1>: X draws (1) or puts away (0) the mover's weapon; the stand-in follows
 act_draw() {
 	local m=$1 w=$2 label=$3 want=$4 f0
@@ -179,8 +188,10 @@ act_draw() {
 	sleep "$ACTIONS_SETTLE"
 	if [ "$want" = 1 ] && ! act_own_drawn "$m"; then rig_fault input "$label: the $m's press" "X left the $m's weapon away ($(dc "$m" where | grep -o 'flags=[^ ]*'))"; return 1; fi
 	if [ "$want" = 0 ] && act_own_drawn "$m"; then rig_fault input "$label: the $m's press" "X left the $m's weapon out"; return 1; fi
-	wait_until "$ACTIONS_WAIT" act_drawn "$w" "$want" && pass "$label: the $w's stand-in follows" "drawn=$want" ||
-		fail "$label: the $w's stand-in follows" "drawn=$(act_field "$w" drawn) wanted=$(act_field "$w" wanted) weaponState=$(act_field "$w" weaponState) drawAsks=$(act_field "$w" drawAsks) drawsFinished=$(act_field "$w" drawsFinished) process=$(act_field "$w" process) responses=$(act_field "$w" responses) after $ACTIONS_WAIT s"
+	wait_until "$ACTIONS_WAIT" act_drawn "$w" "$want" && pass "$label: the $w's stand-in follows" "drawn=$want" || {
+		fail "$label: the $w's stand-in follows" "drawn=$(act_field "$w" drawn) wanted=$(act_field "$w" wanted) weaponState=$(act_field "$w" weaponState) drawAsks=$(act_field "$w" drawAsks) drawsFinished=$(act_field "$w" drawsFinished) process=$(act_field "$w" process) responses=$(act_field "$w" responses) equipLoad=$(act_field "$w" equipLoad) loaded=$(act_field "$w" loaded) equipNudges=$(act_field "$w" equipNudges) after $ACTIONS_WAIT s"
+		act_draw_why "$w"
+	}
 	local f1; f1=$(act_field "$w" drawFixes)
 	is_num "$f0" && is_num "$f1" && [ "$f1" -gt "$f0" ] && warn "$label: the $w's stand-in's draw held the second time" "told again (drawFixes $f0 -> $f1): the first time did not hold"
 	return 0

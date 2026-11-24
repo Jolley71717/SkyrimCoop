@@ -111,6 +111,7 @@ namespace RemotePlayers
 			Clock::time_point       nextCheck{};
 			Clock::time_point       redressAfter{};
 			StandInRules::DrawFix   drawFix;  // its weapon drawn or put away as its friend's is (the game's own way)
+			StandInRules::EquipNudge equipNudge;  // an equip whose model load stays pending, finished the game's own way
 			// Frames (not asks) that told it again, as the game's own update would: one slow draw counts dozens (under lock).
 			std::uint64_t           drawsFinished = 0;
 		};
@@ -128,6 +129,25 @@ namespace RemotePlayers
 		{
 			const auto state = a_actor ? a_actor->AsActorState() : nullptr;
 			return state ? std::optional{ static_cast<StandInRules::Weapon>(std::to_underlying(state->GetWeaponState())) } : std::nullopt;
+		}
+
+		// The middle-high process's hand model loads: pending (+0x1F8 right, +0x1FA left; 0xFFFF none) and last loaded
+		// (+0x304, +0x306), Skyrim SE 1.7.104 (StandInRules::EquipNudge). None without middle-high data.
+		struct EquipLoad
+		{
+			std::uint16_t right = 0xFFFF, left = 0xFFFF, loadedRight = 0xFFFF, loadedLeft = 0xFFFF;
+			[[nodiscard]] bool Pending() const { return left != 0xFFFF || right != 0xFFFF; }
+			[[nodiscard]] std::string Line() const { return std::format("{:04X}/{:04X} loaded={:04X}/{:04X}", right, left, loadedRight, loadedLeft); }
+		};
+
+		std::optional<EquipLoad> EquipLoadOf(RE::Actor* a_actor)
+		{
+			const auto process = a_actor ? a_actor->GetActorRuntimeData().currentProcess : nullptr;
+			const auto data = process ? process->middleHigh : nullptr;
+			if (!data) {
+				return std::nullopt;
+			}
+			return EquipLoad{ data->unk1F8, data->unk1FA, data->unk304, data->unk306 };
 		}
 
 		std::mutex                                lock;  // players' buffers and graph state, byActor and retiring
@@ -615,8 +635,9 @@ namespace RemotePlayers
 			if (sample && eventsHere) {
 				PlayActions(a_this, playerId, actions);
 			}
-			// A draw or a sheathe its graph turned away is asked again, as the game's own update would (FinishDraw).
-			if (sample && RemotePlayers::FinishDraw(a_this)) {
+			// A draw or a sheathe its graph turned away is asked again, as the game's own update would, with its friend's
+			// wish (FinishDraw).
+			if (sample && RemotePlayers::FinishDraw(a_this, (sample->state.flags & Protocol::kWeaponDrawn) != 0)) {
 				std::scoped_lock l{ lock };
 				if (const auto player = players.find(playerId); player != players.end() && player->second.standInId == a_this->GetFormID()) {
 					++player->second.drawsFinished;
@@ -767,6 +788,7 @@ namespace RemotePlayers
 			a_remote.voiceWanted = 0;
 			a_remote.voiceJudged = false;
 			a_remote.drawFix.Reset();
+			a_remote.equipNudge.Reset();
 			a_remote.placeAfter = Clock::now() + RESPAWN_AFTER;
 		}
 
@@ -851,6 +873,7 @@ namespace RemotePlayers
 			a_remote.voiceWanted = 0;
 			a_remote.voiceJudged = false;
 			a_remote.drawFix.Reset();
+			a_remote.equipNudge.Reset();
 			a_remote.placedAt = Clock::now();
 			++a_remote.placed;
 			{
@@ -1017,6 +1040,17 @@ namespace RemotePlayers
 			}
 			const bool wanted = (a_state.flags & Protocol::kWeaponDrawn) != 0;
 			const bool ready = a_remote.dressed && a_remote.checked && a_actor->Is3DLoaded();
+			// An equip whose hands' models stay pending holds every draw back (StandInRules::EquipNudge): finished the
+			// game's own way.
+			if (const auto load = EquipLoadOf(a_actor); ready && load && a_remote.equipNudge.Due(load->Pending(), a_now)) {
+				a_actor->OnItemEquipped(false);
+				const auto after = EquipLoadOf(a_actor);
+				if (a_remote.equipNudge.nudges <= 3) {
+					logs::info("Players: player {}'s stand-in {:08X} had an equip pending (hand loads {}), finished it: now {}; weapon state {}", a_id,
+						a_remote.standInId, load->Line(), after ? after->Line() : std::string{ "none" }, std::to_underlying(*weapon));
+				}
+				return;  // its state read again on the next tick
+			}
 			using A = StandInRules::DrawFix::Ask;
 			const auto ask = a_remote.drawFix.Due(wanted, *weapon, ready, a_now);
 			if (ask == A::kNone) {
@@ -1441,11 +1475,12 @@ namespace RemotePlayers
 	}
 
 	// Actor::Update ends so (Skyrim SE 1.7.104): while the weapon state is kWantToDraw or kWantToSheathe it calls
-	// DrawWeaponMagicHands again with that wish. UpdateNoAI, all a stand-in or a copy gets, does not.
-	bool FinishDraw(RE::Actor* a_actor)
+	// DrawWeaponMagicHands again with that wish. UpdateNoAI, all a stand-in or a copy gets, does not. A stand-in is told its
+	// friend's wish instead (StandInRules::FinishWish).
+	bool FinishDraw(RE::Actor* a_actor, std::optional<bool> a_friendDrawn)
 	{
 		const auto weapon = WeaponOf(a_actor);
-		const auto again = weapon ? StandInRules::AskAgain(*weapon) : std::nullopt;
+		const auto again = weapon ? StandInRules::FinishWish(*weapon, a_friendDrawn) : std::nullopt;
 		if (!again) {
 			return false;
 		}
@@ -1554,6 +1589,7 @@ namespace RemotePlayers
 			int         weaponState = -1;  // the game's weapon state (StandInRules::Weapon), -1: none
 			std::string process = "none";   // its process: high, low (no middle-high data), none
 			int         responses = -1;     // its process has the animation event handlers (1) or not (0)
+			std::string equipLoad = "none";  // its hands' model loads, pending and loaded (EquipLoad)
 		};
 		std::unordered_map<std::uint32_t, Read> reads;
 		for (const auto& [id, remote] : players) {
@@ -1565,6 +1601,9 @@ namespace RemotePlayers
 					read.process = process->InHighProcess() ? "high" : process->middleHigh ? "middle" : "low";
 					read.responses = process->middleHigh ? (process->middleHigh->animResponse ? 1 : 0) : 0;
 				}
+				if (const auto load = EquipLoadOf(actor.get())) {
+					read.equipLoad = load->Line();
+				}
 				reads[id] = read;
 			}
 		}
@@ -1573,12 +1612,12 @@ namespace RemotePlayers
 			const auto read = reads.contains(id) ? reads[id] : Read{};
 			const auto wanted = remote.hasDrawn ? ((remote.lastDrawn.flags & Protocol::kWeaponDrawn) != 0 ? 1 : 0) : -1;
 			const auto handOk = [&](bool a_ok) { return remote.checked ? (a_ok ? "1" : "0") : "?"; };
-			out += std::format(" | player {} standin={:08X} in={} unplaced={} waiting={} lost={} played={} byKind={} refused={} refusedKinds={}{} drawn={} wanted={} drawFixes={} weaponState={} drawAsks={} drawsFinished={} process={} responses={}"
+			out += std::format(" | player {} standin={:08X} in={} unplaced={} waiting={} lost={} played={} byKind={} refused={} refusedKinds={}{} drawn={} wanted={} drawFixes={} weaponState={} drawAsks={} drawsFinished={} process={} responses={} equipLoad={} equipNudges={}"
 							   " aim={:.2f} angleX={:.2f} right={:08X}:{} left={:08X}:{} ammo={:08X}:{} voice={:08X}/{:08X} gearOk={} missing={} refusedForms={} redressed={} baseShouts={}/{}"
 							   " ammoGiven={} magicRefused={} magicKept={} blows={} casts={} damaged={} dealt={:.1f} undone={:.1f}",
 				id, remote.standInId, remote.actionsIn, remote.actionsUnplaced, remote.actions.Size(), remote.actions.Dropped(), remote.played.Total(),
 				remote.played.Line(), remote.refused.Total(), remote.refused.Line(), remote.lastActionRefused.empty() ? "" : " lastRefused=" + remote.lastActionRefused,
-				read.drawnNow, wanted, remote.drawFix.fixes, read.weaponState, remote.drawFix.asks, remote.drawsFinished, read.process, read.responses, remote.aim, read.angleX, remote.gear.right, handOk(remote.held.right), remote.gear.left,
+				read.drawnNow, wanted, remote.drawFix.fixes, read.weaponState, remote.drawFix.asks, remote.drawsFinished, read.process, read.responses, read.equipLoad, remote.equipNudge.nudges, remote.aim, read.angleX, remote.gear.right, handOk(remote.held.right), remote.gear.left,
 				handOk(remote.held.left), remote.gear.ammo, handOk(remote.held.ammo), remote.looks ? remote.looks->voice : 0u, remote.voiceShown,
 				remote.checked ? (remote.held.Complete(remote.gearMissing) && !StandInRules::VoiceDrifted(remote.voiceWanted, !remote.voiceJudged, remote.voiceShown) ? "1" : "0") : "?",
 				remote.gearMissing, remote.refusedForms, remote.redressed, read.baseShouts, remote.baseShouts,
@@ -1618,7 +1657,7 @@ namespace RemotePlayers
 		}
 		const auto id = words.empty() ? std::nullopt : DevLine::Number(words[0]);
 		if (!id) {
-			return "error: usage: graph <player id> [vars | weapon | active | event <name> | float <name> | bool <name> | int <name>] | graph from hook|tick";
+			return "error: usage: graph <player id> [vars | weapon | equip | active | event <name> | float <name> | bool <name> | int <name>] | graph from hook|tick";
 		}
 		const auto it = players.find(static_cast<std::uint32_t>(*id));
 		const auto actor = it != players.end() ? it->second.standIn.get() : RE::NiPointer<RE::Actor>{};
@@ -1647,6 +1686,8 @@ namespace RemotePlayers
 			// What a draw, an attack, a block and a cast are known by: the game's weapon state and the graph's own.
 			const auto weapon = WeaponOf(actor.get());
 			std::string out = std::format("{:08X} weaponState={}", actor->GetFormID(), weapon ? static_cast<int>(std::to_underlying(*weapon)) : -1);
+			const auto load = EquipLoadOf(actor.get());
+			out += std::format(" equipLoad={}", load ? load->Line() : std::string{ "none" });
 			for (const auto name : { "iRightHandType", "iLeftHandType", "iEquippedItemState", "iWantBlock", "iState", "iLeftHandEquipped" }) {
 				std::int32_t v = 0;
 				out += actor->GetGraphVariableInt(Name(name), v) ? std::format(" {}={}", name, v) : std::format(" {}=none", name);
@@ -1657,6 +1698,17 @@ namespace RemotePlayers
 				out += actor->GetGraphVariableBool(Name(name), v) ? std::format(" {}={}", name, v ? 1 : 0) : std::format(" {}=none", name);
 			}
 			return out;
+		}
+		if (what == "equip") {
+			// The game's own end of an equip (Actor::OnItemEquipped), once: what it changes in the hand loads and the weapon state.
+			const auto line = [&] {
+				const auto weapon = WeaponOf(actor.get());
+				const auto load = EquipLoadOf(actor.get());
+				return std::format("weaponState={} equipLoad={}", weapon ? static_cast<int>(std::to_underlying(*weapon)) : -1, load ? load->Line() : std::string{ "none" });
+			};
+			const auto before = line();
+			actor->OnItemEquipped(false);
+			return std::format("{:08X} equip: before {} after {}", actor->GetFormID(), before, line());
 		}
 		if (what == "active") {
 			// The graph's active nodes by name (its states among them): where it stands when it turns events away.
