@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -455,6 +456,10 @@ namespace QuestRules
 	// After a quest's last stage was made here, how long its objectives and its end are left to its own fragments before
 	// the session's word on them is made directly.
 	inline constexpr auto SETTLE = std::chrono::seconds{ 5 };
+	// The session's past (a join, a load, the host's world) comes in batches, a quest's end after its stages, and a
+	// quest's entries may span two of them. A quest not started here is not started from it until no word of the past
+	// has come for PAST_SETTLE: its end is known by then, and one the session ended is put aside (kParked), not begun.
+	inline constexpr auto PAST_SETTLE = std::chrono::seconds{ 3 };
 	// The most entries waiting to be made: past it a new one is dropped (counted).
 	inline constexpr std::size_t MAX_WANTS = 8192;
 	// A friend this near (in one space) is "near" for a stage that moves the player.
@@ -481,6 +486,13 @@ namespace QuestRules
 		// The quest's run is heard and this game has not started the quest for it yet (QuestRunRules::Follower::Hold):
 		// everything of it waits, so its stages are made in the quest started with the host's references.
 		bool                        hold = false;
+		// The session's word has the quest ended (completed or failed): one the host's world finished, before the session
+		// or in it.
+		bool                        sessionEnded = false;
+
+		// This game ran the quest: it runs, has ended, or was stopped part way (it has a current stage). The one notion of
+		// "started here" the rules use (kParked, PAST_SETTLE, kPassed).
+		[[nodiscard]] bool Ran() const { return started || current != 0; }
 	};
 
 	// What of an objective's word this game is to make: show it, and end it (1 completed, 2 failed; 0 nothing). Its end
@@ -514,10 +526,13 @@ namespace QuestRules
 		kFar,         // a stage that moves the player, said by a friend who was not near when they set it: held until
 		              // they are near (Maker gives it up after FAR_WAIT, or when they leave: kFarPast)
 		kFarPast,     // ... said as the session's word (a join, a load: no friend did it now), or given up: dropped, not made
-		kPassed,      // a stage below the current one of a quest started here: this game went past it (done, or a
-		              // branch it did not take), so it is never set again (its fragment would run twice): dropped
+		kPassed,      // a stage below the current one of a quest that ran here (Here::Ran: stopped part way too): this game
+		              // went past it (done, or a branch it did not take), so it is never set again (its fragment would run
+		              // twice): dropped
 		kNotStarted,  // an objective or end of a quest not started here (its stages bring it, or were not made): dropped
 		kHold,        // the quest's run is heard and not started here yet (its fills, its start): held, its later wants too
+		kParked,      // the session's past (a join, a load) on a quest it has ended that this game never started: put aside,
+		              // not made and not dropped, until the quest starts here (its own play, or a quest made here starts it)
 	};
 
 	[[nodiscard]] constexpr std::string_view VerdictName(Verdict a_verdict)
@@ -543,6 +558,8 @@ namespace QuestRules
 			return "notstarted";
 		case Verdict::kHold:
 			return "hold";
+		case Verdict::kParked:
+			return "parked";
 		}
 		return "?";
 	}
@@ -562,10 +579,17 @@ namespace QuestRules
 		if (a_here.has) {
 			return Verdict::kHas;
 		}
+		// A quest the host's world finished that this game never started (the host played it before the session, or the
+		// friend's save is from before it): the friend's world is not walked through every quest the host ever ended, one
+		// after another, at a join. Its word waits until the quest starts here, and is made then; a quest started here, a
+		// stage or end said live, are made as ever.
+		if (!a_here.Ran() && a_reporter == 0 && a_here.sessionEnded) {
+			return Verdict::kParked;
+		}
 		if (a_entry.kind != Entry::kStage) {
 			return a_here.started ? Verdict::kMake : Verdict::kNotStarted;
 		}
-		if (a_here.started && a_entry.index < a_here.current) {
+		if (a_here.Ran() && a_entry.index < a_here.current) {
 			return Verdict::kPassed;
 		}
 		if (a_here.rule) {
@@ -579,10 +603,13 @@ namespace QuestRules
 		return Verdict::kMake;
 	}
 
+	// The most wants put aside for quests not started here (kParked); past it a new one is dropped (counted).
+	inline constexpr std::size_t MAX_PARKED = 8192;
+
 	// The session's entries waiting to be made here, in the order heard, and the pace they are made at: one thing at a
 	// time; one stage of a quest at a time (its fragment runs, and may set the next stage itself); a quest's objectives
 	// and end only once its stages are made and SETTLE has passed (its fragments set most of them); a stage held for a
-	// far friend holds nothing else.
+	// far friend holds nothing else. A want judged kParked is put aside by its quest until Unpark.
 	class Maker
 	{
 	public:
@@ -618,6 +645,9 @@ namespace QuestRules
 		// the friend who did it (a_reporter) was near ours as the word came (NEAR_LATELY), for a stage that moves them.
 		bool Add(const Entry& a_entry, std::uint32_t a_reporter, Clock::time_point a_now, bool a_nearAtStep = false)
 		{
+			if (a_reporter == 0) {
+				lastPast = a_now;
+			}
 			if (wants.size() >= MAX_WANTS) {
 				++dropped;
 				return false;
@@ -696,13 +726,18 @@ namespace QuestRules
 					}
 				}
 				auto release = Release::kNone;
-				const auto verdict = JudgeWant(*it, a_now, a_look, release);
+				Here       here;
+				const auto verdict = JudgeWant(*it, a_now, a_look, release, here);
 				if (verdict == Verdict::kFar && !it->held) {
 					it->held = true;
 					newlyHeld.push_back(*it);
 				}
 				if (verdict == Verdict::kFar || verdict == Verdict::kHold) {
 					blocked.insert(e.questId);  // its later stages wait behind it
+					continue;
+				}
+				if ((verdict == Verdict::kMake || verdict == Verdict::kNotStarted) && it->reporter == 0 && !here.Ran() && a_now - lastPast < PAST_SETTLE) {
+					blocked.insert(e.questId);  // the past may still say it ended (PAST_SETTLE)
 					continue;
 				}
 				if (verdict == Verdict::kMake) {
@@ -716,6 +751,9 @@ namespace QuestRules
 				}
 				Step step{ *it, verdict, release };
 				wants.erase(it);
+				if (verdict == Verdict::kParked) {
+					Park(step.want);
+				}
 				return step;
 			}
 			return std::nullopt;
@@ -727,7 +765,8 @@ namespace QuestRules
 			std::size_t n = 0;
 			for (const auto& w : wants) {
 				auto release = Release::kNone;
-				if (w.entry.kind == Entry::kStage && JudgeWant(w, a_now, a_look, release) == Verdict::kFar) {
+				Here here;
+				if (w.entry.kind == Entry::kStage && JudgeWant(w, a_now, a_look, release, here) == Verdict::kFar) {
 					++n;
 				}
 			}
@@ -749,7 +788,41 @@ namespace QuestRules
 			wants.clear();
 			flight.clear();
 			lastStage.clear();
+			parked.clear();
+			parkedCount = 0;
 		}
+
+		// The quest started here: what was put aside for it is judged again, in the order it was heard, before anything
+		// heard later of it. The number of wants given back.
+		std::size_t Unpark(std::uint32_t a_questId, Clock::time_point a_now)
+		{
+			const auto it = parked.find(a_questId);
+			if (it == parked.end()) {
+				return 0;
+			}
+			auto back = std::move(it->second);
+			parked.erase(it);
+			parkedCount -= back.size();
+			// ahead of the quest's own wants heard since (none, nearly always: its word came whole with the join)
+			const auto first = std::ranges::find_if(wants, [&](const Want& a_w) { return a_w.entry.questId == a_questId; });
+			std::size_t n = 0;
+			auto        at = first;
+			for (auto& w : back) {
+				if (wants.size() >= MAX_WANTS) {
+					dropped += back.size() - n;
+					break;
+				}
+				w.heard = a_now;
+				at = std::next(wants.insert(at, w));
+				++n;
+			}
+			unparked += n;
+			return n;
+		}
+
+		[[nodiscard]] std::size_t   Parked() const { return parkedCount; }
+		[[nodiscard]] std::size_t   ParkedQuests() const { return parked.size(); }
+		[[nodiscard]] std::uint64_t Unparked() const { return unparked; }
 
 		// Whether anything of a_questId waits here: a want to judge, or a stage made and not read done yet (a radiant job's
 		// stop waits for it, QuestRunRules::Follower::Due).
@@ -764,6 +837,10 @@ namespace QuestRules
 			std::erase_if(wants, [&](const Want& a_w) { return a_w.entry.questId == a_questId; });
 			flight.erase(a_questId);
 			lastStage.erase(a_questId);
+			if (const auto it = parked.find(a_questId); it != parked.end()) {
+				parkedCount -= it->second.size();
+				parked.erase(it);
+			}
 		}
 
 		// The wants held for their quest's run (kHold), for the dev command.
@@ -787,11 +864,11 @@ namespace QuestRules
 
 		// A want judged as it stands now: near at its step counts as near; a hold whose friend left, or that waited
 		// FAR_WAIT, is given up (kFarPast, a_release says why).
-		[[nodiscard]] static Verdict JudgeWant(const Want& a_want, Clock::time_point a_now, const Look& a_look, Release& a_release)
+		[[nodiscard]] static Verdict JudgeWant(const Want& a_want, Clock::time_point a_now, const Look& a_look, Release& a_release, Here& a_here)
 		{
-			auto here = a_look(a_want.entry, a_want.reporter);
-			here.reporterNear = here.reporterNear || a_want.nearAtStep;
-			const auto verdict = QuestRules::Judge(a_want.entry, a_want.reporter, here);
+			a_here = a_look(a_want.entry, a_want.reporter);
+			a_here.reporterNear = a_here.reporterNear || a_want.nearAtStep;
+			const auto verdict = QuestRules::Judge(a_want.entry, a_want.reporter, a_here);
 			a_release = Release::kNone;
 			if (verdict == Verdict::kFar) {
 				if (a_want.gone) {
@@ -806,6 +883,24 @@ namespace QuestRules
 			return verdict;
 		}
 
+		void Park(const Want& a_want)
+		{
+			if (parkedCount >= MAX_PARKED) {
+				++dropped;
+				return;
+			}
+			auto& list = parked[a_want.entry.questId];
+			// a newer word on the same thing replaces the one put aside (as Add does)
+			for (auto& w : list) {
+				if (w.entry.SameThing(a_want.entry)) {
+					w.entry = a_want.entry.kind == Entry::kObjective ? QuestBook::Merge(w.entry, a_want.entry) : a_want.entry;
+					return;
+				}
+			}
+			list.push_back(a_want);
+			++parkedCount;
+		}
+
 		[[nodiscard]] bool HasStageWaiting(std::uint32_t a_questId) const
 		{
 			return std::ranges::any_of(wants, [&](const Want& a_w) { return a_w.entry.questId == a_questId && a_w.entry.kind == Entry::kStage; });
@@ -815,10 +910,14 @@ namespace QuestRules
 		std::unordered_map<std::uint32_t, Flight>                flight;
 		std::unordered_map<std::uint32_t, Clock::time_point>     lastStage;
 		Clock::time_point                                        lastMade{};
+		Clock::time_point                                        lastPast{};  // the last word of the session's past heard
 		std::uint64_t                                            dropped = 0;
 		std::uint64_t                                            stuck = 0;
 		std::optional<Entry>                                     lastStuck;
 		std::vector<Want>                                        newlyHeld;
+		std::unordered_map<std::uint32_t, std::vector<Want>>     parked;  // by quest, in the order put aside
+		std::size_t                                              parkedCount = 0;
+		std::uint64_t                                            unparked = 0;
 	};
 
 	// ---- a stage that moved our player ------------------------------------------------------------------------------

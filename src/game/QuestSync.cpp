@@ -64,6 +64,7 @@ namespace QuestSync
 		{
 			Entry             entry;
 			Clock::time_point due;
+			bool              world = false;  // of the host's world (its snapshot): sent again as kQuestWorld
 		};
 		std::vector<Again>   again;  // reports answered busy, to send again
 		// Our stages of a quest whose session word may still be coming (QuestRules::Apart, kWait): judged again each frame.
@@ -101,6 +102,8 @@ namespace QuestSync
 			std::uint64_t farWaited = 0;   // ... held, and given up after FAR_WAIT (counted in farPast too)
 			std::uint64_t passed = 0;      // ... a stage below the current one of a quest started here: not set again
 			std::uint64_t notStarted = 0;  // ... an objective or end of a quest not started here
+			std::uint64_t parked = 0;      // ... the session's past on a quest it ended and this game never started: put aside
+			std::uint64_t parkedQuests = 0;  // quests started here whose word put aside was given back to be made (Unpark)
 			std::uint64_t failedKept = 0;  // ... an objective failed or a quest failed: not made (no console for it)
 			std::uint64_t answered = 0;    // our entries the server answered (not news)
 			std::uint64_t busy = 0;        // ... of them busy: sent again
@@ -110,6 +113,7 @@ namespace QuestSync
 			std::uint64_t rebases = 0;     // this game's quests taken as its base (a welcome, a reset, a load)
 			std::uint64_t snapshots = 0;   // our world said, as the host
 			std::uint64_t snapshotEntries = 0;
+			std::uint64_t snapshotEnded = 0;  // ... of its quests, ended ones (EachEnded), in the last snapshot
 			std::uint64_t apartStages = 0; // our stages of a quest apart from the session: this game's own
 			std::uint64_t moved = 0;       // stages made here that moved our player (MoveGuard)
 			std::uint64_t unmade = 0;      // objectives and ends made here that did not read so after CHECK_AFTER
@@ -136,6 +140,8 @@ namespace QuestSync
 			std::uint64_t startsOffMain = 0;   // starts for a run made off the game's main thread
 		};
 		Counts      counts;
+		std::size_t endedSaid = 0;  // World(): the ended quests it read
+		bool        endedSkipped = false;  // ... none: the done bit is not trusted
 		QuestRunRules::Keeper   keeper;    // the host's game: the runs it says
 		QuestRunRules::Follower follower;  // a friend's game: the host's runs, made here
 		std::string lastRun = "none";
@@ -941,6 +947,7 @@ namespace QuestSync
 			}
 			here.hold = !host && follower.Hold(quest->GetFormID());
 			here.started = Started(quest);
+			here.sessionEnded = view.Known(Entry{ a_entry.questId, Entry::kCompleted, 0, 0 }) || view.Known(Entry{ a_entry.questId, Entry::kFailed, 0, 0 });
 			here.current = Current(quest);
 			switch (a_entry.kind) {
 			case Entry::kStage:
@@ -1049,12 +1056,27 @@ namespace QuestSync
 			return read;
 		}
 
-		// The host's world: every shared quest that runs, its done stages (or, with the done bit not trusted, its current
-		// stage and the ones set while this game ran), objectives (with the stage each is read at) and end.
+		// The shared quests this game has ended and stopped (completed or failed, not running): the host's world finished
+		// them, before the session or in it.
+		template <class F>
+		void EachEnded(F&& a_each)
+		{
+			for (const auto& known : catalog) {
+				if (known.cls == Class::kShared && !known.quest->IsEnabled() && (known.quest->IsCompleted() || Failed(known.quest)) &&
+					!FormIds::IsRuntime(known.quest->GetFormID())) {
+					a_each(known.quest);
+				}
+			}
+		}
+
+		// The host's world: every shared quest that runs or has ended here, its done stages (or, with the done bit not
+		// trusted, its current stage and the ones set while this game ran), objectives (with the stage each is read at)
+		// and end. An ended one is said so that a friend behind in it catches up to its end; a friend that never started
+		// it keeps its word aside until it does (QuestRules::Verdict::kParked).
 		std::vector<Entry> World()
 		{
 			std::vector<QuestRules::QuestRead> reads;
-			EachRunning([&](RE::TESQuest* a_quest) {
+			const auto add = [&](RE::TESQuest* a_quest) {
 				auto read = ReadOf(a_quest);
 				if (bit && bit->trusted) {
 					for (const auto& s : Stages(a_quest)) {
@@ -1070,7 +1092,19 @@ namespace QuestSync
 					read.done.insert(read.done.end(), it->second.begin(), it->second.end());
 				}
 				reads.push_back(std::move(read));
-			});
+			};
+			EachRunning(add);
+			const auto running = reads.size();
+			// an ended quest's stages are read by the done bit alone (what this game saw set is forgotten at its stop): with
+			// the bit not trusted only its last stage would be said, and a friend behind in it would be set straight to its
+			// end, its stages between never run. Not said then (endedSkipped); a friend catches up on it as it was before.
+			if (bit && bit->trusted) {
+				EachEnded(add);
+				endedSkipped = false;
+			} else {
+				endedSkipped = true;
+			}
+			endedSaid = reads.size() - running;
 			return QuestRules::Snapshot(std::move(reads));
 		}
 
@@ -1117,6 +1151,15 @@ namespace QuestSync
 					QuestName(a_questId), stage, stage);
 			}
 			return say;
+		}
+
+		// a_quest started here (its start, or a stage of it set): the session's word put aside for it is made now.
+		void Unpark(std::uint32_t a_quest, Clock::time_point a_now)
+		{
+			if (const auto n = maker.Unpark(a_quest, a_now); n != 0) {
+				++counts.parkedQuests;
+				logs::info("Quests: {} started here: the session's word on it ({} entries, put aside as it never ran here) is made now", QuestName(a_quest), n);
+			}
 		}
 
 		// A stage done here: reported, held for the session's word, or this game's own.
@@ -1171,13 +1214,13 @@ namespace QuestSync
 		}
 
 		// What this game has to report so far, said now (before a run word that must come after it).
-		void Flush(const SendFn& a_send, std::vector<Entry>& a_news)
+		void Flush(const SendFn& a_send, std::vector<Entry>& a_news, Protocol::MessageType a_type = Protocol::MessageType::kQuests)
 		{
 			if (a_news.empty()) {
 				return;
 			}
 			counts.sent += a_news.size();
-			for (auto& packet : Protocol::Batches(a_news, Protocol::MessageType::kQuests)) {
+			for (auto& packet : Protocol::Batches(a_news, a_type)) {
 				a_send(std::move(packet));
 			}
 			a_news.clear();
@@ -1359,12 +1402,14 @@ namespace QuestSync
 				}
 			}
 			const auto world = World();
-			for (auto& packet : Protocol::Batches(world, Protocol::MessageType::kQuests)) {
+			for (auto& packet : Protocol::Batches(world, Protocol::MessageType::kQuestWorld)) {
 				a_send(std::move(packet));
 			}
 			++counts.snapshots;
 			counts.snapshotEntries += world.size();
-			logs::info("Quests: said this world's quests to the session as the host's ({} runs, {} entries)", runs, world.size());
+			counts.snapshotEnded = endedSaid;
+			logs::info("Quests: said this world's quests to the session as the host's ({} runs, {} entries, {} of the quests ended here{})", runs, world.size(),
+				endedSaid, endedSkipped ? "; ended quests not said: the done bit is not trusted, so their stages between would be skipped" : "");
 		}
 
 		std::vector<Entry> news;
@@ -1386,6 +1431,7 @@ namespace QuestSync
 				} else if (!host) {
 					follower.StartedHere(event.quest);  // one this game started on its own is its own (not left over)
 				}
+				Unpark(event.quest, now);
 				continue;
 			}
 			if (event.kind == StageEvent::kStop) {
@@ -1403,6 +1449,7 @@ namespace QuestSync
 			}
 			seen[event.quest].insert(event.stage);
 			maker.Done(event.quest, event.stage, now);
+			Unpark(event.quest, now);
 			if (quest && SharedHere(quest)) {
 				OfferStage(Entry{ event.quest, Entry::kStage, event.stage, 0 }, now, news);
 			}
@@ -1498,9 +1545,10 @@ namespace QuestSync
 			}
 			NoteRan();
 		}
+		std::vector<Entry> worldAgain;
 		for (auto it = again.begin(); it != again.end();) {
 			if (it->due <= now) {
-				news.push_back(it->entry);
+				(it->world ? worldAgain : news).push_back(it->entry);
 				it = again.erase(it);
 			} else {
 				++it;
@@ -1513,6 +1561,7 @@ namespace QuestSync
 			}
 		}
 		Flush(a_send, news);
+		Flush(a_send, worldAgain, Protocol::MessageType::kQuestWorld);
 
 		// The session's word, made where this game is behind.
 		for (int i = 0; i < STEPS_PER_FRAME; ++i) {
@@ -1551,6 +1600,11 @@ namespace QuestSync
 				break;
 			case QuestRules::Verdict::kNotStarted:
 				++counts.notStarted;
+				break;
+			case QuestRules::Verdict::kParked:
+				if (counts.parked++ == 0) {
+					logs::info("Quests: the session's word on {} (ended in the host's world) waits until it starts here; this game never started it", QuestName(step->want.entry.questId));
+				}
 				break;
 			case QuestRules::Verdict::kFar:
 			case QuestRules::Verdict::kHold:
@@ -1647,7 +1701,7 @@ namespace QuestSync
 				}
 				if (!mine) {
 					view.MarkOut(resend);
-					again.push_back({ resend, now + QuestRules::AGAIN_AFTER });
+					again.push_back({ resend, now + QuestRules::AGAIN_AFTER, host });  // the host's world: said again as its world
 				} else if (view.Offer(resend)) {
 					again.push_back({ resend, now + QuestRules::AGAIN_AFTER });
 				}
@@ -1982,7 +2036,8 @@ namespace QuestSync
 			const auto look = [](const Entry& a_e, std::uint32_t a_r) { return Look(a_e, a_r); };
 			return std::format("installed={} host={} quests={} shared={} own={} radiant={} misc={} untyped={} noname={} doneBit={} session={}/{} outstanding={} "
 							   "based={} kept={} wants={} inflight={} held={} events={} sent={} heard={} made={} has={} missing={} nothere={} ownStages={} farPast={} farHeld={} farLeft={} farWaited={} "
-							   "passed={} notStarted={} failedKept={} answered={} busy={} refused={} stuck={} lastStuck={} asks={} resets={} rebases={} snapshots={}/{} "
+							   "passed={} notStarted={} parked={}/{} parkedNow={}/{} unparked={} failedKept={} answered={} busy={} refused={} stuck={} lastStuck={} asks={} "
+							   "resets={} rebases={} snapshots={}/{} snapshotEnded={} "
 							   "apart={} lastApart={} apartStages={} apartHeld={} moved={} lastMoved={} lastMade={} unmade={} lastUnmade={} wantsDropped={} "
 							   "eventsDropped={} offmain={} norun={} runs={} runsSent={} runsHeard={} runsStarted={} runsAdopted={} runsGaveUp={} forced={} "
 							   "forcedAtStart={} locsAtStart={} ownAtStart={} startFailed={} cannotStart={} runsRetried={} stopsMade={} restarts={} rewanted={} "
@@ -1992,9 +2047,10 @@ namespace QuestSync
 				!bit ? "unread" : bit->trusted ? "trusted" : "untrusted", view.Quests(), view.Entries(), view.Outstanding(), view.Based(), view.Kept(), maker.Size(),
 				maker.InFlight(), maker.Held(look, Clock::now()), Counted(counts.events), Counted(counts.sent), Counted(counts.heard), Counted(counts.made), Counted(counts.has),
 				Counted(counts.missing), Counted(counts.notHere), Counted(counts.own), Counted(counts.farPast), Counted(counts.farHeld), Counted(counts.farLeft), Counted(counts.farWaited), Counted(counts.passed), Counted(counts.notStarted),
-				Counted(counts.failedKept), Counted(counts.answered), Counted(counts.busy), Counted(counts.refused), Counted(maker.Stuck()),
+				Counted(counts.parked), Counted(counts.parkedQuests), maker.Parked(), maker.ParkedQuests(), Counted(maker.Unparked()), Counted(counts.failedKept), Counted(counts.answered), Counted(counts.busy), Counted(counts.refused), Counted(maker.Stuck()),
 				maker.LastStuck() ? std::format("{:08X}:{}", maker.LastStuck()->questId, maker.LastStuck()->index) : "none"s, Counted(counts.asks),
-				Counted(counts.resets), Counted(counts.rebases), Counted(counts.snapshots), Counted(counts.snapshotEntries), Counted(apart.Quests()),
+				Counted(counts.resets), Counted(counts.rebases), Counted(counts.snapshots), Counted(counts.snapshotEntries), Counted(counts.snapshotEnded),
+				Counted(apart.Quests()),
 				apart.Quests() ? QuestName(apart.LastQuest()) : "none"s, Counted(counts.apartStages), heldStages.size(), Counted(guard.Moves()), lastMoved, lastMade,
 				Counted(counts.unmade), lastUnmade, Counted(maker.Dropped()), Counted(dropped), Counted(counts.offMain), Counted(counts.noRun),
 				host ? keeper.LiveQuests().size() : follower.Live(), Counted(counts.runsSent), Counted(counts.runsHeard), Counted(follower.Started()),
