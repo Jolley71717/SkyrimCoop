@@ -722,15 +722,16 @@ void Server::Run()
 			break;
 		case MT::kKnocks:
 			// A down or an up to the others, the sender named: its own player's, or an NPC its game runs. An ask to the NPC's
-			// runner alone: a knock the sender's game gave a copy of an NPC another game runs. Downs and asks within the
-			// sender's budget (past it dropped, said once).
+			// runner alone: a knock the sender's game gave a copy of an NPC another game runs; an ask-up too (the paralysis
+			// it asked is over there). Downs and asks within the sender's budget (past it dropped, said once); an up or an
+			// ask-up never dropped (an actor is held down until it comes).
 			if (auto msg = Protocol::DecodeKnocks(a_data)) {
 				const auto                                now = Clock::now();
 				Protocol::Knocks                          others;
 				std::map<std::uint32_t, Protocol::Knocks> asks;
 				std::size_t                               over = 0;
 				for (const auto& knock : msg->knocks) {
-					const bool ask = knock.phase == Protocol::KnockPhase::kAsk;
+					const bool ask = Protocol::KnockToRunner(knock.phase);
 					const auto runner = knock.actor.player != 0 ? 0u : npcs.Owner(knock.actor.npc);
 					if (ask) {
 						if (runner == 0 || runner == a_peer.playerId || !peerOf(runner)) {
@@ -739,7 +740,7 @@ void Server::Run()
 					} else if (knock.actor.player != 0 ? knock.actor.player != a_peer.playerId : runner != a_peer.playerId) {
 						continue;
 					}
-					if (knock.phase != Protocol::KnockPhase::kUp && !a_peer.knockBudget.Take(now)) {
+					if (knock.phase != Protocol::KnockPhase::kUp && knock.phase != Protocol::KnockPhase::kAskUp && !a_peer.knockBudget.Take(now)) {
 						++over;
 						continue;
 					}

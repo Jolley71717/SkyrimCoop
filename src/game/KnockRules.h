@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -33,9 +34,15 @@
 //   replays say that speed needs (Scale, learnt from them); a paralysis by its Paralysis value. While it is knocked it is
 //   held: not placed by the update hooks, its walk not told, the engine's own update run (HoldStep). Lying while its
 //   friend's or runner's actor is still down, it is kept down by the same value (WantKeptDown), taken back at the up.
-// - Asked: a knock this game gives a copy of an NPC another game runs (our player's explosion, a fall here) is held as
-//   above and asked of the NPC's runner (a push only), which knocks its NPC the same way unless it is down already, dead
-//   or busy (JudgeAsk), and then says it as its own: the asker's held copy joins it.
+// - Asked: a knock this game gives a copy of an NPC another game runs (our player's explosion, Unrelenting Force or
+//   paralysis spell, poison or enchantment, a fall here) is held as above and asked of the NPC's runner, which knocks its
+//   NPC the same way unless it is dead, busy or far (a push also unless it is down already) (JudgeAsk), and then says it
+//   as its own: the asker's held copy joins it. A paralysis asked is held there by the NPC's Paralysis value (Asked)
+//   until the asker says its copy's own paralysis is over (an ask-up, OwnParalysisOver), MAX_DOWN at most: in the
+//   runner's game the asker's stand-in's magic takes no effect, so the effect itself never reaches the NPC.
+// - Let go while down: an actor a hold lets go of while it is not standing (given up), or standing because its knock
+//   never took, is not this world's knock (Quiet): no native hold and no ask until it has stood again (a late take
+//   within LATE_TAKE is the knock that was played).
 // The engine's details (whether its knock moves the reference with the ragdoll, how fast a magnitude throws, whether a
 // Paralysis value alone keeps an actor down) are the rig's to confirm: the counts say each.
 namespace KnockRules
@@ -59,6 +66,8 @@ namespace KnockRules
 	inline constexpr float MIN_SPEED_PER_MAGNITUDE = 10.0f;
 	inline constexpr float MAX_SPEED_PER_MAGNITUDE = 2000.0f;
 	inline constexpr std::size_t MAX_HELD = 32;  // actors held by knocks at once
+	inline constexpr auto  LATE_TAKE = 3s;       // a knock let go as never taken that takes within this is that knock
+	inline constexpr float KEPT = 1.0f;          // the Paralysis value this game raises to keep an actor down
 
 	// ---- the knock state ----
 
@@ -485,6 +494,7 @@ namespace KnockRules
 		bool  busy = false;
 		float drift = 0.0f;  // u: our NPC from where the asker's copy was knocked
 		Protocol::KnockKind kind = Protocol::KnockKind::kPush;
+		bool  full = false;  // a paralysis new to Asked when it holds MAX already
 	};
 
 	enum class AskVerdict : std::uint8_t
@@ -492,14 +502,14 @@ namespace KnockRules
 		kApply,
 		kNotOurs,
 		kDead,
-		kDown,
+		kDown,  // a push of an NPC down already: its own down is said, and the asker's copy joins it
 		kBusy,
 		kFar,
-		kParalysis,  // a paralysis is its effect's: the effect reaches the runner on its own, not as a knock
+		kFull,  // a paralysis, with Asked full
 		kCount,
 	};
 	inline constexpr std::array<std::string_view, static_cast<std::size_t>(AskVerdict::kCount)> ASK_NAMES{ "apply", "notOurs", "dead", "down", "busy", "far",
-		"paralysis" };
+		"full" };
 
 	[[nodiscard]] constexpr std::string_view NameOf(AskVerdict a_verdict)
 	{
@@ -507,18 +517,18 @@ namespace KnockRules
 		return i < ASK_NAMES.size() ? ASK_NAMES[i] : "?";
 	}
 
+	// A push or a paralysis asked of this game. A paralysis is applied to an NPC down already too: its paralysis keeps it
+	// down for as long as the asker's copy is paralysed.
 	[[nodiscard]] inline AskVerdict JudgeAsk(const AskFacts& a_facts)
 	{
+		const bool paralysis = a_facts.kind == Protocol::KnockKind::kParalysis;
 		if (!a_facts.ours) {
 			return AskVerdict::kNotOurs;
-		}
-		if (a_facts.kind == Protocol::KnockKind::kParalysis) {
-			return AskVerdict::kParalysis;
 		}
 		if (!a_facts.alive) {
 			return AskVerdict::kDead;
 		}
-		if (a_facts.down) {
+		if (a_facts.down && !paralysis) {
 			return AskVerdict::kDown;
 		}
 		if (a_facts.busy) {
@@ -527,12 +537,185 @@ namespace KnockRules
 		if (!(a_facts.drift <= REACH)) {
 			return AskVerdict::kFar;
 		}
+		if (paralysis && a_facts.full) {
+			return AskVerdict::kFull;
+		}
 		return AskVerdict::kApply;
 	}
 
 	struct AskCounts : Counts<AskVerdict, static_cast<std::size_t>(AskVerdict::kCount)>
 	{
 		AskCounts() { names = &ASK_NAMES; }
+	};
+
+	// An ask-up: the paralysis a_ask asked is over on the asker's copy (where it was asked, no launch).
+	[[nodiscard]] inline Protocol::Knock AskUpOf(const Protocol::Knock& a_ask, std::uint32_t a_sentMs)
+	{
+		Protocol::Knock up = a_ask;
+		up.phase = Protocol::KnockPhase::kAskUp;
+		up.sentMs = a_sentMs;
+		up.vx = up.vy = up.vz = 0.0f;
+		return up;
+	}
+
+	// Whether the paralysis this game asked for its copy is over here: its Paralysis value, less what this game raised to
+	// keep it down (a_kept: KEPT, while it joins its runner's down), is none.
+	[[nodiscard]] inline bool OwnParalysisOver(float a_paralysis, bool a_kept)
+	{
+		return !(a_paralysis - (a_kept ? KEPT : 0.0f) > 0.0f);
+	}
+
+	// The paralyses asked of this game for the NPCs it runs, each by its NPC: who asked (each asker's copy is paralysed in
+	// its game), since when. The NPC's Paralysis value is raised by KEPT once, at the first ask, and taken back when the
+	// last asker's ask-up comes, the last asker leaves, or MAX_DOWN after the last ask (Expired).
+	class Asked
+	{
+	public:
+		static constexpr std::size_t MAX = MAX_HELD;
+
+		enum class Add : std::uint8_t
+		{
+			kFirst,  // the first ask: raise its value
+			kMore,   // asked already (another asker, or the same again): its value is raised
+			kFull,   // MAX NPCs asked already: refused
+		};
+
+		Add Ask(const Protocol::NpcKey& a_npc, std::uint32_t a_sender, Clock::time_point a_now)
+		{
+			auto it = npcs.find(a_npc);
+			if (it == npcs.end()) {
+				if (npcs.size() >= MAX) {
+					return Add::kFull;
+				}
+				npcs.emplace(a_npc, Entry{ .senders = { a_sender }, .since = a_now });
+				return Add::kFirst;
+			}
+			if (std::ranges::find(it->second.senders, a_sender) == it->second.senders.end()) {
+				it->second.senders.push_back(a_sender);
+			}
+			it->second.since = a_now;
+			return Add::kMore;
+		}
+
+		// a_sender's copy is up: true when it was the last to ask (take the value back).
+		bool Up(const Protocol::NpcKey& a_npc, std::uint32_t a_sender)
+		{
+			const auto it = npcs.find(a_npc);
+			if (it == npcs.end() || std::erase(it->second.senders, a_sender) == 0) {
+				return false;
+			}
+			if (!it->second.senders.empty()) {
+				return false;
+			}
+			npcs.erase(it);
+			return true;
+		}
+
+		// a_sender left: the NPCs it was the last to ask for (take their values back).
+		std::vector<Protocol::NpcKey> Left(std::uint32_t a_sender)
+		{
+			std::vector<Protocol::NpcKey> out;
+			for (auto it = npcs.begin(); it != npcs.end();) {
+				if (std::erase(it->second.senders, a_sender) != 0 && it->second.senders.empty()) {
+					out.push_back(it->first);
+					it = npcs.erase(it);
+				} else {
+					++it;
+				}
+			}
+			return out;
+		}
+
+		// The NPCs asked MAX_DOWN ago with no ask-up since (an asker that never said it): forgotten (take back).
+		std::vector<Protocol::NpcKey> Expired(Clock::time_point a_now)
+		{
+			std::vector<Protocol::NpcKey> out;
+			for (auto it = npcs.begin(); it != npcs.end();) {
+				if (a_now - it->second.since >= MAX_DOWN) {
+					out.push_back(it->first);
+					it = npcs.erase(it);
+				} else {
+					++it;
+				}
+			}
+			return out;
+		}
+
+		bool Forget(const Protocol::NpcKey& a_npc) { return npcs.erase(a_npc) != 0; }
+		void Clear() { npcs.clear(); }
+		[[nodiscard]] bool        Has(const Protocol::NpcKey& a_npc) const { return npcs.contains(a_npc); }
+		[[nodiscard]] std::size_t Size() const { return npcs.size(); }
+		[[nodiscard]] std::size_t Askers(const Protocol::NpcKey& a_npc) const
+		{
+			const auto it = npcs.find(a_npc);
+			return it != npcs.end() ? it->second.senders.size() : 0;
+		}
+
+	private:
+		struct Entry
+		{
+			std::vector<std::uint32_t> senders;
+			Clock::time_point          since;
+		};
+		std::map<Protocol::NpcKey, Entry> npcs;
+	};
+
+	// ---- actors let go while down ----
+
+	// The actors a hold let go of while they were not standing (or before their knock took): their lying there is the
+	// knock that was played or joined, not this world's, so no native hold and no ask is made of it until it has stood
+	// again; a knock that never took and then takes within LATE_TAKE is that knock too. Without it a hold given up while
+	// down would be held again as native the same tick, and a copy's asked of its runner, which knocks its NPC again.
+	class Quiet
+	{
+	public:
+		static constexpr std::size_t MAX = 256;
+
+		// a_id let go: a_down (not standing: quiet until it stands) or standing after a knock that never took (quiet for
+		// LATE_TAKE, and until it stands if it goes down meanwhile).
+		void LetGo(std::uint32_t a_id, bool a_down, Clock::time_point a_now)
+		{
+			if (!actors.contains(a_id) && actors.size() >= MAX) {
+				const auto oldest = std::ranges::min_element(actors, {}, [](const auto& a_entry) { return a_entry.second.since; });
+				actors.erase(oldest);
+			}
+			actors.insert_or_assign(a_id, Entry{ .since = a_now, .down = a_down });
+		}
+
+		// Whether a_id seen now in a_phase may be held as this world's knock (and asked): not while it is quiet. It stops
+		// being quiet once seen standing (after LATE_TAKE, for a knock that never took).
+		[[nodiscard]] bool Native(std::uint32_t a_id, Phase a_phase, Clock::time_point a_now)
+		{
+			const auto it = actors.find(a_id);
+			if (it == actors.end()) {
+				return true;
+			}
+			auto& entry = it->second;
+			if (a_phase != Phase::kStanding) {
+				entry.down = true;  // a late take: quiet until it stands
+				++skipped;
+				return false;
+			}
+			if (entry.down || a_now - entry.since >= LATE_TAKE) {
+				actors.erase(it);  // stood again
+			}
+			return true;
+		}
+
+		void Forget(std::uint32_t a_id) { actors.erase(a_id); }
+		void Clear() { actors.clear(); }
+		[[nodiscard]] bool        Has(std::uint32_t a_id) const { return actors.contains(a_id); }
+		[[nodiscard]] std::size_t Size() const { return actors.size(); }
+
+		std::uint64_t skipped = 0;  // ticks a quiet actor down was not taken as this world's
+
+	private:
+		struct Entry
+		{
+			Clock::time_point since;
+			bool              down = false;
+		};
+		std::unordered_map<std::uint32_t, Entry> actors;
 	};
 
 	// ---- holding a knocked actor here ----

@@ -47,6 +47,22 @@
 #   A3. the watcher says its NPC down (saidDown= up, `knocks last` said actor=npc:<key>). Not is a FAIL.
 #   A4. the mover's held copy joins that down (joined= up). Not is a FAIL.
 #   A5. the mover lets its copy go within KNOCKS_HOLD_WAIT (heldNow=0; gaveUp= up a WARN). Still held is a FAIL.
+#   The paralysis asked (knocks_para_ask_way): the mover's player casts a paralysis spell at its copy of the watcher's
+#   person (`console player.cast KNOCKS_PARA_SPELL <copy>`, the rig's injected attack; in the watcher's game the mover's
+#   stand-in's spell takes no effect, so the ask is the only way it gets there). The spell not paralysing the copy
+#   (`knocks state` paralysis=0.0) is a rig fault: KNOCKS_PARA_SPELL is not a paralysis spell there.
+#   PA1. the mover asks the runner a paralysis (askedParalysis= up, `knocks last` asked actor=npc:<key> kind=paralysis).
+#   PA2. the watcher applies it to its NPC (paraApplied= up). Not is a FAIL, with what it was refused for.
+#   PA3. the watcher says its NPC down, a paralysis (saidDown= up). Not is a FAIL.
+#   PA4. the watcher holds its NPC down by its Paralysis value (`knocks state` askKept=1). Not is a FAIL.
+#   PA5. the mover's held copy joins that down (joined= up). Not is a FAIL.
+#   PA6. after the spell (KNOCKS_PARA_SPELL_S, then up to KNOCKS_PARA_LAST) the mover says its copy's paralysis is over
+#        (askUpSent= up), and the watcher lets its NPC up (askLetUp= up) and says it up (saidUp= up). Not is a FAIL.
+#   PA7. no Paralysis value of the watcher's left on its NPC (askKept=0). Kept is a FAIL.
+#   PA8. the mover lets its copy go within KNOCKS_HOLD_WAIT (heldNow=0; gaveUp= up a WARN). Still held is a FAIL.
+#   PA9. let go, it is not taken again: for KNOCKS_QUIET_WAIT the mover asks nothing more and holds no copy or stand-in
+#        as its own knock (asked=, copies=, standIns= unchanged, heldNow=0). Taken again is a FAIL. The same check
+#        follows step 7 of any leg whose hold was given up while its actor still lay there.
 #   Put back after each leg: the NPC's paralysis off and out of combat.
 # Not on the rig yet: a dragon's or a horse's knock, a summon's, a follower's, a knock the game chose itself in a real
 # fight (Unrelenting Force, a giant's club, an explosion: the injected push stands for them), a knock of a stand-in by
@@ -59,6 +75,12 @@ KNOCKS_REST=${KNOCKS_REST:-200}             # u: the two games' actors rest this
 KNOCKS_PLACED=${KNOCKS_PLACED:-150}         # u: the stand-in this near where its player is drawn, once let go
 KNOCKS_MAGNITUDE=${KNOCKS_MAGNITUDE:-20}    # the push's magnitude (the engine's knock)
 KNOCKS_PARA_HOLD=${KNOCKS_PARA_HOLD:-3}     # s: a paralysed NPC kept so before it is let up
+# Skyrim.esm's Paralyze (not checked in a game yet: a cast that paralyses nothing is a rig fault that names this; the
+# console's `help paralyze 4` lists the right one)
+KNOCKS_PARA_SPELL=${KNOCKS_PARA_SPELL:-0007E8DF}
+KNOCKS_PARA_SPELL_S=${KNOCKS_PARA_SPELL_S:-10}  # s: the spell's paralysis lasts about this long
+KNOCKS_PARA_LAST=${KNOCKS_PARA_LAST:-30}    # s: after that, for the copy's paralysis to end and the runner's NPC to be let up
+KNOCKS_QUIET_WAIT=${KNOCKS_QUIET_WAIT:-12}  # s: a hold let go is not taken again as the game's own knock this long after
 
 # ---- the reading, free of the rig (selftest) ----------------------------------------------------------------------
 
@@ -92,6 +114,29 @@ kn_up() { kn_rose "$1" saidUp "$2" && { [ "$5" = 0 ] || kn_rose "$3" upHeard "$4
 kn_rested() { is_num "$1" && _cmp "$1" "<=" "$KNOCKS_REST"; }
 # kn_placed <who> <player>: that player's stand-in is within KNOCKS_PLACED of where it is drawn (pairs.sh's pr_gap)
 kn_placed() { local g; g=$(pr_gap "$(dc "$1" standins)" "$2"); is_num "$g" && _cmp "$g" "<=" "$KNOCKS_PLACED"; }
+# kn_paralysed <who> <local id>: that actor's Paralysis value is up there
+kn_paralysed() { local p; p=$(kn_state "$1" "$2" paralysis); is_num "$p" && _cmp "$p" ">" 0; }
+# kn_asked_para <who> <askedParalysis before> <side>: that game asked a paralysis since, the last asked that actor's
+kn_asked_para() { kn_rose "$1" askedParalysis "$2" && kn_names "$(kn_part "$(dc "$1" 'knocks last')" asked)" "$3" paralysis; }
+# kn_ask_kept <who> <local id>: that game holds its NPC down for an asker (its Paralysis value raised)
+kn_ask_kept() { [ "$(kn_state "$1" "$2" askKept)" = 1 ]; }
+# kn_para_over <mover> <askUpSent before> <watcher> <askLetUp before> <saidUp before>: the mover said its copy's
+# paralysis is over, and the watcher let its NPC up and said it up
+kn_para_over() { kn_rose "$1" askUpSent "$2" && kn_rose "$3" askLetUp "$4" && kn_rose "$3" saidUp "$5"; }
+
+# kn_quiet <who> <label>: a hold that game let go is not taken again as its own knock for KNOCKS_QUIET_WAIT (no ask, no
+# copy or stand-in held as native, nothing held)
+kn_quiet() {
+	local g=$1 label=$2 a0 c0 s0 a1 c1 s1
+	a0=$(kn_get "$g" asked); c0=$(kn_get "$g" copies); s0=$(kn_get "$g" standIns)
+	sleep "$KNOCKS_QUIET_WAIT"
+	a1=$(kn_get "$g" asked); c1=$(kn_get "$g" copies); s1=$(kn_get "$g" standIns)
+	if [ "$a1" = "$a0" ] && [ "$c1" = "$c0" ] && [ "$s1" = "$s0" ] && kn_let_go "$g"; then
+		pass "$label: the $g does not take its actor up again as its own knock" "for $KNOCKS_QUIET_WAIT s: asked=$a1 copies=$c1 standIns=$s1 heldNow=0 quietSkipped=$(kn_get "$g" quietSkipped)"
+	else
+		fail "$label: the $g does not take its actor up again as its own knock" "asked $a0 -> $a1, copies $c0 -> $c1, standIns $s0 -> $s1, heldNow=$(kn_get "$g" heldNow) in $KNOCKS_QUIET_WAIT s: a hold let go was held again (and asked)"
+	fi
+}
 
 # kn_save <watcher> <copy local> <label>: the VM saves with its copy kept down, lives, took its value back and keeps it
 # down again after
@@ -193,6 +238,7 @@ kn_leg() {
 			released=1
 			if kn_rose "$w" gaveUp "$wg0"; then
 				warn "$label: the $w lets its actor go" "still down after the up (gaveUp $wg0 -> $(kn_get "$w" gaveUp)): the engine kept it down there: $(dc "$w" 'knocks holds' | cut -c1-160)"
+				kn_quiet "$w" "$label"  # let go while it lay there: not taken again as the watcher's own knock
 			else
 				pass "$label: the $w lets its actor go" "heldNow=0, ended=$(kn_get "$w" ended) noTake=$(kn_get "$w" noTake): $(dc "$w" 'knocks holds' | cut -c1-160)"
 			fi
@@ -347,6 +393,97 @@ knocks_ask_way() {
 	say "knocks: put back: the $w's $rl out of combat"
 }
 
+# knocks_para_ask_way <mover> <watcher>: the mover's player casts a paralysis spell at its copy of a person the watcher
+# runs: in the watcher's game the mover's stand-in's spell takes no effect, so the paralysis is asked of the watcher,
+# which holds its NPC down by its Paralysis value until the mover says its copy's paralysis is over, and says it down
+# and up as its own; the mover's copy joins that down
+knocks_para_ask_way() {
+	local m=$1 w=$2 label="knocks ($1's player paralyses its copy of the $2's NPC)" wid foes r
+	local ma0 mj0 mg0 mu0 wa0 ws0 wu0 wl0 applied=0
+	section "knocks: the $m's player paralyses its copy of a person the $w runs: asked of the $w"
+	wid=$(field player "$(dc "$w" 'session status')")
+	foes=$(combat_foes "$(npc_rows "$(dc "$w" 'npcs list')")" "$(npc_rows "$(dc "$m" 'npcs list')")" "$wid" "$(pos_of "$m")" human)
+	if ! combat_pick "$w" "$foes" "$label"; then
+		warn "$label: a person the $w runs, neither essential nor protected, that the $m shows" "none (the session gave the $w none near here): the paralysis asked is not tried; $(dc "$w" npcs | cut -c1-160)"
+		return 0
+	fi
+	local key=$COMBAT_KEY rl=$COMBAT_R cl=$COMBAT_W
+	say "$label: set-up: $key (the $w's $rl, the $m's copy $cl)"
+	ma0=$(kn_get "$m" askedParalysis); mj0=$(kn_get "$m" joined); mg0=$(kn_get "$m" gaveUp); mu0=$(kn_get "$m" askUpSent)
+	wa0=$(kn_get "$w" paraApplied); ws0=$(kn_get "$w" saidDown); wu0=$(kn_get "$w" saidUp); wl0=$(kn_get "$w" askLetUp)
+	r=$(dc "$m" "console player.cast $KNOCKS_PARA_SPELL $cl")
+	if [ "$r" != ran ]; then
+		rig_fault input "$label: the $m's player casts a paralysis at its copy $cl (the rig's injected attack)" "the console refused: $r"
+		return 0
+	fi
+	if ! wait_until "$KNOCKS_WAIT" kn_paralysed "$m" "$cl"; then
+		rig_fault input "$label: the $m's paralysis spell takes on its copy $cl (set-up)" "$(dc "$m" "knocks state $cl" | cut -c1-160): no Paralysis value: is KNOCKS_PARA_SPELL=$KNOCKS_PARA_SPELL a paralysis spell, and did it reach the copy?"
+		dc "$m" 'console player.stopcombat' >/dev/null; dc "$m" "console $cl.stopcombat" >/dev/null; dc "$w" "console $rl.stopcombat" >/dev/null
+		return 0
+	fi
+	say "$label: set-up (console): the $m's player cast $KNOCKS_PARA_SPELL at its copy $cl: $(dc "$m" "knocks state $cl" | cut -c1-120)"
+	# PA1. asked
+	if wait_until "$KNOCKS_WAIT" kn_asked_para "$m" "$ma0" "npc:$key"; then
+		pass "$label: the $m asks the $w a paralysis" "askedParalysis $ma0 -> $(kn_get "$m" askedParalysis): $(kn_part "$(dc "$m" 'knocks last')" asked | cut -c1-160)"
+	else
+		fail "$label: the $m asks the $w a paralysis" "askedParalysis $ma0 -> $(kn_get "$m" askedParalysis) copies=$(kn_get "$m" copies): $(dc "$m" 'knocks list' | cut -c1-200)"
+	fi
+	# PA2. applied
+	if wait_until "$KNOCKS_WAIT" kn_rose "$w" paraApplied "$wa0"; then
+		applied=1
+		pass "$label: the $w paralyses its NPC as asked" "paraApplied $wa0 -> $(kn_get "$w" paraApplied)"
+	else
+		fail "$label: the $w paralyses its NPC as asked" "paraApplied $wa0 -> $(kn_get "$w" paraApplied) askHeard=$(kn_get "$w" askHeard) askRefused=$(kn_get "$w" askRefused)"
+	fi
+	if [ "$applied" = 1 ]; then
+		# PA3. said as its own
+		if wait_until "$KNOCKS_WAIT" kn_said "$w" "$ws0" "npc:$key" paralysis; then
+			pass "$label: the $w says its NPC down, paralysed" "saidDown $ws0 -> $(kn_get "$w" saidDown)"
+		else
+			fail "$label: the $w says its NPC down, paralysed" "saidDown $ws0 -> $(kn_get "$w" saidDown), last: $(dc "$w" 'knocks last' | cut -c1-200)"
+		fi
+		# PA4. held down there
+		if wait_until "$KNOCKS_WAIT" kn_ask_kept "$w" "$rl"; then
+			pass "$label: the $w holds its NPC down while the $m's copy is paralysed" "askKept=1 askKeptNow=$(kn_get "$w" askKeptNow)"
+		else
+			fail "$label: the $w holds its NPC down while the $m's copy is paralysed" "$(dc "$w" "knocks state $rl" | cut -c1-160): its NPC fights on"
+		fi
+		# PA5. joined
+		if wait_until "$KNOCKS_WAIT" kn_rose "$m" joined "$mj0"; then
+			pass "$label: the $m's held copy joins that down" "joined $mj0 -> $(kn_get "$m" joined)"
+		else
+			fail "$label: the $m's held copy joins that down" "joined $mj0 -> $(kn_get "$m" joined) refused=$(kn_get "$m" refused): $(dc "$m" 'knocks list' | cut -c1-200)"
+		fi
+		# PA6. over: the ask-up, the NPC let up and said up
+		sleep "$KNOCKS_PARA_SPELL_S"
+		if wait_until "$KNOCKS_PARA_LAST" kn_para_over "$m" "$mu0" "$w" "$wl0" "$wu0"; then
+			pass "$label: the $m says its copy's paralysis is over, the $w lets its NPC up and says it up" "askUpSent $mu0 -> $(kn_get "$m" askUpSent), the $w's askLetUp $wl0 -> $(kn_get "$w" askLetUp) saidUp $wu0 -> $(kn_get "$w" saidUp)"
+		else
+			fail "$label: the $m says its copy's paralysis is over, the $w lets its NPC up and says it up" "askUpSent $mu0 -> $(kn_get "$m" askUpSent), the $w's askLetUp $wl0 -> $(kn_get "$w" askLetUp) askUpHeard=$(kn_get "$w" askUpHeard) saidUp $wu0 -> $(kn_get "$w" saidUp) after $((KNOCKS_PARA_SPELL_S + KNOCKS_PARA_LAST)) s; the $m's copy: $(dc "$m" "knocks state $cl" | cut -c1-120)"
+		fi
+		# PA7. no value left
+		if ! kn_ask_kept "$w" "$rl"; then
+			pass "$label: the $w's NPC has no Paralysis value of the mod's left" "$(dc "$w" "knocks state $rl" | cut -c1-160)"
+		else
+			fail "$label: the $w's NPC has no Paralysis value of the mod's left" "$(dc "$w" "knocks state $rl" | cut -c1-160): held down for good (until MAX_DOWN)"
+		fi
+	fi
+	# PA8. let go
+	if wait_until "$KNOCKS_HOLD_WAIT" kn_let_go "$m"; then
+		if kn_rose "$m" gaveUp "$mg0"; then
+			warn "$label: the $m lets its copy go" "still down after the up (gaveUp $mg0 -> $(kn_get "$m" gaveUp))"
+		else
+			pass "$label: the $m lets its copy go" "heldNow=0: $(dc "$m" 'knocks holds' | cut -c1-160)"
+		fi
+	else
+		fail "$label: the $m lets its copy go" "still held after $KNOCKS_HOLD_WAIT s: $(dc "$m" 'knocks list' | cut -c1-240)"
+	fi
+	# PA9. not taken again
+	kn_quiet "$m" "$label"
+	dc "$m" 'console player.stopcombat' >/dev/null; dc "$m" "console $cl.stopcombat" >/dev/null; dc "$w" "console $rl.stopcombat" >/dev/null
+	say "knocks: put back: the $m's player and copy $cl, the $w's $rl out of combat"
+}
+
 # knocks_ways <mover> <watcher>: every leg one way
 knocks_ways() {
 	knocks_npc_way "$1" "$2" human
@@ -354,6 +491,7 @@ knocks_ways() {
 	knocks_player_way "$1" "$2"
 	knocks_para_way "$1" "$2"
 	knocks_ask_way "$1" "$2"
+	knocks_para_ask_way "$1" "$2"
 }
 
 step_knocks() {
@@ -402,16 +540,50 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	# unplaced (the stand-in left where it fell: a FAIL); nokeep (the paralysed copy not kept down: a FAIL); noask (the
 	# copy's knock not asked: A1 and A2 FAIL); noapply (asked, not applied: a FAIL); nojoin (applied, the mover's copy
 	# not joined: a FAIL); refused (every dev knock refused: the rig's, each leg); nopick (no NPCs: the person's and the
-	# paralysis's the rig's, the creature's and the ask's WARNs); nocreature (none: a WARN); nosaveback (the VM saved
-	# with the value: a FAIL). FK_LEGS: the legs run (default: every leg, the VM the mover).
+	# paralysis's the rig's, the creature's and the asks' WARNs); nocreature (none: a WARN); nosaveback (the VM saved
+	# with the value: a FAIL); nospell (the paralysis spell paralyses nothing: the rig's); noaskup (the copy's paralysis
+	# never said over: PA6 and PA7 FAIL); regrab (held to the end, then taken again as the game's own knock: a WARN and a
+	# FAIL each leg given up). The paralysis asked (PA): noask fails PA1 and PA2, noapply PA2, nojoin PA5, gaveup warns
+	# PA8, refused and nopick as the ask. FK_LEGS: the legs run (default: every leg, the VM the mover).
 	fake_kn() {
 		FK=$d/fk.$RANDOM; mkdir -p "$FK"; FK_MODE=$1
 		local g f
 		for g in vm host; do
-			for f in saidDown saidUp eventsKept played took noTake upHeard gaveUp ended keptDown letUp savedBack asked copies joined applied heldNow held kept paraon; do echo 0 > "$FK/$g.$f"; done
+			for f in saidDown saidUp eventsKept played took noTake upHeard gaveUp ended keptDown letUp savedBack asked copies joined applied heldNow held kept paraon \
+				askedParalysis askUpSent paraApplied askLetUp askKept; do echo 0 > "$FK/$g.$f"; done
 			echo 40 > "$FK/$g.restGapLast"; echo 0.0 > "$FK/$g.paralysis"; echo none > "$FK/$g.lsaid"; echo none > "$FK/$g.lplayed"; echo none > "$FK/$g.lasked"
 		done
-		echo 0 > "$FK/gap"; echo 0 > "$FK/saved"
+		echo 0 > "$FK/gap"; echo 0 > "$FK/saved"; echo none > "$FK/paraover"
+		# The waits the step sleeps out: the spell's paralysis ends (the ask-up), and the quiet watch after a let-go (a
+		# hold taken again, regrab).
+		sleep() {
+			case "${1:-}" in
+				"$KNOCKS_PARA_SPELL_S") fk_para_over ;;
+				"$KNOCKS_QUIET_WAIT") [ "$FK_MODE" = regrab ] && { fk_inc vm.asked; fk_inc host.asked; } ;;
+			esac
+			return 0
+		}
+		fk_para_ask() {  # $1 mover, $2 its copy's local: the cast takes there, asked, applied, said, kept there, joined
+			local m=$1 w; w=$(fk_other "$1")
+			[ "$FK_MODE" = nospell ] && return 0
+			fk_set "$m.paralysis" 1.0; fk_inc "$m.copies"; fk_set "$m.heldNow" 1
+			[ "$FK_MODE" = noask ] && { fk_set "$m.heldNow" 0; return 0; }
+			fk_inc "$m.asked"; fk_inc "$m.askedParalysis"; fk_set "$m.lasked" "actor=npc:$2 phase=ask kind=paralysis at=(150,200,0) speed=0"
+			[ "$FK_MODE" = noapply ] && { fk_set "$m.heldNow" 0; return 0; }
+			fk_inc "$w.paraApplied"; fk_inc "$w.saidDown"; fk_set "$w.lsaid" "actor=npc:$2 phase=down kind=paralysis at=(150,200,0) speed=0"; fk_set "$w.askKept" 1
+			[ "$FK_MODE" = nojoin ] || fk_inc "$m.joined"
+			fk_set paraover "$m"
+			return 0
+		}
+		fk_para_over() {  # the spell's paralysis over on the mover's copy: its ask-up, the runner's NPC let up and said up
+			local m w; m=$(fk_get paraover); [ "$m" != none ] || return 0
+			fk_set paraover none
+			[ "$FK_MODE" = noaskup ] && return 0
+			w=$(fk_other "$m")
+			fk_set "$m.paralysis" 0.0; fk_inc "$m.askUpSent"; fk_inc "$w.askLetUp"; fk_set "$w.askKept" 0; fk_inc "$w.saidUp"; fk_set "$m.heldNow" 0
+			{ [ "$FK_MODE" = gaveup ] || [ "$FK_MODE" = regrab ]; } && fk_inc "$m.gaveUp"
+			return 0
+		}
 		fk_inc() { echo $(( $(cat "$FK/$1") + ${2:-1} )) > "$FK/$1"; }
 		fk_set() { echo "$2" > "$FK/$1"; }
 		fk_get() { cat "$FK/$1"; }
@@ -442,7 +614,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 			[ "$(fk_get "$w.kept")" = 1 ] && fk_inc "$w.letUp"
 			fk_set "$w.kept" 0; fk_set "$w.paralysis" 0.0
 			fk_set "$w.heldNow" 0; fk_set "$w.held" 0; fk_inc "$w.ended"
-			[ "$FK_MODE" = gaveup ] && fk_inc "$w.gaveUp"
+			{ [ "$FK_MODE" = gaveup ] || [ "$FK_MODE" = regrab ]; } && fk_inc "$w.gaveUp"
 			[ "$FK_MODE" = unplaced ] || fk_set gap 0
 			return 0
 		}
@@ -458,7 +630,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 		}
 		fk_report() {
 			local g=$1
-			echo "knocks ours watched=1 saidDown=$(fk_get "$g.saidDown") saidUp=$(fk_get "$g.saidUp") saidPush=0 saidParalysis=0 launchMax=500 | theirs heard=1 played=$(fk_get "$g.played") playedPush=0 playedParalysis=0 inPlace=0 refused=$([ "$FK_MODE" = noplay ] && echo far:1 || echo none) failed=0 joined=$(fk_get "$g.joined") took=$(fk_get "$g.took") keptDown=$(fk_get "$g.keptDown") byValue=0 byCall=0 letUp=$(fk_get "$g.letUp") ended=$(fk_get "$g.ended") noTake=$(fk_get "$g.noTake") gaveUp=$(fk_get "$g.gaveUp") released=0 died=0 handedOver=0 holdFull=0 upHeard=$(fk_get "$g.upHeard") upUnknown=0 restGapLast=$(fk_get "$g.restGapLast") restGapMax=600 heldNow=$(fk_get "$g.heldNow") waiting=0 late=0 dropped=0 | native copies=$(fk_get "$g.copies") standIns=0 asked=$(fk_get "$g.asked") | asks askHeard=1 applied=$(fk_get "$g.applied") askRefused=$([ "$FK_MODE" = noapply ] && echo busy:1 || echo none) | scale perMagnitude=120 learnt=0 ignored=0 speedLast=none wantedLast=none | savedBack=$(fk_get "$g.savedBack") eventsKept=$(fk_get "$g.eventsKept")"
+			echo "knocks ours watched=1 saidDown=$(fk_get "$g.saidDown") saidUp=$(fk_get "$g.saidUp") saidPush=0 saidParalysis=0 launchMax=500 | theirs heard=1 played=$(fk_get "$g.played") playedPush=0 playedParalysis=0 inPlace=0 refused=$([ "$FK_MODE" = noplay ] && echo far:1 || echo none) failed=0 joined=$(fk_get "$g.joined") took=$(fk_get "$g.took") keptDown=$(fk_get "$g.keptDown") byValue=0 byCall=0 letUp=$(fk_get "$g.letUp") ended=$(fk_get "$g.ended") noTake=$(fk_get "$g.noTake") gaveUp=$(fk_get "$g.gaveUp") released=0 died=0 handedOver=0 holdFull=0 upHeard=$(fk_get "$g.upHeard") upUnknown=0 restGapLast=$(fk_get "$g.restGapLast") restGapMax=600 heldNow=$(fk_get "$g.heldNow") waiting=0 late=0 dropped=0 | native copies=$(fk_get "$g.copies") standIns=0 asked=$(fk_get "$g.asked") askedParalysis=$(fk_get "$g.askedParalysis") askUpSent=$(fk_get "$g.askUpSent") quiet=0 quietLetGo=0 quietSkipped=0 | asks askHeard=1 applied=$(fk_get "$g.applied") askRefused=$([ "$FK_MODE" = noapply ] && echo busy:1 || echo none) paraApplied=$(fk_get "$g.paraApplied") paraMore=0 askUpHeard=1 askLetUp=$(fk_get "$g.askLetUp") askGaveUp=0 askLeft=0 askByCall=0 askKeptNow=$(fk_get "$g.askKept") | scale perMagnitude=120 learnt=0 ignored=0 speedLast=none wantedLast=none | savedBack=$(fk_get "$g.savedBack") eventsKept=$(fk_get "$g.eventsKept")"
 		}
 		fk_one() {  # $1 game, $2 the NPC
 			local role kind=human
@@ -499,7 +671,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 				*" knocks paralyze "*" off")
 					if [ "$(fk_get "$g.paraon")" = 1 ]; then fk_set "$g.paraon" 0; fk_up "$g" "$3" paralysis; fi
 					echo "off id=$3 raised=1 paralysis=0.0" ;;
-				*" knocks state "*) echo "state id=$3 knock=0 phase=standing resting=0 paralysis=$(fk_get "$g.paralysis") dead=0 held=$(fk_get "$g.held") kept=$(fk_get "$g.kept") at=(0,0,0)" ;;
+				*" knocks state "*) echo "state id=$3 knock=0 phase=standing resting=0 paralysis=$(fk_get "$g.paralysis") dead=0 held=$(fk_get "$g.held") kept=$(fk_get "$g.kept") askKept=$(fk_get "$g.askKept") quiet=0 askUpOwed=0 at=(0,0,0)" ;;
 				*" knocks last") echo "said $(fk_get "$g.lsaid") | played $(fk_get "$g.lplayed") | asked $(fk_get "$g.lasked")" ;;
 				*" knocks list") echo "held=$(fk_get "$g.heldNow")" ;;
 				*" knocks holds") echo "holds none" ;;
@@ -507,6 +679,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 				"host standins") echo "standins n=1 | player 2 standin=FF000AAA placed=1 dressed=1 at=(100,200,0) heading=1.500 target=($((100 + $(fk_get gap))),200,0) speed=0" ;;
 				"vm standins") echo "standins n=1 | player 1 standin=FF000BBB placed=1 dressed=1 at=(100,200,0) heading=1.500 target=($((100 + $(fk_get gap))),200,0) speed=0" ;;
 				"vm console save "*) fk_set saved 1; [ "$FK_MODE" = nosaveback ] || fk_inc vm.savedBack; echo ran ;;
+				*" console player.cast $KNOCKS_PARA_SPELL "*)
+					[ "$FK_MODE" = refused ] && { echo "refused"; return; }
+					fk_para_ask "$g" "$4"; echo ran ;;
 				*" console "*) echo ran ;;
 				*) echo ok ;;
 			esac
@@ -518,24 +693,30 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	}
 	# vm the mover: the person's push (said, played, took, not back, kept here, up, let go, rest: 8), the creature's
 	# (8), the player's (8 and placed: 9), the paralysis (said, played, took, not back, kept here, kept down, up, let go,
-	# no value left: 9), the ask (asked, applied, said, joined, let go: 5)
-	t "ways: all of it" "$(fake_kn ok)" "PASS:39"
-	t "ways: no down said fails, each leg but the ask" "$(fake_kn nosay)" "FAIL:4 PASS:35"
-	t "ways: nothing played fails, nothing after it read" "$(fake_kn noplay)" "FAIL:4 PASS:21"
-	t "ways: played and never down fails" "$(fake_kn notake)" "FAIL:4 PASS:35"
-	t "ways: a knock said back fails" "$(fake_kn saidback)" "FAIL:4 PASS:35"
-	t "ways: no event kept is a WARN" "$(fake_kn noevents)" "PASS:35 WARN:4"
-	t "ways: never up fails the up and the let-go, and the stand-in unplaced" "$(fake_kn noup)" "FAIL:9 PASS:26"
-	t "ways: resting far apart is a WARN" "$(fake_kn far)" "PASS:36 WARN:3"
-	t "ways: held to the end is a WARN" "$(fake_kn gaveup)" "PASS:35 WARN:4"
-	t "ways: a stand-in left where it fell fails" "$(fake_kn unplaced)" "FAIL:1 PASS:38"
-	t "ways: a paralysed copy not kept down fails" "$(fake_kn nokeep)" "FAIL:1 PASS:38"
-	t "ways: a copy's knock not asked fails, and not applied" "$(fake_kn noask)" "FAIL:2 PASS:35"
-	t "ways: an ask not applied fails" "$(fake_kn noapply)" "FAIL:1 PASS:36"
-	t "ways: the mover's copy not joined fails" "$(fake_kn nojoin)" "FAIL:1 PASS:38"
-	t "ways: refused knocks are the rig's" "$(fake_kn refused)" "RIG:5"
-	t "ways: no NPC: the person and the paralysis the rig's, the creature and the ask WARNs" "$(fake_kn nopick)" "PASS:9 RIG:2 WARN:2"
-	t "ways: no creature is a WARN" "$(fake_kn nocreature)" "PASS:31 WARN:1"
+	# no value left: 9), the ask (asked, applied, said, joined, let go: 5), the paralysis asked (asked, applied, said,
+	# held there, joined, over, no value left, let go, not taken again: 9)
+	t "ways: all of it" "$(fake_kn ok)" "PASS:48"
+	t "ways: no down said fails, each leg but the asks" "$(fake_kn nosay)" "FAIL:4 PASS:44"
+	t "ways: nothing played fails, nothing after it read" "$(fake_kn noplay)" "FAIL:4 PASS:30"
+	t "ways: played and never down fails" "$(fake_kn notake)" "FAIL:4 PASS:44"
+	t "ways: a knock said back fails" "$(fake_kn saidback)" "FAIL:4 PASS:44"
+	t "ways: no event kept is a WARN" "$(fake_kn noevents)" "PASS:44 WARN:4"
+	t "ways: never up fails the up and the let-go, and the stand-in unplaced" "$(fake_kn noup)" "FAIL:9 PASS:35"
+	t "ways: resting far apart is a WARN" "$(fake_kn far)" "PASS:45 WARN:3"
+	t "ways: held to the end is a WARN, and nothing is taken again after" "$(fake_kn gaveup)" "PASS:47 WARN:5"
+	t "ways: a hold given up and then taken again as the game's own knock fails, each leg" "$(fake_kn regrab)" "FAIL:5 PASS:42 WARN:5"
+	t "ways: a stand-in left where it fell fails" "$(fake_kn unplaced)" "FAIL:1 PASS:47"
+	t "ways: a paralysed copy not kept down fails" "$(fake_kn nokeep)" "FAIL:1 PASS:47"
+	t "ways: a copy's knock not asked fails, and not applied, the push and the paralysis" "$(fake_kn noask)" "FAIL:4 PASS:37"
+	t "ways: an ask not applied fails, the push and the paralysis" "$(fake_kn noapply)" "FAIL:2 PASS:39"
+	t "ways: the mover's copy not joined fails, the push and the paralysis" "$(fake_kn nojoin)" "FAIL:2 PASS:46"
+	t "ways: the copy's paralysis never said over: the runner's NPC held, the copy held" "$(fake_kn noaskup)" "FAIL:4 PASS:44"
+	t "ways: a paralysis spell that paralyses nothing is the rig's" "$(fake_kn nospell)" "PASS:39 RIG:1"
+	t "ways: refused knocks and casts are the rig's" "$(fake_kn refused)" "RIG:6"
+	t "ways: no NPC: the person and the paralysis the rig's, the creature and the asks WARNs" "$(fake_kn nopick)" "PASS:9 RIG:2 WARN:3"
+	t "ways: no creature is a WARN" "$(fake_kn nocreature)" "PASS:40 WARN:1"
+	# the host the mover (its player paralyses its copy of the VM's person)
+	t "para asked, the host the mover: all of it" "$(FK_LEGS='knocks_para_ask_way host vm' fake_kn ok)" "PASS:9"
 	# the host the mover, the VM watching a paralysis: 9 and the save (lives, log, savedBack, kept again: 4)
 	t "para, the VM watching: all of it, and its save" "$(FK_LEGS='knocks_para_way host vm' fake_kn ok)" "PASS:13"
 	t "para, the VM watching: its value saved fails" "$(FK_LEGS='knocks_para_way host vm' fake_kn nosaveback)" "FAIL:1 PASS:12"

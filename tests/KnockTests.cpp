@@ -65,11 +65,16 @@ namespace
 		return Knock{ .actor = a_actor, .sentMs = 4000, .phase = KPhase::kUp, .x = 400.0f, .y = 200.0f, .z = 40.0f };
 	}
 
-	Knock Ask(Protocol::NpcKey a_npc)
+	Knock Ask(Protocol::NpcKey a_npc, Kind a_kind = Kind::kPush)
 	{
-		Knock knock = Down(NpcSide(a_npc));
+		Knock knock = Down(NpcSide(a_npc), a_kind);
 		knock.phase = KPhase::kAsk;
 		return knock;
+	}
+
+	Knock AskUp(Protocol::NpcKey a_npc)
+	{
+		return KnockRules::AskUpOf(Ask(a_npc, Kind::kParalysis), 5000);
 	}
 
 	using Names = std::vector<std::string>;
@@ -166,12 +171,41 @@ TEST("knock protocol: knocks read back as they were written, as message 85 of pr
 	static_assert(Protocol::VERSION >= 32);
 	static_assert(static_cast<std::uint8_t>(MT::kKnocks) == 85);
 	const Protocol::Knocks knocks{ .sender = 2,
-		.knocks = { Down(PlayerSide(2)), Down(NpcSide(BANDIT), Kind::kParalysis), Down(NpcSide(WOLF_OF_1)), Up(NpcSide(DRAGON)), Ask(HORSE) } };
+		.knocks = { Down(PlayerSide(2)), Down(NpcSide(BANDIT), Kind::kParalysis), Down(NpcSide(WOLF_OF_1)), Up(NpcSide(DRAGON)), Ask(HORSE),
+			Ask(BANDIT, Kind::kParalysis), AskUp(BANDIT) } };
 	CHECK(Protocol::DecodeKnocks(Protocol::Encode(knocks)) == knocks);
 	CHECK(Protocol::PeekType(Protocol::Encode(knocks)) == MT::kKnocks);
 	CHECK(Protocol::DecodeKnocks(Protocol::Encode(Protocol::Knocks{})) == Protocol::Knocks{});
 	CHECK(FormTranslate::CarriesForms(MT::kKnocks));
-	CHECK(Protocol::Encode(knocks).size() == 1 + 4 + 1 + 5 * Protocol::KNOCK_BYTES);
+	CHECK(Protocol::Encode(knocks).size() == 1 + 4 + 1 + 7 * Protocol::KNOCK_BYTES);
+	CHECK(Protocol::KnockToRunner(KPhase::kAsk));
+	CHECK(Protocol::KnockToRunner(KPhase::kAskUp));
+	CHECK(!Protocol::KnockToRunner(KPhase::kDown));
+	CHECK(!Protocol::KnockToRunner(KPhase::kUp));
+}
+
+TEST("knock protocol: an ask-up is the ask's actor and place, its kind, phase ask-up, no launch; one of a player or one that moves is refused")
+{
+	const Knock ask = Ask(BANDIT, Kind::kParalysis);
+	const Knock up = KnockRules::AskUpOf(ask, 7777);
+	CHECK(up.phase == KPhase::kAskUp);
+	CHECK(up.actor == ask.actor);
+	CHECK(up.kind == Kind::kParalysis);
+	CHECK(up.sentMs == 7777u);
+	CHECK(up.x == ask.x);
+	CHECK(KnockRules::Length({ up.vx, up.vy, up.vz }) == 0.0f);
+	CHECK(Protocol::KnockHolds(up));
+	// From a push's ask too (its launch dropped).
+	CHECK(Protocol::KnockHolds(KnockRules::AskUpOf(Ask(BANDIT), 1)));
+
+	const auto refused = [](Knock a_knock) { return !Protocol::DecodeKnocks(Protocol::Encode(Protocol::Knocks{ .knocks = { a_knock } })); };
+	Knock ofPlayer = up;
+	ofPlayer.actor = PlayerSide(2);
+	CHECK(refused(ofPlayer));
+	Knock moving = up;
+	moving.vx = 10.0f;
+	CHECK(refused(moving));
+	CHECK(!refused(up));
 }
 
 TEST("knock protocol: the most fit; more, a side of nobody, an unknown phase or kind, an ask of a player, a bad place, a launch too fast or not finite, an up that moves, or a byte too many are refused")
@@ -194,7 +228,7 @@ TEST("knock protocol: the most fit; more, a side of nobody, an unknown phase or 
 	Knock phase = Down(PlayerSide(2));
 	phase.phase = static_cast<KPhase>(0);
 	CHECK(refused(phase));
-	phase.phase = static_cast<KPhase>(4);
+	phase.phase = static_cast<KPhase>(5);
 	CHECK(refused(phase));
 	Knock kind = Down(PlayerSide(2));
 	kind.kind = static_cast<Kind>(2);
@@ -312,6 +346,55 @@ TEST("knock server: an ask goes to the NPC's runner alone, the asker named; one 
 	CHECK(KnocksTo(f, 1).empty());
 	CHECK(KnocksTo(f, 2).empty());
 	CHECK(KnocksTo(f, 3).empty());
+}
+
+TEST("knock server: a paralysis asked and its ask-up go to the NPC's runner alone, the asker named; Ada's own ask-up is dropped")
+{
+	Fixture f;
+	AllIn(f, 3);
+	AdaRuns(f, 3);
+
+	const std::vector<Knock> bos{ Ask(BANDIT, Kind::kParalysis), AskUp(BANDIT), AskUp(WOLF_OF_1) };
+	f.fake->Deliver(2, Protocol::Encode(Protocol::Knocks{ .knocks = bos }));
+	REQUIRE(f.fake->Settle());
+	const auto toAda = KnocksTo(f, 1);
+	REQUIRE(toAda.size() == 1u);
+	CHECK(toAda[0].sender == 2u);
+	CHECK(toAda[0].knocks == std::vector<Knock>({ Ask(BANDIT, Kind::kParalysis), AskUp(BANDIT) }));  // the wolf is no one's
+	CHECK(KnocksTo(f, 3).empty());
+	CHECK(KnocksTo(f, 2).empty());
+
+	f.fake->Deliver(1, Protocol::Encode(Protocol::Knocks{ .knocks = { AskUp(BANDIT) } }));
+	REQUIRE(f.fake->Settle());
+	CHECK(KnocksTo(f, 1).empty());
+	CHECK(KnocksTo(f, 2).empty());
+	CHECK(KnocksTo(f, 3).empty());
+}
+
+TEST("knock server: an ask-up is never dropped, past the budget too (the runner's NPC is held down until it comes)")
+{
+	Fixture f;
+	AllIn(f, 2);
+	AdaRuns(f, 2);
+	Protocol::Knocks asks{};
+	Protocol::Knocks ups{};
+	for (std::size_t i = 0; i < Protocol::MAX_KNOCKS; ++i) {
+		asks.knocks.push_back(Ask(BANDIT, Kind::kParalysis));
+		ups.knocks.push_back(AskUp(BANDIT));
+	}
+	for (int i = 0; i < 4; ++i) {
+		f.fake->Deliver(2, Protocol::Encode(asks));
+	}
+	REQUIRE(f.fake->Settle());
+	const auto passed = AllOf(KnocksTo(f, 1)).size();
+	CHECK(passed >= 64u);
+	CHECK(passed < 4u * Protocol::MAX_KNOCKS);  // the budget is spent
+
+	for (int i = 0; i < 4; ++i) {
+		f.fake->Deliver(2, Protocol::Encode(ups));
+	}
+	REQUIRE(f.fake->Settle());
+	CHECK(AllOf(KnocksTo(f, 1)).size() == 4u * Protocol::MAX_KNOCKS);
 }
 
 TEST("knock server: past a burst of 64 a player's downs are dropped, and the log says so once; an up is never dropped")
@@ -619,16 +702,40 @@ TEST("knock rules: judge: a friend's down plays on a stand-in or a copy, alive, 
 	CHECK(KnockRules::NameOf(Verdict::kAlready) == "already");
 }
 
-TEST("knock rules: ask: a push asked of the NPC's runner is applied when it runs it, alive, standing, free and near; a paralysis never")
+TEST("knock rules: ask: a paralysis asked of the NPC's runner is applied when it runs it, alive, free and near, down already too; not with Asked full")
+{
+	const KnockRules::AskFacts ok{ .ours = true, .drift = 30.0f, .kind = Kind::kParalysis };
+	CHECK(KnockRules::JudgeAsk(ok) == AskVerdict::kApply);
+	auto facts = ok;
+	facts.down = true;  // a push's knock: the paralysis keeps it down for as long as the asker's copy is paralysed
+	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kApply);
+	facts = ok;
+	facts.ours = false;
+	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kNotOurs);
+	facts = ok;
+	facts.alive = false;
+	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kDead);
+	facts = ok;
+	facts.busy = true;
+	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kBusy);
+	facts = ok;
+	facts.drift = KnockRules::REACH * 2.0f;
+	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kFar);
+	facts = ok;
+	facts.full = true;
+	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kFull);
+	facts.kind = Kind::kPush;
+	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kApply);  // a push keeps nothing: Asked's room is no matter
+	CHECK(KnockRules::NameOf(AskVerdict::kFull) == "full");
+}
+
+TEST("knock rules: ask: a push asked of the NPC's runner is applied when it runs it, alive, standing, free and near")
 {
 	const KnockRules::AskFacts ok{ .ours = true, .drift = 30.0f };
 	CHECK(KnockRules::JudgeAsk(ok) == AskVerdict::kApply);
 	auto facts = ok;
 	facts.ours = false;
 	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kNotOurs);
-	facts = ok;
-	facts.kind = Kind::kParalysis;
-	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kParalysis);
 	facts = ok;
 	facts.alive = false;
 	CHECK(KnockRules::JudgeAsk(facts) == AskVerdict::kDead);
@@ -644,8 +751,139 @@ TEST("knock rules: ask: a push asked of the NPC's runner is applied when it runs
 
 	KnockRules::AskCounts counts;
 	counts.Add(AskVerdict::kApply);
-	counts.Add(AskVerdict::kParalysis);
-	CHECK(counts.Others() == "paralysis:1");
+	counts.Add(AskVerdict::kDown);
+	CHECK(counts.Others() == "down:1");
+}
+
+// ---- the rules: a paralysis asked of the runner ----
+
+TEST("knock rules: asked: the first ask raises, more askers share it; the last asker's ask-up lets it up; a stranger's ask-up does nothing")
+{
+	using Add = KnockRules::Asked::Add;
+	KnockRules::Asked asked;
+	CHECK(asked.Ask(BANDIT, 2, T0) == Add::kFirst);
+	CHECK(asked.Has(BANDIT));
+	CHECK(asked.Ask(BANDIT, 2, T0 + 1s) == Add::kMore);  // the same asker again
+	CHECK(asked.Askers(BANDIT) == 1u);
+	CHECK(asked.Ask(BANDIT, 3, T0 + 2s) == Add::kMore);
+	CHECK(asked.Askers(BANDIT) == 2u);
+	CHECK(!asked.Up(BANDIT, 4));     // never asked
+	CHECK(!asked.Up(DRAGON, 2));     // not asked of it
+	CHECK(!asked.Up(BANDIT, 2));     // player 3's copy is still paralysed
+	CHECK(asked.Has(BANDIT));
+	CHECK(!asked.Up(BANDIT, 2));     // said twice: once counts
+	CHECK(asked.Up(BANDIT, 3));      // the last: let up
+	CHECK(!asked.Has(BANDIT));
+	CHECK(asked.Size() == 0u);
+}
+
+TEST("knock rules: asked: a leaving asker lets up what it alone asked; MAX_DOWN after the last ask it is let up with no ask-up; MAX NPCs at most")
+{
+	using Add = KnockRules::Asked::Add;
+	KnockRules::Asked asked;
+	(void)asked.Ask(BANDIT, 2, T0);
+	(void)asked.Ask(DRAGON, 2, T0);
+	(void)asked.Ask(DRAGON, 3, T0);
+	const auto left = asked.Left(2);
+	CHECK(left == std::vector<Protocol::NpcKey>({ BANDIT }));
+	CHECK(asked.Has(DRAGON));
+	CHECK(asked.Askers(DRAGON) == 1u);
+
+	(void)asked.Ask(HORSE, 3, T0 + 20s);  // a newer ask
+	CHECK(asked.Expired(T0 + KnockRules::MAX_DOWN - 1ms).empty());
+	CHECK(asked.Expired(T0 + KnockRules::MAX_DOWN) == std::vector<Protocol::NpcKey>({ DRAGON }));
+	CHECK(asked.Has(HORSE));
+	(void)asked.Ask(HORSE, 3, T0 + 50s);  // asked again: its time starts again
+	CHECK(asked.Expired(T0 + 20s + KnockRules::MAX_DOWN).empty());
+	CHECK(asked.Forget(HORSE));
+	CHECK(!asked.Forget(HORSE));
+
+	for (std::uint32_t i = 0; i < KnockRules::Asked::MAX; ++i) {
+		CHECK(asked.Ask(Protocol::NpcKey{ 0x00010000 + i, 0 }, 2, T0) == Add::kFirst);
+	}
+	CHECK(asked.Ask(BANDIT, 2, T0) == Add::kFull);
+	CHECK(asked.Ask(Protocol::NpcKey{ 0x00010000, 0 }, 3, T0) == Add::kMore);  // one asked already still takes askers
+	asked.Clear();
+	CHECK(asked.Size() == 0u);
+}
+
+TEST("knock rules: asked: the copy's own paralysis is over when its value less what this game keeps it down by is none")
+{
+	CHECK(!KnockRules::OwnParalysisOver(1.0f, false));                    // the effect's, asked: not over
+	CHECK(KnockRules::OwnParalysisOver(0.0f, false));                     // the effect ended
+	CHECK(KnockRules::OwnParalysisOver(KnockRules::KEPT, true));          // only ours, kept while joined: over
+	CHECK(!KnockRules::OwnParalysisOver(KnockRules::KEPT + 1.0f, true));  // the effect's and ours
+	CHECK(KnockRules::OwnParalysisOver(-1.0f, false));                    // a value pulled below none
+}
+
+// ---- the rules: let go while down ----
+
+TEST("knock rules: quiet: a hold given up while down is never held again as this world's, nor asked, until it has stood; then a new knock is")
+{
+	using KnockRules::Hold;
+	using KnockRules::HoldStep;
+	KnockRules::Quiet quiet;
+	constexpr std::uint32_t COPY = 0xFF000801;
+	// A friend's push played on the copy at T0, its up at T0 + 4 s; the copy is still lying UP_WAIT later: given up.
+	const auto upAt = T0 + 4s;
+	const auto gaveUpAt = upAt + KnockRules::UP_WAIT;
+	REQUIRE(HoldStep(T0, gaveUpAt, Phase::kDown, true, upAt, std::nullopt) == Hold::kGaveUp);
+	quiet.LetGo(COPY, true, gaveUpAt);
+	// The same tick and for as long as it lies (and as it gets up): not this world's knock (no native hold, no ask).
+	CHECK(!quiet.Native(COPY, Phase::kDown, gaveUpAt));
+	CHECK(!quiet.Native(COPY, Phase::kDown, gaveUpAt + 10s));
+	CHECK(!quiet.Native(COPY, Phase::kGettingUp, gaveUpAt + 11s));
+	CHECK(!quiet.Native(COPY, Phase::kDown, gaveUpAt + 60s));  // however long (a stand-in's MAX_DOWN never cycles)
+	CHECK(quiet.skipped == 4u);
+	// It stands: no longer quiet; a knock after that is this world's.
+	CHECK(quiet.Native(COPY, Phase::kStanding, gaveUpAt + 61s));
+	CHECK(!quiet.Has(COPY));
+	CHECK(quiet.Native(COPY, Phase::kDown, gaveUpAt + 62s));
+	// Another actor was never quiet.
+	CHECK(quiet.Native(0xFF000802, Phase::kDown, T0));
+}
+
+TEST("knock rules: quiet: a knock that never took and then takes within LATE_TAKE is that knock (quiet until it stands); after LATE_TAKE standing it is forgotten")
+{
+	using KnockRules::Hold;
+	using KnockRules::HoldStep;
+	KnockRules::Quiet quiet;
+	constexpr std::uint32_t LATE = 0xFF000803;
+	constexpr std::uint32_t NEVER = 0xFF000804;
+	const auto noTakeAt = T0 + KnockRules::TAKE_WITHIN;
+	REQUIRE(HoldStep(T0, noTakeAt, Phase::kStanding, false, std::nullopt, T0) == Hold::kNoTake);
+	quiet.LetGo(LATE, false, noTakeAt);
+	quiet.LetGo(NEVER, false, noTakeAt);
+	CHECK(quiet.Native(LATE, Phase::kStanding, noTakeAt + 500ms));  // standing: nothing to hold, still quiet
+	CHECK(quiet.Has(LATE));
+	CHECK(!quiet.Native(LATE, Phase::kDown, noTakeAt + 1s));        // the late take
+	CHECK(!quiet.Native(LATE, Phase::kDown, noTakeAt + 5s));        // quiet while it lies, past LATE_TAKE too
+	CHECK(quiet.Native(LATE, Phase::kStanding, noTakeAt + 6s));
+	CHECK(!quiet.Has(LATE));
+	// Never took: forgotten once seen standing LATE_TAKE after.
+	CHECK(quiet.Native(NEVER, Phase::kStanding, noTakeAt + KnockRules::LATE_TAKE));
+	CHECK(!quiet.Has(NEVER));
+	CHECK(quiet.Native(NEVER, Phase::kDown, noTakeAt + KnockRules::LATE_TAKE + 1s));  // a knock of this world's now
+}
+
+TEST("knock rules: quiet: at most MAX actors, the oldest forgotten first; cleared with the world")
+{
+	KnockRules::Quiet quiet;
+	for (std::uint32_t i = 0; i < KnockRules::Quiet::MAX; ++i) {
+		quiet.LetGo(i + 1, true, T0 + std::chrono::milliseconds(i));
+	}
+	CHECK(quiet.Size() == KnockRules::Quiet::MAX);
+	quiet.LetGo(0xFFFF, true, T0 + 1h);
+	CHECK(quiet.Size() == KnockRules::Quiet::MAX);
+	CHECK(!quiet.Has(1));  // the oldest
+	CHECK(quiet.Has(2));
+	CHECK(quiet.Has(0xFFFF));
+	quiet.LetGo(2, true, T0 + 2h);  // again: no room taken
+	CHECK(quiet.Size() == KnockRules::Quiet::MAX);
+	quiet.Forget(2);
+	CHECK(!quiet.Has(2));
+	quiet.Clear();
+	CHECK(quiet.Size() == 0u);
 }
 
 // ---- the rules: holding and keeping down ----

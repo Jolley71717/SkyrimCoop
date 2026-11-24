@@ -61,8 +61,9 @@ namespace Protocol
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
 	// 32: knockdowns (kKnocks, message type 85): a living actor knocked down or ragdolled (a push, an explosion, a giant's
 	//    blow, a fall, a paralysis) is said by the game that runs it as it goes down and as it gets up, and every other
-	//    game knocks the actor that shows it the same way and keeps it down until then; a knock one game gives a copy is
-	//    asked of the copy's runner. (As with 21: renumbered when it lands; 25-31 are other changes'.)
+	//    game knocks the actor that shows it the same way and keeps it down until then; a knock one game gives a copy (a
+	//    push or a paralysis) is asked of the copy's runner, and a paralysis asked is let up when the asker's copy is up
+	//    (ask-up). (As with 21: renumbered when it lands; 25-31 are other changes'.)
 	inline constexpr std::uint16_t VERSION = 32;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
@@ -887,7 +888,8 @@ namespace Protocol
 	// power bash's knockdown, a fall) or paralysed (a spell, a poison, Ice Form). The game that runs it (its player's, an
 	// NPC's runner) says it as it goes down and as it gets up; every other game knocks the actor that shows it there the
 	// same way and keeps it down until it gets up. A knock a game gives a copy of an NPC another game runs is asked of that
-	// runner, which knocks its NPC the same way (and then says it as its own).
+	// runner, which knocks its NPC the same way (and then says it as its own); a paralysis asked holds the runner's NPC
+	// until the asker says its copy's paralysis is over (an ask-up).
 
 	// At most this many in one message (a game sends what a tick saw).
 	inline constexpr std::size_t MAX_KNOCKS = 32;
@@ -899,7 +901,14 @@ namespace Protocol
 		kDown = 1,  // knocked down: where it began, its launch
 		kUp = 2,    // getting up: where it rests
 		kAsk = 3,   // a knock a game gave a copy, to the NPC's runner: where it began, its launch
+		kAskUp = 4,  // the paralysis a game asked is over on its copy, to the NPC's runner: let its NPC up (no launch)
 	};
+
+	// An ask or an ask-up: to the NPC's runner alone.
+	[[nodiscard]] constexpr bool KnockToRunner(KnockPhase a_phase)
+	{
+		return a_phase == KnockPhase::kAsk || a_phase == KnockPhase::kAskUp;
+	}
 
 	enum class KnockKind : std::uint8_t
 	{
@@ -929,16 +938,16 @@ namespace Protocol
 		bool operator==(const Knocks&) const = default;
 	};
 
-	// Whether a knock can be: one actor, a known phase and kind, an ask only of an NPC, a place a game can hold, a launch
-	// finite and at most MAX_KNOCK_SPEED, and none for an up.
+	// Whether a knock can be: one actor, a known phase and kind, an ask or an ask-up only of an NPC, a place a game can
+	// hold, a launch finite and at most MAX_KNOCK_SPEED, and none for an up or an ask-up.
 	[[nodiscard]] inline bool KnockHolds(const Knock& a_knock)
 	{
 		const auto phase = static_cast<std::uint8_t>(a_knock.phase);
 		const auto kind = static_cast<std::uint8_t>(a_knock.kind);
-		if (!PairSideHolds(a_knock.actor) || phase < 1 || phase > 3 || kind > 1) {
+		if (!PairSideHolds(a_knock.actor) || phase < 1 || phase > 4 || kind > 1) {
 			return false;
 		}
-		if (a_knock.phase == KnockPhase::kAsk && a_knock.actor.player != 0) {
+		if (KnockToRunner(a_knock.phase) && a_knock.actor.player != 0) {
 			return false;
 		}
 		if (!InWorld(a_knock.x) || !InWorld(a_knock.y) || !InWorld(a_knock.z)) {
@@ -948,7 +957,7 @@ namespace Protocol
 			return false;
 		}
 		const float speed = std::sqrt(a_knock.vx * a_knock.vx + a_knock.vy * a_knock.vy + a_knock.vz * a_knock.vz);
-		return a_knock.phase == KnockPhase::kUp ? speed == 0.0f : speed <= MAX_KNOCK_SPEED;
+		return a_knock.phase == KnockPhase::kUp || a_knock.phase == KnockPhase::kAskUp ? speed == 0.0f : speed <= MAX_KNOCK_SPEED;
 	}
 
 	// Whether a sit can be: one actor (a player and no NPC, or an NPC of id != 0), a known kind, a place a game can hold,

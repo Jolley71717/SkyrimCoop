@@ -78,13 +78,29 @@ namespace Knocks
 			bool                             inPlace = false;
 			bool                             measured = false;
 			bool                             asked = false;  // a native knock of a copy, asked of its runner
+			// A paralysis asked: an ask-up is owed to the runner once the copy's own paralysis is over (or the hold ends).
+			bool                             askUpOwed = false;
+			Protocol::Knock                  askSent;
 		};
 		std::vector<Hold> holds;
 
-		constexpr float KEPT = 1.0f;  // the Paralysis value a kept actor is raised by
+		constexpr float KEPT = KnockRules::KEPT;  // the Paralysis value a kept actor is raised by
 
 		KnockRules::Watch         ours;     // our player's and our NPCs' knocks
 		KnockRules::Watch         natives;  // this world's knocks of copies and stand-ins
+		KnockRules::Quiet         quiet;    // actors let go while down: not this world's knock until they stand again
+		KnockRules::Asked         paralysesAsked;  // paralyses asked of this game for the NPCs it runs
+
+		// The NPCs a paralysis asked of this game holds down: their Paralysis value raised by KEPT (kept; not after a save,
+		// until the next tick), the engine's paralysis knock when the value alone has not put it down by callAt.
+		struct Raised
+		{
+			RE::ActorHandle                  handle;
+			RE::FormID                       id = 0;
+			bool                             kept = false;
+			std::optional<Clock::time_point> callAt;
+		};
+		std::map<Protocol::NpcKey, Raised> raised;
 		KnockRules::Inbox         inbox;
 		KnockRules::Scale         scale;
 		KnockRules::VerdictCounts verdicts;
@@ -107,6 +123,8 @@ namespace Knocks
 			std::uint64_t heard = 0, upHeard = 0, upUnknown = 0, playedPush = 0, playedParalysis = 0, inPlace = 0, failed = 0, joined = 0, took = 0;
 			std::uint64_t keptDown = 0, byValue = 0, byCall = 0, letUp = 0, ended = 0, noTake = 0, gaveUp = 0, released = 0, died = 0, handedOver = 0, holdFull = 0;
 			std::uint64_t nativeCopies = 0, nativeStandIns = 0, asked = 0, askHeard = 0, askApplied = 0, savedBack = 0;
+			std::uint64_t askedParalysis = 0, askUpSent = 0, quietLetGo = 0;
+			std::uint64_t paraApplied = 0, paraMore = 0, askUpHeard = 0, askLetUp = 0, askGaveUp = 0, askLeft = 0, askByCall = 0;
 			float         restGapLast = -1.0f, restGapMax = -1.0f, speedLast = -1.0f, wantedLast = -1.0f;
 		};
 		Counts counts;
@@ -129,7 +147,10 @@ namespace Knocks
 
 		std::string KnockText(const Protocol::Knock& a_knock)
 		{
-			const auto phase = a_knock.phase == Protocol::KnockPhase::kDown ? "down" : a_knock.phase == Protocol::KnockPhase::kUp ? "up" : "ask";
+			const auto phase = a_knock.phase == Protocol::KnockPhase::kDown ? "down" :
+			                   a_knock.phase == Protocol::KnockPhase::kUp   ? "up" :
+			                   a_knock.phase == Protocol::KnockPhase::kAsk  ? "ask" :
+			                                                                  "askUp";
 			return std::format("actor={} phase={} kind={} at=({:.0f},{:.0f},{:.0f}) speed={:.0f}", SideText(a_knock.actor), phase, KnockRules::NameOf(a_knock.kind), a_knock.x,
 				a_knock.y, a_knock.z, KnockRules::Length({ a_knock.vx, a_knock.vy, a_knock.vz }));
 		}
@@ -223,6 +244,57 @@ namespace Knocks
 			a_hold.kept = true;
 		}
 
+		// The ask-up a paralysis asked of a copy's runner is owed: sent (the runner lets its NPC up).
+		void PayAskUp(Hold& a_hold, Clock::time_point a_now)
+		{
+			if (!a_hold.askUpOwed) {
+				return;
+			}
+			a_hold.askUpOwed = false;
+			const auto up = KnockRules::AskUpOf(a_hold.askSent, Protocol::SentMs(a_now));
+			if (!Protocol::KnockHolds(up)) {
+				return;
+			}
+			++counts.askUpSent;
+			logs::info("Knocks: told the runner of {} its paralysis is over here", SideText(a_hold.side));
+			outgoing.push_back(up);
+		}
+
+		// An actor let go: while it lies there (or before its knock took), its knock is not this world's (Quiet).
+		void Quieten(const Hold& a_hold, Phase a_phase, KnockRules::Hold a_end, Clock::time_point a_now)
+		{
+			if (a_phase != Phase::kStanding || a_end == KnockRules::Hold::kNoTake) {
+				quiet.LetGo(a_hold.id, a_phase != Phase::kStanding, a_now);
+				++counts.quietLetGo;
+			}
+		}
+
+		// ---- paralyses asked of this game ----
+
+		// Its Paralysis value taken back (when this game raised it and the actor is still the one), forgotten.
+		void LowerAsked(const Protocol::NpcKey& a_npc)
+		{
+			const auto it = raised.find(a_npc);
+			if (it == raised.end()) {
+				return;
+			}
+			if (it->second.kept) {
+				if (const auto actor = it->second.handle.get(); actor && actor->GetFormID() == it->second.id) {
+					RaiseParalysis(actor.get(), -KEPT);
+					++counts.askLetUp;
+				}
+			}
+			raised.erase(it);
+		}
+
+		void LowerAllAsked()
+		{
+			while (!raised.empty()) {
+				LowerAsked(raised.begin()->first);
+			}
+			paralysesAsked.Clear();
+		}
+
 		void Summarise(const Hold& a_hold, RE::Actor* a_actor, std::string_view a_end, Clock::time_point a_now)
 		{
 			float gap = -1.0f;
@@ -238,13 +310,16 @@ namespace Knocks
 
 		void LetGoAll(bool a_giveBack)
 		{
+			const auto now = Clock::now();
 			for (auto& hold : holds) {
 				if (a_giveBack) {
 					TakeBack(hold);
 				}
+				PayAskUp(hold, now);
 			}
 			counts.released += holds.size();
 			holds.clear();
+			quiet.Clear();
 			Publish();
 		}
 
@@ -315,8 +390,11 @@ namespace Knocks
 				if ((hold && hold->from != From::kNative) || one.actor->IsDead() || !one.actor->Is3DLoaded()) {
 					continue;  // a friend's knock played here (or joined): not this world's
 				}
-				seen.insert(id);
 				const auto phase = KnockRules::PhaseOf(KnockStateOf(one.actor.get()));
+				if (!hold && !quiet.Native(id, phase, a_now)) {
+					continue;  // let go while down: the knock played or joined, not this world's (not held, not asked)
+				}
+				seen.insert(id);
 				const bool paralysed = ParalysisOf(one.actor.get()) > 0.0f;
 				// Held from the moment it is knocked: its states would pull it out of the engine's ragdoll.
 				if (phase != Phase::kStanding && !hold) {
@@ -337,9 +415,10 @@ namespace Knocks
 					}
 				}
 				for (const auto& said : natives.Step(id, phase, PosOf(one.actor.get()), paralysed, a_now)) {
-					// A copy's push is asked of its runner (a stand-in's player's game decides its own; a paralysis is its
-					// effect's, which reaches the runner on its own).
-					if (said.phase != Protocol::KnockPhase::kDown || !one.copy || said.kind != Kind::kPush || !hold || hold->asked) {
+					// A copy's push or paralysis is asked of its runner: in the runner's game the effect that did it here
+					// (our player's stand-in's spell, poison or enchantment) takes none, and a hit carries only health. (A
+					// stand-in's player's game decides its own.)
+					if (said.phase != Protocol::KnockPhase::kDown || !one.copy || !hold || hold->asked) {
 						continue;
 					}
 					auto ask = KnockRules::ToWire(one.side, said, Protocol::SentMs(said.when), true);
@@ -347,6 +426,12 @@ namespace Knocks
 						continue;
 					}
 					hold->asked = true;
+					hold->kind = said.kind;
+					if (said.kind == Kind::kParalysis) {
+						hold->askUpOwed = true;
+						hold->askSent = ask;
+						++counts.askedParalysis;
+					}
 					++counts.asked;
 					lastAsked = KnockText(ask);
 					logs::info("Knocks: asked the runner of {}: {}", SideText(one.side), lastAsked);
@@ -458,26 +543,46 @@ namespace Knocks
 			logs::info("Knocks: played {} from player {}", lastPlayed, a_sender);
 		}
 
+		// By the actor the hold shows (its side), not by the actor shown here now: an up that comes while that actor is
+		// disabled or has no 3D (our player went through a door) still lets it up.
 		void PlayUp(std::uint32_t a_sender, const Protocol::Knock& a_knock, Clock::time_point a_now)
 		{
-			const auto here = HereOf(a_knock.actor);
-			auto*      hold = here.actor ? HoldOf(here.actor->GetFormID()) : nullptr;
-			if (!hold) {
+			bool found = false;
+			for (auto& hold : holds) {
+				if (hold.side != a_knock.actor) {
+					continue;
+				}
+				found = true;
+				hold.upAt = a_now;
+				hold.rest = { a_knock.x, a_knock.y, a_knock.z };
+				hold.sender = a_sender;
+				TakeBack(hold);  // the engine gets it up now
+			}
+			if (!found) {
 				++counts.upUnknown;  // its down was not played here (refused, late) or it was let go already
 				return;
 			}
 			++counts.upHeard;
-			hold->upAt = a_now;
-			hold->rest = { a_knock.x, a_knock.y, a_knock.z };
-			hold->sender = a_sender;
-			TakeBack(*hold);  // the engine gets it up now
 		}
 
 		void ApplyAsks(Clock::time_point a_now)
 		{
 			for (const auto& ask : asks) {
-				const auto         actor = NpcSync::ActorOf(ask.knock.actor.npc);
-				KnockRules::AskFacts facts{ .ours = actor && NpcSync::RunnerOf(ask.knock.actor.npc) == ourId.load() && actor->Is3DLoaded(), .kind = ask.knock.kind };
+				const auto& npc = ask.knock.actor.npc;
+				if (ask.knock.phase == Protocol::KnockPhase::kAskUp) {
+					// The asker's copy is up: its NPC let up here once no other asker's copy is paralysed.
+					++counts.askUpHeard;
+					if (paralysesAsked.Up(npc, ask.sender)) {
+						LowerAsked(npc);
+						logs::info("Knocks: {} let up: the paralysis player {} asked is over there", SideText(ask.knock.actor), ask.sender);
+					}
+					continue;
+				}
+				const auto           actor = NpcSync::ActorOf(npc);
+				const bool           paralysis = ask.knock.kind == Kind::kParalysis;
+				KnockRules::AskFacts facts{ .ours = actor && NpcSync::RunnerOf(npc) == ourId.load() && actor->Is3DLoaded(),
+					.kind = ask.knock.kind,
+					.full = paralysis && !paralysesAsked.Has(npc) && paralysesAsked.Size() >= KnockRules::Asked::MAX };
 				if (facts.ours) {
 					facts.alive = !actor->IsDead();
 					facts.down = KnockRules::PhaseOf(KnockStateOf(actor.get())) != Phase::kStanding;
@@ -491,6 +596,22 @@ namespace Knocks
 					logs::info("Knocks: ask not applied ({}): {} from player {}", why, KnockText(ask.knock), ask.sender);
 					continue;
 				}
+				if (paralysis) {
+					// Held down by its Paralysis value (what the effect on the asker's copy raised there) until the asker's
+					// ask-up; the engine's paralysis knock if the value alone has not put it down by PARALYZE_CALL.
+					const auto add = paralysesAsked.Ask(npc, ask.sender, a_now);
+					if (add == KnockRules::Asked::Add::kFirst) {
+						RaiseParalysis(actor.get(), KEPT);
+						raised[npc] = Raised{ .handle = actor->GetHandle(), .id = actor->GetFormID(), .kept = true, .callAt = a_now + KnockRules::PARALYZE_CALL };
+						++counts.paraApplied;
+					} else {
+						++counts.paraMore;
+					}
+					++counts.askApplied;
+					logs::info("Knocks: applied {} from player {} to {:08X} (held by its Paralysis value, {} asking)", KnockText(ask.knock), ask.sender, actor->GetFormID(),
+						paralysesAsked.Askers(npc));
+					continue;
+				}
 				const auto push = KnockRules::PushFor(PosOf(actor.get()), { ask.knock.vx, ask.knock.vy, ask.knock.vz }, scale.SpeedPerMagnitude());
 				if (KnockBy(actor.get(), push)) {
 					++counts.askApplied;
@@ -498,7 +619,43 @@ namespace Knocks
 				}
 			}
 			asks.clear();
-			(void)a_now;
+		}
+
+		// The NPCs a paralysis asked of this game holds: kept down (again after a save), the engine's paralysis knock when
+		// the value alone did not take, let up MAX_DOWN after the last ask, and forgotten when gone, dead or not ours.
+		void TendAsked(Clock::time_point a_now)
+		{
+			for (const auto& npc : paralysesAsked.Expired(a_now)) {
+				++counts.askGaveUp;
+				logs::info("Knocks: {} let up: no ask-up came", SideText(Side{ .npc = npc }));
+				LowerAsked(npc);
+			}
+			for (auto it = raised.begin(); it != raised.end();) {
+				const auto npc = it->first;
+				auto&      one = it->second;
+				const auto actor = one.handle.get();
+				++it;  // (LowerAsked erases this one)
+				if (!actor || actor->GetFormID() != one.id) {
+					paralysesAsked.Forget(npc);
+					raised.erase(npc);  // gone (its value went with it)
+					continue;
+				}
+				if (actor->IsDead() || NpcSync::RunnerOf(npc) != ourId.load() || !paralysesAsked.Has(npc)) {
+					paralysesAsked.Forget(npc);
+					LowerAsked(npc);  // a body is its death's; one handed over is its new runner's to say
+					continue;
+				}
+				if (!one.kept) {
+					RaiseParalysis(actor.get(), KEPT);  // after a save
+					one.kept = true;
+				}
+				if (one.callAt && a_now >= *one.callAt) {
+					one.callAt.reset();
+					if (KnockRules::PhaseOf(KnockStateOf(actor.get())) == Phase::kStanding && KnockParalyze(actor.get())) {
+						++counts.askByCall;
+					}
+				}
+			}
 		}
 
 		// The actors held here, each let go when its knock is over.
@@ -509,19 +666,27 @@ namespace Knocks
 				const auto actor = a_hold.handle.get();
 				if (!actor || actor->GetFormID() != a_hold.id) {
 					++counts.released;
+					PayAskUp(a_hold, a_now);
 					return true;  // gone (its value went with it)
 				}
 				if (actor->IsDead()) {
 					TakeBack(a_hold);
+					PayAskUp(a_hold, a_now);
 					++counts.died;
 					Summarise(a_hold, actor.get(), "died", a_now);
 					return true;  // a body is its death's (NpcSync, the ragdolls' change)
 				}
 				if (a_hold.side.player == 0 && a_hold.side.npc.id != 0 && NpcSync::RunnerOf(a_hold.side.npc) == ourId.load()) {
 					TakeBack(a_hold);
+					a_hold.askUpOwed = false;  // ours now: what was asked is this game's (its own paralysis)
 					++counts.handedOver;
 					Summarise(a_hold, actor.get(), "handedOver", a_now);
 					return true;  // ours now: its knock is this game's to say
+				}
+				// A paralysis asked of its runner: once the copy's own paralysis is over here, its runner lets its NPC up
+				// (which says it up, and the copy follows).
+				if (a_hold.askUpOwed && KnockRules::OwnParalysisOver(ParalysisOf(actor.get()), a_hold.kept)) {
+					PayAskUp(a_hold, a_now);
 				}
 				const auto state = KnockStateOf(actor.get());
 				const auto phase = KnockRules::PhaseOf(state);
@@ -575,6 +740,8 @@ namespace Knocks
 					break;
 				}
 				TakeBack(a_hold);
+				PayAskUp(a_hold, a_now);
+				Quieten(a_hold, phase, step, a_now);
 				Summarise(a_hold, actor.get(), KnockRules::NameOf(step), a_now);
 				return true;
 			});
@@ -589,14 +756,18 @@ namespace Knocks
 				"knocks ours watched={} saidDown={} saidUp={} saidPush={} saidParalysis={} launchMax={:.0f} | theirs heard={} played={} playedPush={} playedParalysis={} "
 				"inPlace={} refused={} failed={} joined={} took={} keptDown={} byValue={} byCall={} letUp={} ended={} noTake={} gaveUp={} released={} died={} handedOver={} "
 				"holdFull={} upHeard={} upUnknown={} restGapLast={} restGapMax={} heldNow={} waiting={} late={} dropped={} | native copies={} standIns={} asked={} "
-				"| asks askHeard={} applied={} askRefused={} | scale perMagnitude={:.0f} learnt={} ignored={} speedLast={} wantedLast={} | savedBack={} eventsKept={}",
+				"askedParalysis={} askUpSent={} quiet={} quietLetGo={} quietSkipped={} "
+				"| asks askHeard={} applied={} askRefused={} paraApplied={} paraMore={} askUpHeard={} askLetUp={} askGaveUp={} askLeft={} askByCall={} askKeptNow={} "
+				"| scale perMagnitude={:.0f} learnt={} ignored={} speedLast={} wantedLast={} | savedBack={} eventsKept={}",
 				ours.Size(), counts.saidDown, counts.saidUp, counts.saidPush, counts.saidParalysis, counts.launchMax, counts.heard,
 				counts.playedPush + counts.playedParalysis, counts.playedPush, counts.playedParalysis, counts.inPlace, verdicts.Others(), counts.failed, counts.joined,
 				counts.took, counts.keptDown, counts.byValue, counts.byCall, counts.letUp, counts.ended, counts.noTake, counts.gaveUp, counts.released, counts.died,
 				counts.handedOver, counts.holdFull, counts.upHeard, counts.upUnknown,
 				counts.restGapLast < 0.0f ? std::string{ "none" } : std::format("{:.0f}", counts.restGapLast),
 				counts.restGapMax < 0.0f ? std::string{ "none" } : std::format("{:.0f}", counts.restGapMax), holds.size(), inbox.Size(), inbox.late, inbox.dropped,
-				counts.nativeCopies, counts.nativeStandIns, counts.asked, counts.askHeard, counts.askApplied, askVerdicts.Others(), scale.SpeedPerMagnitude(), scale.learnt,
+				counts.nativeCopies, counts.nativeStandIns, counts.asked, counts.askedParalysis, counts.askUpSent, quiet.Size(), counts.quietLetGo, quiet.skipped,
+				counts.askHeard, counts.askApplied, askVerdicts.Others(), counts.paraApplied, counts.paraMore, counts.askUpHeard, counts.askLetUp, counts.askGaveUp,
+				counts.askLeft, counts.askByCall, raised.size(), scale.SpeedPerMagnitude(), scale.learnt,
 				scale.ignored, counts.speedLast < 0.0f ? std::string{ "none" } : std::format("{:.0f}", counts.speedLast),
 				counts.wantedLast < 0.0f ? std::string{ "none" } : std::format("{:.0f}", counts.wantedLast), counts.savedBack, eventsKept.load());
 		}
@@ -630,9 +801,10 @@ namespace Knocks
 			const auto state = KnockStateOf(actor);
 			const auto at = PosOf(actor);
 			const auto hold = HoldOf(actor->GetFormID());
-			return std::format("state id={:08X} knock={} phase={} resting={} paralysis={:.1f} dead={} held={} kept={} at=({:.0f},{:.0f},{:.0f})", actor->GetFormID(), state,
-				KnockRules::NameOf(KnockRules::PhaseOf(state)), KnockRules::Resting(state) ? 1 : 0, ParalysisOf(actor), actor->IsDead() ? 1 : 0, hold ? 1 : 0,
-				hold && hold->kept ? 1 : 0, at.x, at.y, at.z);
+			const auto keptForAsk = std::ranges::any_of(raised, [&](const auto& a_entry) { return a_entry.second.id == actor->GetFormID() && a_entry.second.kept; });
+			return std::format("state id={:08X} knock={} phase={} resting={} paralysis={:.1f} dead={} held={} kept={} askKept={} quiet={} askUpOwed={} at=({:.0f},{:.0f},{:.0f})",
+				actor->GetFormID(), state, KnockRules::NameOf(KnockRules::PhaseOf(state)), KnockRules::Resting(state) ? 1 : 0, ParalysisOf(actor), actor->IsDead() ? 1 : 0,
+				hold ? 1 : 0, hold && hold->kept ? 1 : 0, keptForAsk ? 1 : 0, quiet.Has(actor->GetFormID()) ? 1 : 0, hold && hold->askUpOwed ? 1 : 0, at.x, at.y, at.z);
 		}
 
 		// `knocks push <local> <magnitude> [<from local>]`: the rig's set-up (an injected push).
@@ -722,6 +894,7 @@ namespace Knocks
 			}
 		}
 		ApplyAsks(now);
+		TendAsked(now);
 		Tend(now);
 		SayOurs(now);
 		WatchNatives(now);
@@ -740,9 +913,10 @@ namespace Knocks
 		}
 		const auto now = Clock::now();
 		for (const auto& knock : a_msg.knocks) {
-			if (knock.phase == Protocol::KnockPhase::kAsk) {
+			if (Protocol::KnockToRunner(knock.phase)) {
 				++counts.askHeard;
-				if (asks.size() < KnockRules::Inbox::MAX) {
+				// An ask-up is kept past the room for asks: the NPC it lets up is held down until it comes.
+				if (asks.size() < KnockRules::Inbox::MAX || (knock.phase == Protocol::KnockPhase::kAskUp && asks.size() < 4 * KnockRules::Inbox::MAX)) {
 					asks.push_back({ a_msg.sender, knock });
 				}
 				continue;
@@ -757,6 +931,10 @@ namespace Knocks
 	{
 		inbox.Forget(a_playerId);
 		std::erase_if(asks, [&](const Ask& a_ask) { return a_ask.sender == a_playerId; });
+		for (const auto& npc : paralysesAsked.Left(a_playerId)) {
+			++counts.askLeft;
+			LowerAsked(npc);  // no ask-up will come: let up
+		}
 		const auto now = Clock::now();
 		const auto before = holds.size();
 		std::erase_if(holds, [&](Hold& a_hold) {
@@ -779,6 +957,7 @@ namespace Knocks
 	void Clear()
 	{
 		LetGoAll(true);
+		LowerAllAsked();
 		ours.Clear();
 		natives.Clear();
 		inbox.Clear();
@@ -791,6 +970,7 @@ namespace Knocks
 	void ForgetWorld()
 	{
 		LetGoAll(true);
+		LowerAllAsked();
 		ours.Clear();
 		natives.Clear();
 		inbox.Clear();
@@ -804,6 +984,16 @@ namespace Knocks
 			if (hold.kept) {
 				TakeBack(hold);
 				++counts.savedBack;  // kept down again by the next tick (WantKeptDown)
+			}
+		}
+		for (auto& [npc, one] : raised) {
+			if (!one.kept) {
+				continue;
+			}
+			one.kept = false;
+			if (const auto actor = one.handle.get(); actor && actor->GetFormID() == one.id) {
+				RaiseParalysis(actor.get(), -KEPT);
+				++counts.savedBack;  // raised again by the next tick (TendAsked)
 			}
 		}
 		for (const auto& [id, raised] : devKept) {
@@ -822,11 +1012,14 @@ namespace Knocks
 		}
 		const auto id = a_actor->GetFormID();
 		const auto before = holds.size();
+		const auto now = Clock::now();
+		quiet.Forget(id);
 		std::erase_if(holds, [&](Hold& a_hold) {
 			if (a_hold.id != id) {
 				return false;
 			}
 			TakeBack(a_hold);
+			PayAskUp(a_hold, now);
 			return true;
 		});
 		if (holds.size() != before) {

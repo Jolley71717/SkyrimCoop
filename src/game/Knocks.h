@@ -16,8 +16,10 @@
 //   take). While knocked it is held (Held): not placed by the update hooks, its walk not told, its runner's actions
 //   dropped, the engine's own update run. Lying while its friend's actor is still down it is kept down by its Paralysis
 //   value, taken back at the friend's up, before a save and whenever it is let go.
-// - Asked: a knock this game's world gives a copy (or a stand-in) is held the same way; a copy's push is asked of the
-//   NPC's runner (kKnocks, phase ask), which knocks its NPC the same way, and its down then joins the held copy here.
+// - Asked: a knock this game's world gives a copy (or a stand-in) is held the same way; a copy's push or paralysis is
+//   asked of the NPC's runner (kKnocks, phase ask), which knocks its NPC the same way (a paralysis by its Paralysis value,
+//   held until this game's ask-up says the copy's own paralysis is over, MAX_DOWN at most), and its down then joins the
+//   held copy here. An actor let go while still down is not this world's knock until it stands again (no hold, no ask).
 // - Kept here: the graph events of an actor that is knocked are not sent as actions (EventsStay): every game plays its
 //   own knock.
 //
