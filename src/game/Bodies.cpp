@@ -44,6 +44,7 @@ namespace Bodies
 		struct Watch
 		{
 			BodyRules::Settle settle;
+			bool              handedOver = false;  // another game runs it now (counted once)
 		};
 
 		std::map<Key, Clock::time_point>  dying;      // deaths this game said, their fall not read yet: since when
@@ -360,7 +361,7 @@ namespace Bodies
 			// The reference first, to where the runner's lies: loot, activation, a cell's reload and the save follow it, not
 			// its bones.
 			if (ObjectRules::Distance(At(actor.get()), there) > BodyRules::REF_SLACK) {
-				actor->SetPosition(RE::NiPoint3{ there.x, there.y, there.z });
+				actor->SetPosition(RE::NiPoint3{ there.x, there.y, there.z }, true);
 				++counts.moved;
 			}
 			const auto write = [&](const std::vector<BoneBody>& a_bones, const std::vector<const Protocol::Bone*>& a_to) {
