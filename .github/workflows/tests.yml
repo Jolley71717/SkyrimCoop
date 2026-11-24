@@ -118,6 +118,13 @@ jobs:
         timeout-minutes: 40
         run: bash tools/coverage.sh
 
+      # The rig harness's own tests (tools/rig/selftest.sh): its checks, verdicts, crash-log reading and its steps'
+      # reading of the games' replies, with both games faked. Seconds; no game, no rig, nothing downloaded. After the
+      # unit tests, and run whether they passed or not, so a failure of one never hides the other.
+      - name: Rig harness self-test
+        if: success() || failure()
+        run: bash tools/rig/selftest.sh
+
       - name: Summary
         if: always()
         run: |
