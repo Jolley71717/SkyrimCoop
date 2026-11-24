@@ -375,13 +375,34 @@ namespace CopyHealth
 		return !(a_weAreHost && a_weReportedIt);
 	}
 
+	// What a session-dead NPC that this game kills (KillsOnLoad) is here, for DeadHere: a body (dead, or a spell's
+	// thrall or zombie, which is still a body: its caster's summon until it ends), alive by no word of the session's
+	// (killed), or the session's raise (left alone): a raise in the game that runs it, of one it saw die while it ran it
+	// (a quest's Resurrect, the console), which its health says next and has it alive in every game.
+	enum class DeadLooks : std::uint8_t
+	{
+		kBody,
+		kRisen,
+		kSessionsRaise,
+	};
+
+	[[nodiscard]] constexpr DeadLooks LookOfDead(bool a_dead, bool a_reanimated, bool a_weRunIt, bool a_weSawItDie)
+	{
+		if (a_dead || a_reanimated) {
+			return DeadLooks::kBody;
+		}
+		return a_weRunIt && a_weSawItDie ? DeadLooks::kSessionsRaise : DeadLooks::kRisen;
+	}
+
 	// The session's dead that live here (KillsOnLoad), each looked at as it is loaded here: killed; a kill the game did not
 	// take tried again every KILL_AGAIN, up to KILL_TRIES (then given up, said once: this game keeps it from dying, an
-	// essential flag the runner's game had off); and killed again whenever one seen dead here lives again (this game's own
-	// respawn of its cell, which each game times from its own last visit, or a script's or a spell's raise in this game
-	// alone). The session's word is that it is dead: a body risen in a friend's game and fought there would be run alive and
-	// raise it in every game. (A raise by its runner is the session's: its health said again ends the session's death,
-	// and Forget with it.)
+	// essential flag the runner's game had off); and killed again whenever one seen dead here lives again by no word of the
+	// session's (this game's own respawn of its cell, which each game times from its own last visit, the host's included
+	// for a friend's kill; a script's or the console's raise in a game that does not run it). The session's word is that it
+	// is dead: a body risen in a friend's game and fought there would be run alive and raise it in every game. Never looked
+	// at (NpcSync's claim pass): a raise in the game that runs it, of one it saw die while it ran it, which is the session's
+	// raise (its health said again ends the session's death, and Forget with it, in every game); and a body a spell has up
+	// as a thrall or a zombie (life state kReanimate), which is still a body, its caster's summon until it ends.
 	inline constexpr int  KILL_TRIES = 5;
 
 	enum class DeadDo : std::uint8_t

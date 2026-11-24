@@ -1033,3 +1033,25 @@ TEST("npc combat rules: the session's dead that live here are killed, a kill tha
 	dead.Clear();
 	CHECK(dead.Size() == 0u);
 }
+
+TEST("npc combat rules: a runner's raise of one it saw die is the session's, and a spell's thrall or zombie stays a body; any other rise is killed")
+{
+	using CopyHealth::DeadLooks;
+	using CopyHealth::LookOfDead;
+	// Dead here: a body, whoever runs it.
+	CHECK(LookOfDead(true, false, false, false) == DeadLooks::kBody);
+	CHECK(LookOfDead(true, false, true, true) == DeadLooks::kBody);
+	// Up as a thrall or a zombie (life state kReanimate), whatever the engine's dead flag says: still a body, in the
+	// runner's game too, so a player's Raise Zombie or Dead Thrall on a co-op kill is never killed again.
+	CHECK(LookOfDead(false, true, false, false) == DeadLooks::kBody);
+	CHECK(LookOfDead(false, true, true, true) == DeadLooks::kBody);
+	CHECK(LookOfDead(true, true, true, false) == DeadLooks::kBody);
+	// Alive in the game that runs it, which saw it die while it ran it (a quest's Resurrect, the console): the session's
+	// raise, said next, never killed.
+	CHECK(LookOfDead(false, false, true, true) == DeadLooks::kSessionsRaise);
+	// Alive by no word of the session's: in a game that does not run it (a respawn, a raise here alone), in a runner that
+	// took it over after its death was said (a hand-over on its way), or in one that loaded it alive from its save.
+	CHECK(LookOfDead(false, false, false, true) == DeadLooks::kRisen);
+	CHECK(LookOfDead(false, false, false, false) == DeadLooks::kRisen);
+	CHECK(LookOfDead(false, false, true, false) == DeadLooks::kRisen);
+}

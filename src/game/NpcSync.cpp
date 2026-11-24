@@ -223,6 +223,15 @@ namespace NpcSync
 			return it->second;
 		}
 
+		// A body a spell or an effect has up again for a while (Raise Zombie, Dead Thrall, Reanimate Corpse, the Vampire
+		// Lord's raise: life state kReanimate): its caster's summon, which ends as ash, never the NPC living again. The
+		// session's dead are never killed again for it, and its runner never says it lives (CopyHealth::DeadHere).
+		bool Reanimated(RE::Actor* a_actor)
+		{
+			const auto state = a_actor->AsActorState();
+			return state && state->GetLifeState() == RE::ACTOR_LIFE_STATE::kReanimate;
+		}
+
 		// ---- the graph event hook: IAnimationGraphManagerHolder::NotifyAnimationGraph of every Character ----
 		// The holder's vtable in Character's is its fourth (VTABLE_Character[3]: TESObjectREFR's bases are TESForm,
 		// BSHandleRefObject, BSTEventSink<BSAnimationGraphEvent>, IAnimationGraphManagerHolder); slot 1 is the notify.
@@ -1051,12 +1060,19 @@ namespace NpcSync
 				// The session has it dead (a death said while it was not loaded here, or before we joined) and it lives
 				// here: killed, not asked for (CopyHealth::KillsOnLoad: the host's game keeps its own save's word). A kill
 				// that does not take is tried again, the engine's kill then the one that ignores the essential flag; one seen
-				// dead here that lives again (this game's respawn of its cell, a raise here alone) is killed again
-				// (CopyHealth::DeadHere).
-				if (sessionDead.contains(key) && CopyHealth::KillsOnLoad(ourId == hostId, ourDeaths.contains(key))) {
-					const bool alive = !actor->IsDead();
-					// (one in a kill move is left to the move, and killed after it if it lives)
-					if (!alive || !actor->IsInKillMove()) {
+				// dead here that lives again by no word of the session's (this game's respawn of its cell, a script's or the
+				// console's raise in a game that does not run it) is killed again (CopyHealth::DeadHere). Never killed again:
+				// - a raise in the game that runs it, of one it saw die while it ran it (a quest's Resurrect, the console):
+				//   the session's raise, which SendFates says next (its health), and the session has it alive again;
+				// - a body a spell or an effect has up for a while (Reanimated: a thrall, a zombie): the caster's summon,
+				//   looked at as the body it still is, and never run.
+				// (CopyHealth::LookOfDead)
+				const bool reanimated = Reanimated(actor.get());
+				const auto looks = CopyHealth::LookOfDead(actor->IsDead(), reanimated, ours, npc.deathSent);
+				if (sessionDead.contains(key) && looks != CopyHealth::DeadLooks::kSessionsRaise && CopyHealth::KillsOnLoad(ourId == hostId, ourDeaths.contains(key))) {
+					const bool alive = looks == CopyHealth::DeadLooks::kRisen;
+					// (one in a kill move or another pair is left to it, and killed after it if it lives)
+					if (!alive || (!actor->IsInKillMove() && !Pairs::Held(actor.get()))) {
 						const auto risenBefore = deadHere.risen;
 						switch (deadHere.Look(npc.id, alive, a_now)) {
 						case CopyHealth::DeadDo::kKill:
@@ -1086,8 +1102,8 @@ namespace NpcSync
 							break;
 						}
 					}
-					if (alive) {
-						continue;
+					if (alive || reanimated) {
+						continue;  // (a reanimated body is its caster's: never asked for, never run)
 					}
 				} else {
 					deadHere.Forget(npc.id);
@@ -1643,8 +1659,12 @@ namespace NpcSync
 					}
 					continue;
 				}
+				if (npc.deathSent && Reanimated(actor.get())) {
+					continue;  // up as a thrall or a zombie (Reanimated): still dead to the session, never said alive
+				}
 				if (npc.deathSent) {
-					// Raised (a spell, a script): its health says so, and the session has it alive again.
+					// Raised (a quest's Resurrect, a script, the console): its health says so, and the session has it alive
+					// again.
 					npc.deathSent = false;
 					npc.reporter.Reset();
 					sessionDead.erase(key);
@@ -1712,8 +1732,10 @@ namespace NpcSync
 				if (health.size() >= Protocol::MAX_NPCS && !health.contains(one.key)) {
 					continue;
 				}
-				auto&      copy = health[one.key];
-				const bool dead = actor->IsDead();
+				auto& copy = health[one.key];
+				// A copy whose runner has it dead and that a spell here has up as a thrall or a zombie (Reanimated) is still
+				// the body: never killed again for it, the caster's summon until it ends.
+				const bool dead = actor->IsDead() || (copy.RunnerDead() && Reanimated(actor.get()));
 				const auto killer = dead ? actor->GetKiller() : nullptr;
 				// What our player's lasting effects on it take, and whether our player killed it: only those of ours count.
 				const CopyHealth::Seen seen{ .share = CopyHealth::ShareOf(HealthOf(actor.get()), max),
