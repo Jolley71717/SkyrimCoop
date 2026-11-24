@@ -75,13 +75,24 @@ namespace LooseObjects
 		std::atomic<std::uint64_t>     blastsHeard{ 0 }, hitsHeard{ 0 }, pickupsHeard{ 0 };
 
 		using ExplosionUpdateFn = void (*)(RE::Explosion*, float);
-		ExplosionUpdateFn explosionUpdate = nullptr;
+		// The explosion classes whose update is hooked (a chain explosion has its own vtable), each with its original.
+		ExplosionUpdateFn explosionUpdates[2] = {};
+		std::size_t       explosionsHooked = 0;
 		bool              explosionHooked = false;
 
+		void Blasted(RE::Explosion* a_this, bool a_before);
+
+		template <std::size_t I>
 		void OnExplosionUpdate(RE::Explosion* a_this, float a_delta)
 		{
 			const bool before = a_this && a_this->GetExplosionRuntimeData().flags.any(RE::Explosion::Flags::kForcesApplied);
-			explosionUpdate(a_this, a_delta);
+			explosionUpdates[I](a_this, a_delta);
+			Blasted(a_this, before);
+		}
+
+		void Blasted(RE::Explosion* a_this, bool a_before)
+		{
+			const bool before = a_before;
 			if (!a_this || before || !active.load(std::memory_order_relaxed)) {
 				return;
 			}
@@ -553,7 +564,7 @@ namespace LooseObjects
 				RE::bhkRigidBody*  body;
 				float              distance;
 			};
-			std::vector<Near>                      near;
+			std::vector<Near>                      nearBy;
 			std::unordered_map<std::uint32_t, Vec> shotsNow;
 			const auto                             tes = RE::TES::GetSingleton();
 			if (!tes) {
@@ -586,18 +597,18 @@ namespace LooseObjects
 					return RE::BSContainer::ForEachResult::kContinue;
 				}
 				if (const auto body = LooseBody(a_ref)) {
-					near.push_back({ a_ref, body, distance });
+					nearBy.push_back({ a_ref, body, distance });
 				}
 				return RE::BSContainer::ForEachResult::kContinue;
 			});
 			shotsSeen.swap(shotsNow);
-			if (near.size() > MAX_LOOKED) {
-				std::nth_element(near.begin(), near.begin() + static_cast<std::ptrdiff_t>(MAX_LOOKED), near.end(),
+			if (nearBy.size() > MAX_LOOKED) {
+				std::nth_element(nearBy.begin(), nearBy.begin() + static_cast<std::ptrdiff_t>(MAX_LOOKED), nearBy.end(),
 					[](const Near& a_a, const Near& a_b) { return a_a.distance < a_b.distance; });
-				near.resize(MAX_LOOKED);
+				nearBy.resize(MAX_LOOKED);
 			}
 
-			for (const auto& one : near) {
+			for (const auto& one : nearBy) {
 				const auto id = one.ref->GetFormID();
 				const auto pose = PoseOf(one.body);
 				if (!pose) {
@@ -851,8 +862,11 @@ namespace LooseObjects
 
 	bool Install()
 	{
-		REL::Relocation<std::uintptr_t> vtable{ RE::VTABLE_Explosion[0] };
-		explosionHooked = VtableHook::Slot<ExplosionUpdateFn>(vtable.address(), EXPLOSION_UPDATE_SLOT, OnExplosionUpdate, explosionUpdate, "Objects", "explosion update");
+		REL::Relocation<std::uintptr_t> plain{ RE::VTABLE_Explosion[0] };
+		REL::Relocation<std::uintptr_t> chain{ RE::VTABLE_ChainExplosion[0] };
+		explosionsHooked += VtableHook::Slot<ExplosionUpdateFn>(plain.address(), EXPLOSION_UPDATE_SLOT, OnExplosionUpdate<0>, explosionUpdates[0], "Objects", "explosion update") ? 1 : 0;
+		explosionsHooked += VtableHook::Slot<ExplosionUpdateFn>(chain.address(), EXPLOSION_UPDATE_SLOT, OnExplosionUpdate<1>, explosionUpdates[1], "Objects", "chain explosion update") ? 1 : 0;
+		explosionHooked = explosionsHooked == 2;
 		if (!explosionHooked) {
 			logs::warn("Objects: the explosion update is not hooked: what a blast throws about is nobody's to report here");
 		}
