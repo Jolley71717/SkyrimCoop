@@ -335,7 +335,7 @@ TEST("text: dist/lang/en.txt is the built-in English, and en-gb.txt differs from
 	const auto gb = Text::Parse(SourceTree::Read(*root / "dist" / "lang" / "en-gb.txt"));
 	for (const auto& [key, text] : gb) {
 		auto american = Text::GetEnglish(key);
-		for (const auto& [us, uk] : std::vector<std::pair<std::string, std::string>>{ { "color", "colour" }, { "armor", "armour" }, { "favor", "favour" }, { "honor", "honour" }, { "center", "centre" }, { "defense", "defence" }, { "gray", "grey" }, { "ize", "ise" } }) {
+		for (const auto& [us, uk] : std::vector<std::pair<std::string, std::string>>{ { "color", "colour" }, { "armor", "armour" }, { "favor", "favour" }, { "honor", "honour" }, { "center", "centre" }, { "defense", "defence" }, { "gray", "grey" }, { "ize", "ise" }, { "traveling", "travelling" }, { "traveled", "travelled" } }) {
 			for (auto at = american.find(us); at != std::string::npos; at = american.find(us, at + uk.size())) {
 				american.replace(at, us.size(), uk);
 			}
