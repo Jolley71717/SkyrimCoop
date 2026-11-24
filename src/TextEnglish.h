@@ -31,5 +31,13 @@ namespace Text
 		// language of the player who sets it ---
 		{ "steam.status_hosting", "Hosting Skyrim co-op" },
 		{ "steam.status_playing", "Playing Skyrim co-op" },
+
+		// --- A player brought down and helped up (src/game/Downed.cpp), on the screen's top left ---
+		{ "down.you", "You are down. A friend who stays by your side can help you up. You have {n} seconds." },
+		{ "down.left", "{n} seconds left for a friend to help you up." },
+		{ "down.friend", "{player} is down. Stay by their side to help them up." },
+		{ "down.helping", "Helping {player} up..." },
+		{ "down.helped_them", "You helped {player} up." },
+		{ "down.helped_you", "{player} helped you up." },
 	};
 }

@@ -14,6 +14,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Downed.h"
 #include "game/Pairs.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
@@ -212,6 +213,12 @@ namespace DevCommands
 			return Shots::Command(a_args);
 		}
 
+		// downed: our player's down (phase, essential flag, seconds left, counts) and each friend's (Downed::Describe).
+		std::string DownedCommand(std::string_view)
+		{
+			return Downed::Describe();
+		}
+
 		// pairs [last | list | holds | find <kill|feed|any> | play <idle> <victim> [attacker]]: kill moves and other paired animations
 		// said and played, actors held by them (Pairs::Command).
 		std::string PairsCommand(std::string_view a_args)
@@ -277,6 +284,7 @@ namespace DevCommands
 			{ "peace", PeaceCommand },
 			{ "shots", ShotsCommand },
 			{ "pairs", PairsCommand },
+			{ "downed", DownedCommand },
 			{ "strays", Strays },
 			{ "npcs", Npcs },
 			{ "graph", Graph },
@@ -298,7 +306,7 @@ namespace DevCommands
 
 	std::string Help()
 	{
-		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | pairs [last | list | holds | find <kill|feed|any> | play <idle> <victim> [attacker]] | peace [targeting | find <base> [radius] | line <stand-in> [beyond] [width]] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
+		return "ping | help | status | steam [host | stophost | join <lobby id> | expectjoin | leave | joinurl | why] | probe [send [count] | report | log | reset] | session [host | leave | status] | forms [id <hex> | find <plugin> <hex> | place <plugin> | armor <plugin>] | where | standins | actions [equip <hand> <id>] | faces [nudge [undo]] | swim [find [radius]] | ride [find [radius] | base] | shots [find <kind> | last] | downed | pairs [last | list | holds | find <kill|feed|any> | play <idle> <victim> [attacker]] | peace [targeting | find <base> [radius] | line <stand-in> [beyond] [width]] | npcs [list | <form id>] | strays | graph <player> [...] | pad ... | walkto ... | console <command>";
 	}
 
 	void NoteStart(std::string a_game, std::string a_addressLibrary)

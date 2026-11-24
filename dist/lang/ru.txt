@@ -10,3 +10,10 @@ reject.mods = Ваши моды отличаются от модов хоста.
 
 steam.status_hosting = Проводит кооперативную игру в Skyrim
 steam.status_playing = Играет в Skyrim в кооперативе
+
+down.you = Вы повержены. Друг, который останется рядом, может поднять вас. У вас {n} секунд.
+down.left = Осталось {n} секунд, чтобы друг поднял вас.
+down.friend = {player} повержен. Оставайтесь рядом, чтобы поднять его.
+down.helping = Вы поднимаете {player}...
+down.helped_them = Вы подняли {player}.
+down.helped_you = {player} поднял вас.

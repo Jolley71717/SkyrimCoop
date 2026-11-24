@@ -10,3 +10,10 @@ reject.mods = MODがホストと異なります。
 
 steam.status_hosting = Skyrim Co-opをホスト中
 steam.status_playing = Skyrim Co-opをプレイ中
+
+down.you = あなたは倒れました。そばにいる仲間が助け起こせます。残り {n} 秒です。
+down.left = 仲間に助け起こしてもらうまで残り {n} 秒。
+down.friend = {player} が倒れました。そばにいて助け起こしてください。
+down.helping = {player} を助け起こしています...
+down.helped_them = {player} を助け起こしました。
+down.helped_you = {player} があなたを助け起こしました。

@@ -75,6 +75,13 @@ namespace
 		// begin a few at a time). Past it one is dropped, never kept: the pair is over by the time a budget would let it go.
 		TokenBucket pairBudget{ 16.0, 8.0 };
 		bool        toldPairsDropped = false;
+		// Its player's down (kDowned): the last said, kept while it waits for help or gets up, for a joiner. Downs said
+		// pass a burst of 8, then 2 a second (a change now and then, a wait's seconds every 5 s); helps asked a burst of 4,
+		// then 1 a second (one per downed friend every 3 s). Past either, dropped (the next says it again), said once.
+		std::optional<Protocol::Downed> downed;
+		TokenBucket                     downBudget{ 8.0, 2.0 };
+		TokenBucket                     helpBudget{ 4.0, 1.0 };
+		bool                            toldDownsDropped = false;
 		bool        toldUnknown = false;
 	};
 
@@ -399,6 +406,12 @@ void Server::Run()
 		if (auto all = sits.All(); !all.empty()) {
 			sendSits(&a_key, nullptr, std::move(all), true);
 		}
+		// Who is down now (a joiner's game kneels their stand-ins and may help them up).
+		for (const auto& [key, other] : peers) {
+			if (other.joined && key != a_key && other.downed) {
+				send(a_key, Protocol::Encode(*other.downed), true);
+			}
+		}
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
 		log(std::format("server: player {} joined from {}{} ({} in the session)", a_peer.playerId, transports[a_key.first]->Describe(a_key.second),
@@ -713,6 +726,47 @@ void Server::Run()
 					msg->sender = a_peer.playerId;
 					broadcast(Protocol::Encode(*msg), true, &a_key);
 				}
+			}
+			break;
+		case MT::kDowned:
+			// Its own player's down, the sender named, to the others; kept while it is on the ground, for a joiner. An up that
+			// ends a kept down always goes (a friend's stand-in must not be left kneeling), and one that ends nothing is
+			// dropped (the others have it up), so ups are bounded by downs; a down past the budget is dropped (said again).
+			if (auto msg = Protocol::DecodeDowned(a_data)) {
+				msg->player = a_peer.playerId;
+				const bool up = msg->state == static_cast<std::uint8_t>(0);
+				if (up && !a_peer.downed) {
+					break;
+				}
+				if (!up && !a_peer.downBudget.Take(Clock::now())) {
+					if (!a_peer.toldDownsDropped) {
+						a_peer.toldDownsDropped = true;
+						log(std::format("server: player {} says its down faster than it is passed on: the rest are dropped (said once)", a_peer.playerId));
+					}
+					break;
+				}
+				const bool was = a_peer.downed.has_value();
+				a_peer.downed = up ? std::nullopt : std::optional{ *msg };
+				if (was != a_peer.downed.has_value()) {
+					log(std::format("server: player {} is {}", a_peer.playerId, up ? "up again" : msg->state == 1 ? "down, waiting for help" : "down, getting up"));
+				}
+				broadcast(Protocol::Encode(*msg), true, &a_key);
+			}
+			break;
+		case MT::kHelpUp:
+			// A help, to the downed player alone, the helper named. Never one's own; never to a player not waiting for help
+			// by the server's book (one getting up, up, or gone); within the helper's budget.
+			if (const auto msg = Protocol::DecodeHelpUp(a_data)) {
+				const auto to = msg->player != a_peer.playerId ? peerOf(msg->player) : std::nullopt;
+				const auto target = to ? peers.find(*to) : peers.end();
+				const bool waits = target != peers.end() && target->second.downed && target->second.downed->state == 1;
+				if (!waits || !a_peer.helpBudget.Take(Clock::now())) {
+					log(std::format("server: player {}'s help for player {} dropped ({})", a_peer.playerId, msg->player,
+						msg->player == a_peer.playerId ? "itself" : !to ? "no such player" : !waits ? "not waiting for help" : "too many"));
+					break;
+				}
+				log(std::format("server: player {} helps player {} up", a_peer.playerId, msg->player));
+				send(*to, Protocol::Encode(Protocol::HelpUp{ a_peer.playerId }), true);
 			}
 			break;
 		case MT::kHeartbeat:

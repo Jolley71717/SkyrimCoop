@@ -10,3 +10,10 @@ reject.mods = 你的 MOD 与房主的不同。
 
 steam.status_hosting = 正在主持 Skyrim 联机
 steam.status_playing = 正在玩 Skyrim 联机
+
+down.you = 你倒下了。留在你身边的朋友可以扶你起来。你还有 {n} 秒。
+down.left = 还剩 {n} 秒让朋友扶你起来。
+down.friend = {player} 倒下了。留在其身边即可扶其起来。
+down.helping = 正在扶起 {player}...
+down.helped_them = 你扶起了 {player}。
+down.helped_you = {player} 扶你起来了。

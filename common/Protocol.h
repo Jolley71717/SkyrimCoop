@@ -59,7 +59,10 @@ namespace Protocol
 	// 24: paired animations (kPairs, message type 76): a kill move, a sneak kill, a creature's or a dragon's kill move, a
 	//    vampire's feeding: the game that runs the actor that begins one says it, and every other game plays the same
 	//    pair on the actors that show both there. (As with 21: renumbered when it lands; 22 and 23 are other changes'.)
-	inline constexpr std::uint16_t VERSION = 24;
+	// 27: a player brought down and helped up (kDowned, kHelpUp, message types 77-78): with a friend in the session a player
+	//    a blow would kill kneels and waits for help; a friend near helps them up. (Renumbered when it lands, as 21 and 24;
+	//    25 and 26 are other changes'.)
+	inline constexpr std::uint16_t VERSION = 27;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -130,6 +133,8 @@ namespace Protocol
 		kSits = 58,   // both ways, reliable: who is in what furniture (a player, the NPCs a game runs); the server names the sender
 		// 59-75: the other changes' messages (each in its own change).
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
+		kDowned = 77,  // both ways, reliable: our player is down and waits for help, is getting up, or is up again; the server names the sender
+		kHelpUp = 78,  // client -> server: our player helps that downed player up; server -> that player alone: this player helped you
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2221,6 +2226,76 @@ namespace Protocol
 	inline constexpr std::size_t PAIR_BYTES = 2 * (4 + 8) + 4 + 4 + 1 + MAX_EVENT_NAME + 1 + 4 * 4;
 	inline constexpr std::size_t MAX_PAIRS_SIZE = 1 + 4 + 1 + MAX_PAIRS * PAIR_BYTES;
 	static_assert(MAX_PAIRS <= 0xFF && MAX_PAIRS_SIZE <= 2048, "a message of pairs stays small");
+
+	// ---- a player brought down and helped up (docs/DESIGN.md, "Downed and helped up") ----
+	// With a friend in the session, a blow that would kill a player brings them down instead (src/game/DownRules.h). Their
+	// game says so (kDowned: waiting for help, getting up, up), each change and every few seconds while they wait; the
+	// server names the sender, passes it on and keeps a waiting one for a joiner. A friend's game whose player stays near
+	// one that waits asks the server to help them up (kHelpUp naming the downed player); the server passes it to that
+	// player alone, naming the helper, and the downed player's game decides (a help that comes while it does not wait
+	// does nothing).
+
+	// state: DownRules::Said (0 up, 1 waiting for help, 2 getting up). secondsLeft: of the wait, while waiting (else 0).
+	// player: 0 from a game; the server names the sender.
+	struct Downed
+	{
+		std::uint32_t player = 0;
+		std::uint8_t  state = 0;
+		std::uint16_t secondsLeft = 0;
+		bool operator==(const Downed&) const = default;
+	};
+	inline constexpr std::uint8_t DOWNED_STATES = 3;
+
+	// player: from a game, the downed player it helps; from the server, the player who helped.
+	struct HelpUp
+	{
+		std::uint32_t player = 0;
+		bool operator==(const HelpUp&) const = default;
+	};
+
+	inline std::vector<std::uint8_t> Encode(const Downed& a_msg)
+	{
+		Writer w{ MessageType::kDowned };
+		w.U32(a_msg.player);
+		w.U8(a_msg.state);
+		w.U16(a_msg.secondsLeft);
+		return w.Data();
+	}
+
+	// None for a state past DOWNED_STATES, seconds left while not waiting, or a byte too many.
+	inline std::optional<Downed> DecodeDowned(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Downed msg;
+		msg.player = r.U32();
+		msg.state = r.U8();
+		msg.secondsLeft = r.U16();
+		if (!r.Ok() || !r.AtEnd() || msg.state >= DOWNED_STATES || (msg.state != 1 && msg.secondsLeft != 0)) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const HelpUp& a_msg)
+	{
+		Writer w{ MessageType::kHelpUp };
+		w.U32(a_msg.player);
+		return w.Data();
+	}
+
+	// None for player 0 (nobody to help, or nobody who helped) or a byte too many.
+	inline std::optional<HelpUp> DecodeHelpUp(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		HelpUp msg;
+		msg.player = r.U32();
+		if (!r.Ok() || !r.AtEnd() || msg.player == 0) {
+			return std::nullopt;
+		}
+		return msg;
+	}
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

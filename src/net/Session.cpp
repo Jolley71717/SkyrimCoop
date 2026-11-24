@@ -15,6 +15,7 @@
 #include "game/PlayerActions.h"
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
+#include "game/Downed.h"
 #include "game/Pairs.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
@@ -243,6 +244,7 @@ namespace Session
 					Furniture::Started(playerId);
 					Shots::Started(playerId);
 					Pairs::Started(playerId);
+					Downed::Started(playerId);
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -264,6 +266,7 @@ namespace Session
 					Riding::Left(msg->playerId);
 					Furniture::Left(msg->playerId);
 					Pairs::Left(msg->playerId);
+					Downed::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -345,6 +348,16 @@ namespace Session
 			case Protocol::MessageType::kPairs:
 				if (const auto msg = Protocol::DecodePairs(a_data); msg && msg->sender != playerId) {
 					Pairs::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kDowned:
+				if (const auto msg = Protocol::DecodeDowned(a_data); msg && msg->player != playerId) {
+					Downed::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kHelpUp:
+				if (const auto msg = Protocol::DecodeHelpUp(a_data); msg && msg->player != playerId) {
+					Downed::HelpedBy(msg->player);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -515,6 +528,7 @@ namespace Session
 			}
 		}
 		Pairs::Clear();   // actors held by a pair let go first
+		Downed::Clear();  // friends' downs forgotten; ours goes on (its clock ends it)
 		Shots::Clear();   // our launches ended while the stand-ins and copies that shot them are still there
 		Riding::Clear();  // riders off their mounts before the stand-ins and copies go
 		Furniture::Clear();  // and sitters out of their furniture
@@ -538,6 +552,7 @@ namespace Session
 			}
 		}
 		if (!client) {
+			Downed::Frame(0, {});  // no friends: our flag off, or a down that began in a session goes on its clock
 			return;
 		}
 		for (auto& event : client->Poll()) {
@@ -563,6 +578,9 @@ namespace Session
 			Furniture::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Pairs::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Downed::Frame(RemotePlayers::Count(), [](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+		} else {
+			Downed::Frame(0, {});
 		}
 		RemotePlayers::Frame();
 		StandInPeace::Frame();  // after the stand-ins are placed: actors fighting one told to stop
