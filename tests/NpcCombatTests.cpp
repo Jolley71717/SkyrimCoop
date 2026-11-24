@@ -179,7 +179,7 @@ TEST("npc combat protocol: the longest of each fits, and one past a limit, cut s
 	CHECK(!hitOf({ GUARD, 1, 1.5f, 0 }));
 	CHECK(!hitOf({ GUARD, 1, -0.1f, 0 }));
 	CHECK(!hitOf({ GUARD, 1, std::nanf(""), 0 }));
-	CHECK(!hitOf({ GUARD, 1, 0.5f, 0x40 }));
+	CHECK(!hitOf({ GUARD, 1, 0.5f, 0x80 }));
 
 	// An answer of no hitter, no hit, an unknown verdict or no share.
 	const auto answerOf = [](Protocol::NpcHitAnswer a_answer) {

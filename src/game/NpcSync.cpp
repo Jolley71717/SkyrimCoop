@@ -1126,7 +1126,6 @@ namespace NpcSync
 				// death), and its runner never dealt: this game runs it now, so it is put on here.
 				if (ours && !actor->IsDead()) {
 					if (const auto owed = OwedKill(npc.id)) {
-						++owedKillsPut;
 						logs::info("NPCs: {:08X} is ours now, and a script's kill held here while another game ran it is still owed: killed", key.id);
 						OnWord word;
 						actor->KillImpl(*owed ? player : nullptr, 0.0f, true, false);
@@ -1741,7 +1740,11 @@ namespace NpcSync
 		std::optional<bool> OwedKill(RE::FormID a_id)
 		{
 			std::scoped_lock l{ heldLock };
-			return held.Run(a_id);
+			const auto       owed = held.Run(a_id);
+			if (owed) {
+				++owedKillsPut;
+			}
+			return owed;
 		}
 
 		// Who killed an NPC we ran: the player its killer shows (our player, or a friend's stand-in), else the friend
