@@ -359,6 +359,66 @@ namespace RemotePlayers
 			}
 		}
 
+		// ---- a flyer's graph: TurnDelta, PitchDelta and TargetSpeed (Protocol::NpcGraph) ----
+		// A dragon's flight graph blends by three more channels' values: <..., ActorTurnDeltaChannel>, <..., ActorPitchDeltaChannel>
+		// and <..., ActorTargetSpeedChannel>, read from the actor's movement as Speed is, so none of them moves for a copy whose
+		// AI is off (it flew straight, its wings as at rest). They are hooked as Speed's is, and a copy of a flyer in the air
+		// has its runner's values written after the engine's. Where those channels keep their actor has not been read from
+		// the game (Speed's is at 28, after its own data at 20; a channel with no data of its own may keep it at 20): both
+		// places are tried, and an address is read as an actor only once the drive table holds it (GaitDrive::Table::Held),
+		// so a wrong guess drives nothing and is never followed. The dev command `standins` counts what was driven.
+		constexpr std::array<std::size_t, 2> FLIGHT_CHANNEL_ACTOR{ CHANNEL_ACTOR, 0x20 };
+		PollFn                              originalTurnDeltaPoll = nullptr;
+		PollFn                              originalPitchDeltaPoll = nullptr;
+		PollFn                              originalTargetSpeedPoll = nullptr;
+		std::atomic<std::uint64_t>          flightDriven{ 0 };
+		// Which of FLIGHT_CHANNEL_ACTOR found a driven actor, once each (dev `standins`: says where the actor is).
+		std::array<std::atomic<std::uint64_t>, 2> flightActorAt{};
+
+		std::optional<GaitDrive::Values> FlightFor(void* a_channel)
+		{
+			if (!drive.AnyFlight() || !Watching()) {
+				return std::nullopt;
+			}
+			const auto now = Clock::now();
+			for (std::size_t i = 0; i < FLIGHT_CHANNEL_ACTOR.size(); ++i) {
+				const auto at = *reinterpret_cast<RE::Actor* const*>(static_cast<std::byte*>(a_channel) + FLIGHT_CHANNEL_ACTOR[i]);
+				const auto held = at ? drive.Held(at, now) : std::nullopt;
+				if (held && held->second.flight && at->GetFormID() == held->first) {
+					flightActorAt[i].fetch_add(1, std::memory_order_relaxed);
+					return held->second;
+				}
+			}
+			return std::nullopt;
+		}
+
+		void TurnDeltaPoll(void* a_channel, bool a_flag)
+		{
+			originalTurnDeltaPoll(a_channel, a_flag);
+			if (const auto values = FlightFor(a_channel)) {
+				ChannelValue(a_channel) = values->turnDelta;
+				flightDriven.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
+		void PitchDeltaPoll(void* a_channel, bool a_flag)
+		{
+			originalPitchDeltaPoll(a_channel, a_flag);
+			if (const auto values = FlightFor(a_channel)) {
+				ChannelValue(a_channel) = values->pitchDelta;
+				flightDriven.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
+		void TargetSpeedPoll(void* a_channel, bool a_flag)
+		{
+			originalTargetSpeedPoll(a_channel, a_flag);
+			if (const auto values = FlightFor(a_channel)) {
+				ChannelValue(a_channel) = values->targetSpeed;
+				flightDriven.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+
 		template <class Fn>
 		bool HookSlot(std::uintptr_t a_vtable, std::size_t a_index, Fn a_hook, Fn& a_original, std::string_view a_what)
 		{
@@ -1432,6 +1492,15 @@ namespace RemotePlayers
 		if (!direction) {
 			logs::warn("Players: the graph's {} channel is not ours: stand-ins' legs won't follow their friends'", speed ? "Direction" : "Speed");
 		}
+		// Without these, a copied dragon flies where its runner's does, its wings and turns its own graph's.
+		REL::Relocation<std::uintptr_t> turnDeltaChannel{ RE::VTABLE_BSTAnimationGraphDataChannel_Actor_float_ActorTurnDeltaChannel_[0] };
+		REL::Relocation<std::uintptr_t> pitchDeltaChannel{ RE::VTABLE_BSTAnimationGraphDataChannel_Actor_float_ActorPitchDeltaChannel_[0] };
+		REL::Relocation<std::uintptr_t> targetSpeedChannel{ RE::VTABLE_BSTAnimationGraphDataChannel_Actor_float_ActorTargetSpeedChannel_[0] };
+		if (!HookSlot<PollFn>(turnDeltaChannel.address(), CHANNEL_POLL_INDEX, &TurnDeltaPoll, originalTurnDeltaPoll, "graph's TurnDelta channel") ||
+			!HookSlot<PollFn>(pitchDeltaChannel.address(), CHANNEL_POLL_INDEX, &PitchDeltaPoll, originalPitchDeltaPoll, "graph's PitchDelta channel") ||
+			!HookSlot<PollFn>(targetSpeedChannel.address(), CHANNEL_POLL_INDEX, &TargetSpeedPoll, originalTargetSpeedPoll, "graph's TargetSpeed channel")) {
+			logs::warn("Players: a flight channel is not ours: copied dragons fly where their runners' do, but bank and flap as their own graphs say");
+		}
 		// What a stand-in does to others here: nothing (its spells' effects on Character are hooked once one is placed).
 		HookPlayerMagic();
 		if (!HookSlot<HealthDamageFn>(characterVtable, HEALTH_DAMAGE_INDEX, &CharacterHealthDamage, originalCharacterHealthDamage, "Character health damage")) {
@@ -1944,8 +2013,9 @@ namespace RemotePlayers
 			disabled += grave.disabledAt && !grave.deleted ? 1 : 0;
 			deleted += grave.deleted ? 1 : 0;
 		}
-		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) driven speed={} direction={} channels={} from={}", players.size(),
-			standIns.load(), graveyard.size(), disabled, deleted, speedsDriven.load(), directionsDriven.load(), drive.Size(), eventsFromTick ? "tick" : "hook");
+		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) driven speed={} direction={} flight={} (actor at 28: {}, at 20: {}) channels={} from={}",
+			players.size(), standIns.load(), graveyard.size(), disabled, deleted, speedsDriven.load(), directionsDriven.load(), flightDriven.load(), flightActorAt[0].load(),
+			flightActorAt[1].load(), drive.Size(), eventsFromTick ? "tick" : "hook");
 		const auto  here = LocalPlayer::Read();
 		// What each stand-in really has on: the armor its inventory holds as worn, not what its friend's looks named (the
 		// rig's `forms` step checks an item is on the actor). Read before the lock: the game's inventory has its own.

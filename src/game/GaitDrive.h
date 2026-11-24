@@ -1,10 +1,13 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
+#include <utility>
 
 // The speed and direction each stand-in's legs go by, as its graph is to be given them.
 //
@@ -21,11 +24,17 @@
 namespace GaitDrive
 {
 	// What a stand-in's graph is given: Speed in the graph's own units (its friend's graph's, as sent), Direction as a
-	// fraction of a turn from where it faces.
+	// fraction of a turn from where it faces. A copy of a flyer in the air (its runner's state says it flies, or its body
+	// crashes) also has its graph's flight values driven (Protocol::NpcGraph: the channels TurnDelta, PitchDelta and
+	// TargetSpeed); with flight false those stay the engine's.
 	struct Values
 	{
 		float speed = 0.0f;
 		float direction = 0.0f;
+		bool  flight = false;
+		float turnDelta = 0.0f;
+		float pitchDelta = 0.0f;
+		float targetSpeed = 0.0f;
 
 		bool operator==(const Values&) const = default;
 	};
@@ -45,7 +54,9 @@ namespace GaitDrive
 		void Set(Key a_key, std::uint32_t a_id, Values a_values, time_point a_now)
 		{
 			std::scoped_lock l{ lock };
-			entries[a_key] = Entry{ a_id, a_values, a_now };
+			auto&            entry = entries[a_key];
+			flights += (a_values.flight ? 1 : 0) - (entry.values.flight ? 1 : 0);
+			entry = Entry{ a_id, a_values, a_now };
 		}
 
 		// The values for this actor, or none: never set, set for another actor at that address, or not set for FRESH.
@@ -59,16 +70,37 @@ namespace GaitDrive
 			return it->second.values;
 		}
 
+		// The values set at this address and the form id they were set for, without the actor's: for a caller that holds an
+		// address it is not sure is an actor's (a channel whose actor's place is not known for sure), which may read it as an
+		// actor only once the table holds it.
+		[[nodiscard]] std::optional<std::pair<std::uint32_t, Values>> Held(Key a_key, time_point a_now) const
+		{
+			std::scoped_lock l{ lock };
+			const auto       it = entries.find(a_key);
+			if (it == entries.end() || a_now - it->second.at > FRESH) {
+				return std::nullopt;
+			}
+			return std::pair{ it->second.id, it->second.values };
+		}
+
+		// Whether any entry has flight values: the flight channels' polls (every actor's graph's) skip the table while none
+		// does. Read without the lock.
+		[[nodiscard]] bool AnyFlight() const { return flights.load(std::memory_order_relaxed) > 0; }
+
 		void Erase(Key a_key)
 		{
 			std::scoped_lock l{ lock };
-			entries.erase(a_key);
+			if (const auto it = entries.find(a_key); it != entries.end()) {
+				flights -= it->second.values.flight ? 1 : 0;
+				entries.erase(it);
+			}
 		}
 
 		void Clear()
 		{
 			std::scoped_lock l{ lock };
 			entries.clear();
+			flights = 0;
 		}
 
 		[[nodiscard]] std::size_t Size() const
@@ -87,5 +119,6 @@ namespace GaitDrive
 
 		mutable std::mutex                 lock;
 		std::unordered_map<Key, Entry>     entries;
+		std::atomic<std::ptrdiff_t>        flights{ 0 };  // entries with flight values
 	};
 }

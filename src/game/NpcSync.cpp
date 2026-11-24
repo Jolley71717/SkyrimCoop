@@ -82,6 +82,8 @@ namespace NpcSync
 			std::optional<Clock::time_point> killMoveAt;  // last seen in a kill move
 			bool                             aliveUnrun = false;  // last seen alive while no other game ran it (a death here after is ours to say)
 			std::uint64_t                    castsSent = 0;  // its graph's cast events said (SpellRules::CastEvent), while we ran it
+			bool                             flying = false;  // the last state sent of it said it flies
+			NpcRules::Crash                  crash;           // its body's fall, once it died flying
 		};
 		std::map<Key, Loaded> loaded;
 		// The numbers of the states of every NPC we ran this session (not forgotten with its loaded entry).
@@ -132,6 +134,12 @@ namespace NpcSync
 			std::uint64_t         castsRefused = 0;
 			std::string           lastCast;
 			float                 magickaBack = 0.0f;
+			// A flyer's (NpcRules::Crash, Protocol::NpcGraph): its runner's latest graph values, and when a state last said its
+			// body crashes (its runner's death is held meanwhile: NpcRules::HoldsDeath).
+			Protocol::NpcGraph               graph;
+			std::optional<Clock::time_point> crashAt;
+			std::optional<Clock::time_point> flyingAt;  // when a state last said it flies
+			std::uint64_t                    crashStates = 0;
 		};
 		std::mutex                                copyLock;
 		std::map<Key, Copy>                       copies;
@@ -175,6 +183,8 @@ namespace NpcSync
 			std::uint64_t statesSent = 0, statesIn = 0, actionsSent = 0, actionsIn = 0, gearSent = 0, gearIn = 0, gearMissing = 0, gearSkipped = 0, gearTakenOff = 0;
 			std::uint64_t spawnsPlaced = 0, spawnsTaken = 0, unshared = 0, lookDiffers = 0;
 			std::uint64_t fallbackSilent = 0, fallbackElsewhere = 0, fallbackFar = 0;
+			// Flyers shot down (NpcRules::Crash): bodies we ran followed to where they lay still; crash states of others' came.
+			std::uint64_t crashes = 0, crashStatesIn = 0;
 			// A friend's hits on NPCs we run: came, applied; the healths and deaths we said and heard; NPCs killed as
 			// they loaded for the session's word; copies set to a share.
 			std::uint64_t hitsIn = 0, hitsApplied = 0, healthsSent = 0, healthsIn = 0, deathsSent = 0, deathsIn = 0, killsOnLoad = 0, healthSets = 0;
@@ -449,6 +459,20 @@ namespace NpcSync
 			}
 			RE::NiPointer<RE::Actor> mount;
 			return a_player->GetMount(mount) && mount.get() == a_actor;
+		}
+
+		// A flyer's graph's flight values, as its copies' graphs are given them (Protocol::NpcGraph); none for an NPC whose
+		// race does not fly. a_crash: it is a body that died flying and still falls.
+		Protocol::NpcGraph GraphOf(RE::Actor* a_actor, NpcRules::Kind a_kind, bool a_crash)
+		{
+			Protocol::NpcGraph graph;
+			graph.crash = a_crash;
+			if (a_kind == NpcRules::Kind::kDragon) {
+				graph.turnDelta = Protocol::PackGraphValue(GraphFloat(a_actor, "TurnDelta", 0.0f), Protocol::GRAPH_DELTA_SCALE);
+				graph.pitchDelta = Protocol::PackGraphValue(GraphFloat(a_actor, "PitchDelta", 0.0f), Protocol::GRAPH_DELTA_SCALE);
+				graph.targetSpeed = Protocol::PackGraphValue(GraphFloat(a_actor, "TargetSpeed", 0.0f), Protocol::GRAPH_SPEED_SCALE);
+			}
+			return graph;
 		}
 
 		NpcRules::Kind KindOf(RE::Actor* a_actor)
@@ -1152,12 +1176,31 @@ namespace NpcSync
 						++counts.gearSent;
 					}
 				}
-				if (a_now < npc.nextState || actor->IsDead()) {
-					continue;  // a body's place is its fall's (shared with deaths), not a walk's
+				// A body's place is its fall's (shared with deaths), not a walk's; but one that died flying is followed while
+				// it falls and slides (NpcRules::Crash), so its copies die where it comes to rest.
+				const bool dead = actor->IsDead();
+				if (dead) {
+					if (!npc.crash.Started() && npc.flying) {
+						logs::info("NPCs: {:08X} died flying: its copies follow its body until it lies still", npc.id);
+					}
+					npc.crash.Died(npc.flying, a_now);
+				} else if (npc.crash.Started()) {
+					npc.crash.Reset();
+				}
+				if (a_now < npc.nextState || (dead && !npc.crash.Active())) {
+					continue;
 				}
 				auto state = Read(actor.get());
 				if (!state) {
 					continue;
+				}
+				if (dead && !npc.crash.Follow(state->x, state->y, state->z, a_now)) {
+					++counts.crashes;
+					logs::info("NPCs: {:08X}'s body lies still: its copies die there", npc.id);
+					continue;
+				}
+				if (!dead) {
+					npc.flying = (state->flags & Protocol::kFlying) != 0;
 				}
 				std::optional<float> nearest;
 				const auto           consider = [&](const Protocol::PlayerState& a_player) {
@@ -1176,7 +1219,7 @@ namespace NpcSync
 				npc.nextState = a_now - npc.nextState < every ? npc.nextState + every : a_now + every;
 				state->sequence = sequences.Next(key);
 				state->sentMs = Protocol::SentMs(a_now);
-				states.npcs.push_back({ key, BaseOf(actor.get()), *state });
+				states.npcs.push_back({ key, BaseOf(actor.get()), *state, GraphOf(actor.get(), npc.kind, dead) });
 				if (states.npcs.size() >= Protocol::MAX_NPC_STATES) {
 					flush();
 				}
@@ -1283,7 +1326,8 @@ namespace NpcSync
 						}
 					}
 					const bool sameSpace = sample && a_here && SameSpace(sample->state, *a_here);
-					const auto mode = NpcRules::CopyMode(sample.has_value() && othersRun, sameSpace, sameSpace ? std::optional{ Distance(sample->state, *a_here) } : std::nullopt);
+					const bool inTheAir = sample && ((sample->state.flags & Protocol::kFlying) != 0 || NpcRules::HoldsDeath(copy.crashAt, copy.flyingAt, a_now));
+					const auto mode = NpcRules::CopyMode(sample.has_value() && othersRun, sameSpace, sameSpace ? std::optional{ Distance(sample->state, *a_here) } : std::nullopt, inTheAir);
 					if (mode != copy.mode && copy.mode == NpcRules::Mode::kMirror) {
 						counts.fallbackSilent += mode == NpcRules::Mode::kSilent ? 1 : 0;
 						counts.fallbackElsewhere += mode == NpcRules::Mode::kElsewhere ? 1 : 0;
@@ -1644,6 +1688,7 @@ namespace NpcSync
 				RE::ActorHandle handle;
 				RE::FormID      id = 0;
 				std::uint32_t   runner = 0;
+				bool            crashing = false;  // NpcRules::HoldsDeath
 			};
 			std::vector<Shown> shown;
 			{
@@ -1651,7 +1696,7 @@ namespace NpcSync
 				for (const auto& [key, copy] : copies) {
 					const auto owner = owners.find(key);
 					if (copy.actorId != 0 && owner != owners.end() && owner->second != ourId) {
-						shown.push_back({ key, copy.handle, copy.actorId, owner->second });
+						shown.push_back({ key, copy.handle, copy.actorId, owner->second, NpcRules::HoldsDeath(copy.crashAt, copy.flyingAt, a_now) });
 					}
 				}
 			}
@@ -1688,6 +1733,7 @@ namespace NpcSync
 				const CopyHealth::Seen seen{ .share = CopyHealth::ShareOf(HealthOf(actor.get()), max),
 					.dead = dead,
 					.inKillMove = actor->IsInKillMove(),
+					.crashing = one.crashing,
 					.floor = 1.0f / max,
 					.ourDrain = dead ? 0.0f : OurDrainOn(actor.get(), max, player),
 					.killedByUs = killer && player && killer == player };
@@ -1940,6 +1986,15 @@ namespace NpcSync
 			auto& copy = CopyOf(npc.key, a_msg.runner);
 			copy.base = npc.base;
 			copy.buffer.Push(npc.state, now);
+			copy.graph = npc.graph;
+			if ((npc.state.flags & Protocol::kFlying) != 0 && !npc.graph.crash) {
+				copy.flyingAt = now;
+			}
+			if (npc.graph.crash) {
+				copy.crashAt = now;
+				++copy.crashStates;
+				++counts.crashStatesIn;
+			}
 			++counts.statesIn;
 		}
 	}
@@ -2086,6 +2141,7 @@ namespace NpcSync
 		Key                                 key;
 		std::optional<StateBuffer::Sampled> sample;
 		Gait::Step                          step;
+		GaitDrive::Values                   legs;
 		std::vector<std::string>            events;
 		// A copy our player sits on is ridden here: the engine moves it until its runner hands it over (a mount goes
 		// with its rider, NpcRules::Facts::ridden). A copy seated on its mount (Riding.h) is carried by the engine: not
@@ -2137,6 +2193,14 @@ namespace NpcSync
 				copy.shown = step.shown;
 			}
 			events = copy.actions.Due(now - StateBuffer::Buffer::Delay());
+			// A flyer in the air: its graph's flight values are its runner's latest (they come with the states, and change
+			// slowly next to the delay a copy is drawn at).
+			if ((sample->state.flags & Protocol::kFlying) != 0 || NpcRules::HoldsDeath(copy.crashAt, std::nullopt, now)) {
+				legs.flight = true;
+				legs.turnDelta = Protocol::UnpackGraphValue(copy.graph.turnDelta, Protocol::GRAPH_DELTA_SCALE);
+				legs.pitchDelta = Protocol::UnpackGraphValue(copy.graph.pitchDelta, Protocol::GRAPH_DELTA_SCALE);
+				legs.targetSpeed = Protocol::UnpackGraphValue(copy.graph.targetSpeed, Protocol::GRAPH_SPEED_SCALE);
+			}
 			copy.lastDrawn = sample->state;
 			copy.hasDrawn = true;
 			++copy.drawn;
@@ -2160,7 +2224,9 @@ namespace NpcSync
 			a_actor->data.angle.x = 0.0f;
 		}
 		RemotePlayers::ShowMoves(a_actor, Gait::Bits(step, sample->state));
-		RemotePlayers::DriveLegs(a_actor, { step.speed, step.direction });
+		legs.speed = step.speed;
+		legs.direction = step.direction;
+		RemotePlayers::DriveLegs(a_actor, legs);
 		a_actor->UpdateNoAI(a_delta);
 		// In water, at its runner's depth: the water's pull to the surface does not lift it.
 		float      drift = 0.0f;
@@ -2263,13 +2329,13 @@ namespace NpcSync
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
 				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
 				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={} "
-				"pairActionsSent={} heldActionsDropped={}",
+				"pairActionsSent={} heldActionsDropped={} crashes={} crashStatesIn={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
 				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
 				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad,
-				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size(), pairActionsSent, heldActionsDropped.load());
+				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size(), pairActionsSent, heldActionsDropped.load(), counts.crashes, counts.crashStatesIn);
 		}
 		// One line per NPC: `npcs list`, or `npcs <form id>` for one. Its local form id, who runs it, its kind, where its
 		// actor is here (at=) and, for a copy, where its runner's state puts it (target=) and how far apart they are.
