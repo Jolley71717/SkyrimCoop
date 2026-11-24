@@ -282,7 +282,7 @@ TEST("body book: the game that said a fall may say its rest after the NPC change
 	CHECK(book.counts.owedDropped == 2u);
 	Body next;
 	REQUIRE(book.NextOwed(1, next));
-	CHECK(next.key == Protocol::NpcKey{ 0x00500002, 0 });
+	CHECK((next.key == Protocol::NpcKey{ 0x00500002, 0 }));
 	CHECK(!book.NextOwed(2, next));
 	book.Leave(1);
 	CHECK(!book.Owes(1));
