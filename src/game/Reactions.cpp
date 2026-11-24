@@ -93,9 +93,25 @@ namespace Reactions
 		};
 		HitSink hitSink;
 
+		// An NPC a friend's reaction is never played on: dead, in a kill move, in furniture the engine plays, and any state
+		// a stagger's graph event could seem to end while the state stays: down (bleeding out, essential down, knocked out,
+		// restrained: any life state but alive or a spell's thrall), knocked down or getting up (a ragdoll), in a saddle
+		// or getting on or off, or a dragon in flight.
 		bool Busy(RE::Actor* a_actor)
 		{
-			return a_actor->IsDead() || Pairs::EventsStay(a_actor) || Furniture::EngineOwnsEvents(a_actor);
+			if (a_actor->IsDead() || Pairs::EventsStay(a_actor) || Furniture::EngineOwnsEvents(a_actor) || a_actor->IsOnMount()) {
+				return true;
+			}
+			const auto state = a_actor->AsActorState();
+			if (!state) {
+				return true;
+			}
+			using FS = RE::FLY_STATE;
+			const auto fly = state->GetFlyState();
+			const auto life = state->GetLifeState();
+			return (life != RE::ACTOR_LIFE_STATE::kAlive && life != RE::ACTOR_LIFE_STATE::kReanimate) || state->GetKnockState() != RE::KNOCK_STATE_ENUM::kNormal ||
+			       state->GetSitSleepState() != RE::SIT_SLEEP_STATE::kNormal || fly == FS::kTakeOff || fly == FS::kCruising || fly == FS::kHovering ||
+			       fly == FS::kLanding || fly == FS::kAction;
 		}
 	}
 

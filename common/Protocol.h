@@ -62,11 +62,11 @@ namespace Protocol
 	// 27: a player brought down and helped up (kDowned, kHelpUp, message types 77-78): with a friend in the session a player
 	//    a blow would kill kneels and waits for help; a friend near helps them up. (Renumbered when it lands, as 21 and 24;
 	//    25 and 26 are other changes'.)
-	// 28: melee hit reactions shared (kNpcReactions, message type 79): a copy's stagger, recoil or blocked-hit reaction our
+	// 33: melee hit reactions shared (kNpcReactions, message type 88): a copy's stagger, recoil or blocked-hit reaction our
 	//    player's blow or block caused here goes to the NPC's runner, which plays it on its NPC; and a stagger event sent
 	//    as a player's or an NPC's action carries its size and way (Stagger), so it plays the same in every game.
-	//    (Renumbered when it lands, as 21, 24 and 27.)
-	inline constexpr std::uint16_t VERSION = 28;
+	//    (Renumbered when it lands, as 21, 24 and 27; 28-32 and types 79-87 are other changes'.)
+	inline constexpr std::uint16_t VERSION = 33;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -139,7 +139,8 @@ namespace Protocol
 		kPairs = 76,  // both ways, reliable: paired animations (kill moves) our player and the NPCs a game runs began
 		kDowned = 77,  // both ways, reliable: our player is down and waits for help, is getting up, or is up again; the server names the sender
 		kHelpUp = 78,  // client -> server: our player helps that downed player up; server -> that player alone: this player helped you
-		kNpcReactions = 79,  // client -> server: copies' hit reactions our player caused; server -> each NPC's runner alone, the player named
+		// 79-87: the other changes' messages (each in its own change).
+		kNpcReactions = 88,  // client -> server: copies' hit reactions our player caused; server -> each NPC's runner alone, the player named
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.

@@ -73,14 +73,14 @@ namespace
 
 // ---- the messages ----
 
-TEST("reaction protocol: reactions read back as written, as message 79 of protocol 28, and carry forms")
+TEST("reaction protocol: reactions read back as written, as message 88 of protocol 33, and carry forms")
 {
-	static_assert(Protocol::VERSION >= 28);
+	static_assert(Protocol::VERSION >= 33);
 	const Protocol::NpcReactions msg{ .player = 2,
 		.reactions = { { GUARD, "staggerStart", Protocol::Stagger{ 128, 64 } }, { WOLF, "recoilLargeStart", std::nullopt } } };
 	const auto bytes = Protocol::Encode(msg);
 	CHECK(Protocol::PeekType(bytes) == MT::kNpcReactions);
-	CHECK(static_cast<int>(MT::kNpcReactions) == 79);
+	CHECK(static_cast<int>(MT::kNpcReactions) == 88);
 	CHECK(Protocol::DecodeNpcReactions(bytes) == msg);
 	CHECK(FormTranslate::CarriesForms(MT::kNpcReactions));
 	// An empty list reads (a translation may leave every reaction out).
