@@ -7,6 +7,7 @@
 #include "Redact.h"
 #include "game/Console.h"
 #include "game/Face.h"
+#include "game/FriendMarkers.h"
 #include "game/Furniture.h"
 #include "game/GameThread.h"
 #include "game/LocalPlayer.h"
@@ -15,6 +16,7 @@
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
 #include "game/Pairs.h"
+#include "game/Party.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
 #include "game/VirtualPad.h"
@@ -199,6 +201,19 @@ namespace DevCommands
 			return Riding::Command(a_args);
 		}
 
+		// party: our status (health, travelling, inside, the way in on the map, sent) and each friend's as it came
+		// (Party::Command).
+		std::string PartyCommand(std::string_view a_args)
+		{
+			return Party::Command(a_args);
+		}
+
+		// markers [span <degrees>]: what the compass, the names and the maps drew last (FriendMarkers::Command).
+		std::string MarkersCommand(std::string_view a_args)
+		{
+			return FriendMarkers::Command(a_args);
+		}
+
 		// sit [find <kind> [radius] | off <id>]: who sits in what, ours and each actor another game says is in furniture
 		// (Furniture::Command).
 		std::string SitCommand(std::string_view a_args)
@@ -274,6 +289,8 @@ namespace DevCommands
 			{ "swim", SwimCommand },
 			{ "ride", RideCommand },
 			{ "sit", SitCommand },
+			{ "party", PartyCommand },
+			{ "markers", MarkersCommand },
 			{ "peace", PeaceCommand },
 			{ "shots", ShotsCommand },
 			{ "pairs", PairsCommand },

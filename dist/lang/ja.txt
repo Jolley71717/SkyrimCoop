@@ -10,3 +10,5 @@ reject.mods = MODがホストと異なります。
 
 steam.status_hosting = Skyrim Co-opをホスト中
 steam.status_playing = Skyrim Co-opをプレイ中
+
+party.tag_hurt = {name}（{health}%）

@@ -50,6 +50,12 @@ namespace
 		std::optional<Protocol::PlayerFace> face;
 		TokenBucket                         faceBudget{ 4.0, 1.0 };
 		bool                                faceOwed = false;
+		// The player's newest status (health, travel, the way in on the map: kPlayerStatus), kept and passed on like the face: a game
+		// sends it when it changes, at most a few a second (MarkerRules::Worth), so a burst of eight, then four a second, and
+		// the newest owed past that.
+		std::optional<Protocol::PlayerStatus> status;
+		TokenBucket                           statusBudget{ 8.0, 4.0 };
+		bool                                  statusOwed = false;
 		// Heartbeats answered: a burst of twenty, then ten a second (the game sends a few a second at most).
 		TokenBucket heartbeats{ 20.0, 10.0 };
 		// Hits on copies sent on (NpcFates.h): a burst of 64, then 20 a second (a flurry of daggers, a flame spell's
@@ -373,6 +379,9 @@ void Server::Run()
 				if (peer.face) {
 					send(a_key, Protocol::Encode(Protocol::RemoteFace{ peer.playerId, *peer.face }), true);
 				}
+				if (peer.status) {
+					send(a_key, Protocol::Encode(Protocol::RemoteStatus{ peer.playerId, *peer.status }), true);
+				}
 			}
 		}
 		// Who runs each NPC (a full list; a game forgets what it knew at each welcome), and their gear. Nothing when no NPC
@@ -458,6 +467,21 @@ void Server::Run()
 					broadcast(Protocol::Encode(Protocol::RemoteFace{ a_peer.playerId, *a_peer.face }), true, &a_key);
 				} else {
 					a_peer.faceOwed = true;
+				}
+			}
+			break;
+		case MT::kPlayerStatus:
+			// As the face: kept for whoever joins later, passed on to those there now, the same again ignored.
+			if (const auto status = Protocol::DecodePlayerStatus(a_data)) {
+				if (a_peer.status && *a_peer.status == *status) {
+					break;
+				}
+				a_peer.status = *status;
+				if (a_peer.statusBudget.Take(Clock::now())) {
+					a_peer.statusOwed = false;
+					broadcast(Protocol::Encode(Protocol::RemoteStatus{ a_peer.playerId, *a_peer.status }), true, &a_key);
+				} else {
+					a_peer.statusOwed = true;
 				}
 			}
 			break;
@@ -774,6 +798,10 @@ void Server::Run()
 			if (peer.joined && peer.faceOwed && peer.face && peer.faceBudget.Take(now)) {
 				peer.faceOwed = false;
 				broadcast(Protocol::Encode(Protocol::RemoteFace{ peer.playerId, *peer.face }), true, &key);
+			}
+			if (peer.joined && peer.statusOwed && peer.status && peer.statusBudget.Take(now)) {
+				peer.statusOwed = false;
+				broadcast(Protocol::Encode(Protocol::RemoteStatus{ peer.playerId, *peer.status }), true, &key);
 			}
 			if (peer.joined && rides.Owes(peer.playerId)) {
 				std::vector<Protocol::Ride> pass;

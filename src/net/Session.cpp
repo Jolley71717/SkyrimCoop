@@ -9,6 +9,7 @@
 #include "game/Face.h"
 #include "game/Furniture.h"
 #include "game/FaceRules.h"
+#include "game/FriendMarkers.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
 #include "game/NpcSync.h"
@@ -16,6 +17,7 @@
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
 #include "game/Pairs.h"
+#include "game/Party.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
 #include "game/Water.h"
@@ -243,6 +245,7 @@ namespace Session
 					Furniture::Started(playerId);
 					Shots::Started(playerId);
 					Pairs::Started(playerId);
+					Party::Started();
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -264,6 +267,7 @@ namespace Session
 					Riding::Left(msg->playerId);
 					Furniture::Left(msg->playerId);
 					Pairs::Left(msg->playerId);
+					Party::Left(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
@@ -280,6 +284,11 @@ namespace Session
 			case Protocol::MessageType::kRemoteFace:
 				if (const auto msg = Protocol::DecodeRemoteFace(a_data); msg && msg->playerId != playerId) {
 					RemotePlayers::Faced(msg->playerId, msg->face);
+				}
+				break;
+			case Protocol::MessageType::kRemoteStatus:
+				if (const auto msg = Protocol::DecodeRemoteStatus(a_data); msg && msg->playerId != playerId) {
+					Party::Heard(*msg);
 				}
 				break;
 			case Protocol::MessageType::kRemoteActions:
@@ -521,6 +530,8 @@ namespace Session
 		NpcSync::Clear();
 		RemotePlayers::Clear();
 		StandInPeace::Clear();
+		Party::Clear();
+		FriendMarkers::Clear();
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -563,9 +574,13 @@ namespace Session
 			Furniture::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Shots::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 			Pairs::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
+			Party::Frame([](std::vector<std::uint8_t> a_data, bool a_reliable) { Send(std::move(a_data), a_reliable); });
 		}
 		RemotePlayers::Frame();
 		StandInPeace::Frame();  // after the stand-ins are placed: actors fighting one told to stop
+		if (welcomed) {
+			FriendMarkers::Frame();  // after the stand-ins are placed: the compass, the maps and the names drawn from them
+		}
 	}
 
 	bool Active()

@@ -85,6 +85,8 @@ namespace FormTranslate
 		case MT::kShots:
 		case MT::kSits:
 		case MT::kPairs:
+		case MT::kPlayerStatus:
+		case MT::kRemoteStatus:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -264,6 +266,17 @@ namespace FormTranslate
 			a_ctx.Detail(a_face.faceDetails);
 			a_ctx.Detail(a_face.skin);
 		}
+
+		inline void MapStatus(Context& a_ctx, Protocol::PlayerStatus& a_status)
+		{
+			a_ctx.Detail(a_status.location);
+			if (a_status.mapWorld != 0 && !a_ctx.Key(a_status.mapWorld)) {
+				a_status.mapWorld = 0;
+				a_status.mapX = a_status.mapY = a_status.mapZ = 0.0f;
+				++a_ctx.out.fields;
+				a_ctx.changed = true;
+			}
+		}
 	}
 
 	// a_packet as the other side numbers its forms. A packet that can't be read is left as it is (its reader refuses
@@ -429,6 +442,14 @@ namespace FormTranslate
 					ctx.Detail(pair.idle);
 				}
 			});
+			break;
+		// A status: a place it lacks (a mod's town) reads none, and a map world it lacks takes the map spot with it (none:
+		// the friend is not drawn on a map this game has).
+		case MT::kPlayerStatus:
+			detail::Apply<Protocol::PlayerStatus>(a_packet, ctx, Protocol::DecodePlayerStatus, [&](Protocol::PlayerStatus& a_status) { detail::MapStatus(ctx, a_status); });
+			break;
+		case MT::kRemoteStatus:
+			detail::Apply<Protocol::RemoteStatus>(a_packet, ctx, Protocol::DecodeRemoteStatus, [&](Protocol::RemoteStatus& a_msg) { detail::MapStatus(ctx, a_msg.status); });
 			break;
 		default:
 			break;

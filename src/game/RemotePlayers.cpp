@@ -12,6 +12,7 @@
 #include "game/NpcSync.h"
 #include "game/Furniture.h"
 #include "game/Pairs.h"
+#include "game/Party.h"
 #include "game/PeaceRules.h"
 #include "game/Retire.h"
 #include "game/Riding.h"
@@ -85,6 +86,7 @@ namespace RemotePlayers
 			Clock::time_point placeAfter{};
 			Clock::time_point placedAt{};
 			std::uint32_t     placed = 0;
+			std::string       tagShown;  // the name the stand-in shows now: its friend's, with their health when hurt (Party::Tag)
 
 			Gait::Shown   shown;  // under lock
 			std::uint64_t drawn = 0;
@@ -1013,6 +1015,18 @@ namespace RemotePlayers
 			a_remote.placeAfter = Clock::now() + RESPAWN_AFTER;
 		}
 
+		// The stand-in is named as its friend is, with their health when hurt (Party::Tag): the name the game gives what the
+		// crosshair is on and the one over its head (FriendMarkers).
+		void ShowName(std::uint32_t a_id, Remote& a_remote, RE::Actor* a_actor)
+		{
+			auto tag = Party::Tag(a_id, a_remote.name);
+			if (tag.empty() || tag == a_remote.tagShown) {
+				return;
+			}
+			a_actor->SetDisplayName(tag, true);
+			a_remote.tagShown = std::move(tag);
+		}
+
 		bool SameSpace(const Protocol::PlayerState& a_a, const Protocol::PlayerState& a_b)
 		{
 			return a_a.cell == a_b.cell && a_a.worldspace == a_b.worldspace;
@@ -1114,9 +1128,8 @@ namespace RemotePlayers
 			actor->extraList.SetExtraFlags(static_cast<RE::ExtraFlags::Flag>(
 				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivate) | std::to_underlying(RE::ExtraFlags::Flag::kBlockPlayerActivate) |
 				std::to_underlying(RE::ExtraFlags::Flag::kBlockActivateText)), true);
-			if (!a_remote.name.empty()) {
-				actor->SetDisplayName(a_remote.name, true);
-			}
+			a_remote.tagShown.clear();
+			ShowName(a_id, a_remote, actor);
 			Neutralise(actor);
 			a_remote.baseShouts = Gear::BaseShouts(actor);
 			HookCharacterMagic(actor);
@@ -1586,6 +1599,7 @@ namespace RemotePlayers
 				Check(id, remote, actor.get(), now);
 			}
 			KeepFull(actor.get());
+			ShowName(id, remote, actor.get());  // their health on it when it changed (their status)
 			FixDraw(id, remote, actor.get(), sample->state, now);
 			if (eventsFromTick && actor->Is3DLoaded()) {
 				Gait::Step  step;
@@ -1878,6 +1892,20 @@ namespace RemotePlayers
 		return out;
 	}
 
+	std::vector<Friend> Friends()
+	{
+		std::vector<Friend> out;
+		std::scoped_lock    l{ lock };
+		for (const auto& [id, remote] : players) {
+			Friend shown{ .id = id, .name = remote.name, .standIn = remote.standIn };
+			if (!remote.buffer.snapshots.empty()) {
+				shown.state = remote.buffer.snapshots.back().state;
+			}
+			out.push_back(std::move(shown));
+		}
+		return out;
+	}
+
 	void SetCopies(std::size_t a_count)
 	{
 		copies.store(a_count, std::memory_order_relaxed);
@@ -1999,7 +2027,7 @@ namespace RemotePlayers
 				const auto shown = actor->GetDisplayFullName();
 				const auto baseName = remote.base ? remote.base->GetName() : nullptr;
 				const std::string_view text = shown ? shown : "";
-				named = text.empty() ? "empty" : (!remote.name.empty() && text == remote.name) ? "friend" : (baseName && text == baseName) ? "base" : "other";
+				named = text.empty() ? "empty" : (!remote.name.empty() && (text == remote.name || text == remote.tagShown)) ? "friend" : (baseName && text == baseName) ? "base" : "other";
 				if (const auto pick = RE::CrosshairPickData::GetSingleton()) {
 					aimed = pick->GetActiveTarget().get().get() == actor.get();
 				}

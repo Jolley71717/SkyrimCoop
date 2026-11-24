@@ -9,6 +9,7 @@
 #include "RuntimeSupport.h"
 #include "Text.h"
 #include "game/Furniture.h"
+#include "game/FriendMarkers.h"
 #include "game/GameThread.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
@@ -17,6 +18,7 @@
 #include "game/RemotePlayers.h"
 #include "game/Riding.h"
 #include "game/Pairs.h"
+#include "game/Party.h"
 #include "game/Shots.h"
 #include "game/StandInPeace.h"
 #include "game/VirtualPad.h"
@@ -187,6 +189,7 @@ namespace
 		Shots::Install();  // every projectile an actor launches, said and shown (says why if not)
 		Pairs::Install();  // the load order's paired idles, by their events (kill moves said and played)
 		PlayerActions::Install();  // our player's attacks, casts and shouts, for the others' stand-in of us (says why if not)
+		FriendMarkers::Install();  // friends on the compass and the maps, their names over their heads (says why if not)
 		LocalPlayer::NoteDefaultName();
 		NoFirstRunPrompts();
 		RunInBackground();  // before the first tick: the main menu must not stall either
@@ -222,6 +225,7 @@ namespace
 			Furniture::ForgetWorld();
 			Pairs::ForgetWorld();
 			Shots::ForgetWorld();
+			Party::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
 			break;
@@ -237,6 +241,7 @@ namespace
 			Furniture::ForgetWorld();
 			Pairs::ForgetWorld();
 			Shots::ForgetWorld();
+			Party::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
 			CheckSteam();
@@ -284,6 +289,7 @@ namespace
 		Furniture::ForgetWorld();
 		Pairs::ForgetWorld();
 		Shots::ForgetWorld();
+		Party::ForgetWorld();
 		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();
 	}
