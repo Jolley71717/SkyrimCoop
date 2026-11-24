@@ -559,10 +559,10 @@ TEST("talk rules: a heard line is shown once (a repeat within 5 s is skipped) an
 
 TEST("talk rules: a line near us shows over its speaker as the game's own settings allow, as a notice otherwise, and not at all far away")
 {
-	const Where near{ 300.0f, 200.0f };
-	CHECK(HowToShow(near, true, false) == Show::kSubtitle);
-	CHECK(HowToShow(near, false, false) == Show::kNotice);  // General Subtitles off
-	CHECK(HowToShow(near, true, true) == Show::kNotice);    // in our own conversation
+	const Where nearby{ 300.0f, 200.0f };
+	CHECK(HowToShow(nearby, true, false) == Show::kSubtitle);
+	CHECK(HowToShow(nearby, false, false) == Show::kNotice);  // General Subtitles off
+	CHECK(HowToShow(nearby, true, true) == Show::kNotice);    // in our own conversation
 	CHECK(HowToShow(Where{ HEAR_RANGE + 1.0f, 100.0f }, true, false) == Show::kFar);  // the speaker's distance counts
 	CHECK(HowToShow(Where{ std::nullopt, 500.0f }, true, false) == Show::kNotice);    // a speaker our game lacks: by name
 	CHECK(HowToShow(Where{ std::nullopt, HEAR_RANGE * 2 }, true, false) == Show::kFar);

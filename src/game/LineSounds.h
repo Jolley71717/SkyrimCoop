@@ -63,8 +63,8 @@ public:
 
 	// A new line's sound. The same speaker's sound before it is ended (kNext), and while MAX_PLAYING are kept the
 	// oldest is ended (kTooMany): a_end(entry, why) for each, before the new one is kept.
-	template <class End>
-	void Start(Key a_key, Handle a_handle, Clock::time_point a_now, std::optional<double> a_seconds, End&& a_end)
+	template <class EndFn>
+	void Start(Key a_key, Handle a_handle, Clock::time_point a_now, std::optional<double> a_seconds, EndFn&& a_end)
 	{
 		std::erase_if(entries, [&](Entry& a_entry) {
 			if (a_entry.key != a_key) {
@@ -82,8 +82,8 @@ public:
 	}
 
 	// Calls a_end(entry, kTooLong) for every sound at its hard end and forgets it. Returns how many.
-	template <class End>
-	std::size_t EndDue(Clock::time_point a_now, End&& a_end)
+	template <class EndFn>
+	std::size_t EndDue(Clock::time_point a_now, EndFn&& a_end)
 	{
 		std::size_t ended = 0;
 		std::erase_if(entries, [&](Entry& a_entry) {
@@ -99,8 +99,8 @@ public:
 
 	// The sound of a_key, if one is kept: a_end(entry, kEnded) when a_cut says so of it (a_cut(entry): its start and its
 	// recording's length), and it is forgotten. False when none is kept, or a_cut let it play out.
-	template <class Cut, class End>
-	bool End(Key a_key, Cut&& a_cut, End&& a_end)
+	template <class Cut, class EndFn>
+	bool End(Key a_key, Cut&& a_cut, EndFn&& a_end)
 	{
 		const auto it = std::ranges::find_if(entries, [&](const Entry& a_entry) { return a_entry.key == a_key; });
 		if (it == entries.end() || !a_cut(*it)) {
@@ -112,8 +112,8 @@ public:
 	}
 
 	// Calls a_end(entry) for every sound kept and forgets them (the session's end).
-	template <class End>
-	void EndAll(End&& a_end)
+	template <class EndFn>
+	void EndAll(EndFn&& a_end)
 	{
 		for (auto& entry : entries) {
 			a_end(entry);

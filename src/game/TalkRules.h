@@ -324,8 +324,8 @@ namespace TalkRules
 	// conversation of their own (the game then shows that conversation's lines alone); a notice otherwise.
 	[[nodiscard]] inline Show HowToShow(const Where& a_where, bool a_generalSubtitles, bool a_inConversation)
 	{
-		const auto near = [](const std::optional<float>& a_d) { return a_d && std::isfinite(*a_d) && *a_d <= HEAR_RANGE; };
-		if (a_where.speaker ? !near(a_where.speaker) : !near(a_where.talker)) {
+		const auto inRange = [](const std::optional<float>& a_d) { return a_d && std::isfinite(*a_d) && *a_d <= HEAR_RANGE; };
+		if (a_where.speaker ? !inRange(a_where.speaker) : !inRange(a_where.talker)) {
 			return Show::kFar;
 		}
 		if (!a_where.speaker || !a_generalSubtitles || a_inConversation) {

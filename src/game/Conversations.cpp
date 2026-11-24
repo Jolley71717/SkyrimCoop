@@ -10,6 +10,11 @@
 #include "game/SubtitleTime.h"
 #include "game/TalkRules.h"
 
+// windows.h names GetObject a macro (GetObjectA); BGSDefaultObjectManager::GetObject is the engine's own.
+#ifdef GetObject
+#	undef GetObject
+#endif
+
 namespace Conversations
 {
 	namespace
@@ -94,7 +99,7 @@ namespace Conversations
 			std::uint64_t missing = 0;    // no recording of that path here
 			std::uint64_t unplayed = 0;   // a recording here the audio manager would not play
 			std::uint64_t silent = 0;     // this game's sound is off
-			std::uint64_t far = 0;
+			std::uint64_t farAway = 0;
 			std::uint64_t noSpeaker = 0;  // an NPC named that this game has, not loaded here
 			std::uint64_t repeats = 0;
 			std::uint64_t tooMany = 0;
@@ -739,7 +744,7 @@ namespace Conversations
 				"offmain={} events={} eventsDropped={}",
 				installed ? 1 : 0, ourId, DialogueOpen() ? 1 : 0, partner ? partner->GetFormID() : 0, claimer.Current(), claimer.Lingering(), claimer.Granted() ? 1 : 0,
 				claimer.Busy() ? 1 : 0, claimer.Holder(), startedByPlayer ? 1 : 0, counts.said, counts.playerLines, counts.ends, counts.talks, lastSaid, counts.heard,
-				counts.subtitled, counts.noticed, counts.dropped, counts.voiced, counts.missing, counts.unplayed, counts.silent, counts.far, counts.noSpeaker,
+				counts.subtitled, counts.noticed, counts.dropped, counts.voiced, counts.missing, counts.unplayed, counts.silent, counts.farAway, counts.noSpeaker,
 				counts.repeats, counts.tooMany, counts.busyRefused, counts.busyClosed, sounds.Kept(), counts.cutLong, counts.cutCrowded, counts.cutEnded, up.size(),
 				subtitlesOff ? 1 : 0, lastHeard, lastFrom, AudioOn() ? 1 : 0, counts.offMain, eventsSeen.load(), dropped);
 		}
@@ -820,7 +825,7 @@ namespace Conversations
 		}
 		const auto show = TalkRules::HowToShow(where, GeneralSubtitles() && !subtitlesOff, DialogueOpen());
 		if (show == TalkRules::Show::kFar) {
-			++counts.far;
+			++counts.farAway;
 			return;
 		}
 		switch (hearing.Judge(key, a_line.text, now)) {
