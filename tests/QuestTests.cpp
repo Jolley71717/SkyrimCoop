@@ -1445,8 +1445,8 @@ TEST("quest maker: the past on an ended quest never started here waits aside, an
 	CHECK(!game.completed);
 	CHECK(maker.Unpark(0x20, now) == 0);  // nothing aside for it
 
-	// A newer word on a thing put aside takes its place (an objective's state goes forward only).
-	maker.Add(Objective(0x10, 1, 1, 20), 0, now);
+	// A newer word on a thing put aside takes its place (an objective read shown at a later stage).
+	maker.Add(Objective(0x10, 1, 3, 30), 0, now);
 	steps = RunMaker(maker, game, now);
 	REQUIRE(steps.size() == 1);
 	CHECK(steps[0].first == V::kParked);
@@ -1462,7 +1462,7 @@ TEST("quest maker: the past on an ended quest never started here waits aside, an
 	CHECK(maker.Unparked() == 4);
 	CHECK(maker.Unpark(0x10, now) == 0);
 	steps = RunMaker(maker, game, now);
-	want = { { V::kMake, Stage(0x10, 10) }, { V::kMake, Stage(0x10, 20) }, { V::kMake, Stage(0x10, 30) }, { V::kMake, Objective(0x10, 1, 3, 20) },
+	want = { { V::kMake, Stage(0x10, 10) }, { V::kMake, Stage(0x10, 20) }, { V::kMake, Stage(0x10, 30) }, { V::kMake, Objective(0x10, 1, 3, 30) },
 		{ V::kMake, Completed(0x10) } };
 	CHECK(steps == want);
 	CHECK(game.completed);
