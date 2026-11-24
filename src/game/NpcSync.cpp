@@ -1060,6 +1060,14 @@ namespace NpcSync
 			return it != owners.end() && it->second == ourId;
 		}
 
+		// Our copy of a_key follows its runner's crashing body (NpcRules::HoldsDeath): the session's death waits for the crash.
+		bool CrashHeld(const Key& a_key, Clock::time_point a_now)
+		{
+			std::scoped_lock l{ copyLock };
+			const auto       it = copies.find(a_key);
+			return it != copies.end() && NpcRules::HoldsDeath(it->second.crashAt, it->second.flyingAt, a_now);
+		}
+
 		void SendClaims(const SendFn& a_send, Clock::time_point a_now, const std::optional<Protocol::PlayerState>& a_here, const std::vector<Protocol::PlayerState>& a_friends)
 		{
 			const auto           player = RE::PlayerCharacter::GetSingleton();
@@ -1087,8 +1095,10 @@ namespace NpcSync
 				// The session has it dead (a death said while it was not loaded here, or before we joined) and it lives
 				// here: killed, not asked for (CopyHealth::KillsOnLoad: the host's game keeps its own save's word).
 				if (!actor->IsDead() && sessionDead.contains(key) && CopyHealth::KillsOnLoad(ourId == hostId, ourDeaths.contains(key))) {
-					// (one in a kill move is left to the move, and killed after it if it lives)
-					if (!actor->IsInKillMove() && killedOnLoad.insert(npc.id).second) {
+					// (one in a kill move is left to the move, and a copy whose runner's body crashes is left to its crash, and
+					// either is killed after if it lives; meanwhile it stays here, never asked for, so nobody takes over a falling
+					// body)
+					if (NpcRules::KillsSessionDeadNow(actor->IsInKillMove(), CrashHeld(key, a_now)) && killedOnLoad.insert(npc.id).second) {
 						++counts.killsOnLoad;
 						const auto& death = sessionDead[key];
 						const auto  by = RemotePlayers::StandInOf(death.killer);

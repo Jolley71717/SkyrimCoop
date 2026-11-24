@@ -343,6 +343,15 @@ namespace NpcRules
 		return fresh(a_lastCrashState) || fresh(a_lastFlyingState);
 	}
 
+	// Whether this game kills now an NPC alive here that the session has dead (CopyHealth::KillsOnLoad): not while it is in
+	// a kill move (the move kills it), nor while it is a copy whose runner's body crashes (HoldsDeath: it follows that body
+	// and is killed where it came to rest). Either is killed afterwards if it still lives; meanwhile it stays the
+	// session's dead and is never asked for, so nobody takes a falling body over mid-crash.
+	[[nodiscard]] constexpr bool KillsSessionDeadNow(bool a_inKillMove, bool a_crashing)
+	{
+		return !a_inKillMove && !a_crashing;
+	}
+
 	[[nodiscard]] constexpr std::string_view ModeName(Mode a_mode)
 	{
 		switch (a_mode) {
