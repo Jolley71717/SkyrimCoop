@@ -212,11 +212,11 @@ TEST("reward outbox: the same item for the same quest within SEND_AFTER is one r
 	CHECK(outbox.Due(T0 + 1s).empty());
 	auto due = outbox.Due(T0 + 1500ms);
 	REQUIRE(due.size() == 2);
-	CHECK(due[0] == Reward{ 0x40, 0xF, 150 });
-	CHECK(due[1] == Reward{ 0x40, 0x1234, 1 });
+	CHECK((due[0] == Reward{ 0x40, 0xF, 150 }));
+	CHECK((due[1] == Reward{ 0x40, 0x1234, 1 }));
 	due = outbox.Due(T0 + 1600ms);
 	REQUIRE(due.size() == 1);
-	CHECK(due[0] == Reward{ 0x41, 0xF, 7 });
+	CHECK((due[0] == Reward{ 0x41, 0xF, 7 }));
 	CHECK(outbox.Size() == 0);
 
 	CHECK(outbox.Add({ 0x40, 0xF, MAX_COUNT }, T0));
