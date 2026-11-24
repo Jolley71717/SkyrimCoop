@@ -90,7 +90,7 @@ namespace
 TEST("npc combat protocol: hits, answers, healths and deaths read back as they were written")
 {
 	const Protocol::NpcHits hits{ .hitter = 2,
-		.hits = { { GUARD, 1, 0.25f, Protocol::kHitPower | Protocol::kHitSneak }, { ATRONACH_OF_1, 2, 1.0f, Protocol::kHitKilling | Protocol::kHitKillMove } } };
+		.hits = { { GUARD, 1, 0.25f, Protocol::kHitPower | Protocol::kHitSneak }, { ATRONACH_OF_1, 2, 1.0f, Protocol::kHitKilling | Protocol::kHitKillMove }, { WOLF, 3, 0.5f, Protocol::kHitScript } } };
 	CHECK(Protocol::DecodeNpcHits(Protocol::Encode(hits)) == hits);
 	CHECK(Protocol::PeekType(Protocol::Encode(hits)) == MT::kNpcHits);
 
@@ -179,7 +179,8 @@ TEST("npc combat protocol: the longest of each fits, and one past a limit, cut s
 	CHECK(!hitOf({ GUARD, 1, 1.5f, 0 }));
 	CHECK(!hitOf({ GUARD, 1, -0.1f, 0 }));
 	CHECK(!hitOf({ GUARD, 1, std::nanf(""), 0 }));
-	CHECK(!hitOf({ GUARD, 1, 0.5f, 0x40 }));
+	CHECK(!hitOf({ GUARD, 1, 0.5f, Protocol::kHitEssential }));  // a KillEssential is only ever a script's kill
+	CHECK(hitOf({ GUARD, 1, 0.5f, Protocol::kHitScript | Protocol::kHitEssential }));
 
 	// An answer of no hitter, no hit, an unknown verdict or no share.
 	const auto answerOf = [](Protocol::NpcHitAnswer a_answer) {
@@ -631,6 +632,167 @@ TEST("copy health: a copy our player killed sends its killing blow once, as all 
 	CHECK(move.hit.flags == (Protocol::kHitKilling | Protocol::kHitKillMove));
 }
 
+TEST("copy health: a copy dies here only on its runner's word, or in our player's kill move with it")
+{
+	CHECK(CopyHealth::DiesHere(true, false));
+	CHECK(CopyHealth::DiesHere(false, true));
+	CHECK(!CopyHealth::DiesHere(false, false));
+}
+
+TEST("copy health: our player's blow that would have killed a copy is held: a killing blow goes, and it dies on its runner's word")
+{
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(0.4f);
+	r.Look({ .share = 0.4f, .floor = floor });
+	// Our blow took it to nothing; it was held at one point, alive.
+	const auto blow = r.Hit(Protocol::kHitPower);
+	const auto kill = r.Look({ .share = floor, .floor = floor, .heldByUs = true }, blow);
+	CHECK(kill.what == Do::kSend);
+	CHECK(Near(kill.hit.share, 0.4f));
+	CHECK(kill.hit.flags == (Protocol::kHitPower | Protocol::kHitKilling));
+	CHECK(r.counts.heldKills == 1u);
+	// Held at its floor while the blow is on its way: no second blow (another held one of ours, a frame later), no set back.
+	r.t += 16ms;
+	CHECK(r.Look({ .share = floor, .floor = floor, .heldByUs = true }, blow).what == Do::kNothing);
+	r.t += CopyHealth::JUDGE_AFTER;
+	CHECK(r.Look({ .share = floor, .floor = floor }).what == Do::kNothing);
+	CHECK(r.counts.sent == 1u);
+	// Applied: its runner's NPC died. The death word kills it here, never before.
+	r.copy.Answer(kill.hit.seq, Verdict::kApplied, 0.0f, r.counts);
+	r.copy.Died();
+	CHECK(r.Look({ .share = floor, .floor = floor }).what == Do::kKill);
+	CHECK(r.counts.kills == 1u);
+	CHECK(r.counts.revived == 0u);
+}
+
+TEST("copy health: a held killing blow refused is given back, and the next held blow of ours is sent again; another's held blow is set back")
+{
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(0.5f);
+	r.Look({ .share = 0.5f, .floor = floor });
+	const auto kill = r.Look({ .share = floor, .floor = floor, .heldByUs = true }, r.Hit());
+	CHECK(kill.what == Do::kSend);
+	r.copy.Answer(kill.hit.seq, Verdict::kNotHere, 0.0f, r.counts);
+	const auto back = r.Look({ .share = floor, .floor = floor });
+	CHECK(back.what == Do::kSet);
+	CHECK(Near(back.share, 0.5f));
+	r.t += 2s;
+	const auto again = r.Look({ .share = floor, .floor = floor, .heldByUs = true }, r.Hit());
+	CHECK(again.what == Do::kSend);
+	CHECK((again.hit.flags & Protocol::kHitKilling) != 0);
+	CHECK(r.counts.heldKills == 2u);
+	// Never answered: given back after LOST_AFTER.
+	r.t += CopyHealth::LOST_AFTER;
+	CHECK(r.Look({ .share = floor, .floor = floor }).what == Do::kSet);
+
+	// A guard's blow (an NPC this game runs) held it at one point: not ours, so set back once it has stood; nothing sent.
+	Run g;
+	g.Look({ .share = 1.0f, .floor = floor });
+	g.copy.Word(0.7f);
+	g.Look({ .share = 0.7f, .floor = floor });
+	CHECK(g.Look({ .share = floor, .floor = floor }).what == Do::kNothing);
+	g.t += CopyHealth::JUDGE_AFTER;
+	const auto setBack = g.Look({ .share = floor, .floor = floor });
+	CHECK(setBack.what == Do::kSet);
+	CHECK(Near(setBack.share, 0.7f));
+	CHECK(g.counts.sent == 0u);
+}
+
+TEST("copy health: a script's held kill of a copy goes to its runner as a death, essential or not, our player its killer only if named")
+{
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(0.8f);
+	r.Look({ .share = 0.8f, .floor = floor });
+	// A quest's Kill() on it here: held, alive at what it had.
+	const auto kill = r.Look({ .share = 0.8f, .floor = floor, .heldScript = true });
+	CHECK(kill.what == Do::kSend);
+	CHECK(Near(kill.hit.share, 0.8f));
+	CHECK(kill.hit.flags == Protocol::kHitScript);  // no killer named: nobody's kill
+	CHECK(r.counts.scriptKills == 1u);
+	CHECK(r.counts.heldKills == 0u);
+	// On its way: not sent again.
+	r.t += 16ms;
+	CHECK(r.Look({ .share = 0.8f, .floor = floor, .heldScript = true }).what == Do::kNothing);
+	// Applied: the runner's death kills it here.
+	r.copy.Answer(kill.hit.seq, Verdict::kApplied, 0.0f, r.counts);
+	r.copy.Died();
+	CHECK(r.Look({ .share = 0.8f, .floor = floor }).what == Do::kKill);
+
+	// Its runner's NPC is down at none (an essential one): a KillEssential still goes, at least its floor, and kills it.
+	Run e;
+	e.Look({ .share = 1.0f, .floor = floor });
+	e.copy.Word(0.0f);
+	e.Look({ .share = floor, .floor = floor });
+	const auto down = e.Look({ .share = floor, .floor = floor, .heldByUs = true, .heldScript = true });
+	CHECK(down.what == Do::kSend);
+	CHECK(Near(down.hit.share, floor));
+	CHECK(down.hit.flags == (Protocol::kHitScript | Protocol::kHitKilling));  // Kill(player): our player its killer
+}
+
+TEST("copy health: a held kill no blow explains is owed until the NPC dies: sent again, waits for the word, put on here if this game runs it")
+{
+	using Held = CopyHealth::HeldKills;
+	const Steady::time_point t0{ 100s };
+	Held held;
+	// Held before any word of its runner: waits for it.
+	held.Script(0x1234, false, t0);
+	CHECK(!held.Look(0x1234, false, false, t0).script);
+	CHECK(held.Owes(0x1234));
+	const auto first = held.Look(0x1234, true, false, t0);
+	CHECK(first.script);
+	CHECK(!first.blow);
+	CHECK(!first.byUs);
+	// Due again only SCRIPT_RESEND later (a runner that could not apply it: not loaded there, handed on).
+	CHECK(!held.Look(0x1234, true, false, t0 + 100ms).script);
+	CHECK(held.Look(0x1234, true, false, t0 + Held::SCRIPT_RESEND).script);
+	// Never forgotten while it lives, however long.
+	held.Forget(t0 + 1h);
+	CHECK(held.Owes(0x1234));
+	// This game comes to run it: put on here, nobody its killer; then owed no more.
+	CHECK(held.Run(0x1234) == std::optional<bool>{ false });
+	CHECK(!held.Owes(0x1234));
+	CHECK(!held.Run(0x1234));
+	// A Kill(player) on another: our player its killer; it died: owed no more.
+	held.Script(0x5678, true, t0);
+	CHECK(held.Look(0x5678, true, false, t0).byUs);
+	held.Dead(0x5678);
+	CHECK(!held.Owes(0x5678));
+	CHECK(held.Size() == 0u);
+}
+
+TEST("copy health: our player's held blow is owed only a moment: one never looked at in time is never sent later")
+{
+	using Held = CopyHealth::HeldKills;
+	const Steady::time_point t0{ 100s };
+	Held held;
+	held.Blow(0x1234, t0);
+	const auto due = held.Look(0x1234, true, false, t0 + 16ms);
+	CHECK(due.blow);
+	CHECK(due.byUs);
+	CHECK(!due.script);
+	CHECK(!held.Owes(0x1234));  // taken
+	// A copy that unloaded (or that this game came to run) before a look: the blow lapses.
+	held.Blow(0x2345, t0);
+	held.Forget(t0 + Held::OUR_BLOW_FRESH);
+	CHECK(!held.Owes(0x2345));
+	held.Blow(0x3456, t0);
+	CHECK(!held.Look(0x3456, true, false, t0 + Held::OUR_BLOW_FRESH).blow);
+	// Held before the word: waits for it, a moment only.
+	held.Blow(0x4567, t0);
+	CHECK(!held.Look(0x4567, false, false, t0 + 100ms).blow);
+	CHECK(held.Look(0x4567, true, false, t0 + 200ms).blow);
+	// A blow is never put on here when this game comes to run it (only a script's kill is).
+	held.Blow(0x5678, t0);
+	CHECK(!held.Run(0x5678));
+	CHECK(held.Size() == 0u);
+}
+
 TEST("copy health: our player's kill counts however late its hit event; a kill by anyone else is not ours, and is raised")
 {
 	// Our player's arrow killed it, its hit event long gone (or never seen): its killer says it is ours.
@@ -993,4 +1155,103 @@ TEST("npc combat server: a death from the game that let go of its NPC a moment a
 	f.fake->Deliver(1, Protocol::Encode(Protocol::NpcDeaths{ .deaths = { { WOLF, 1, 0 } } }));
 	REQUIRE(f.fake->Settle());
 	CHECK(f.fake->Take(2).empty());
+}
+
+TEST("copy health: a kill no blow explains on an essential NPC: owed nothing here; the runner kills it only for a KillEssential, else refuses")
+{
+	// Essential here: the engine's refusal (the console's kill, a quest's Kill() on an essential quest giver): nothing owed.
+	CHECK(!CopyHealth::OwesScriptKill(true));
+	CHECK(CopyHealth::OwesScriptKill(false));
+	// The runner: not essential there, it dies (Kill or KillEssential alike); essential there, only of a KillEssential.
+	using SK = CopyHealth::ScriptKill;
+	CHECK(CopyHealth::OnScriptKill(false, false) == SK::kKill);
+	CHECK(CopyHealth::OnScriptKill(false, true) == SK::kKill);
+	CHECK(CopyHealth::OnScriptKill(true, true) == SK::kKillEssential);
+	CHECK(CopyHealth::OnScriptKill(true, false) == SK::kRefuse);
+}
+
+TEST("copy health: a KillEssential is a kill of a copy seen essential a moment before, and goes with kHitEssential")
+{
+	using Held = CopyHealth::HeldKills;
+	const Steady::time_point t0{ 100s };
+	Held held;
+	// Seen essential, then the script takes the flag off (a frame later the copy is no longer essential) and kills it.
+	CHECK(!held.Look(0x1234, true, true, t0).script);
+	CHECK(!held.Look(0x1234, true, false, t0 + 16ms).script);
+	REQUIRE(held.Script(0x1234, false, t0 + 50ms));
+	const auto due = held.Look(0x1234, true, false, t0 + 66ms);
+	CHECK(due.script);
+	CHECK(due.essential);
+	// Never essential here: a plain kill.
+	REQUIRE(held.Script(0x2345, false, t0));
+	CHECK(!held.Look(0x2345, true, false, t0).essential);
+	// Essential long ago (forgotten): a plain kill.
+	CHECK(!held.Look(0x3456, true, true, t0).script);
+	held.Forget(t0 + Held::ESSENTIAL_FRESH + 1s);
+	REQUIRE(held.Script(0x3456, false, t0 + Held::ESSENTIAL_FRESH + 1s));
+	CHECK(!held.Look(0x3456, true, false, t0 + Held::ESSENTIAL_FRESH + 1s).essential);
+
+	// The copy's look sends it with kHitEssential (no killer named here).
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(1.0f);
+	r.Look({ .share = 1.0f, .floor = floor });
+	const auto kill = r.Look({ .share = 1.0f, .floor = floor, .heldScript = true, .heldEssential = true });
+	CHECK(kill.what == Do::kSend);
+	CHECK(kill.hit.flags == (Protocol::kHitScript | Protocol::kHitEssential));
+}
+
+TEST("copy health: a script's kill its runner answered is sent no more, but stays owed for a take-over; resends are bounded")
+{
+	using Held = CopyHealth::HeldKills;
+	const Steady::time_point t0{ 100s };
+	// The copy: the answer to its script kill settles it (applied, alive: refused there, essential); a blow's answer does not.
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(1.0f);
+	r.Look({ .share = 1.0f, .floor = floor });
+	const auto kill = r.Look({ .share = 1.0f, .floor = floor, .heldScript = true });
+	REQUIRE(kill.what == Do::kSend);
+	CHECK(r.copy.Answer(kill.hit.seq, Verdict::kApplied, 1.0f, r.counts));
+	CHECK(r.Look({ .share = 1.0f, .floor = floor }).what == Do::kNothing);  // it stands where its runner's NPC stands
+	r.t += 16ms;
+	const auto again = r.Look({ .share = 1.0f, .floor = floor, .heldScript = true });
+	REQUIRE(again.what == Do::kSend);
+	CHECK(!r.copy.Answer(again.hit.seq, Verdict::kNotHere, 0.0f, r.counts));  // not loaded there: not settled, sent again
+	Run b;
+	b.Look({ .share = 1.0f, .floor = floor });
+	b.copy.Word(0.5f);
+	b.Look({ .share = 0.5f, .floor = floor });
+	const auto blow = b.Look({ .share = floor, .floor = floor, .heldByUs = true }, b.Hit());
+	REQUIRE(blow.what == Do::kSend);
+	CHECK(!b.copy.Answer(blow.hit.seq, Verdict::kApplied, 0.0f, b.counts));
+
+	// The book: settled, it is due no more, however long, and is still put on at a take-over.
+	Held held;
+	REQUIRE(held.Script(0x1234, true, t0));
+	CHECK(held.Look(0x1234, true, false, t0).script);
+	held.Answered(0x1234);
+	CHECK(!held.Look(0x1234, true, false, t0 + 1h).script);
+	CHECK(held.Owes(0x1234));
+	CHECK(held.Run(0x1234) == std::optional<bool>{ true });
+	// Never answered (a runner that never has it loaded): sent SCRIPT_SENDS_MOST times, then no more; still owed.
+	REQUIRE(held.Script(0x2345, false, t0));
+	int sends = 0;
+	for (int i = 0; i < 3 * Held::SCRIPT_SENDS_MOST; ++i) {
+		sends += held.Look(0x2345, true, false, t0 + i * Held::SCRIPT_RESEND).script ? 1 : 0;
+	}
+	CHECK(sends == Held::SCRIPT_SENDS_MOST);
+	CHECK(held.Owes(0x2345));
+	// A death of it said anywhere (Deaths, loaded here or not) ends it: raised later, it is never killed for it.
+	held.Dead(0x2345);
+	CHECK(!held.Run(0x2345));
+	// Too many owed: a new one is dropped, and says so.
+	Held full;
+	for (std::uint32_t i = 0; i < Held::MOST; ++i) {
+		REQUIRE(full.Script(0x10000 + i, false, t0));
+	}
+	CHECK(!full.Script(0x90000, false, t0));
+	CHECK(full.Script(0x10000, true, t0));  // one owed already is no more
 }

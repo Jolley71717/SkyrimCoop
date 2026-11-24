@@ -728,6 +728,43 @@ TEST("npc rules: a copy holds its runner's death while crash states come, or its
 	CHECK(HoldsDeath(t0 + 400ms, t0, t0 + 600ms));
 }
 
+TEST("npc rules: a spawn's copy lying dead near our player is kept a while, for its death scripts; far, elsewhere or long dead it goes")
+{
+	using namespace NpcRules;
+	CHECK(KeepsSpawnBody(true, 1000.0f, std::chrono::seconds{ 10 }));
+	CHECK(KeepsSpawnBody(true, MIRROR_WITHIN, SPAWN_BODY_KEEP - std::chrono::seconds{ 1 }));
+	CHECK(!KeepsSpawnBody(false, 1000.0f, std::chrono::seconds{ 10 }));          // alive: mirrored or not, as ever
+	CHECK(!KeepsSpawnBody(true, MIRROR_WITHIN + 1.0f, std::chrono::seconds{ 10 }));  // our player went far
+	CHECK(!KeepsSpawnBody(true, std::nullopt, std::chrono::seconds{ 10 }));       // another space
+	CHECK(!KeepsSpawnBody(true, 1000.0f, SPAWN_BODY_KEEP));
+}
+
+TEST("npc rules: a body is not dressed in its runner's gear, and a copy that stands again is dressed again")
+{
+	using namespace NpcRules;
+	Dressing dressing;
+	bool     geared = false;
+	// Alive: dressed as its runner's NPC is.
+	CHECK(dressing.Allowed(true, geared));
+	CHECK(!dressing.Down());
+	geared = true;
+	CHECK(dressing.Allowed(true, geared));
+	CHECK(geared);
+	// A body (a dragon whose skin this game's death scripts took off): its runner's gear is neither put on nor checked,
+	// for as long as it lies there.
+	CHECK(!dressing.Allowed(false, geared));
+	CHECK(dressing.Down());
+	CHECK(!dressing.Allowed(false, geared));
+	CHECK(geared);  // what it wears is left alone
+	// Raised: dressed again from its runner's gear, whatever it wore as a body, and once only.
+	CHECK(dressing.Allowed(true, geared));
+	CHECK(!geared);
+	CHECK(!dressing.Down());
+	geared = true;
+	CHECK(dressing.Allowed(true, geared));
+	CHECK(geared);
+}
+
 TEST("npc rules: the session's dead is not killed here in a kill move or while its runner's body crashes, and is after")
 {
 	using namespace NpcRules;

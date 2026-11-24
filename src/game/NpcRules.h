@@ -469,7 +469,48 @@ namespace NpcRules
 		std::uint64_t     dropped = 0;
 	};
 
+	// A spawn's copy that lies dead here (a summoned or commanded dragon, shot down) is kept, though its runner sends no
+	// more states for it, while our player is in its space within MIRROR_WITHIN of it, for at most SPAWN_BODY_KEEP. Its own
+	// death scripts run here as a load-order NPC's body's do (a dragon's soul absorbed once our player comes near, its skin
+	// turned to bones; docs/DESIGN.md, "Dragon souls and word walls"), and taking it away would cut them off.
+	inline constexpr auto SPAWN_BODY_KEEP = std::chrono::seconds{ 300 };
+
+	[[nodiscard]] inline bool KeepsSpawnBody(bool a_dead, std::optional<float> a_fromOurPlayer, Clock::duration a_deadFor)
+	{
+		return a_dead && a_fromOurPlayer && *a_fromOurPlayer <= MIRROR_WITHIN && a_deadFor < SPAWN_BODY_KEEP;
+	}
+
 	// ---- its gear ----
+
+	// Whether a copy is dressed in its runner's gear now. A body is not: each game's own death scripts change what a body
+	// wears in that game, at their own time (a dragon's, as its soul is absorbed by the player there: its skin taken off,
+	// its bones put on; docs/DESIGN.md, "Dragon souls and word walls"), and its runner's gear, sent as its runner's own
+	// scripts change it, would put a dragon's skin back on in a game whose player already took its soul (or take it off
+	// in one whose player has not come near yet). A copy that stands again (raised in its runner's game, or a corpse
+	// raised here) is dressed again, whatever it wore as a body.
+	class Dressing
+	{
+	public:
+		// a_up: the copy stands (alive, or raised). True: its runner's gear may be put on and checked now. A copy back up
+		// from a body has its a_geared cleared, so it is dressed again.
+		bool Allowed(bool a_up, bool& a_geared)
+		{
+			if (!a_up) {
+				down = true;
+				return false;
+			}
+			if (down) {
+				down = false;
+				a_geared = false;
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool Down() const { return down; }
+
+	private:
+		bool down = false;
+	};
 
 	// What a copy takes off and puts on to wear and hold what its runner's NPC does. A copy of a load-order NPC is a real
 	// NPC of this game, which goes into its saves: it equips only what it carries already, and nothing is ever added to it

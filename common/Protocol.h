@@ -63,6 +63,9 @@ namespace Protocol
 	//    engine feeds a graph from the actor's movement and a copy has none of, so a copied dragon banks, climbs and
 	//    dives as its runner's does; and whether it is a body that died flying and still crashes (NpcGraph::crash).
 	//    (As with 21: renumbered when it lands; 25 is another change's.)
+	//    With it, under the same number (the dragon souls change is stacked on it and lands with it): a hit's kHitScript (a
+	//    kill of a copy no blow explains, sent to its runner as a death) and kHitEssential (that kill was a KillEssential).
+	//    Should the dragons' change ship without it, these two take a number of their own.
 	inline constexpr std::uint16_t VERSION = 26;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
@@ -578,7 +581,12 @@ namespace Protocol
 		kHitSpell = 1 << 3,     // a spell, a staff, a scroll or an enchantment's effect
 		kHitKilling = 1 << 4,   // it brought the copy to nothing: the NPC dies of it
 		kHitKillMove = 1 << 5,  // a kill move (the copy died in our player's paired animation)
-		kHitAllFlags = kHitPower | kHitSneak | kHitBash | kHitSpell | kHitKilling | kHitKillMove,
+		kHitScript = 1 << 6,    // a kill of the copy no blow explains (a script's Kill or KillEssential, the console's kill):
+		                        // the NPC dies of it where it is not essential, else only with kHitEssential (refused otherwise:
+		                        // Skyrim alone only knocks it down); its killer is the hitter's player with kHitKilling, else none
+		kHitEssential = 1 << 7, // with kHitScript only: a KillEssential (the copy was essential here until the kill): it dies
+		                        // even where it is essential
+		kHitAllFlags = kHitPower | kHitSneak | kHitBash | kHitSpell | kHitKilling | kHitKillMove | kHitScript | kHitEssential,
 	};
 
 	// seq counts the hitter's hits for the session (from 1), so each answer names the one it answers.
@@ -1861,7 +1869,8 @@ namespace Protocol
 			hit.seq = r.U32();
 			hit.share = r.F32();
 			hit.flags = r.U8();
-			if (r.Ok() && (hit.key.id == 0 || hit.seq == 0 || !IsShare(hit.share) || (hit.flags & ~kHitAllFlags) != 0)) {
+			if (r.Ok() && (hit.key.id == 0 || hit.seq == 0 || !IsShare(hit.share) || (hit.flags & ~kHitAllFlags) != 0 ||
+			                (hit.flags & (kHitScript | kHitEssential)) == kHitEssential)) {
 				return std::nullopt;
 			}
 			msg.hits.push_back(hit);
