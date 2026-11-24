@@ -70,12 +70,12 @@ namespace Protocol
 	//    there. Written on top of 15 (conversations) beside 16 (mechanism outcomes, types 63-64) and 17 (loose objects,
 	//    types 65-67), each on another branch: the number is above all three and is renumbered at merge; its message (68)
 	//    clashes with none.
-	// 19: the host's reset is a line no quest word crosses (kQuestResetSeen; docs/DESIGN.md "Quests"): the server comes
+	// 20: the host's reset is a line no quest word crosses (kQuestResetSeen; docs/DESIGN.md "Quests"): the server comes
 	//    back to the host with its reset (kQuestReset with its own id), and the host's game makes no other player's word
 	//    heard before it (the old world's); each other game says when it heard the reset, and the server drops its quest
-	//    reports until then (sent from the old world, in flight). Written on top of 18 (the host's world); renumbered at
-	//    merge.
-	inline constexpr std::uint16_t VERSION = 19;
+	//    reports until then (sent from the old world, in flight). Written on top of 18 (the host's world) beside 19
+	//    (ragdolls, another branch, type 69): the number is above both and is renumbered at merge.
+	inline constexpr std::uint16_t VERSION = 20;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -158,7 +158,8 @@ namespace Protocol
 		kTalkAnswer = 62,  // server -> the asker alone: who talks with that NPC (the asker: it is theirs)
 		// 63 and 64 are left for mechanism outcomes and 65 to 67 for loose objects, written at the same time on other branches.
 		kQuestWorld = 68,  // host -> server, reliable: its world's quests, as kQuests: passed on as the session's word (player 0)
-		kQuestResetSeen = 69,  // client -> server, reliable: our game heard the host's reset: its quest reports are of the new world now
+		// 69 is left for ragdolls, written at the same time on another branch.
+		kQuestResetSeen = 70,  // client -> server, reliable: our game heard the host's reset: its quest reports are of the new world now
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
