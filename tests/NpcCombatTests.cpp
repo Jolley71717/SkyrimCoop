@@ -90,7 +90,7 @@ namespace
 TEST("npc combat protocol: hits, answers, healths and deaths read back as they were written")
 {
 	const Protocol::NpcHits hits{ .hitter = 2,
-		.hits = { { GUARD, 1, 0.25f, Protocol::kHitPower | Protocol::kHitSneak }, { ATRONACH_OF_1, 2, 1.0f, Protocol::kHitKilling | Protocol::kHitKillMove } } };
+		.hits = { { GUARD, 1, 0.25f, Protocol::kHitPower | Protocol::kHitSneak }, { ATRONACH_OF_1, 2, 1.0f, Protocol::kHitKilling | Protocol::kHitKillMove }, { WOLF, 3, 0.5f, Protocol::kHitScript } } };
 	CHECK(Protocol::DecodeNpcHits(Protocol::Encode(hits)) == hits);
 	CHECK(Protocol::PeekType(Protocol::Encode(hits)) == MT::kNpcHits);
 
@@ -699,6 +699,97 @@ TEST("copy health: a held killing blow refused is given back, and the next held 
 	CHECK(setBack.what == Do::kSet);
 	CHECK(Near(setBack.share, 0.7f));
 	CHECK(g.counts.sent == 0u);
+}
+
+TEST("copy health: a script's held kill of a copy goes to its runner as a death, essential or not, our player its killer only if named")
+{
+	Run r;
+	const float floor = 0.01f;
+	r.Look({ .share = 1.0f, .floor = floor });
+	r.copy.Word(0.8f);
+	r.Look({ .share = 0.8f, .floor = floor });
+	// A quest's Kill() on it here: held, alive at what it had.
+	const auto kill = r.Look({ .share = 0.8f, .floor = floor, .heldScript = true });
+	CHECK(kill.what == Do::kSend);
+	CHECK(Near(kill.hit.share, 0.8f));
+	CHECK(kill.hit.flags == Protocol::kHitScript);  // no killer named: nobody's kill
+	CHECK(r.counts.scriptKills == 1u);
+	CHECK(r.counts.heldKills == 0u);
+	// On its way: not sent again.
+	r.t += 16ms;
+	CHECK(r.Look({ .share = 0.8f, .floor = floor, .heldScript = true }).what == Do::kNothing);
+	// Applied: the runner's death kills it here.
+	r.copy.Answer(kill.hit.seq, Verdict::kApplied, 0.0f, r.counts);
+	r.copy.Died();
+	CHECK(r.Look({ .share = 0.8f, .floor = floor }).what == Do::kKill);
+
+	// Its runner's NPC is down at none (an essential one): a KillEssential still goes, at least its floor, and kills it.
+	Run e;
+	e.Look({ .share = 1.0f, .floor = floor });
+	e.copy.Word(0.0f);
+	e.Look({ .share = floor, .floor = floor });
+	const auto down = e.Look({ .share = floor, .floor = floor, .heldByUs = true, .heldScript = true });
+	CHECK(down.what == Do::kSend);
+	CHECK(Near(down.hit.share, floor));
+	CHECK(down.hit.flags == (Protocol::kHitScript | Protocol::kHitKilling));  // Kill(player): our player its killer
+}
+
+TEST("copy health: a held kill no blow explains is owed until the NPC dies: sent again, waits for the word, put on here if this game runs it")
+{
+	using Held = CopyHealth::HeldKills;
+	const Steady::time_point t0{ 100s };
+	Held held;
+	// Held before any word of its runner: waits for it.
+	held.Script(0x1234, false);
+	CHECK(!held.Look(0x1234, false, t0).script);
+	CHECK(held.Owes(0x1234));
+	const auto first = held.Look(0x1234, true, t0);
+	CHECK(first.script);
+	CHECK(!first.blow);
+	CHECK(!first.byUs);
+	// Due again only SCRIPT_RESEND later (a runner that could not apply it: not loaded there, handed on).
+	CHECK(!held.Look(0x1234, true, t0 + 100ms).script);
+	CHECK(held.Look(0x1234, true, t0 + Held::SCRIPT_RESEND).script);
+	// Never forgotten while it lives, however long.
+	held.Forget(t0 + 1h);
+	CHECK(held.Owes(0x1234));
+	// This game comes to run it: put on here, nobody its killer; then owed no more.
+	CHECK(held.Run(0x1234) == std::optional<bool>{ false });
+	CHECK(!held.Owes(0x1234));
+	CHECK(!held.Run(0x1234));
+	// A Kill(player) on another: our player its killer; it died: owed no more.
+	held.Script(0x5678, true);
+	CHECK(held.Look(0x5678, true, t0).byUs);
+	held.Dead(0x5678);
+	CHECK(!held.Owes(0x5678));
+	CHECK(held.Size() == 0u);
+}
+
+TEST("copy health: our player's held blow is owed only a moment: one never looked at in time is never sent later")
+{
+	using Held = CopyHealth::HeldKills;
+	const Steady::time_point t0{ 100s };
+	Held held;
+	held.Blow(0x1234, t0);
+	const auto due = held.Look(0x1234, true, t0 + 16ms);
+	CHECK(due.blow);
+	CHECK(due.byUs);
+	CHECK(!due.script);
+	CHECK(!held.Owes(0x1234));  // taken
+	// A copy that unloaded (or that this game came to run) before a look: the blow lapses.
+	held.Blow(0x2345, t0);
+	held.Forget(t0 + Held::OUR_BLOW_FRESH);
+	CHECK(!held.Owes(0x2345));
+	held.Blow(0x3456, t0);
+	CHECK(!held.Look(0x3456, true, t0 + Held::OUR_BLOW_FRESH).blow);
+	// Held before the word: waits for it, a moment only.
+	held.Blow(0x4567, t0);
+	CHECK(!held.Look(0x4567, false, t0 + 100ms).blow);
+	CHECK(held.Look(0x4567, true, t0 + 200ms).blow);
+	// A blow is never put on here when this game comes to run it (only a script's kill is).
+	held.Blow(0x5678, t0);
+	CHECK(!held.Run(0x5678));
+	CHECK(held.Size() == 0u);
 }
 
 TEST("copy health: our player's kill counts however late its hit event; a kill by anyone else is not ours, and is raised")

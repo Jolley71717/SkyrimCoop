@@ -578,7 +578,9 @@ namespace Protocol
 		kHitSpell = 1 << 3,     // a spell, a staff, a scroll or an enchantment's effect
 		kHitKilling = 1 << 4,   // it brought the copy to nothing: the NPC dies of it
 		kHitKillMove = 1 << 5,  // a kill move (the copy died in our player's paired animation)
-		kHitAllFlags = kHitPower | kHitSneak | kHitBash | kHitSpell | kHitKilling | kHitKillMove,
+		kHitScript = 1 << 6,    // a kill of the copy no blow explains (a script's Kill or KillEssential, the console's kill):
+		                        // the NPC dies of it, essential or not; its killer is the hitter's player with kHitKilling, else none
+		kHitAllFlags = kHitPower | kHitSneak | kHitBash | kHitSpell | kHitKilling | kHitKillMove | kHitScript,
 	};
 
 	// seq counts the hitter's hits for the session (from 1), so each answer names the one it answers.

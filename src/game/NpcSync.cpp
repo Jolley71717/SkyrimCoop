@@ -1072,6 +1072,8 @@ namespace NpcSync
 			return it != owners.end() && it->second == ourId;
 		}
 
+		std::optional<bool> OwedKill(RE::FormID a_id);  // the kill hook's, below
+
 		// Our copy of a_key follows its runner's crashing body (NpcRules::HoldsDeath): the session's death waits for the crash.
 		bool CrashHeld(const Key& a_key, Clock::time_point a_now)
 		{
@@ -1119,6 +1121,16 @@ namespace NpcSync
 						actor->KillImpl(by.get(), 0.0f, true, false);
 					}
 					continue;
+				}
+				// A kill held here while another game ran it, which no blow explains (a script's: a quest here waits on that
+				// death), and its runner never dealt: this game runs it now, so it is put on here.
+				if (ours && !actor->IsDead()) {
+					if (const auto owed = OwedKill(npc.id)) {
+						++owedKillsPut;
+						logs::info("NPCs: {:08X} is ours now, and a script's kill held here while another game ran it is still owed: killed", key.id);
+						OnWord word;
+						actor->KillImpl(*owed ? player : nullptr, 0.0f, true, false);
+					}
 				}
 				// A body is nobody's to run, unless we ran it as it died (its death is ours to say), or it died here while
 				// nobody ran it, after this game saw it alive this session (whoever's blow it was: our player's, an NPC's we
@@ -1656,37 +1668,54 @@ namespace NpcSync
 		// a script's Kill, our player's blow) is held at one point of health instead: its own death scripts would run at
 		// once (a dragon's soul given and its skin turned to bones, a kill counted, a quest stage) for an NPC that lives in
 		// its runner's game, and it would be raised REVIVE_AFTER later. Our player's held blow goes to the runner as a
-		// killing blow (CopyHealth::Seen::heldByUs); the copy dies when its runner says its NPC died (killed OnWord). Our
-		// player's kill move with it is let through: the paired move kills its victim (its killing blow goes as ever).
+		// killing blow (CopyHealth::Seen::heldByUs); the copy dies when its runner says its NPC died (killed OnWord). A kill
+		// no blow explains (its health not brought to nothing: a script's Kill or KillEssential, a scene's execution, the
+		// console's kill) is owed until the NPC dies (CopyHealth::HeldKills): sent to its runner as a death, and put on here
+		// if this game comes to run it. Our player's kill move with it is let through: the paired move kills its victim (its
+		// killing blow goes as ever).
 		using KillFn = void (*)(RE::Actor*, RE::Actor*, float, bool, bool);
 		constexpr std::size_t       KILL_INDEX = 0x10E;  // Actor::KillImpl
 		KillFn                      originalKill = nullptr;
 		std::atomic<std::uint64_t>  deathsHeld{ 0 };        // kills of copies held here
 		std::atomic<std::uint64_t>  deathsHeldOurs{ 0 };    // of them, our player's blow
 		std::atomic<std::uint64_t>  deathsLetMoves{ 0 };    // our player's kill moves on copies, let through
+		std::atomic<std::uint64_t>  deathsHeldScript{ 0 };  // of them, kills no blow explains (a script's, the console's)
+		std::atomic<std::uint64_t>  owedKillsPut{ 0 };      // of those, put on here when this game came to run the NPC
 		std::mutex                  heldLock;
-		std::unordered_set<RE::FormID> heldByUs;  // under heldLock: copies our player's held blow was on, until the next look
+		CopyHealth::HeldKills       held;  // under heldLock: what is owed of the kills held here
 
 		void KillHook(RE::Actor* a_this, RE::Actor* a_attacker, float a_damage, bool a_sendEvent, bool a_ragdollInstant)
 		{
 			if (a_this && !killingOnWord && othersCopyIds.Contains(a_this->GetFormID()) && !a_this->IsDead()) {
 				const auto player = RE::PlayerCharacter::GetSingleton();
 				if (!CopyHealth::DiesHere(false, InKillMoveWith(player, a_this))) {
+					// A blow brings its health to nothing before the kill; a script's (or the console's) kill leaves it as it
+					// was. One in a kill move (a friend's stand-in's) is the move's, whose killing blow its runner gets.
+					bool noBlow = false;
 					if (const auto values = a_this->AsActorValueOwner()) {
 						const float health = values->GetActorValue(RE::ActorValue::kHealth);
+						noBlow = std::isfinite(health) && health > 0.0f && !a_this->IsInKillMove();
 						if (std::isfinite(health) && health < 1.0f) {
 							values->RestoreActorValue(RE::ActorValue::kHealth, 1.0f - health);
 						}
 					}
 					const bool ours = player && a_attacker == player;
-					if (ours) {
+					{
 						std::scoped_lock l{ heldLock };
-						heldByUs.insert(a_this->GetFormID());
-						++deathsHeldOurs;
+						if (noBlow) {
+							held.Script(a_this->GetFormID(), ours);
+							++deathsHeldScript;
+						} else if (ours) {
+							held.Blow(a_this->GetFormID(), Clock::now());
+							++deathsHeldOurs;
+						}
 					}
-					if (deathsHeld.fetch_add(1) == 0) {
+					const auto n = deathsHeld.fetch_add(1);
+					if (n < 20 || noBlow) {
 						logs::info("NPCs: copy {:08X} would have died here ({}): held at one point until its runner says it died", a_this->GetFormID(),
-							ours ? "our player's blow, sent as a killing blow" : a_attacker ? "another's blow, its runner's to deal" : "no attacker");
+							noBlow ? "a kill no blow explains, a script's or the console's: sent to its runner as a death" :
+							ours   ? "our player's blow, sent as a killing blow" :
+							a_attacker ? "another's blow, its runner's to deal" : "no attacker");
 					}
 					return;
 				}
@@ -1695,11 +1724,24 @@ namespace NpcSync
 			originalKill(a_this, a_attacker, a_damage, a_sendEvent, a_ragdollInstant);
 		}
 
-		// Whether our player's blow on a copy was held since the last look (and from now, not).
-		bool TakeHeldByUs(RE::FormID a_id)
+		// What is owed of the kills held of a living copy, at a look with (a_canSend) or without its runner's word.
+		CopyHealth::HeldKills::Due LookHeld(RE::FormID a_id, bool a_canSend, Clock::time_point a_now)
 		{
 			std::scoped_lock l{ heldLock };
-			return heldByUs.erase(a_id) != 0;
+			return held.Look(a_id, a_canSend, a_now);
+		}
+
+		void HeldDead(RE::FormID a_id)
+		{
+			std::scoped_lock l{ heldLock };
+			held.Dead(a_id);
+		}
+
+		// This game runs the NPC now: a kill held here no blow explained, still owed (true: our player its killer).
+		std::optional<bool> OwedKill(RE::FormID a_id)
+		{
+			std::scoped_lock l{ heldLock };
+			return held.Run(a_id);
 		}
 
 		// Who killed an NPC we ran: the player its killer shows (our player, or a friend's stand-in), else the friend
@@ -1839,6 +1881,13 @@ namespace NpcSync
 				auto&      copy = health[one.key];
 				const bool dead = actor->IsDead();
 				const auto killer = dead ? actor->GetKiller() : nullptr;
+				// What is owed of a kill held here: sent once its runner's word is here, nothing once it is dead.
+				CopyHealth::HeldKills::Due owed;
+				if (dead || copy.RunnerDead()) {
+					HeldDead(one.id);
+				} else {
+					owed = LookHeld(one.id, copy.RunnersWord().has_value(), a_now);
+				}
 				// What our player's lasting effects on it take, and whether our player killed it: only those of ours count.
 				const CopyHealth::Seen seen{ .share = CopyHealth::ShareOf(HealthOf(actor.get()), max),
 					.dead = dead,
@@ -1847,7 +1896,8 @@ namespace NpcSync
 					.floor = 1.0f / max,
 					.ourDrain = dead ? 0.0f : OurDrainOn(actor.get(), max, player),
 					.killedByUs = killer && player && killer == player,
-					.heldByUs = TakeHeldByUs(one.id) };
+					.heldByUs = owed.byUs,
+					.heldScript = owed.script };
 				auto ourHit = OurHitOn(one.id);
 				if (InKillMoveWith(player, actor.get())) {
 					// Our player's kill move on this copy (the paired move has no hit event); a follower's kill move on it,
@@ -1889,6 +1939,8 @@ namespace NpcSync
 				}
 			}
 			flush();
+			std::scoped_lock l{ heldLock };
+			held.Forget(a_now);
 		}
 
 		Copy& CopyOf(const Key& a_key, std::uint32_t a_runner)  // under copyLock
@@ -1987,7 +2039,7 @@ namespace NpcSync
 		}
 		{
 			std::scoped_lock l{ heldLock };
-			heldByUs.clear();
+			held.Clear();
 		}
 		madeEnding.clear();
 		ResetLetGo();
@@ -2181,14 +2233,17 @@ namespace NpcSync
 			const auto               by = ActorOfPlayer(a_msg.hitter, hold);
 			const auto               max = actor->GetActorValueMax(RE::ActorValue::kHealth);
 			const auto               damage = CopyHealth::DamageOf(hit.share, max);
-			const bool               killing = (hit.flags & Protocol::kHitKilling) != 0 || HealthOf(actor.get()) - damage <= 0.0f;
+			// A kill no blow explains in the hitter's game (a script's, the console's): it dies, essential or not (a script's
+			// KillEssential), by the hitter's player only if the script named them.
+			const bool               script = (hit.flags & Protocol::kHitScript) != 0;
+			const bool               killing = script || (hit.flags & Protocol::kHitKilling) != 0 || HealthOf(actor.get()) - damage <= 0.0f;
 			run.lastHitter = a_msg.hitter;
 			run.lastHitAt = now;
 			if ((hit.flags & Protocol::kHitKillMove) != 0) {
 				run.killMoveAt = now;
 			}
-			if (killing && !actor->IsEssential()) {
-				actor->KillImpl(by, damage, true, false);  // killed first, so the friend is its killer
+			if (killing && (script || !actor->IsEssential())) {
+				actor->KillImpl(script && (hit.flags & Protocol::kHitKilling) == 0 ? nullptr : by, damage, true, false);  // killed first, so the friend is its killer
 			}
 			if (const auto values = actor->AsActorValueOwner(); values && damage > 0.0f) {
 				values->DamageActorValue(RE::ActorValue::kHealth, damage);  // an essential one goes down
@@ -2449,14 +2504,15 @@ namespace NpcSync
 				"actionsSent={} actionsIn={} played={} refusedEvents={} walkRefused={} eventsLost={} gearSent={} gearIn={} gearMissing={} gearSkipped={} gearTakenOff={} spawnsPlaced={} "
 				"spawnsTaken={} unshared={} lookDiffers={} fallbacks={}/{}/{} hooked={} hitsSent={} hitsApplied={} hitsRefused={} hitsLost={} givenBack={} takenBack={} "
 				"hitsIn={} hitsInApplied={} healthsSent={} healthsIn={} deathsSent={} deathsIn={} copyKills={} killsOnLoad={} saveKills={} revived={} healthSets={} dead={} "
-				"pairActionsSent={} heldActionsDropped={} crashes={} crashStatesIn={} deathsHeld={} deathsHeldOurs={} heldKills={} killMovesLet={}",
+				"pairActionsSent={} heldActionsDropped={} crashes={} crashStatesIn={} deathsHeld={} deathsHeldOurs={} heldKills={} killMovesLet={} deathsHeldScript={} "
+				"scriptKills={} owedKillsPut={}",
 				active ? 1 : 0, loaded.size(), run, owners.size(), copies.size(), shown, mirrored, spawnCopies, kindList, counts.claims, counts.granted, counts.refused, counts.released,
 				counts.hands, counts.letGo, counts.graphsReset, counts.statesSent, counts.statesIn, counts.actionsSent, counts.actionsIn, played, refused, walkRefused, eventsLost.load(), counts.gearSent, counts.gearIn,
 				counts.gearMissing, counts.gearSkipped, counts.gearTakenOff, counts.spawnsPlaced, counts.spawnsTaken, counts.unshared, counts.lookDiffers, counts.fallbackSilent, counts.fallbackElsewhere,
 				counts.fallbackFar, originalNotify ? 1 : 0, healthCounts.sent, healthCounts.applied, healthCounts.refused, healthCounts.lost, healthCounts.givenBack,
 				healthCounts.takenBack, counts.hitsIn, counts.hitsApplied, counts.healthsSent, counts.healthsIn, counts.deathsSent, counts.deathsIn, healthCounts.kills, counts.killsOnLoad,
 				healthCounts.saveKills, healthCounts.revived, counts.healthSets, sessionDead.size(), pairActionsSent, heldActionsDropped.load(), counts.crashes, counts.crashStatesIn,
-				deathsHeld.load(), deathsHeldOurs.load(), healthCounts.heldKills, deathsLetMoves.load());
+				deathsHeld.load(), deathsHeldOurs.load(), healthCounts.heldKills, deathsLetMoves.load(), deathsHeldScript.load(), healthCounts.scriptKills, owedKillsPut.load());
 		}
 		// One line per NPC: `npcs list`, or `npcs <form id>` for one. Its local form id, who runs it, its kind, where its
 		// actor is here (at=) and, for a copy, where its runner's state puts it (target=) and how far apart they are.

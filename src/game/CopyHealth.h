@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 // An NPC's health and death in every game (docs/DESIGN.md, "NPC health and deaths"), the parts that need no game: what
@@ -62,7 +63,8 @@ namespace CopyHealth
 		float floor = 0;
 		float ourDrain = 0;
 		bool  killedByUs = false;
-		bool  heldByUs = false;  // our player's blow would have killed it here since the last look, and it was held (DiesHere)
+		bool  heldByUs = false;    // our player's blow would have killed it here since the last look, and it was held (DiesHere)
+		bool  heldScript = false;  // a kill of it here that no blow explains (a script's, the console's) is owed (HeldKills)
 	};
 
 	// Whether a copy of an NPC another game runs may die here: on its runner's word (or the session's: it is dead in the
@@ -108,6 +110,7 @@ namespace CopyHealth
 		std::uint64_t revived = 0;    // copies raised for their runner's NPC living
 		std::uint64_t saveKills = 0;  // bodies of the host's save its runner had alive: killing blows sent
 		std::uint64_t heldKills = 0;  // our player's blows that would have killed a copy here, held: killing blows sent
+		std::uint64_t scriptKills = 0;  // kills here no blow explains (a script's, the console's), held: sent as deaths
 		bool operator==(const Counts&) const = default;
 	};
 
@@ -264,17 +267,20 @@ namespace CopyHealth
 			}
 			// Our player's blow would have killed it, and it was held at one point: a killing blow of all it stood at goes to
 			// its runner, once while it is on its way; the copy stays at its floor until the answer (applied: the runner's death
-			// kills it here; refused or lost: given back).
-			if (a_seen.heldByUs && !heldKill) {
+			// kills it here; refused or lost: given back). A kill here no blow explains (a script's Kill or KillEssential, the
+			// console's kill; HeldKills) goes the same way, as a death (kHitScript: it dies there, essential or not, even with no
+			// health left), our player its killer only if the script named them.
+			if ((a_seen.heldByUs || a_seen.heldScript) && !heldKill) {
 				const auto left = *Expected();
-				if (left > EPSILON) {
+				if (left > EPSILON || a_seen.heldScript) {
 					if (ours) {
 						bookedHit = ours->at;  // its drop is this blow's: not booked again
 					}
-					const auto flags = ours ? ours->flags : std::uint8_t{ 0 };
-					auto       step = book(left, static_cast<std::uint8_t>(flags | Protocol::kHitKilling));
+					const auto flags = a_seen.heldScript ? static_cast<std::uint8_t>(Protocol::kHitScript | (a_seen.heldByUs ? Protocol::kHitKilling : 0)) :
+					                                       static_cast<std::uint8_t>((ours ? ours->flags : 0) | Protocol::kHitKilling);
+					auto step = book(a_seen.heldScript ? (std::max)(left, a_seen.floor) : left, flags);
 					heldKill = step.hit.seq;
-					++a_counts.heldKills;
+					++(a_seen.heldScript ? a_counts.scriptKills : a_counts.heldKills);
 					return step;
 				}
 			}
@@ -410,4 +416,120 @@ namespace CopyHealth
 	{
 		return !(a_weAreHost && a_weReportedIt);
 	}
+
+	// Kills of copies held here (DiesHere) and still owed, by the copy's form id (the kill hook adds them on any thread:
+	// the caller locks).
+	// - Our player's blow: sent as a killing blow at the copy's next look with its runner's word (Seen::heldByUs). Owed for
+	//   OUR_BLOW_FRESH only, so a copy that unloads, or that this game comes to run, before such a look never sends a blow
+	//   from long ago.
+	// - A kill no blow explains (a script's Kill or KillEssential, a scene's execution, the console's kill: its health was
+	//   not brought to nothing; Seen::heldScript). Its runner's game runs only its own quests and would never deal it, so
+	//   it is owed until the NPC dies: sent to its runner as a death, again each SCRIPT_RESEND while it is a copy here that
+	//   lives (a runner that could not apply it: not loaded there, handed on), and put on here at once if this game comes to
+	//   run the NPC (Run). A quest here waiting on that death never waits for ever.
+	class HeldKills
+	{
+	public:
+		static constexpr auto        OUR_BLOW_FRESH = 2s;
+		static constexpr auto        SCRIPT_RESEND = 2s;
+		static constexpr std::size_t MOST = 256;
+
+		void Blow(std::uint32_t a_id, Clock::time_point a_now)
+		{
+			if (auto* entry = Entry(a_id)) {
+				entry->blowAt = a_now;
+			}
+		}
+
+		void Script(std::uint32_t a_id, bool a_byUs)
+		{
+			if (auto* entry = Entry(a_id)) {
+				entry->script = true;
+				entry->scriptByUs = entry->scriptByUs || a_byUs;
+			}
+		}
+
+		struct Due
+		{
+			bool blow = false;    // our player's held blow: send a killing blow
+			bool script = false;  // a held kill no blow explains: send it as a death
+			bool byUs = false;    // our player is its killer
+		};
+
+		// A look at a living copy. a_canSend: its runner's word is here (what is owed waits for it otherwise). The blow is
+		// taken; the script's kill stays owed, due again SCRIPT_RESEND after.
+		Due Look(std::uint32_t a_id, bool a_canSend, Clock::time_point a_now)
+		{
+			const auto it = entries.find(a_id);
+			if (it == entries.end() || !a_canSend) {
+				return {};
+			}
+			Due   due;
+			auto& entry = it->second;
+			if (entry.blowAt) {
+				due.blow = a_now - *entry.blowAt < OUR_BLOW_FRESH;
+				entry.blowAt.reset();
+			}
+			if (entry.script && (!entry.sentAt || a_now - *entry.sentAt >= SCRIPT_RESEND)) {
+				entry.sentAt = a_now;
+				due.script = true;
+			}
+			due.byUs = due.blow || (due.script && entry.scriptByUs);
+			if (!entry.script) {
+				entries.erase(it);
+			}
+			return due;
+		}
+
+		// This game runs the NPC now: a kill no blow explains that is still owed is put on here (true: our player its
+		// killer). Whatever else was held of it is owed no more.
+		std::optional<bool> Run(std::uint32_t a_id)
+		{
+			const auto it = entries.find(a_id);
+			if (it == entries.end()) {
+				return std::nullopt;
+			}
+			const auto owed = it->second.script ? std::optional<bool>{ it->second.scriptByUs } : std::nullopt;
+			entries.erase(it);
+			return owed;
+		}
+
+		// It died (here, or its runner said so): nothing is owed.
+		void Dead(std::uint32_t a_id) { entries.erase(a_id); }
+
+		// Our blows that were not looked at in time are owed no more.
+		void Forget(Clock::time_point a_now)
+		{
+			std::erase_if(entries, [&](auto& a_entry) {
+				auto& entry = a_entry.second;
+				if (entry.blowAt && a_now - *entry.blowAt >= OUR_BLOW_FRESH) {
+					entry.blowAt.reset();
+				}
+				return !entry.blowAt && !entry.script;
+			});
+		}
+
+		void Clear() { entries.clear(); }
+		[[nodiscard]] bool        Owes(std::uint32_t a_id) const { return entries.contains(a_id); }
+		[[nodiscard]] std::size_t Size() const { return entries.size(); }
+
+	private:
+		struct Owed
+		{
+			std::optional<Clock::time_point> blowAt;
+			bool                             script = false;
+			bool                             scriptByUs = false;
+			std::optional<Clock::time_point> sentAt;
+		};
+
+		Owed* Entry(std::uint32_t a_id)
+		{
+			if (entries.size() >= MOST && !entries.contains(a_id)) {
+				return nullptr;
+			}
+			return &entries[a_id];
+		}
+
+		std::unordered_map<std::uint32_t, Owed> entries;
+	};
 }
