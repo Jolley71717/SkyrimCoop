@@ -11,14 +11,19 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 // Loose objects, the rules (docs/DESIGN.md, "Loose objects"; the game's side is src/game/LooseObjects.cpp, the
 // server's common/ObjectBook.h). The sister project's moved objects, carried to Skyrim's Havok bodies:
 // - The class (Movable): a reference of the load order, not an actor, a projectile, an explosion or a hazard, enabled,
-//   with its 3D, and one rigid body whose motion type is loose (dynamic, sphere, box or thin box inertia). Judged by its
-//   physics, never by a list of forms: a mod's clutter is shared as the game's is; a door, a lever, a trap's moving part
-//   (keyframed) or a static never are.
+//   with its 3D, and one to Protocol::MAX_OBJECT_PARTS rigid bodies of which the lead (the first loose one) has a loose
+//   motion type (dynamic, sphere, box or thin box inertia). Judged by its physics, never by a list of forms: a mod's
+//   clutter is shared as the game's is; a door, a lever, a trap's moving part (keyframed) or a static never are.
+// - Parts: an object of several bodies (a hanging chain, a cage, a heap of bones) is looked at, followed and judged by
+//   its lead; its rest carries every loose body by name (PartNames), and it is put whole or not at all (PartsAlike). Its
+//   hold is not drawn in a friend's hands (a grab is still our cause; its rest is said when it settles).
 // - Frames: what a player holds is said in their frame (ToHolder) and drawn in front of their stand-in (FromHolder).
 // - Causes: whose move it is. A grab, a hit, an explosion, a projectile's path, a body standing by it, a dead body's
 //   fall, a loose object's flight: ours (our player, an NPC this game runs, an object we watch) or theirs (a friend's
@@ -381,14 +386,66 @@ namespace ObjectRules
 		bool          enabled = true;
 		bool          has3D = false;
 		bool          inAlias = false;   // a quest alias holds it
-		std::uint32_t bodies = 0;        // rigid bodies in its 3D
-		Motion        motion = Motion::kInvalid;  // the one body's (when there is one)
+		std::uint32_t bodies = 0;        // rigid bodies in its 3D (counted to one past Protocol::MAX_OBJECT_PARTS)
+		Motion        motion = Motion::kInvalid;  // the lead's: its first loose body's, or its first body's when none is loose
 	};
 
 	[[nodiscard]] constexpr bool Movable(const Facts& a_facts)
 	{
-		return !a_facts.runtime && !a_facts.actor && !a_facts.transient && !a_facts.fixedKind && a_facts.enabled && a_facts.has3D && !a_facts.inAlias && a_facts.bodies == 1 &&
-		       Loose(a_facts.motion);
+		return !a_facts.runtime && !a_facts.actor && !a_facts.transient && !a_facts.fixedKind && a_facts.enabled && a_facts.has3D && !a_facts.inAlias &&
+		       a_facts.bodies >= 1 && a_facts.bodies <= Protocol::MAX_OBJECT_PARTS && Loose(a_facts.motion);
+	}
+
+	// ---- parts ----
+
+	// FNV-1a over a node's name, lower-cased (a node's name is the same in every game; its case is not worth trusting).
+	[[nodiscard]] constexpr std::uint32_t NameHash(std::string_view a_name)
+	{
+		std::uint32_t hash = 2166136261u;
+		for (const char c : a_name) {
+			const auto lower = static_cast<unsigned char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+			hash ^= lower;
+			hash *= 16777619u;
+		}
+		return hash == 0 ? 1u : hash;  // 0 is no name
+	}
+
+	// The names of an object's loose bodies, in the order its 3D holds them: each node's NameHash, and a name met again
+	// (a chain's links are often all "Link") its NameHash with "#k" after, k counting from 1, so every part has a name of
+	// its own while the meshes are the same.
+	[[nodiscard]] inline std::vector<std::uint32_t> PartNames(const std::vector<std::string_view>& a_nodes)
+	{
+		std::vector<std::uint32_t> out;
+		out.reserve(a_nodes.size());
+		std::map<std::uint32_t, std::uint32_t> met;
+		for (const auto name : a_nodes) {
+			const auto plain = NameHash(name);
+			const auto k = met[plain]++;
+			auto       hash = plain;
+			if (k > 0) {
+				std::string again{ name };
+				again += '#';
+				again += std::to_string(k);
+				hash = NameHash(again);
+			}
+			// A hash met already (two names that hash alike, or a "#k" that is another node's name): onwards until free.
+			while (std::find(out.begin(), out.end(), hash) != out.end()) {
+				hash = hash * 16777619u + 1u;
+				hash = hash == 0 ? 1u : hash;
+			}
+			out.push_back(hash);
+		}
+		return out;
+	}
+
+	// Whether a rest's parts name exactly our object's loose bodies (a_ours: PartNames): the same mesh, put whole. Not
+	// when a part of ours or of the rest is missing from the other (a mod's other mesh, or a body loose in one game only).
+	[[nodiscard]] inline bool PartsAlike(const std::vector<std::uint32_t>& a_ours, const std::vector<Protocol::ObjectPart>& a_parts)
+	{
+		if (a_ours.size() != a_parts.size() || a_ours.empty()) {
+			return false;
+		}
+		return std::all_of(a_parts.begin(), a_parts.end(), [&](const Protocol::ObjectPart& a_part) { return std::find(a_ours.begin(), a_ours.end(), a_part.name) != a_ours.end(); });
 	}
 
 	// ---- whose move ----
@@ -904,6 +961,37 @@ namespace ObjectRules
 	[[nodiscard]] inline bool NeedsPut(const Pose& a_here, const Pose& a_rest)
 	{
 		return Distance(a_here.at, a_rest.at) > PUT_EPSILON || Angle(a_here.rot, a_rest.rot) > TURN_EPSILON;
+	}
+
+	// A part's pose.
+	[[nodiscard]] inline Pose PoseOf(const Protocol::ObjectPart& a_part) { return { { a_part.x, a_part.y, a_part.z }, a_part.rot }; }
+
+	// The same for an object of several bodies: unless every part lies where the rest has it (a_here: our parts by name,
+	// as PartNames names them; a part we lack counts as out of place).
+	[[nodiscard]] inline bool PartsNeedPut(const std::vector<std::pair<std::uint32_t, Pose>>& a_here, const std::vector<Protocol::ObjectPart>& a_parts)
+	{
+		return std::any_of(a_parts.begin(), a_parts.end(), [&](const Protocol::ObjectPart& a_part) {
+			const auto it = std::find_if(a_here.begin(), a_here.end(), [&](const auto& a_ours) { return a_ours.first == a_part.name; });
+			return it == a_here.end() || NeedsPut(it->second, PoseOf(a_part));
+		});
+	}
+
+	// Parts for a rest, from our object's loose bodies (a_names: PartNames, a_poses alike in order): none when any pose is
+	// missing (a body gone NaN is never said, and an object is said whole or not at all).
+	[[nodiscard]] inline std::optional<std::vector<Protocol::ObjectPart>> PartsOf(const std::vector<std::uint32_t>& a_names, const std::vector<std::optional<Pose>>& a_poses)
+	{
+		if (a_names.size() != a_poses.size() || a_names.size() > Protocol::MAX_OBJECT_PARTS) {
+			return std::nullopt;
+		}
+		std::vector<Protocol::ObjectPart> out;
+		out.reserve(a_names.size());
+		for (std::size_t i = 0; i < a_names.size(); ++i) {
+			if (!a_poses[i]) {
+				return std::nullopt;
+			}
+			out.push_back({ a_names[i], a_poses[i]->at.x, a_poses[i]->at.y, a_poses[i]->at.z, Normalized(a_poses[i]->rot) });
+		}
+		return out;
 	}
 
 	// A hold is late when its holder's rest or let-go of the object was heard less than LATE_HOLD before it (holds go on

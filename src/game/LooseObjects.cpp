@@ -11,6 +11,7 @@
 #include "net/FormsCommand.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
@@ -18,8 +19,10 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 #include <xmmintrin.h>
 
 namespace LooseObjects
@@ -306,6 +309,7 @@ namespace LooseObjects
 		std::pair<std::uint32_t, std::uint32_t>   ourHoldSpace{};  // the cell or worldspace of ourHoldPose
 		bool                                      ourHoldTelekinesis = false;
 		ObjectRules::HoldEnds                     holdEnds;
+		std::optional<RE::FormID>                 severalGrab;  // an object of several bodies our player holds (not said)
 		std::optional<LetGo>                      letGo;
 		std::optional<RE::FormID>                 refusedGrab;  // a friend holds what our player grabbed: dropped
 		std::unordered_map<std::uint32_t, Vec>    shotsSeen;   // projectiles' last place, for their path
@@ -318,6 +322,7 @@ namespace LooseObjects
 		{
 			std::uint64_t holdsSent = 0, holdsHeard = 0, holdsDrawn = 0, holdsRefused = 0, grabsDropped = 0, holdsEnded = 0;
 			std::uint64_t telekinesisHolds = 0, lateHolds = 0, parted = 0, carried = 0, carriedOver = 0, leftBehind = 0, notMovable = 0;
+			std::uint64_t partRests = 0, partsWritten = 0, partsUnlike = 0, severalGrabs = 0;
 			std::uint64_t letGosSent = 0, letGosHeard = 0, letGosApplied = 0;
 			std::uint64_t restsSaid = 0, restsSent = 0, restsHeard = 0, restsApplied = 0, restsLeft = 0, answers = 0, catchUps = 0;
 			std::uint64_t placesApplied = 0, goneSent = 0, goneHeard = 0;
@@ -330,23 +335,34 @@ namespace LooseObjects
 		// ---- the engine ----
 
 		// The rigid bodies of a 3D (at most a few deep), and the first one.
+		ObjectRules::Motion MotionOf(RE::bhkRigidBody* a_body)
+		{
+			const auto hk = a_body ? a_body->GetRigidBody() : nullptr;
+			return hk ? static_cast<ObjectRules::Motion>(hk->motion.type.underlying()) : ObjectRules::Motion::kInvalid;
+		}
+
 		struct Bodies
 		{
-			RE::bhkRigidBody* first = nullptr;
-			RE::NiAVObject*   node = nullptr;  // the node that holds the first one's collision
-			std::uint32_t     count = 0;
+			struct One
+			{
+				RE::bhkRigidBody* body = nullptr;
+				RE::NiAVObject*   node = nullptr;  // the node that holds its collision
+			};
+			RE::bhkRigidBody* first = nullptr;  // the lead: the first loose body, or the first body when none is loose
+			RE::NiAVObject*   node = nullptr;   // the node that holds the lead's collision
+			std::uint32_t     count = 0;        // counted to one past Protocol::MAX_OBJECT_PARTS
+			std::array<One, Protocol::MAX_OBJECT_PARTS> all{};  // the first MAX_OBJECT_PARTS, in the order the 3D holds them
 		};
 		void FindBodies(RE::NiAVObject* a_node, Bodies& a_out, int a_depth)
 		{
-			if (!a_node || a_depth > 24 || a_out.count > 1) {
+			if (!a_node || a_depth > 24 || a_out.count > Protocol::MAX_OBJECT_PARTS) {
 				return;
 			}
 			if (const auto collision = a_node->collisionObject.get()) {
 				if (const auto niCollision = netimmerse_cast<RE::bhkNiCollisionObject*>(collision)) {
 					if (const auto body = niCollision->body ? netimmerse_cast<RE::bhkRigidBody*>(niCollision->body.get()) : nullptr) {
-						if (!a_out.first) {
-							a_out.first = body;
-							a_out.node = a_node;
+						if (a_out.count < Protocol::MAX_OBJECT_PARTS) {
+							a_out.all[a_out.count] = { body, a_node };
 						}
 						++a_out.count;
 					}
@@ -363,13 +379,52 @@ namespace LooseObjects
 		{
 			Bodies bodies;
 			FindBodies(a_ref ? a_ref->Get3D() : nullptr, bodies, 0);
+			const auto known = (std::min)(bodies.count, static_cast<std::uint32_t>(Protocol::MAX_OBJECT_PARTS));
+			for (std::uint32_t i = 0; i < known && !bodies.first; ++i) {
+				if (ObjectRules::Loose(MotionOf(bodies.all[i].body))) {
+					bodies.first = bodies.all[i].body;
+					bodies.node = bodies.all[i].node;
+				}
+			}
+			if (!bodies.first && known > 0) {
+				bodies.first = bodies.all[0].body;
+				bodies.node = bodies.all[0].node;
+			}
 			return bodies;
 		}
 
-		ObjectRules::Motion MotionOf(RE::bhkRigidBody* a_body)
+		// An object of several bodies' loose ones, named (ObjectRules::PartNames), in the order its 3D holds them.
+		struct Part
 		{
-			const auto hk = a_body ? a_body->GetRigidBody() : nullptr;
-			return hk ? static_cast<ObjectRules::Motion>(hk->motion.type.underlying()) : ObjectRules::Motion::kInvalid;
+			RE::bhkRigidBody* body = nullptr;
+			std::uint32_t     name = 0;
+		};
+		std::vector<Part> LooseParts(const Bodies& a_bodies)
+		{
+			std::vector<Part>             out;
+			std::vector<std::string_view> names;
+			const auto                    known = (std::min)(a_bodies.count, static_cast<std::uint32_t>(Protocol::MAX_OBJECT_PARTS));
+			for (std::uint32_t i = 0; i < known; ++i) {
+				const auto& one = a_bodies.all[i];
+				if (ObjectRules::Loose(MotionOf(one.body))) {
+					out.push_back({ one.body, 0 });
+					const auto name = one.node ? one.node->name.c_str() : nullptr;
+					names.emplace_back(name ? name : "");
+				}
+			}
+			const auto hashes = ObjectRules::PartNames(names);
+			for (std::size_t i = 0; i < out.size(); ++i) {
+				out[i].name = hashes[i];
+			}
+			return out;
+		}
+		std::vector<std::uint32_t> NamesOf(const std::vector<Part>& a_parts)
+		{
+			std::vector<std::uint32_t> out;
+			for (const auto& part : a_parts) {
+				out.push_back(part.name);
+			}
+			return out;
 		}
 
 		bool Transient(const RE::TESObjectREFR* a_ref)
@@ -412,7 +467,7 @@ namespace LooseObjects
 			}
 		}
 
-		// The one rigid body of a loose object of the class (ObjectRules::Movable), or none.
+		// The lead rigid body of a loose object of the class (ObjectRules::Movable: its only one, or its first loose one), or none.
 		RE::bhkRigidBody* LooseBody(RE::TESObjectREFR* a_ref)
 		{
 			if (!a_ref) {
@@ -459,6 +514,40 @@ namespace LooseObjects
 				return std::nullopt;  // a body gone NaN is never said (the sister project's Havok freeze)
 			}
 			return pose;
+		}
+
+		// Each loose part's pose by name (an object of several bodies).
+		std::vector<std::pair<std::uint32_t, Pose>> PartPoses(const Bodies& a_bodies)
+		{
+			std::vector<std::pair<std::uint32_t, Pose>> out;
+			for (const auto& part : LooseParts(a_bodies)) {
+				if (const auto pose = PoseOf(part.body)) {
+					out.emplace_back(part.name, *pose);
+				}
+			}
+			return out;
+		}
+
+		// An object of several bodies' rest gets every loose part's pose; false when one has none (it is said whole or not
+		// at all). An object of one body's is left as it is.
+		bool AddParts(RE::TESObjectREFR* a_ref, Protocol::ObjectRest& a_rest)
+		{
+			const auto bodies = BodiesOf(a_ref);
+			if (bodies.count <= 1) {
+				return true;
+			}
+			const auto                       parts = LooseParts(bodies);
+			std::vector<std::optional<Pose>> poses;
+			for (const auto& part : parts) {
+				poses.push_back(PoseOf(part.body));
+			}
+			auto made = ObjectRules::PartsOf(NamesOf(parts), poses);
+			if (!made) {
+				return false;
+			}
+			a_rest.parts = std::move(*made);
+			++counts.partRests;
+			return true;
 		}
 
 		ObjectRules::Mat3 MatFrom(const RE::NiMatrix3& a_m)
@@ -514,12 +603,33 @@ namespace LooseObjects
 		// cell's reload and the game's own drawing use), then its body, kept in step and given the velocity. A body moved
 		// alone, asleep, would collide where its mesh is not, and the reference would go back to its old place on a reload.
 		// a_moveRef false: the body alone (a held copy between its reference's writes).
-		bool Write(RE::TESObjectREFR* a_ref, const Pose& a_pose, const Vec& a_velocity, bool a_moveRef = true)
+		// An object of several bodies is put whole or not at all: at rest, with a_parts naming exactly its loose bodies
+		// (ObjectRules::PartsAlike), its reference from its lead's part, then every part.
+		bool Write(RE::TESObjectREFR* a_ref, const Pose& a_pose, const Vec& a_velocity, bool a_moveRef = true, const std::vector<Protocol::ObjectPart>* a_parts = nullptr)
 		{
 			const auto bodies = a_ref ? BodiesOf(a_ref) : Bodies{};
-			if (!a_ref || bodies.count != 1 || !ObjectRules::Finite(a_velocity)) {
+			if (!a_ref || bodies.count == 0 || bodies.count > Protocol::MAX_OBJECT_PARTS || !ObjectRules::Finite(a_velocity)) {
 				++counts.writeFails;
 				return false;
+			}
+			const bool several = bodies.count > 1;
+			Pose       lead = a_pose;
+			if (several) {
+				const auto parts = LooseParts(bodies);
+				const bool still = a_velocity.x == 0.0f && a_velocity.y == 0.0f && a_velocity.z == 0.0f;
+				if (!a_parts || !a_moveRef || !still || !ObjectRules::PartsAlike(NamesOf(parts), *a_parts)) {
+					++counts.partsUnlike;
+					return false;
+				}
+				// The reference goes where our lead's part lies in the rest (its own place is its sender's lead's).
+				for (const auto& part : parts) {
+					if (part.body == bodies.first) {
+						const auto it = std::find_if(a_parts->begin(), a_parts->end(), [&](const Protocol::ObjectPart& a_part) { return a_part.name == part.name; });
+						if (it != a_parts->end()) {
+							lead = ObjectRules::PoseOf(*it);
+						}
+					}
+				}
 			}
 			const auto here = PoseOf(bodies.first);
 			const auto root = a_ref->Get3D();
@@ -532,7 +642,7 @@ namespace LooseObjects
 				const Pose  rootNow{ { t.x, t.y, t.z }, ObjectRules::RotOf(MatFrom(root->world.rotate), senseOfBody) };
 				// Where the body lies in the reference's frame (its collision may sit off the root), and so where the
 				// reference goes for the body to lie at a_pose.
-				const auto refPose = ObjectRules::RefFor(a_pose, ObjectRules::OffsetOf(rootNow, *here));
+				const auto refPose = ObjectRules::RefFor(lead, ObjectRules::OffsetOf(rootNow, *here));
 				const auto angles = ObjectRules::AnglesFor(ObjectRules::WorldOf(refPose.rot, senseOfBody), senseOfAngles);
 				if (ObjectRules::Writable(refPose, rootNow.at) && ObjectRules::Finite(angles)) {
 					a_ref->SetPosition(RE::NiPoint3{ refPose.at.x, refPose.at.y, refPose.at.z });
@@ -545,32 +655,49 @@ namespace LooseObjects
 			} else {
 				++counts.refUnwritten;  // the conventions are not learnt yet (no loose object looked at): the body alone
 			}
-			// The body, found again (the 3D's update may have warped it), written exactly and set moving, under its world's
-			// lock.
-			const auto body = BodiesOf(a_ref).first;
-			if (!body) {
+			// The bodies, found again (the 3D's update may have warped them), written exactly and set moving, under their
+			// world's lock.
+			const auto                                      now = BodiesOf(a_ref);
+			std::vector<std::pair<RE::bhkRigidBody*, Pose>> puts;
+			if (several) {
+				for (const auto& part : LooseParts(now)) {
+					const auto it = std::find_if(a_parts->begin(), a_parts->end(), [&](const Protocol::ObjectPart& a_part) { return a_part.name == part.name; });
+					if (it == a_parts->end()) {
+						++counts.partsUnlike;  // its 3D made anew otherwise: put none
+						return false;
+					}
+					puts.emplace_back(part.body, ObjectRules::PoseOf(*it));
+				}
+			} else if (now.first) {
+				puts.emplace_back(now.first, a_pose);
+			}
+			if (puts.empty()) {
 				++counts.writeFails;
 				return false;
 			}
-			const auto       scale = RE::bhkWorld::GetWorldScale();
-			RE::hkVector4    at{ a_pose.at.x * scale, a_pose.at.y * scale, a_pose.at.z * scale, 0.0f };
-			RE::hkQuaternion rot;
-			rot.vec = RE::hkVector4{ a_pose.rot.x, a_pose.rot.y, a_pose.rot.z, a_pose.rot.w };
+			const auto          scale = RE::bhkWorld::GetWorldScale();
 			const RE::hkVector4 velocity{ a_velocity.x * scale, a_velocity.y * scale, a_velocity.z * scale, 0.0f };
-			const auto          cell = a_ref->GetParentCell();
-			const auto          world = cell ? cell->GetbhkWorld() : nullptr;
+			const auto          putAll = [&]() {
+				for (const auto& [body, pose] : puts) {
+					RE::hkVector4    at{ pose.at.x * scale, pose.at.y * scale, pose.at.z * scale, 0.0f };
+					RE::hkQuaternion rot;
+					rot.vec = RE::hkVector4{ pose.rot.x, pose.rot.y, pose.rot.z, pose.rot.w };
+					body->SetPositionAndRotation(at, rot);
+					body->SetLinearVelocity(velocity);
+					body->SetAngularVelocity(RE::hkVector4{ 0.0f });
+				}
+			};
+			const auto cell = a_ref->GetParentCell();
+			const auto world = cell ? cell->GetbhkWorld() : nullptr;
 			if (world) {
 				RE::BSWriteLockGuard guard{ world->worldLock };
-				body->SetPositionAndRotation(at, rot);
-				body->SetLinearVelocity(velocity);
-				body->SetAngularVelocity(RE::hkVector4{ 0.0f });
+				putAll();
 			} else {
-				body->SetPositionAndRotation(at, rot);
-				body->SetLinearVelocity(velocity);
-				body->SetAngularVelocity(RE::hkVector4{ 0.0f });
+				putAll();
 			}
 			a_ref->AddChange(static_cast<std::uint32_t>(RE::TESObjectREFR::ChangeFlags::kHavokMoved));
 			++counts.writes;
+			counts.partsWritten += several ? puts.size() : 0;
 			return true;
 		}
 
@@ -750,7 +877,21 @@ namespace LooseObjects
 		{
 			const auto grab = GrabOf(a_player);
 			const auto grabbed = grab.ref;
-			const auto body = grabbed ? LooseBody(grabbed.get()) : nullptr;
+			auto       body = grabbed ? LooseBody(grabbed.get()) : nullptr;
+			if (body && BodiesOf(grabbed.get()).count > 1) {
+				// An object of several bodies is not drawn in a friend's hands: its grab is our cause (so its move is ours),
+				// and its rest is said whole once it settles.
+				if (const auto pose = PoseOf(body)) {
+					AddCause(pose->at, pose->at, 0.0f, ObjectRules::Strength::kGrab, Whose::kOurs, a_now + 1s, grabbed->GetFormID());
+					if (!severalGrab || *severalGrab != grabbed->GetFormID()) {
+						severalGrab = grabbed->GetFormID();
+						++counts.severalGrabs;
+					}
+				}
+				body = nullptr;
+			} else {
+				severalGrab.reset();
+			}
 			const auto id = body ? grabbed->GetFormID() : 0;
 			if (ourHold && *ourHold != id) {
 				// Let go of (or another grabbed): its flight is said LET_GO_AFTER later, from where it left the hands.
@@ -1070,8 +1211,11 @@ namespace LooseObjects
 				follow.until = a_now + FOLLOW_ON;
 				if (echo.MaySay(id, a_now)) {
 					const auto [cell, worldspace] = SpaceOf(ref);
-					pacer.Push(ObjectRules::RestOf(id, Protocol::RestKind::kRest, cell, worldspace, *pose), a_now);
-					++counts.restsSaid;
+					auto rest = ObjectRules::RestOf(id, Protocol::RestKind::kRest, cell, worldspace, *pose);
+					if (AddParts(ref, rest)) {
+						pacer.Push(rest, a_now);
+						++counts.restsSaid;
+					}
 				}
 				it = watches.erase(it);
 			}
@@ -1220,6 +1364,7 @@ namespace LooseObjects
 			const auto body = LooseBody(ref);
 			const auto here = body ? PoseOf(body) : std::nullopt;
 			const auto pose = ObjectRules::PoseOf(a_rest);
+			const auto parts = a_rest.parts.empty() ? nullptr : &a_rest.parts;
 			if (!here || !ObjectRules::Writable(pose, here->at)) {
 				++counts.badPoses;
 				return true;  // nothing to put it on here, or too far: not tried again
@@ -1233,8 +1378,8 @@ namespace LooseObjects
 				quiet.Hush(id, a_now + ObjectRules::FRIEND_FLIGHT);
 				return true;
 			}
-			if (ObjectRules::NeedsPut(*here, pose)) {
-				if (Write(ref, pose, {})) {
+			if (ObjectRules::NeedsPut(*here, pose) || (parts && ObjectRules::PartsNeedPut(PartPoses(BodiesOf(ref)), *parts))) {
+				if (Write(ref, pose, {}, true, parts)) {
 					++(a_sender != 0 ? counts.restsApplied : counts.placesApplied);
 				}
 			} else {
@@ -1301,6 +1446,14 @@ namespace LooseObjects
 				at.x, at.y, at.z);
 			if (const auto node = bodies.node) {
 				out += std::format(" layer={}", static_cast<int>(node->GetCollisionLayer()));
+			}
+			if (bodies.count > 1) {
+				// An object of several bodies: each loose part by name, where it lies.
+				const auto parts = PartPoses(bodies);
+				out += std::format(" parts={}", parts.size());
+				for (const auto& [name, part] : parts) {
+					out += std::format(" {}@({:.1f},{:.1f},{:.1f})", Hex(name), part.at.x, part.at.y, part.at.z);
+				}
 			}
 			if (pose) {
 				out += std::format(" body=({:.1f},{:.1f},{:.1f}) rot=({:.4f},{:.4f},{:.4f},{:.4f})", pose->at.x, pose->at.y, pose->at.z, pose->rot.x, pose->rot.y, pose->rot.z,
@@ -1556,6 +1709,7 @@ namespace LooseObjects
 		ourHold.reset();
 		ourHoldPose.reset();
 		ourHoldTelekinesis = false;
+		severalGrab.reset();
 		holdEnds.Clear();
 		letGo.reset();
 		refusedGrab.reset();
@@ -1582,6 +1736,7 @@ namespace LooseObjects
 		ourHold.reset();
 		ourHoldPose.reset();
 		ourHoldTelekinesis = false;
+		severalGrab.reset();
 		holdEnds.Clear();
 		letGo.reset();
 		refusedGrab.reset();
@@ -1633,12 +1788,12 @@ namespace LooseObjects
 		}
 		const auto& c = counts;
 		return std::format(
-			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} telekinesis={} late={} parted={} carried={} carriedOver={} leftBehind={} notMovable={} | letGos sent={} heard={} applied={} | "
+			"objects active={} hooked={} holds sent={} heard={} drawn={} refused={} grabsDropped={} ended={} keyframes={} releases={} telekinesis={} late={} parted={} carried={} carriedOver={} leftBehind={} notMovable={} | parts rests={} written={} unlike={} grabs={} | letGos sent={} heard={} applied={} | "
 			"rests said={} sent={} heard={} applied={} left={} answers={} placesApplied={} catchUps={} waiting={} waitingRefused={} | gone sent={} heard={} | "
 			"scans={} started={} notOurs={} hushed={} followOns={} lost={} gaveUp={} watched={} seen={} causes={} paced={} pacedDropped={} echoStopped={} | "
 			"blasts={} hits={} pickups={} | flights watched={} heard={} dropped={} stretches={} stretchesDropped={} cones={} | bodyFalls={} ourPaths={} theirPaths={} causesJoined={} causesDropped={} | writes={} refWrites={} refUnwritten={} bodyOnly={} writeFails={} badPoses={} | senses body={} ({}/{}) angles={} ({}/{})",
 			active.load() ? 1 : 0, explosionHooked ? 1 : 0, c.holdsSent, c.holdsHeard, c.holdsDrawn, c.holdsRefused, c.grabsDropped, c.holdsEnded, c.keyframes, c.releases,
-			c.telekinesisHolds, c.lateHolds, c.parted, c.carried, c.carriedOver, c.leftBehind, c.notMovable,
+			c.telekinesisHolds, c.lateHolds, c.parted, c.carried, c.carriedOver, c.leftBehind, c.notMovable, c.partRests, c.partsWritten, c.partsUnlike, c.severalGrabs,
 			c.letGosSent, c.letGosHeard, c.letGosApplied, c.restsSaid, c.restsSent, c.restsHeard, c.restsApplied, c.restsLeft, c.answers, c.placesApplied, c.catchUps,
 			waiting.Size(), waiting.refused, c.goneSent, c.goneHeard, c.scans, c.started, c.notOurs, c.hushed, c.followOns, c.lost, c.gaveUp, watches.size(), seen.Size(),
 			causes.Size(), pacer.Waiting(), pacer.dropped, echo.stopped, blastsHeard.load(), hitsHeard.load(), pickupsHeard.load(), Shots::AllHooked() ? 1 : 0,

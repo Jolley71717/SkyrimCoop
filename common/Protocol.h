@@ -60,7 +60,10 @@ namespace Protocol
 	// 19: bodies of the dead (kBodies, message type 69): how an NPC's body fell at its death and where its ragdoll's bones
 	//    came to rest, from its runner, so a copy's body falls the same way and lies in the same place. (18 and type 68
 	//    are the quests' ended-quest snapshot on the other line; as with 17: whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 19;
+	// 24: a loose object of several bodies (a hanging chain, a cage, a heap of bones) rests whole: a kObjectRests rest
+	//    carries the place of each of its loose bodies by name (ObjectPart). (20 to 23 are other changes of the stack: as
+	//    with 17, whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 24;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -898,8 +901,25 @@ namespace Protocol
 	};
 	inline constexpr std::uint8_t REST_KIND_COUNT = 3;
 
-	// Where a loose object is: its cell (an interior) or worldspace (outside), its body's place and rotation, and for a
-	// let-go its velocity in units a second (0 for the others).
+	// An object of several rigid bodies (a hanging chain, a cage, a heap of bones; at most MAX_OBJECT_PARTS) rests whole:
+	// the place and rotation of each of its loose bodies, named by a hash of its node's name (ObjectRules::PartNames: the
+	// mesh is the same in every game). One rest's parts lie within MAX_PART_REACH of its place; a message holds at most
+	// MAX_PARTS_PER_MESSAGE in all (ObjectRestsFit).
+	inline constexpr std::size_t MAX_OBJECT_PARTS = 32;
+	inline constexpr float       MAX_PART_REACH = 2048.0f;
+	inline constexpr std::size_t MAX_PARTS_PER_MESSAGE = 256;
+
+	struct ObjectPart
+	{
+		std::uint32_t name = 0;  // ObjectRules::PartNames of its body's node
+		float         x = 0, y = 0, z = 0;
+		Quat          rot;
+		bool operator==(const ObjectPart&) const = default;
+	};
+
+	// Where a loose object is: its cell (an interior) or worldspace (outside), its body's place and rotation (the lead's,
+	// for an object of several: its first loose body), and for a let-go its velocity in units a second (0 for the
+	// others). parts: an object of several bodies' every loose body, a kRest's only (none for an object of one).
 	struct ObjectRest
 	{
 		ObjectKey     key;
@@ -909,6 +929,7 @@ namespace Protocol
 		float         x = 0, y = 0, z = 0;
 		Quat          rot;
 		float         vx = 0, vy = 0, vz = 0;
+		std::vector<ObjectPart> parts;
 		bool operator==(const ObjectRest&) const = default;
 	};
 
@@ -939,8 +960,20 @@ namespace Protocol
 		return reach2 <= MAX_HOLD_REACH * MAX_HOLD_REACH && QuatHolds(a_hold.rot);
 	}
 
+	// Whether a part can be: a name, a place a game can hold within MAX_PART_REACH of its object's, a rotation.
+	[[nodiscard]] inline bool ObjectPartHolds(const ObjectPart& a_part, float a_x, float a_y, float a_z)
+	{
+		if (a_part.name == 0 || !InWorld(a_part.x) || !InWorld(a_part.y) || !InWorld(a_part.z) || !QuatHolds(a_part.rot)) {
+			return false;
+		}
+		const auto dx = a_part.x - a_x;
+		const auto dy = a_part.y - a_y;
+		const auto dz = a_part.z - a_z;
+		return dx * dx + dy * dy + dz * dz <= MAX_PART_REACH * MAX_PART_REACH;
+	}
+
 	// Whether a rest can be: a key, a known kind, a place a game can hold, a rotation; a velocity only for a let-go, and
-	// at most MAX_OBJECT_SPEED.
+	// at most MAX_OBJECT_SPEED; parts only for a kRest, at most MAX_OBJECT_PARTS, each holding and no two of one name.
 	[[nodiscard]] inline bool ObjectRestHolds(const ObjectRest& a_rest)
 	{
 		if (!ObjectKeyHolds(a_rest.key) || static_cast<std::uint8_t>(a_rest.kind) >= REST_KIND_COUNT) {
@@ -953,7 +986,43 @@ namespace Protocol
 			return false;
 		}
 		const auto speed2 = a_rest.vx * a_rest.vx + a_rest.vy * a_rest.vy + a_rest.vz * a_rest.vz;
-		return a_rest.kind == RestKind::kLetGo ? speed2 <= MAX_OBJECT_SPEED * MAX_OBJECT_SPEED : speed2 == 0.0f;
+		if (!(a_rest.kind == RestKind::kLetGo ? speed2 <= MAX_OBJECT_SPEED * MAX_OBJECT_SPEED : speed2 == 0.0f)) {
+			return false;
+		}
+		if (a_rest.parts.empty()) {
+			return true;
+		}
+		if (a_rest.kind != RestKind::kRest || a_rest.parts.size() > MAX_OBJECT_PARTS) {
+			return false;
+		}
+		for (std::size_t i = 0; i < a_rest.parts.size(); ++i) {
+			if (!ObjectPartHolds(a_rest.parts[i], a_rest.x, a_rest.y, a_rest.z)) {
+				return false;
+			}
+			for (std::size_t j = 0; j < i; ++j) {
+				if (a_rest.parts[j].name == a_rest.parts[i].name) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	// The end of the rests from a_first that one message holds: at most MAX_OBJECT_RESTS, and MAX_PARTS_PER_MESSAGE parts
+	// in all (a rest's own parts never part: one rest's are at most MAX_OBJECT_PARTS). Past a_first unless none is left.
+	[[nodiscard]] inline std::size_t ObjectRestsFit(const std::vector<ObjectRest>& a_rests, std::size_t a_first)
+	{
+		std::size_t end = a_first;
+		std::size_t parts = 0;
+		while (end < a_rests.size() && end - a_first < MAX_OBJECT_RESTS) {
+			const auto more = (std::min)(a_rests[end].parts.size(), MAX_OBJECT_PARTS);
+			if (end > a_first && parts + more > MAX_PARTS_PER_MESSAGE) {
+				break;
+			}
+			parts += more;
+			++end;
+		}
+		return end;
 	}
 
 	// Whether a shot can be: one shooter (a player and no NPC, or an NPC of id != 0), a record, a known kind, hand and
@@ -2298,7 +2367,7 @@ namespace Protocol
 	inline std::vector<std::uint8_t> Encode(const ObjectRests& a_msg)
 	{
 		Writer     w{ MessageType::kObjectRests };
-		const auto count = (std::min)(a_msg.rests.size(), MAX_OBJECT_RESTS);
+		const auto count = ObjectRestsFit(a_msg.rests, 0);
 		w.U32(a_msg.sender);
 		w.U8(a_msg.full ? 1 : 0);
 		w.U8(static_cast<std::uint8_t>(count));
@@ -2317,11 +2386,23 @@ namespace Protocol
 			for (const auto v : { rest.vx, rest.vy, rest.vz }) {
 				w.F32(flies ? v : 0.0f);
 			}
+			// Only a rest has parts.
+			const auto parts = rest.kind == RestKind::kRest ? (std::min)(rest.parts.size(), MAX_OBJECT_PARTS) : 0;
+			w.U8(static_cast<std::uint8_t>(parts));
+			for (std::size_t p = 0; p < parts; ++p) {
+				const auto& part = rest.parts[p];
+				w.U32(part.name);
+				for (const auto v : { part.x, part.y, part.z }) {
+					w.F32(v);
+				}
+				WriteQuat(w, part.rot);
+			}
 		}
 		return w.Data();
 	}
 
-	// None for more than MAX_OBJECT_RESTS, a rest that does not hold (ObjectRestHolds), or a full that is not 0 or 1.
+	// None for more than MAX_OBJECT_RESTS or MAX_PARTS_PER_MESSAGE, a rest that does not hold (ObjectRestHolds), or a full
+	// that is not 0 or 1.
 	inline std::optional<ObjectRests> DecodeObjectRests(std::span<const std::uint8_t> a_data)
 	{
 		Reader r{ a_data };
@@ -2335,6 +2416,7 @@ namespace Protocol
 		}
 		msg.full = full == 1;
 		msg.rests.reserve(count);
+		std::size_t partsRead = 0;
 		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
 			ObjectRest rest;
 			rest.key = ReadObjectKey(r);
@@ -2348,6 +2430,19 @@ namespace Protocol
 			for (auto* v : { &rest.vx, &rest.vy, &rest.vz }) {
 				*v = r.F32();
 			}
+			const auto parts = r.U8();
+			partsRead += parts;
+			if (!r.Ok() || parts > MAX_OBJECT_PARTS || partsRead > MAX_PARTS_PER_MESSAGE) {
+				return std::nullopt;
+			}
+			rest.parts.resize(parts);
+			for (auto& part : rest.parts) {
+				part.name = r.U32();
+				for (auto* v : { &part.x, &part.y, &part.z }) {
+					*v = r.F32();
+				}
+				part.rot = ReadQuat(r);
+			}
 			if (r.Ok() && !ObjectRestHolds(rest)) {
 				return std::nullopt;
 			}
@@ -2359,9 +2454,11 @@ namespace Protocol
 		return msg;
 	}
 
-	inline constexpr std::size_t OBJECT_REST_BYTES = 5 + 1 + 4 + 4 + 3 * 4 + 4 * 4 + 3 * 4;
-	inline constexpr std::size_t MAX_OBJECT_RESTS_SIZE = 1 + 4 + 1 + 1 + MAX_OBJECT_RESTS * OBJECT_REST_BYTES;
-	static_assert(MAX_OBJECT_RESTS <= 0xFF && MAX_OBJECT_RESTS_SIZE <= 4096, "a message of rests stays small");
+	inline constexpr std::size_t OBJECT_REST_BYTES = 5 + 1 + 4 + 4 + 3 * 4 + 4 * 4 + 3 * 4 + 1;  // and its parts
+	inline constexpr std::size_t OBJECT_PART_BYTES = 4 + 3 * 4 + 4 * 4;
+	inline constexpr std::size_t MAX_OBJECT_RESTS_SIZE = 1 + 4 + 1 + 1 + MAX_OBJECT_RESTS * OBJECT_REST_BYTES + MAX_PARTS_PER_MESSAGE * OBJECT_PART_BYTES;
+	static_assert(MAX_OBJECT_RESTS <= 0xFF && MAX_OBJECT_PARTS <= 0xFF && MAX_OBJECT_PARTS <= MAX_PARTS_PER_MESSAGE && MAX_OBJECT_RESTS_SIZE <= 16384,
+		"a message of rests stays small");
 
 	// After a load: every place the session keeps, again (the type alone).
 	inline std::vector<std::uint8_t> EncodeAskObjectRests()
