@@ -2,7 +2,7 @@
 # version. Run by hand only (Actions > Upload to Nexus > Run workflow): Nexus gets settled versions rarely, when the
 # maintainer decides (docs/RELEASING.md). The GitHub release must already carry SkyrimCoop-X.Y.Z-nexus.zip.
 #
-# NOT IN USE YET. The mod's page exists on Nexus Mods (mod id 200124, unpublished) but has no file, and the repository
+# NOT IN USE YET. The mod's page exists on Nexus Mods (page number 200124, unpublished) but has no file, and the repository
 # secret NEXUSMODS_API_KEY is not set. This action (Nexus-Mods/upload-action, API v3) only adds a new version to a file
 # that already exists: it cannot create a page's first file. So the maintainer uploads the first file by hand on the
 # mod page (Manage files), once, then copies that file's id (Files tab > Advanced, or Manage Files > edit menu) into
@@ -28,10 +28,13 @@ permissions:
 
 env:
   # The main file's API file id (the mod page's Files tab > Advanced) and the mod's unique API id (for the changelog).
-  # The mod id is the number in the page's address. The file id stays empty until the page's first file has been
-  # uploaded by hand: the upload API cannot create it.
+  # The mod id is the mod's unique API id, not the page number: (game id << 32) | page number. F4Multiplayer's
+  # 4943507467508 is (1151 << 32) | 109812; Skyrim SE's game id is 1704, so page 200124 gives 7318624472508. That value
+  # is computed, not read from Nexus: CHECK IT against the "Advanced" view after the first hand upload, together with
+  # the file id, before the first run. The file id stays empty until the page's first file has been uploaded by hand
+  # (the upload API cannot create it).
   NEXUS_FILE_ID: ""
-  NEXUS_MOD_ID: "200124"
+  NEXUS_MOD_ID: "7318624472508"
 
 jobs:
   upload:
@@ -39,7 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Refuse until the mod has a Nexus page
+      - name: Refuse until the Nexus ids are set
         env:
           TAG: ${{ inputs.tag }}
           CHECK_ONLY: ${{ inputs.check_only }}

@@ -1,6 +1,6 @@
 # SkyrimCoop: install
 
-**Pre-alpha.** This is an early test build for two players over Steam: it has bugs, and some things in the game are not shared yet. Back up your saves before you play with it. The release notes on the [releases page](https://github.com/Jolley71717/SkyrimCoop/releases) say what works and what is known not to; [docs/PLAN.md](https://github.com/Jolley71717/SkyrimCoop/blob/main/docs/PLAN.md) says what comes next.
+**Pre-alpha.** This is an early test build for two players over Steam (the settings allow up to 4 by default; more than two is untested): it has bugs, and some things in the game are not shared yet. Back up your saves before you play with it. The release notes on the [releases page](https://github.com/Jolley71717/SkyrimCoop/releases) say what works and what is known not to; [docs/PLAN.md](https://github.com/Jolley71717/SkyrimCoop/blob/main/docs/PLAN.md) says what comes next.
 
 Everyone in a session needs the same version of the mod, and the same mods otherwise.
 

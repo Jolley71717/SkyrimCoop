@@ -11,7 +11,7 @@ SkyrimCoop will be a co-op mod for The Elder Scrolls V: Skyrim Special Edition o
 
 ## Where it is today
 
-SkyrimCoop is pre-alpha: version 0.1.0 is the first one meant for other people to try. It is an SKSE plugin for Skyrim Special Edition 1.7.104 (Steam), for two players over Steam. What a release can and cannot do is in its release notes on the [releases page](https://github.com/Jolley71717/SkyrimCoop/releases); [dist/INSTALL.md](dist/INSTALL.md) says how to install it.
+SkyrimCoop is pre-alpha: version 0.1.0 is the first one meant for other people to try. It is an SKSE plugin for Skyrim Special Edition 1.7.104 (Steam), for two players over Steam (up to 4 by default in the settings; more than two is untested). What a release can and cannot do is in its release notes on the [releases page](https://github.com/Jolley71717/SkyrimCoop/releases); [dist/INSTALL.md](dist/INSTALL.md) says how to install it.
 
 [docs/PLAN.md](docs/PLAN.md) lists the phases in order, from "the plugin loads" to shared quests, and what each one has to prove before the next begins. There are no dates.
 
