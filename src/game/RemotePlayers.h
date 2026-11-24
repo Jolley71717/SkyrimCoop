@@ -2,6 +2,11 @@
 
 #include "Protocol.h"
 
+namespace RE
+{
+	class Actor;
+}
+
 namespace SKSE
 {
 	class SerializationInterface;
@@ -60,6 +65,10 @@ namespace RemotePlayers
 	void AfterLoad();
 
 	[[nodiscard]] std::size_t Count();
+
+	// That player's stand-in, placed in this world now (enabled, its 3D there); null when there is none. Main thread:
+	// what a friend's use of a mechanism is made by (src/game/WorldObjects.cpp).
+	[[nodiscard]] RE::Actor* StandInOf(std::uint32_t a_playerId);
 
 	// Developer channel: `standins` (one line each), `strays` (placed actors of a preset base in the loaded game:
 	// 0 outside a session means nothing of a session was saved), `graph <player> [event <name> | vars]`.

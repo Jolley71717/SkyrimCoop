@@ -408,7 +408,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ] && [ "${1:-}" = selftest ]; then
 	t "gear: still on after it came off: FAIL" "$(gear "$S" "$S")" "PASS PASS FAIL "
 
 	# the step is wired into the harness: in STEPS before final, a session step, not run unless named
-	t "forms is a step" "$(case " $STEPS " in *" forms final "*) echo yes;; esac)" yes
+	t "forms is a step, before final" "$(case " $STEPS " in *" forms "*" final "*) echo yes;; esac)" yes
 	t "forms needs a session" "$(case " $SESSION_STEPS " in *" forms "*) echo yes;; esac)" yes
 	t "forms runs only when named" "$(case " $OPTIN_STEPS " in *" forms "*) echo yes;; esac)" yes
 	t "the VM restarts in the harness's cell" "$(forms_cell)" "$SMOKE_CELL"

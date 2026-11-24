@@ -4,6 +4,7 @@
 #include "FormIds.h"
 #include "Name.h"
 #include "Redact.h"
+#include "RefBook.h"
 #include "Text.h"
 #include "TokenBucket.h"
 
@@ -42,6 +43,17 @@ namespace
 		bool        looksOwed = false;
 		// Heartbeats answered: a burst of twenty, then ten a second (the game sends a few a second at most).
 		TokenBucket heartbeats{ 20.0, 10.0 };
+		// Doors and mechanisms (docs/DESIGN.md, "Doors, locks and mechanisms"): reports of a reference's state, a burst of
+		// 32 then 8 a second (a game paces each reference itself: src/game/RefRules.h); uses of a mechanism, 8 then 4 a
+		// second (a player pulls a lever by hand); asks for every kept state again, 2 then one in 5 s (one per load).
+		// A report past its budget is answered "busy" (kRefRefused), and the game reports it again later; an ask past
+		// its budget is owed, and answered from the server's loop once the budget has room.
+		TokenBucket refBudget{ 32.0, 8.0 };
+		TokenBucket actBudget{ 8.0, 4.0 };
+		TokenBucket askBudget{ 2.0, 0.2 };
+		bool        asksOwed = false;
+		std::uint64_t refsDropped = 0;  // past the budget: said once in the log, counted after
+		std::uint64_t actsDropped = 0;
 		bool        toldUnknown = false;
 	};
 
@@ -142,6 +154,10 @@ void Server::Run()
 	// translate theirs, so they must have the session's load order.
 	std::optional<std::uint32_t> sessionHash;
 	std::vector<std::string>     sessionTable;
+	// The session's word on each door's open state and lock (common/RefBook.h), in the table's numbering: a new session
+	// (its first player in) starts it again with the table.
+	RefBook refs;
+	bool    refsFullSaid = false;
 
 	std::random_device random;
 	const auto         sessionId = (std::uint64_t{ random() } << 32) | random();
@@ -170,6 +186,13 @@ void Server::Run()
 		broadcast(Protocol::Encode(Protocol::PlayerLeft{ a_peer.playerId }), true, &a_key);
 		if (a_peer.playerId == hostId) {
 			hostId = 0;
+		}
+	};
+
+	// Every kept door state to one game, the session's word (player id 0), in the order first reported.
+	const auto sendRefs = [&](const PeerKey& a_to) {
+		for (const auto& state : refs.All()) {
+			send(a_to, Protocol::Encode(state, MT::kRemoteRefState), true);
 		}
 	};
 
@@ -225,6 +248,8 @@ void Server::Run()
 		if (!othersIn) {
 			sessionHash = hello->contentHash;
 			sessionTable.clear();  // the first player's load order numbers the new session
+			refs.Clear();          // ... and the doors were numbered by the old one
+			refsFullSaid = false;
 		} else if (otherOrder) {
 			// Not their name, and no player number yet: where they come from (masked) says which joiner it was.
 			log(std::format("server: {} has another load order ({}); its form IDs are translated by plugin name", transports[a_key.first]->Describe(a_key.second),
@@ -270,6 +295,8 @@ void Server::Run()
 				}
 			}
 		}
+		// The session's doors, after the players: what was opened, closed, locked and picked before they came.
+		sendRefs(a_key);
 		broadcast(Protocol::Encode(Protocol::PlayerJoined{ a_peer.playerId, a_peer.name }), true, &a_key);
 		players = countPlayers();
 		log(std::format("server: player {} joined from {}{} ({} in the session)", a_peer.playerId, transports[a_key.first]->Describe(a_key.second),
@@ -314,6 +341,67 @@ void Server::Run()
 					broadcast(Protocol::Encode(Protocol::RemoteLooks{ a_peer.playerId, *a_peer.looks }), true, &a_key);
 				} else {
 					a_peer.looksOwed = true;  // the newest goes once the budget allows
+				}
+			}
+			break;
+		case MT::kRefState:
+			// Passed on to every game, the reporter's too, in the order heard: each applies the last word, so two players
+			// at one door at once end on the same state. One that changes nothing goes back to the reporter alone (its
+			// game counts its reports answered, src/game/RefRules.h). Every report is answered: one not taken goes back
+			// to its reporter alone as kRefRefused, with why and the session's word, so its game neither waits for an echo
+			// that is not coming nor takes its own report for the session's word.
+			if (const auto report = Protocol::DecodeRefState(a_data)) {
+				using Refusal = Protocol::RefRefusal;
+				const auto refuse = [&](Refusal::Reason a_reason) { send(a_key, Protocol::Encode(Refusal::Of(*report, a_reason, refs.Find(report->refId))), true); };
+				if (!a_peer.refBudget.Take(Clock::now())) {
+					if (a_peer.refsDropped++ == 0) {
+						log(std::format("server: player {} reports doors faster than the server passes them on; the rest are answered busy", a_peer.playerId));
+					}
+					refuse(Refusal::kBusy);
+					break;
+				}
+				auto       said = *report;
+				said.playerId = a_peer.playerId;
+				Protocol::RefState out;
+				switch (refs.Report(said, out)) {
+				case RefBook::Take::kNews:
+					broadcast(Protocol::Encode(out, MT::kRemoteRefState), true, nullptr);
+					break;
+				case RefBook::Take::kSame:
+					send(a_key, Protocol::Encode(out, MT::kRemoteRefState), true);
+					break;
+				case RefBook::Take::kFull:
+					if (!std::exchange(refsFullSaid, true)) {
+						log(std::format("server: the session keeps {} doors' states, its most; a new one is not kept or passed on", refs.Size()));
+					}
+					refuse(Refusal::kFull);
+					break;
+				case RefBook::Take::kRefused:
+					refuse(Refusal::kRefused);
+					break;
+				}
+			}
+			break;
+		case MT::kActivate:
+			// Not kept: a use is an event. What it changes in the host's world is the host's save's, and a door it
+			// opens is a door's state as any other.
+			if (const auto use = Protocol::DecodeActivation(a_data); use && use->refId != 0 && !FormIds::IsRuntime(use->refId)) {
+				if (!a_peer.actBudget.Take(Clock::now())) {
+					if (a_peer.actsDropped++ == 0) {
+						log(std::format("server: player {} uses mechanisms faster than the server passes them on; the rest are dropped", a_peer.playerId));
+					}
+					break;
+				}
+				broadcast(Protocol::Encode(Protocol::Activation{ use->refId, a_peer.playerId }, MT::kRemoteActivate), true, &a_key);
+			}
+			break;
+		case MT::kAskRefStates:
+			if (a_data.size() == 1) {
+				if (a_peer.askBudget.Take(Clock::now())) {
+					a_peer.asksOwed = false;
+					sendRefs(a_key);
+				} else {
+					a_peer.asksOwed = true;  // answered from the loop once the budget has room: never dropped
 				}
 			}
 			break;
@@ -371,6 +459,10 @@ void Server::Run()
 			if (peer.joined && peer.looksOwed && peer.looks && peer.looksBudget.Take(now)) {
 				peer.looksOwed = false;
 				broadcast(Protocol::Encode(Protocol::RemoteLooks{ peer.playerId, *peer.looks }), true, &key);
+			}
+			if (peer.joined && peer.asksOwed && peer.askBudget.Take(now)) {
+				peer.asksOwed = false;
+				sendRefs(key);
 			}
 			if (!peer.joined && peer.connectedAt != Clock::time_point::max() && now - peer.connectedAt > options.helloTimeout) {
 				log(std::format("server: dropped {}: no hello", transports[key.first]->Describe(key.second)));

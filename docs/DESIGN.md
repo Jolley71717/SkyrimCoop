@@ -106,9 +106,42 @@ A friend keeps their own save, and nothing of the session goes into it. The sist
 
 Not designed yet (phase 3). The starting rule is the sister project's: the host's game runs every NPC and decides every hit's result; a friend's game reports its hits and shows what the host decided. To settle: melee timing over a connection, blocking and staggers, bows and spells in flight, kill moves, a player's death, friendly fire, levelled enemies when players differ in level.
 
+## Doors, locks and mechanisms
+
+Since protocol 5. Not tested in a game yet; the rig step `doors` is ready for it. The rules, free of the game, are `src/game/RefRules.h`; the game side is `src/game/WorldObjects`; the server's book is `common/RefBook.h`; tests in `tests/RefStateTests.cpp`.
+
+**What is shared, by class.** Each reference is sorted by its base's form type and flags, never by its name or script, so every door, gate, chest and lever of every mod is covered the same way:
+
+| Class | How it is told | What is shared |
+| --- | --- | --- |
+| Door (gates, portcullises, hatches) | a `DOOR` base without a teleport | open or closed, and the lock |
+| Gate built as an activator (portcullises, drawbridges, gates a lever's script raises) | an `ACTI` base, named or not, whose reference has open and closed states (`BGSOpenCloseForm`) | open or closed |
+| Load door | a door with a teleport (it leads to another cell) | the lock only: each player goes through on their own |
+| Automatic door | the door's "automatic" flag | the lock only: it opens for whoever is near it |
+| Container | a `CONT` base | the lock only (what is in it is for later) |
+| Mechanism | an `ACTI` base with a name (levers, pull chains, pillars, buttons, wheels) | a player's use: their stand-in uses it in the other games |
+| Anything else | markers, activators with no open state and no name, pressure plates | nothing: each game's own |
+
+**How a change travels.** The game says what changed in its own events: a door opened or closed (`TESOpenCloseEvent`), a lock changed (`TESLockChangedEvent`: picked, opened with a key, locked or unlocked by a script or the console), our player used something (`TESActivateEvent`). The sinks only queue; the next frame reads the reference and reports what the session doesn't know yet. A report says only the part its change is about: an open or close says the open state, a lock change the lock and its level; the rest of what the reporting game reads is its own save's, and never overrules the host's world (a friend who opens a door that is unlocked in their save does not unlock the host's). As not every kind is known to send the open/close event (an activator a script opens), the open states within 2000 units of our player are also read twice a second, and a change between two reads counts as an event; a reference first read (come near, or loaded) is this game's as it is and says nothing. A change by our player is reported at any distance; one made by anything else (an NPC through a door, a script) only within 2000 units of our player, so two players far apart don't both report the same NPC's door. The server keeps the last word on each reference (up to 16384) and passes each report to every game, the reporter's own included; each game applies the session's word where its own reads otherwise. A game counts its own reports still on their way, so an old echo of its own doesn't undo a newer change of its own. Every report is answered: one the server does not take (past the player's budget, a full book, a report of nothing) goes back to its reporter alone with why and the session's word on it; the game then counts it answered, takes the session's word as what is known, and reports a busy one again a second later. Two players at one door at once end on the same word: whichever the server heard last.
+
+**Lock levels** go as the game's six levels (novice to master, and "needs a key"). A lock the session sets is written at that level with its "leveled" flag cleared, so every game reads the same level whatever its player's level, also where the reference had no lock (one is added) or a leveled one that read no level.
+
+**A friend's use of a mechanism** is made in each other game by the friend's stand-in (`ActivateRef`), so the lever's own script runs there: the gate it moves, the trap it springs. It is refused when the stand-in is not placed, or is more than 1000 units from the mechanism (it is somewhere else in that game), or when the game refuses the activation. Uses are not kept: one made before a player joined is not made again for them; what it changed (a door, a gate, a lock) is. What a use moves is moved by the script in each game, and the user's game reports it too: for 3 seconds after a use is made, words on open states wait and are applied after the script has run, and open states that change in that game without its player's hand are not reported. Otherwise a lever script that flips its gate would find the gate already opened by the word and close it again, and every game would end with it closed.
+
+**Pacing.** Each game sends at most 8 reports for one reference at once and then one every 2 seconds (a door spammed open and shut, a script that loops), the latest held back and sent when due. The server allows each player a burst of 32 reports and 8 a second after that (past it, answered busy), 8 uses and 4 a second, and two asks for every word and one in 5 seconds after that (past it, the ask is answered when the budget allows, never dropped).
+
+**Late joiners and loads.** A game that joins is sent every kept word right after its welcome. A game that loads a save (or starts a new game) asks for every kept word again and applies it: its save holds its own doors as it last saw them, and the session's word wins. A word on a reference not loaded in that game waits (up to 4096) and is applied when it loads, tried again every half second.
+
+**Threads.** The game writes (a lock, an open state, a stand-in's use) are made from the plugin's tick, which until the frame hook is written runs on SKSE's task queue, seen on the task pool's job threads in the world. Each write made off the main thread is counted (`refs`: `offmain=`) and said once in the log; the frame hook moves them to the main thread.
+
+**Not yet:**
+- A mechanism whose script checks the user's inventory (a claw door, a key-only activator) may refuse a friend's stand-in, which carries no claw. The friend's own game opened it; the others' don't follow.
+- The server does not judge whether a reporter could have reached what it reports.
+- The session's book lives as long as the server runs; a session hosted again starts with an empty one.
+
 ## The world
 
-Not designed yet (phase 4). The host's world is the world: containers, items lying about, doors and locks, bodies, harvested and mined things, time and weather. To settle: what a friend who joins late is told, respawning cells, what a friend's save keeps, houses and Hearthfire.
+Not designed yet (phase 4), beyond doors, locks and mechanisms (above). The host's world is the world: containers, items lying about, bodies, harvested and mined things, time and weather. To settle: what a friend who joins late is told, respawning cells, what a friend's save keeps, houses and Hearthfire.
 
 ## Quests
 
@@ -132,6 +165,8 @@ Choices made to keep moving. Each is the obvious option, cheap to change now, an
 | The first player in the session sets the load order. | Only ever the host. |
 | Any load order is let in when both lists are known (protocol 4); a form whose plugin a game lacks is skipped there. | A host option to refuse friends whose mods differ. |
 | Up to 4352 plugin names in a hello (the longest load order, 254 full plugins and 4096 light ones, with one to spare) in at most 480 KB, so a hello is one Steam message (512 KB at most). That holds names of up to 110 bytes on average; a longer list is cut at a whole name, and `Protocol::PluginsFit` lets a game tell its player before it joins. | Send a longer list in parts, if real load orders ever need it. |
+| Doors, locks and mechanisms are shared by class (protocol 5): plain doors their open state and lock, activators with open states their open state, load doors, automatic doors and containers their lock, named activators each use, made again by the user's stand-in. The last report the server hears wins. | The host's game decides every door, as it will every hit. |
+| Pressure plates, and activators with no open state and no name, are each game's own. | Share them too, once traps are designed. |
 | Up to 8 players by protocol, 4 by default; port 7780; ini and log named SkyrimCoop. | Other numbers. |
 | On GitHub, the Windows build runs only for the owner's branch pushes and by hand; pull requests get the Linux unit tests, with a line coverage report (the run's summary, and a comment on pull requests from this repository's branches). | Build the plugin for every pull request once the repository is public and minutes are free. |
 | The Nexus upload workflow is present but switched off: it refuses to run until the mod has a Nexus page and its ids are filled in. | Remove it until then. |
