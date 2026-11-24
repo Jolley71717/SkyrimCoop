@@ -106,9 +106,9 @@ When a candidate has passed the gate and the soak:
 
 ## Nexus Mods
 
-Not in use yet. The mod's page exists (page number 200124) but is unpublished and has no file.
+The mod's page is page number 200124.
 
-The upload API only adds a new version to a file that already exists; it cannot create a page's first file. So, once, by hand: the maintainer uploads the first release's Nexus zip on the page's Manage files screen (as the main file), copies the file's id and the mod's API id from the Files tab's "Advanced" view, puts them in `NEXUS_FILE_ID` and `NEXUS_MOD_ID` at the top of `.github/workflows/nexus-upload.yml` through a pull request, and sets the repository secret `NEXUSMODS_API_KEY`. `NEXUS_MOD_ID` in the file now holds a computed value, `(1704 << 32) | 200124 = 7318624472508` (1704 is Skyrim SE's game id; the same formula gives F4Multiplayer's 4943507467508 from `(1151 << 32) | 109812`): it is the mod's API id, not the page number, and must be checked against the Advanced view after the first upload. From then on, uploads are rare, made only when the maintainer says so, and only through the workflow, never by hand in a browser:
+The upload API only adds a new version to a file that already exists; it cannot create a page's first file. That first file was uploaded once, by hand, on the page's Manage files screen (2026-11-24, a placeholder 0.0.1 while the page was unpublished); its file id and the mod's API id, read from the file's "Advanced" view, are `NEXUS_FILE_ID` and `NEXUS_MOD_ID` at the top of `.github/workflows/nexus-upload.yml`, and the repository secret `NEXUSMODS_API_KEY` is set. From then on, every release whose candidate passed its soak goes to Nexus as well as GitHub, only through the workflow, never by hand in a browser:
 
 ```
 gh workflow run nexus-upload.yml -f tag=vX.Y.Z

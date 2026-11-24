@@ -1,14 +1,12 @@
 # Uploads a release's Nexus zip (the one without the dedicated server) to the mod's main file on Nexus Mods, as its new
-# version. Run by hand only (Actions > Upload to Nexus > Run workflow): Nexus gets settled versions rarely, when the
-# maintainer decides (docs/RELEASING.md). The GitHub release must already carry SkyrimCoop-X.Y.Z-nexus.zip.
+# version. Run by hand only (Actions > Upload to Nexus > Run workflow), for every release whose candidate passed its
+# soak (docs/RELEASING.md). The GitHub release must already carry SkyrimCoop-X.Y.Z-nexus.zip.
 #
-# NOT IN USE YET. The mod's page exists on Nexus Mods (page number 200124, unpublished) but has no file, and the repository
-# secret NEXUSMODS_API_KEY is not set. This action (Nexus-Mods/upload-action, API v3) only adds a new version to a file
-# that already exists: it cannot create a page's first file. So the maintainer uploads the first file by hand on the
-# mod page (Manage files), once, then copies that file's id (Files tab > Advanced, or Manage Files > edit menu) into
-# NEXUS_FILE_ID below and sets the secret. The first step refuses every run until both ids are filled in, except a
-# check_only run with no tag, which only asks Nexus whether it accepts the key. Every upload after the first goes
-# through this workflow. Carried from the sister project (F4Multiplayer).
+# The mod's page is Nexus Mods page 200124. This action (Nexus-Mods/upload-action, API v3) only adds a new version to a
+# file that already exists: it cannot create a page's first file. That first file was uploaded by hand on the page's
+# Manage files screen on 2026-11-24 (a placeholder, version 0.0.1, while the page was unpublished); its id and the mod's
+# API id below were read from that file's "Advanced" view. The repository secret NEXUSMODS_API_KEY is set. Every upload
+# from now on goes through this workflow, never by hand. Carried from the sister project (F4Multiplayer).
 name: Upload to Nexus
 
 on:
@@ -27,13 +25,10 @@ permissions:
   contents: read
 
 env:
-  # The main file's API file id (the mod page's Files tab > Advanced) and the mod's unique API id (for the changelog).
-  # The mod id is the mod's unique API id, not the page number: (game id << 32) | page number. F4Multiplayer's
-  # 4943507467508 is (1151 << 32) | 109812; Skyrim SE's game id is 1704, so page 200124 gives 7318624472508. That value
-  # is computed, not read from Nexus: CHECK IT against the "Advanced" view after the first hand upload, together with
-  # the file id, before the first run. The file id stays empty until the page's first file has been uploaded by hand
-  # (the upload API cannot create it).
-  NEXUS_FILE_ID: ""
+  # The main file's API file id and the mod's unique API id (for the changelog), both read from the main file's
+  # "Advanced" view on the Manage files screen. The mod id is the API id, not the page number:
+  # (game id << 32) | page number = (1704 << 32) | 200124.
+  NEXUS_FILE_ID: "8450994"
   NEXUS_MOD_ID: "7318624472508"
 
 jobs:
