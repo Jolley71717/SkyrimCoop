@@ -242,6 +242,7 @@ namespace Session
 			case Protocol::MessageType::kPlayerJoined:
 				if (const auto msg = Protocol::DecodePlayerJoined(a_data); msg && msg->playerId != playerId) {
 					RemotePlayers::Joined(msg->playerId, msg->name);
+					QuestSync::PlayerJoined(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kPlayerLeft:
@@ -249,6 +250,7 @@ namespace Session
 					RemotePlayers::Left(msg->playerId);
 					WorldClock::Left(msg->playerId);
 					Conversations::Left(msg->playerId);
+					QuestSync::PlayerLeft(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kRemoteState:
