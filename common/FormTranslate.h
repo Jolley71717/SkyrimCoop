@@ -86,6 +86,7 @@ namespace FormTranslate
 		case MT::kSits:
 		case MT::kObjectHolds:
 		case MT::kObjectRests:
+		case MT::kBodies:
 			return true;
 		case MT::kHello:  // a load order is plugin names, not form IDs
 		case MT::kWelcome:
@@ -432,6 +433,12 @@ namespace FormTranslate
 				ctx.Entries(a_msg.rests, [&](Protocol::ObjectRest& a_rest) {
 					return (a_rest.key.kind != Protocol::ObjectKind::kRef || ctx.Key(a_rest.key.id)) && ctx.WholePlace(a_rest.cell, a_rest.worldspace);
 				});
+			});
+			break;
+		// Bodies: an NPC, cell or worldspace the other side lacks leaves the body out (bones are names, no form).
+		case MT::kBodies:
+			detail::Apply<Protocol::Bodies>(a_packet, ctx, Protocol::DecodeBodies, [&](Protocol::Bodies& a_msg) {
+				ctx.Entries(a_msg.bodies, [&](Protocol::Body& a_body) { return ctx.Npc(a_body.key) && ctx.WholePlace(a_body.cell, a_body.worldspace); });
 			});
 			break;
 		default:

@@ -57,7 +57,10 @@ namespace Protocol
 	//    telekinesis, where it was let go of, and where a loose object their player, spell or NPC moved came to rest, so
 	//    it lies in the same place in every game. (15 and 16 are the conversations' and the mechanisms' changes on the
 	//    other line; whichever change lands later renumbers.)
-	inline constexpr std::uint16_t VERSION = 17;
+	// 19: bodies of the dead (kBodies, message type 69): how an NPC's body fell at its death and where its ragdoll's bones
+	//    came to rest, from its runner, so a copy's body falls the same way and lies in the same place. (18 and type 68
+	//    are the quests' ended-quest snapshot on the other line; as with 17: whichever change lands later renumbers.)
+	inline constexpr std::uint16_t VERSION = 19;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -129,7 +132,8 @@ namespace Protocol
 		// 59-64: the conversations' and the mechanisms' (each in its own change).
 		kObjectHolds = 65,     // both ways, on the state channel: the loose object our player holds, in the holder's frame
 		kObjectRests = 66,     // both ways, reliable: let go of, came to rest, picked up (the server names the sender; 0: the session's)
-		kAskObjectRests = 67,  // client -> server, reliable: send me every kept place again (after a load)
+		kAskObjectRests = 67,  // client -> server, reliable: send me every kept place again (after a load), bodies' too
+		kBodies = 69,          // both ways, reliable: a body's fall at its death, its bones at rest (the server names the sender; 0: the session's)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -2368,6 +2372,177 @@ namespace Protocol
 	{
 		return a_data.size() == 1 && a_data[0] == static_cast<std::uint8_t>(MessageType::kAskObjectRests);
 	}
+
+	// ---- bodies of the dead (docs/DESIGN.md, "Bodies") ----
+	// The runner of an NPC says how its body fell at its death (kFall: the pelvis's velocity from the killing blow) and,
+	// once its ragdoll settled, where its bones lie (kRest: each bone named by a hash of its node's name, the skeleton
+	// being the race's and the same in every game). A copy's body falls the same way and is laid the same.
+
+	// At most this many bones of a body (a person's ragdoll has about 15, a dragon's several times that; a body with more is
+	// never sent: a body is laid whole or not at all).
+	inline constexpr std::size_t MAX_BONES = 96;
+	// At most this many bodies in one message.
+	inline constexpr std::size_t MAX_BODIES = 4;
+	// A bone farther than this from its body's place does not hold (a dragon's wings reach far, a body never this far).
+	inline constexpr float MAX_BONE_REACH = 4096.0f;
+
+	enum class BodyKind : std::uint8_t
+	{
+		kFall = 0,  // it died now and falls with this velocity (no bones)
+		kRest = 1,  // its ragdoll came to rest: its bones
+	};
+	inline constexpr std::uint8_t BODY_KIND_COUNT = 2;
+
+	struct Bone
+	{
+		std::uint32_t name = 0;  // BodyRules::NameHash of the bone's node name
+		float         x = 0, y = 0, z = 0;
+		Quat          rot;
+		bool operator==(const Bone&) const = default;
+	};
+
+	struct Body
+	{
+		NpcKey            key;
+		BodyKind          kind = BodyKind::kRest;
+		std::uint32_t     cell = 0;        // its interior cell, or 0 outside
+		std::uint32_t     worldspace = 0;  // its worldspace outside, or 0
+		float             x = 0, y = 0, z = 0;  // the reference's place
+		float             vx = 0, vy = 0, vz = 0;  // kFall only
+		std::vector<Bone> bones;                // kRest only
+		bool operator==(const Body&) const = default;
+	};
+
+	struct Bodies
+	{
+		std::uint32_t     sender = 0;
+		bool              full = false;
+		std::vector<Body> bodies;
+		bool operator==(const Bodies&) const = default;
+	};
+
+	[[nodiscard]] inline bool BoneHolds(const Bone& a_bone, float a_x, float a_y, float a_z)
+	{
+		if (a_bone.name == 0 || !InWorld(a_bone.x) || !InWorld(a_bone.y) || !InWorld(a_bone.z) || !QuatHolds(a_bone.rot)) {
+			return false;
+		}
+		const auto dx = a_bone.x - a_x;
+		const auto dy = a_bone.y - a_y;
+		const auto dz = a_bone.z - a_z;
+		return dx * dx + dy * dy + dz * dz <= MAX_BONE_REACH * MAX_BONE_REACH;
+	}
+
+	[[nodiscard]] inline bool BodyHolds(const Body& a_body)
+	{
+		if (a_body.key.id == 0 || static_cast<std::uint8_t>(a_body.kind) >= BODY_KIND_COUNT) {
+			return false;
+		}
+		if (!InWorld(a_body.x) || !InWorld(a_body.y) || !InWorld(a_body.z)) {
+			return false;
+		}
+		if (!std::isfinite(a_body.vx) || !std::isfinite(a_body.vy) || !std::isfinite(a_body.vz)) {
+			return false;
+		}
+		const auto speed2 = a_body.vx * a_body.vx + a_body.vy * a_body.vy + a_body.vz * a_body.vz;
+		if (a_body.kind == BodyKind::kFall) {
+			return speed2 <= MAX_OBJECT_SPEED * MAX_OBJECT_SPEED && a_body.bones.empty();
+		}
+		if (speed2 != 0.0f || a_body.bones.empty() || a_body.bones.size() > MAX_BONES) {
+			return false;
+		}
+		for (const auto& bone : a_body.bones) {
+			if (!BoneHolds(bone, a_body.x, a_body.y, a_body.z)) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	inline std::vector<std::uint8_t> Encode(const Bodies& a_msg)
+	{
+		Writer     w{ MessageType::kBodies };
+		const auto count = (std::min)(a_msg.bodies.size(), MAX_BODIES);
+		w.U32(a_msg.sender);
+		w.U8(a_msg.full ? 1 : 0);
+		w.U8(static_cast<std::uint8_t>(count));
+		for (std::size_t i = 0; i < count; ++i) {
+			const auto& body = a_msg.bodies[i];
+			const bool  falls = body.kind == BodyKind::kFall;
+			WriteKey(w, body.key);
+			w.U8(static_cast<std::uint8_t>(body.kind));
+			w.U32(body.cell);
+			w.U32(body.worldspace);
+			for (const auto v : { body.x, body.y, body.z }) {
+				w.F32(v);
+			}
+			for (const auto v : { body.vx, body.vy, body.vz }) {
+				w.F32(falls ? v : 0.0f);
+			}
+			const auto bones = falls ? 0 : (std::min)(body.bones.size(), MAX_BONES);
+			w.U8(static_cast<std::uint8_t>(bones));
+			for (std::size_t b = 0; b < bones; ++b) {
+				const auto& bone = body.bones[b];
+				w.U32(bone.name);
+				for (const auto v : { bone.x, bone.y, bone.z }) {
+					w.F32(v);
+				}
+				WriteQuat(w, bone.rot);
+			}
+		}
+		return w.Data();
+	}
+
+	inline std::optional<Bodies> DecodeBodies(std::span<const std::uint8_t> a_data)
+	{
+		Reader r{ a_data };
+		r.U8();
+		Bodies msg;
+		msg.sender = r.U32();
+		const auto full = r.U8();
+		const auto count = r.U8();
+		if (!r.Ok() || full > 1 || count > MAX_BODIES) {
+			return std::nullopt;
+		}
+		msg.full = full == 1;
+		msg.bodies.reserve(count);
+		for (std::uint8_t i = 0; i < count && r.Ok(); ++i) {
+			Body body;
+			body.key = ReadKey(r);
+			body.kind = static_cast<BodyKind>(r.U8());
+			body.cell = r.U32();
+			body.worldspace = r.U32();
+			for (auto* v : { &body.x, &body.y, &body.z, &body.vx, &body.vy, &body.vz }) {
+				*v = r.F32();
+			}
+			const auto bones = r.U8();
+			if (!r.Ok() || bones > MAX_BONES) {
+				return std::nullopt;
+			}
+			body.bones.reserve(bones);
+			for (std::uint8_t b = 0; b < bones && r.Ok(); ++b) {
+				Bone bone;
+				bone.name = r.U32();
+				for (auto* v : { &bone.x, &bone.y, &bone.z }) {
+					*v = r.F32();
+				}
+				bone.rot = ReadQuat(r);
+				body.bones.push_back(bone);
+			}
+			if (r.Ok() && !BodyHolds(body)) {
+				return std::nullopt;
+			}
+			msg.bodies.push_back(std::move(body));
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	inline constexpr std::size_t BONE_BYTES = 4 + 3 * 4 + 4 * 4;
+	inline constexpr std::size_t BODY_BYTES = 8 + 1 + 4 + 4 + 3 * 4 + 3 * 4 + 1;  // and its bones
+	inline constexpr std::size_t MAX_BODIES_SIZE = 1 + 4 + 1 + 1 + MAX_BODIES * (BODY_BYTES + MAX_BONES * BONE_BYTES);
+	static_assert(MAX_BONES <= 0xFF && MAX_BODIES <= 0xFF && MAX_BODIES_SIZE <= 16384, "a message of bodies stays small");
 
 	inline void WritePlayerActions(Writer& a_writer, const std::vector<PlayerAction>& a_actions)
 	{

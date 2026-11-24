@@ -8,6 +8,7 @@
 #include "Protocol.h"
 #include "RuntimeSupport.h"
 #include "Text.h"
+#include "game/Bodies.h"
 #include "game/Furniture.h"
 #include "game/LooseObjects.h"
 #include "game/GameThread.h"
@@ -218,6 +219,7 @@ namespace
 			Riding::ForgetWorld();
 			Furniture::ForgetWorld();
 			LooseObjects::ForgetWorld();
+			Bodies::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
@@ -233,6 +235,7 @@ namespace
 			Riding::ForgetWorld();
 			Furniture::ForgetWorld();
 			LooseObjects::ForgetWorld();
+			Bodies::ForgetWorld();
 			Shots::ForgetWorld();
 			NpcSync::ForgetWorld();
 			RemotePlayers::ForgetStandIns();
@@ -280,6 +283,7 @@ namespace
 		Riding::ForgetWorld();
 		Furniture::ForgetWorld();
 		LooseObjects::ForgetWorld();
+		Bodies::ForgetWorld();
 		Shots::ForgetWorld();
 		NpcSync::ForgetWorld();
 		RemotePlayers::ForgetStandIns();
