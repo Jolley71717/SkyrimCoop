@@ -221,6 +221,7 @@ namespace
 			// Which save is loaded: the line a report of "an old save" is read by.
 			logs::info("Load: about to load \"{}\"", MessageText(a_msg));
 			RemotePlayers::ForgetStandIns();  // the load takes the world they stand in; their players stay
+			QuestSync::BeforeLoad();          // no quest alias record is left rewritten for a run into the load
 			break;
 		case SKSE::MessagingInterface::kPostLoadGame:
 			// data is not a pointer here: it is whether the load worked.
@@ -261,12 +262,14 @@ namespace
 	// The co-save: the list of stand-ins taken out of the world for the save (RemotePlayers), so a load can remove any
 	// that the save brought back, and the loot ledger (LootSync): which of the session's moves of loot this world holds,
 	// and the ones still waiting for their holder; and the dropped items' record (DropSync): which of the session's drops
-	// left this world and which it took in, and the copies taken out for the save. Nothing else of a session is kept.
+	// left this world and which it took in, and the copies taken out for the save; and the radiant jobs that ran for the
+	// session's runs (QuestSync), so a load stops one no run claims. Nothing else of a session is kept.
 	void OnSave(SKSE::SerializationInterface* a_intf)
 	{
 		RemotePlayers::WriteCoSave(a_intf);
 		LootSync::WriteCoSave(a_intf);
 		DropSync::WriteCoSave(a_intf);
+		QuestSync::WriteCoSave(a_intf);
 	}
 
 	void OnLoad(SKSE::SerializationInterface* a_intf)
@@ -281,6 +284,8 @@ namespace
 				LootSync::ReadCoSave(a_intf, version, length);
 			} else if (type == DropSync::COSAVE_DROPS) {
 				DropSync::ReadCoSave(a_intf, version, length);
+			} else if (type == QuestSync::COSAVE_RUNS) {
+				QuestSync::ReadCoSave(a_intf, version, length);
 			} else {
 				logs::warn("Co-save: a record of a type this version does not know ({:08X}); skipped", type);
 			}
@@ -292,6 +297,7 @@ namespace
 		RemotePlayers::ForgetStandIns();
 		LootSync::RevertCoSave();
 		DropSync::RevertCoSave();
+		QuestSync::RevertCoSave();
 	}
 
 	// False when the plugin must not load into this game.

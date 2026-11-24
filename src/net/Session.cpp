@@ -284,6 +284,11 @@ namespace Session
 					QuestSync::Answered(*msg);
 				}
 				break;
+			case Protocol::MessageType::kRemoteQuestRun:
+				if (const auto msg = Protocol::DecodeQuestRun(a_data); msg && welcomed) {
+					QuestSync::HeardRun(*msg);
+				}
+				break;
 			case Protocol::MessageType::kQuestReset:
 				if (const auto msg = Protocol::DecodeQuestReset(a_data, true); msg && welcomed && msg->playerId != playerId) {
 					QuestSync::HostReset(msg->playerId);

@@ -30,6 +30,8 @@
 //   nothing of: a door of a plugin some game lacks is that game's own;
 // - an entry of a quest batch whose quest has no ID is left out (a mod's quest some game lacks is that game's own); a
 //   batch left with no entry is not sent at all (kDrop), as it could not be read;
+// - a quest's run (kQuestRun, kRemoteQuestRun) whose quest has no ID is not sent (kDrop); a reference or a location one
+//   of its aliases holds that has none becomes kUnknown (no form: that game keeps its own pick in that alias);
 // - a move of loot the session passes on (kRemoteLoot) whose holder or item has no ID is left out (a mod's chest or
 //   item some game lacks is that game's own), a batch left with none dropped; in a game's own moves going out (kLoot) and
 //   in the answers to them (kLootAnswer) each becomes 0 instead, so every move is still answered once (the server
@@ -98,6 +100,8 @@ namespace FormTranslate
 		case MT::kReportDrop:
 		case MT::kDropPlaced:
 		case MT::kDropList:
+		case MT::kQuestRun:
+		case MT::kRemoteQuestRun:
 			return true;
 		case MT::kClaimDrop:  // drop numbers, no forms
 		case MT::kDropGone:
@@ -227,6 +231,36 @@ namespace FormTranslate
 			if (a_ctx.changed) {
 				a_ctx.out.kind = Result::Kind::kChanged;
 				a_ctx.out.packet = Protocol::Encode(static_cast<const T&>(*msg), a_type);
+			}
+		}
+
+		// A quest's run, written back with its own type: its quest, or kDrop when the quest has no ID on the other side (a
+		// mod's quest that game lacks is its own); each fill's reference or location, or kUnknown when it has none there
+		// (that game's own pick stays in that alias).
+		inline void ApplyQuestRun(std::span<const std::uint8_t> a_packet, Context& a_ctx, Protocol::MessageType a_type)
+		{
+			auto msg = Protocol::DecodeQuestRun(a_packet);
+			if (!msg) {
+				return;
+			}
+			if (!a_ctx.Key(msg->questId)) {
+				a_ctx.out.kind = Result::Kind::kDrop;
+				return;
+			}
+			for (auto& fill : msg->fills) {
+				if (fill.kind != Protocol::AliasFill::kRef && fill.kind != Protocol::AliasFill::kLoc) {
+					continue;
+				}
+				if (!a_ctx.Key(fill.refId)) {
+					fill.refId = 0;
+					fill.kind = Protocol::AliasFill::kUnknown;
+					++a_ctx.out.fields;
+					a_ctx.changed = true;
+				}
+			}
+			if (a_ctx.changed) {
+				a_ctx.out.kind = Result::Kind::kChanged;
+				a_ctx.out.packet = Protocol::Encode(*msg, a_type);
 			}
 		}
 
@@ -432,6 +466,10 @@ namespace FormTranslate
 			break;
 		case MT::kDropList:
 			detail::ApplyDropList(a_packet, ctx);
+			break;
+		case MT::kQuestRun:
+		case MT::kRemoteQuestRun:
+			detail::ApplyQuestRun(a_packet, ctx, *type);
 			break;
 		default:
 			break;

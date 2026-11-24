@@ -51,7 +51,13 @@ namespace Protocol
 	//    each with its own copy, until one player takes it; the server grants each item to the first who asks, and makes
 	//    the session agree with what each world holds after its welcome and every load. Written on top of 10 (loot) beside
 	//    10 (faces, another branch): whichever is merged later renumbers; the messages (49-54) do not clash.
-	inline constexpr std::uint16_t VERSION = 11;
+	// 12: quest runs and their aliases (QuestRun, docs/DESIGN.md "Quests", "Runs and aliases"): the host's game says each
+	//    shared quest and radiant job it starts, the references and locations its aliases hold, and a radiant job's stop;
+	//    a friend's game starts the quest with those in its aliases (or forces them into a quest running there), so
+	//    every game does the same job, and a radiant job begun again is a new run whose old stages are not its own.
+	//    Written on top of 11 (drops) beside 11 (swimming, another branch): whichever is merged later renumbers; the
+	//    messages (55, 56) do not clash.
+	inline constexpr std::uint16_t VERSION = 12;
 	inline constexpr std::uint16_t DEFAULT_PORT = 7780;
 	// A name's bytes on the wire: Name::MAX_CHARACTERS characters of UTF-8, up to four bytes each (common/Name.h).
 	inline constexpr std::size_t MAX_NAME_LENGTH = 128;
@@ -125,6 +131,8 @@ namespace Protocol
 		kDropPlaced = 52,      // server -> the dropper alone (an offer, or a refusal: no number), or everyone (it lies there now)
 		kDropGone = 53,        // server -> everyone: a dropped item was taken (by takerId: that game takes it) or is back with its owner
 		kDropList = 54,        // server -> one game: every item lying in the session now (the answer to its kDropRecord)
+		kQuestRun = 55,        // host -> server, reliable: a quest started (a run), its aliases' references read, or a radiant job stopped
+		kRemoteQuestRun = 56,  // server -> the others: the host's word (and every run that is on, to a joiner and to one that loaded)
 	};
 
 	// A coordinate a game can hold: finite and within the range a float keeps whole units in.
@@ -446,6 +454,53 @@ namespace Protocol
 		std::uint32_t playerId = 0;
 		bool operator==(const QuestReset&) const = default;
 	};
+
+	// One alias of a quest, a reference alias or a location alias, as the host's game holds it filled (docs/DESIGN.md,
+	// "Quests", "Runs and aliases"). aliasId is the quest's own numbering (the same in every game that has the quest);
+	// refId is a form in the session's numbering, and only with kRef (a reference) or kLoc (a location).
+	struct AliasFill
+	{
+		enum Kind : std::uint8_t
+		{
+			kEmpty = 0,    // the alias holds nothing (an optional one the quest did not fill, or one a script cleared)
+			kRef = 1,      // a reference alias that holds refId, a reference of the load order
+			kRuntime = 2,  // it holds a form the host's game made as it ran (a created alias's actor): no other game has it
+			kUnknown = 3,  // it holds a form of a plugin the reading game lacks (FormTranslate.h), or one the host's game could
+			               // not read (a location while the engine's layout is not confirmed there): that game's own pick stays
+			kLoc = 4,      // a location alias that holds refId, a location of the load order
+		};
+		static constexpr std::uint8_t KIND_MAX = kLoc;
+
+		std::uint32_t aliasId = 0;
+		std::uint32_t refId = 0;
+		std::uint8_t  kind = kEmpty;
+		bool operator==(const AliasFill&) const = default;
+	};
+
+	// A run of a quest: the host's game started a shared quest or a radiant job (a run, numbered by the host's game, never
+	// twice in its session), read the references its aliases hold (kFilled, with them; again whenever they change), or
+	// stopped a radiant job (kStopped). kQuestRun from the host (playerId 0), kRemoteQuestRun from the server (the host's
+	// player id; 0 for the session's word sent again: to a joiner, or after a load).
+	struct QuestRun
+	{
+		enum Flags : std::uint8_t
+		{
+			kFresh = 1 << 0,    // a radiant job begun (again): the quest's stages of an earlier run are not this run's
+			kFilled = 1 << 1,   // fills holds the references the quest's reference aliases hold now
+			kStopped = 1 << 2,  // the radiant job stopped: the run is over (its stages go with it)
+		};
+		static constexpr std::uint8_t FLAGS_ALL = kFresh | kFilled | kStopped;
+
+		std::uint32_t          playerId = 0;
+		std::uint32_t          questId = 0;
+		std::uint32_t          run = 0;
+		std::uint8_t           flags = 0;
+		std::vector<AliasFill> fills;  // with kFilled only, by alias id, at most MAX_ALIAS_FILLS
+		bool operator==(const QuestRun&) const = default;
+	};
+	// The most aliases a run names (a quest has a few dozen at most; the radiant trackers a few hundred, and those are
+	// untyped, never shared): past it the rest are each game's own picks.
+	inline constexpr std::size_t MAX_ALIAS_FILLS = 256;
 
 	// A game's clock and weather (kClock, playerId 0; kRemoteClock, the clock owner's player id). Its forms are the
 	// worldspace the sender stands in outside (0: inside, or a place the reader's game lacks) and the weather there (0:
@@ -1368,6 +1423,76 @@ namespace Protocol
 		QuestReset msg;
 		if (a_fromServer) {
 			msg.playerId = r.U32();
+		}
+		if (!r.AtEnd()) {
+			return std::nullopt;
+		}
+		return msg;
+	}
+
+	// kQuestRun (no player id: the server knows whose it is) or kRemoteQuestRun (the host's player id first): questId,
+	// run, flags, then with kFilled a count (0 to MAX_ALIAS_FILLS) and each fill: aliasId, refId, kind. Without kFilled no
+	// fills are written. None for no quest, run 0, a flag not known, kFilled with kStopped, a kind not known, a form with
+	// a kind that names none (or none with kRef or kLoc), or a count past MAX_ALIAS_FILLS. Encode writes at most
+	// MAX_ALIAS_FILLS fills.
+	inline std::vector<std::uint8_t> Encode(const QuestRun& a_msg, MessageType a_type)
+	{
+		Writer w{ a_type };
+		if (a_type == MessageType::kRemoteQuestRun) {
+			w.U32(a_msg.playerId);
+		}
+		w.U32(a_msg.questId);
+		w.U32(a_msg.run);
+		w.U8(a_msg.flags);
+		if ((a_msg.flags & QuestRun::kFilled) != 0) {
+			const auto count = (std::min)(a_msg.fills.size(), MAX_ALIAS_FILLS);
+			w.U16(static_cast<std::uint16_t>(count));
+			for (std::size_t i = 0; i < count; ++i) {
+				const auto& f = a_msg.fills[i];
+				w.U32(f.aliasId);
+				w.U32(f.refId);
+				w.U8(f.kind);
+			}
+		}
+		return w.Data();
+	}
+	inline std::vector<std::uint8_t> Encode(const QuestRun& a_msg) { return Encode(a_msg, MessageType::kQuestRun); }
+
+	inline std::optional<QuestRun> DecodeQuestRun(std::span<const std::uint8_t> a_data)
+	{
+		const auto type = PeekType(a_data);
+		if (type != MessageType::kQuestRun && type != MessageType::kRemoteQuestRun) {
+			return std::nullopt;
+		}
+		Reader r{ a_data };
+		r.U8();
+		QuestRun msg;
+		if (type == MessageType::kRemoteQuestRun) {
+			msg.playerId = r.U32();
+		}
+		msg.questId = r.U32();
+		msg.run = r.U32();
+		msg.flags = r.U8();
+		if (!r.Ok() || msg.questId == 0 || msg.run == 0 || (msg.flags & ~QuestRun::FLAGS_ALL) != 0 ||
+			((msg.flags & QuestRun::kFilled) != 0 && (msg.flags & QuestRun::kStopped) != 0)) {
+			return std::nullopt;
+		}
+		if ((msg.flags & QuestRun::kFilled) != 0) {
+			const auto count = r.U16();
+			if (!r.Ok() || count > MAX_ALIAS_FILLS) {
+				return std::nullopt;
+			}
+			msg.fills.reserve(count);
+			for (std::uint16_t i = 0; i < count; ++i) {
+				AliasFill f;
+				f.aliasId = r.U32();
+				f.refId = r.U32();
+				f.kind = r.U8();
+				if (!r.Ok() || f.kind > AliasFill::KIND_MAX || (f.kind == AliasFill::kRef || f.kind == AliasFill::kLoc) != (f.refId != 0)) {
+					return std::nullopt;
+				}
+				msg.fills.push_back(f);
+			}
 		}
 		if (!r.AtEnd()) {
 			return std::nullopt;

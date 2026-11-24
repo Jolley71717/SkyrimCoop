@@ -6,6 +6,7 @@
 #include "LootLog.h"
 #include "Name.h"
 #include "QuestBook.h"
+#include "QuestRuns.h"
 #include "Redact.h"
 #include "RefBook.h"
 #include "Text.h"
@@ -65,6 +66,12 @@ namespace
 		TokenBucket questAskBudget{ 2.0, 0.2 };
 		bool        questAsksOwed = false;
 		std::uint64_t questsDropped = 0;
+		// Quest runs (docs/DESIGN.md, "Quests", "Runs and aliases"): the host's game alone says them, one per quest
+		// started, a few with its snapshot, and again when an alias changes; past a burst of 512 then 64 a second one is
+		// dropped (said once, counted): a game saying more is broken, not busy.
+		TokenBucket runBudget{ 512.0, 64.0 };
+		std::uint64_t runsDropped = 0;
+		bool          toldNotRunHost = false;
 		// The clock (docs/DESIGN.md, "Time and weather"): every game says its own every 5 s and on a change; only the
 		// clock owner's is passed on, a burst of 4 then one a second. Past the budget the newest is kept and owed, as looks.
 		Clock::time_point joinedAt{};
@@ -196,6 +203,10 @@ void Server::Run()
 	// session, and cleared when the host's game says its world is new (kQuestReset).
 	QuestBook quests;
 	bool      questsFullSaid = false;
+	// ... and the runs of its quests (common/QuestRuns.h): the host's word on each quest its game started, the
+	// references in its aliases, and the radiant jobs stopped. Kept and cleared with the quests.
+	QuestRuns questRuns;
+	bool      questRunsFullSaid = false;
 	// The session's clock: the clock owner's last report, kept for whoever joins (a new session starts with none).
 	std::optional<Protocol::ClockState> sessionClock;
 
@@ -270,8 +281,12 @@ void Server::Run()
 		}
 	};
 
-	// Every kept quest entry to one game, the session's word (player id 0), in the book's order.
+	// Every run that is on, then every kept quest entry to one game, the session's word (player id 0), in the books'
+	// order: the runs first, so a game starts a quest with the host's references in its aliases before its stages.
 	const auto sendQuests = [&](const PeerKey& a_to) {
+		for (const auto& run : questRuns.Live()) {
+			send(a_to, Protocol::Encode(run, MT::kRemoteQuestRun), true);
+		}
 		for (const auto& packet : Protocol::Batches(quests.All(), MT::kRemoteQuests, 0)) {
 			send(a_to, packet, true);
 		}
@@ -374,6 +389,8 @@ void Server::Run()
 			refsFullSaid = false;
 			quests.Clear();        // ... and the quests
 			questsFullSaid = false;
+			questRuns.Clear();     // ... and their runs
+			questRunsFullSaid = false;
 			sessionClock.reset();  // ... and its clock was another world's
 			loot.Restart((std::uint64_t{ random() } << 32) | random());  // ... and its loot, under a new log id
 			lootFullSaid = false;
@@ -560,6 +577,12 @@ void Server::Run()
 					for (const auto& e : batch->entries) {
 						E out;
 						auto answer = e;
+						if (questRuns.Stopped(e.questId)) {
+							// a radiant job whose run is over: a word from that run must not start it again anywhere
+							answer.value = E::kRefused;
+							answers.push_back(answer);
+							continue;
+						}
 						switch (quests.Report(e, out)) {
 						case QuestBook::Take::kNews:
 							news.push_back(out);
@@ -610,7 +633,39 @@ void Server::Run()
 				}
 				quests.Clear();
 				questsFullSaid = false;
+				questRuns.Clear();
+				questRunsFullSaid = false;
 				broadcast(Protocol::Encode(Protocol::QuestReset{ a_peer.playerId }, true), true, &a_key);
+			}
+			break;
+		case MT::kQuestRun:
+			// The host's game started a quest, read its aliases or stopped a radiant job: kept, and passed on to the others
+			// when new. Only the host's game says runs: a friend's quests started there are its own picks.
+			if (auto run = Protocol::DecodeQuestRun(a_data)) {
+				if (a_peer.playerId != hostId || hostId == 0) {
+					if (!std::exchange(a_peer.toldNotRunHost, true)) {
+						log(std::format("server: player {} is not the host: its quest runs are not passed on", a_peer.playerId));
+					}
+					break;
+				}
+				if (!a_peer.runBudget.Take(Clock::now())) {
+					if (a_peer.runsDropped++ == 0) {
+						log(std::format("server: player {} says quest runs faster than the server passes them on; the rest are dropped", a_peer.playerId));
+					}
+					break;
+				}
+				const auto result = questRuns.Report(*run);
+				if (result.take == QuestRuns::Take::kFull && !std::exchange(questRunsFullSaid, true)) {
+					log(std::format("server: the session keeps {} quests' runs, its most; a new one is not kept or passed on", questRuns.Quests()));
+				}
+				if (result.take != QuestRuns::Take::kNews) {
+					break;
+				}
+				if (result.forget) {
+					quests.Forget(run->questId);  // a radiant job begun again or stopped: what the session had of it was another run's
+				}
+				run->playerId = a_peer.playerId;
+				broadcast(Protocol::Encode(*run, MT::kRemoteQuestRun), true, &a_key);
 			}
 			break;
 		case MT::kClock:
