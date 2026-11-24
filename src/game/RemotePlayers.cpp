@@ -15,6 +15,7 @@
 #include "game/Party.h"
 #include "game/PeaceRules.h"
 #include "game/Retire.h"
+#include "game/SpaceRules.h"
 #include "game/Riding.h"
 #include "game/SpellRules.h"
 #include "game/StandInPeace.h"
@@ -31,10 +32,6 @@ namespace RemotePlayers
 	{
 		using Clock = std::chrono::steady_clock;
 
-		// A stand-in is placed once its friend is this near (game units, about two exterior cells), and taken away past
-		// the second: a stand-in in a cell this game has not loaded would stand on nothing.
-		constexpr float SHOW_WITHIN = 8000.0f;
-		constexpr float HIDE_BEYOND = 10000.0f;
 		// After a stand-in is taken away for a save or by its looks changing, the next is placed no sooner than this.
 		constexpr auto RESPAWN_AFTER = 250ms;
 		// A friend whose race this game lacks (a race mod only they have: their looks name race 0, FormTranslate.h) is
@@ -87,6 +84,13 @@ namespace RemotePlayers
 			Clock::time_point placedAt{};
 			std::uint32_t     placed = 0;
 			std::string       tagShown;  // the name the stand-in shows now: its friend's, with their health when hurt (Party::Tag)
+			// Its friend's status has said travelling since (none: it doesn't), whether that ran past SpaceRules::TRAVEL_HIDES_FOR,
+			// the stand-in's 3D watched while it should be shown, and when it is next checked to be in the cell under it.
+			std::optional<Clock::time_point> travelSince;
+			bool                             travelCapped = false;
+			SpaceRules::Drawn                drawnWatch;
+			Clock::time_point                nextCellCheck{};
+			SpaceRules::Why                  why = SpaceRules::Why::kNoState;  // the last judgement (`standins`)
 
 			Gait::Shown   shown;  // under lock
 			std::uint64_t drawn = 0;
@@ -245,6 +249,12 @@ namespace RemotePlayers
 		std::vector<Taken>      takenForSave;
 		std::vector<Taken>      namedByLoad;
 		bool                    hooked = false;         // the Character update is ours: without it, no stand-in is placed
+		// Stand-ins taken away because their friend's status said travelling, statuses that said it past
+		// SpaceRules::TRAVEL_HIDES_FOR, stand-ins moved into the cell under them, and ones taken away with no 3D (main thread).
+		std::uint64_t travelTaken = 0;
+		std::uint64_t travelCapped = 0;
+		std::uint64_t recelled = 0;
+		std::uint64_t no3dTaken = 0;
 		bool                    placedThisRun = false;  // a stand-in was placed since the game started
 		bool                    coSaveRecord = false;   // the loaded save's co-save has a stand-ins record
 
@@ -1012,6 +1022,7 @@ namespace RemotePlayers
 			a_remote.faceShown = 0;
 			a_remote.faceTried = 0;
 			a_remote.watch = {};
+			a_remote.drawnWatch.Reset();
 			a_remote.placeAfter = Clock::now() + RESPAWN_AFTER;
 		}
 
@@ -1025,6 +1036,34 @@ namespace RemotePlayers
 			}
 			a_actor->SetDisplayName(tag, true);
 			a_remote.tagShown = std::move(tag);
+		}
+
+		// The engine's move of a reference into a cell at a spot (what the console's and Papyrus' MoveTo end in; CommonLibSSE-NG keeps
+		// it private, so it is called through the same address): no target, so the reference keeps its own spot and angle.
+		void MoveInto(RE::TESObjectREFR* a_ref, RE::TESObjectCELL* a_cell, RE::TESWorldSpace* a_world, const RE::NiPoint3& a_position, const RE::NiPoint3& a_angle)
+		{
+			using func_t = void(RE::TESObjectREFR*, const RE::ObjectRefHandle&, RE::TESObjectCELL*, RE::TESWorldSpace*, const RE::NiPoint3&, const RE::NiPoint3&);
+			static REL::Relocation<func_t> func{ RELOCATION_ID(56227, 56626) };
+			func(a_ref, RE::ObjectRefHandle{}, a_cell, a_world, a_position, a_angle);
+		}
+
+		// A stand-in outside moved into the cell under it when that is another the game has loaded (SpaceRules::Recell): moved
+		// by its position alone it would stay in the cell it was placed in, and go when the game lets that cell go.
+		void KeepInCell(std::uint32_t a_id, RE::Actor* a_actor)
+		{
+			const auto parent = a_actor->GetParentCell();
+			const auto tes = RE::TES::GetSingleton();
+			if (!parent || !tes) {
+				return;
+			}
+			const auto at = a_actor->GetPosition();
+			const auto under = parent->IsInteriorCell() ? nullptr : tes->GetCell(at);
+			if (!SpaceRules::Recell(parent->IsInteriorCell(), parent->GetFormID(), under ? under->GetFormID() : 0, under && under->IsAttached())) {
+				return;
+			}
+			MoveInto(a_actor, under, a_actor->GetWorldspace(), at, a_actor->GetAngle());
+			++recelled;
+			logs::info("Players: player {}'s stand-in moved from cell {:08X} into {:08X}, the one under it", a_id, parent->GetFormID(), under->GetFormID());
 		}
 
 		bool SameSpace(const Protocol::PlayerState& a_a, const Protocol::PlayerState& a_b)
@@ -1576,10 +1615,33 @@ namespace RemotePlayers
 				TakeAway(id, remote, "gone");
 				continue;
 			}
-			const bool wanted = here && sample && remote.looks && SameSpace(*here, sample->state) && Distance(*here, sample->state) < (actor ? HIDE_BEYOND : SHOW_WITHIN);
-			if (!wanted) {
+			// Whether it is wanted (SpaceRules::Judge): its friend's status taking them through a door, a fast travel or a load
+			// takes it away at once, before their first state from the other side.
+			const auto status = Party::StatusOf(id);
+			const bool travelling = status && (status->flags & Protocol::kStatusTravelling) != 0;
+			if (!travelling) {
+				remote.travelSince.reset();
+				remote.travelCapped = false;
+			} else if (!remote.travelSince) {
+				remote.travelSince = now;
+			} else if (!remote.travelCapped && now - *remote.travelSince >= SpaceRules::TRAVEL_HIDES_FOR) {
+				remote.travelCapped = true;
+				++travelCapped;
+				logs::warn("Players: player {}'s status has said travelling for {} s: their states say where they are from now on", id,
+					std::chrono::duration_cast<std::chrono::seconds>(SpaceRules::TRAVEL_HIDES_FOR).count());
+			}
+			const SpaceRules::Seen seen{ .hereInWorld = here.has_value(),
+				.haveState = sample.has_value(),
+				.haveLooks = remote.looks.has_value(),
+				.sameSpace = here && sample && SameSpace(*here, sample->state),
+				.distance = here && sample ? Distance(*here, sample->state) : 0.0f,
+				.placed = actor != nullptr,
+				.travellingFor = remote.travelSince ? std::optional<Clock::duration>{ now - *remote.travelSince } : std::nullopt };
+			remote.why = SpaceRules::Judge(seen);
+			if (remote.why != SpaceRules::Why::kShown) {
 				if (actor) {
-					TakeAway(id, remote, !here ? "this game left the world" : !sample ? "no recent state" : "elsewhere");
+					travelTaken += remote.why == SpaceRules::Why::kTravelling ? 1 : 0;
+					TakeAway(id, remote, SpaceRules::WhyName(remote.why));
 				}
 				continue;
 			}
@@ -1592,6 +1654,16 @@ namespace RemotePlayers
 			}
 			if (FaceStep(id, remote, actor.get(), now)) {
 				continue;  // placed again with the face it should show
+			}
+			if (remote.drawnWatch.Tick(actor->Is3DLoaded(), now)) {
+				// In the world but drawn nowhere (its cell let go): placed again where we are.
+				++no3dTaken;
+				TakeAway(id, remote, "no 3D");
+				continue;
+			}
+			if (now >= remote.nextCellCheck) {
+				remote.nextCellCheck = now + SpaceRules::CELL_CHECK_EVERY;
+				KeepInCell(id, actor.get());
 			}
 			if (!remote.dressed) {
 				Dress(id, remote, actor.get());
@@ -1972,8 +2044,9 @@ namespace RemotePlayers
 			disabled += grave.disabledAt && !grave.deleted ? 1 : 0;
 			deleted += grave.deleted ? 1 : 0;
 		}
-		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) driven speed={} direction={} channels={} from={}", players.size(),
-			standIns.load(), graveyard.size(), disabled, deleted, speedsDriven.load(), directionsDriven.load(), drive.Size(), eventsFromTick ? "tick" : "hook");
+		std::string out = std::format("players={} standins={} leaving={} (disabled={} deleted={}) driven speed={} direction={} channels={} from={} travelTaken={} travelCapped={} recelled={} no3dTaken={}", players.size(),
+			standIns.load(), graveyard.size(), disabled, deleted, speedsDriven.load(), directionsDriven.load(), drive.Size(), eventsFromTick ? "tick" : "hook", travelTaken, travelCapped,
+			recelled, no3dTaken);
 		const auto  here = LocalPlayer::Read();
 		// What each stand-in really has on: the armor its inventory holds as worn, not what its friend's looks named (the
 		// rig's `forms` step checks an item is on the actor). Read before the lock: the game's inventory has its own.
@@ -2032,6 +2105,13 @@ namespace RemotePlayers
 					aimed = pick->GetActiveTarget().get().get() == actor.get();
 				}
 			}
+			// Its cell against the one under it (outside: in=1 when they are the same; the rig's check that none is left behind).
+			std::string cellNote = "none";
+			if (const auto cell = actor ? actor->GetParentCell() : nullptr) {
+				const auto tes = RE::TES::GetSingleton();
+				const auto under = cell->IsInteriorCell() || !tes ? cell : tes->GetCell(actor->GetPosition());
+				cellNote = std::format("{:08X}(in={})", cell->GetFormID(), under == cell ? 1 : 0);
+			}
 			// What it wears: how many of the items its friend's game named it was dressed in, their form IDs in this game as
 			// the looks named them (wornIds), and the armor the stand-in really has on (equippedIds: what the rig checks).
 			std::string wornIds;
@@ -2041,7 +2121,7 @@ namespace RemotePlayers
 				}
 			}
 			const auto on = equipped.find(id);
-			out += std::format(" named={} aimed={} race={:08X} worn={}/{} wornIds={} equippedIds={}", named, aimed ? 1 : 0, remote.looks ? remote.looks->race : 0u, remote.wornShown,
+			out += std::format(" why={} cell={} named={} aimed={} race={:08X} worn={}/{} wornIds={} equippedIds={}", SpaceRules::WhyName(remote.why), cellNote, named, aimed ? 1 : 0, remote.looks ? remote.looks->race : 0u, remote.wornShown,
 				remote.looks ? remote.looks->worn.size() : 0u, wornIds.empty() ? "none" : wornIds, on == equipped.end() || on->second.empty() ? "none" : on->second);
 		}
 		return out;
