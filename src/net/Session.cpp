@@ -8,6 +8,7 @@
 #include "Server.h"
 #include "game/LoadOrder.h"
 #include "game/LocalPlayer.h"
+#include "game/QuestSync.h"
 #include "game/RemotePlayers.h"
 #include "game/WorldObjects.h"
 #include "net/FormsCommand.h"
@@ -116,6 +117,9 @@ namespace Session
 			}
 			auto result = FormTranslate::Translate(forms, FormTranslate::Way::kToSession, a_data);
 			Note(result, FormTranslate::Way::kToSession);
+			if (result.kind == FormTranslate::Result::Kind::kDrop) {
+				return;  // nothing in it the session can name (a quest batch of a mod's quests only)
+			}
 			client->Send(result.kind == FormTranslate::Result::Kind::kChanged ? std::move(result.packet) : std::move(a_data), a_reliable);
 		}
 
@@ -192,6 +196,9 @@ namespace Session
 			// Every packet is read in this game's numbering of forms.
 			auto translated = FormTranslate::Translate(forms, FormTranslate::Way::kToLocal, a_data);
 			Note(translated, FormTranslate::Way::kToLocal);
+			if (translated.kind == FormTranslate::Result::Kind::kDrop) {
+				return;  // nothing in it this game has
+			}
 			if (translated.kind == FormTranslate::Result::Kind::kChanged) {
 				a_data = translated.packet;
 			}
@@ -213,6 +220,7 @@ namespace Session
 					sentLooks.reset();
 					nextState = nextLooks = nextBeat = Clock::now();
 					WorldObjects::Welcomed(playerId);  // the session's doors follow the welcome
+					QuestSync::Welcomed(playerId, playerId == hostId);  // ... and its quests (the host's game says its own)
 					logs::info("Session: in the session as player {} (the host is player {}){}", playerId, hostId,
 						role == Role::kFriend ? std::format(", {} ms after asking", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - joinedAt).count()) : "");
 				}
@@ -257,6 +265,21 @@ namespace Session
 			case Protocol::MessageType::kRemoteActivate:
 				if (const auto msg = Protocol::DecodeActivation(a_data); msg && welcomed && msg->playerId != playerId) {
 					WorldObjects::Used(*msg);
+				}
+				break;
+			case Protocol::MessageType::kRemoteQuests:
+				if (const auto msg = Protocol::DecodeQuestBatch(a_data); msg && welcomed) {
+					QuestSync::Heard(*msg);
+				}
+				break;
+			case Protocol::MessageType::kQuestAnswer:
+				if (const auto msg = Protocol::DecodeQuestBatch(a_data); msg && welcomed) {
+					QuestSync::Answered(*msg);
+				}
+				break;
+			case Protocol::MessageType::kQuestReset:
+				if (const auto msg = Protocol::DecodeQuestReset(a_data, true); msg && welcomed && msg->playerId != playerId) {
+					QuestSync::HostReset(msg->playerId);
 				}
 				break;
 			case Protocol::MessageType::kHeartbeatAck:
@@ -394,6 +417,7 @@ namespace Session
 		}
 		RemotePlayers::Clear();
 		WorldObjects::Clear();
+		QuestSync::Clear();
 		Reset();
 		role = Role::kNone;
 		lastEnd = std::string{ a_why };
@@ -430,6 +454,7 @@ namespace Session
 		if (welcomed) {
 			SendOurs(Clock::now());
 			WorldObjects::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
+			QuestSync::Frame([](std::vector<std::uint8_t> a_packet) { Send(std::move(a_packet), true); });
 		}
 		RemotePlayers::Frame();
 	}

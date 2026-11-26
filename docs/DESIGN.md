@@ -145,7 +145,50 @@ Not designed yet (phase 4), beyond doors, locks and mechanisms (above). The host
 
 ## Quests
 
-Not designed yet (phase 5). The aim is that every quest is shared: the stage advances for everyone whoever did the step, and the host's save keeps it. To settle: dialogue (who talks, what the others see), scenes written for one player, quest items, rewards, radiant quests, and the quests that cannot be shared as they are.
+Since protocol 7. Not tested in a game yet; the rig step `quests` is ready for it. The rules, free of the game, are `src/game/QuestRules.h`; the game side is `src/game/QuestSync`; the server's book is `common/QuestBook.h`; tests in `tests/QuestTests.cpp`.
+
+The aim is that every quest is shared: a stage done is done for everyone, whoever did the step, and the host's save keeps it. This version shares a quest's stages, its objectives and its end (completed or failed). Dialogue, scenes, quest items and rewards are each player's own for now (below).
+
+**Which quests, by class.** Each quest is judged by its own record, never by a name list alone, so a mod's quest is shared as the base game's are and the load order does not matter:
+
+| Class | How it is told | Shared? |
+| --- | --- | --- |
+| Shared | a journal tab (main quest, College, Thieves Guild, Dark Brotherhood, Companions, Daedric, side, Civil War, Dawnguard, Dragonborn), an editor ID, and not a radiant job | yes: stages, objectives, end |
+| Own | a typed quest each player plays for themselves: the Helgen opening (`MQ101`), marriage, adoption (`QuestRules::OWN_QUESTS`) | no |
+| Radiant | started by the Story Manager for an event, and not "run once": each game picks its own job (its targets come from the event) | no, until the jobs' targets are shared |
+| Misc | the misc tab (favours, small errands) | no, in this version: a scan of which play the same everywhere comes first |
+| Untyped | no journal tab: the game's machinery (dialogue, followers, trackers, encounters) | no |
+| No name | no editor ID: nothing to name it by when it is made here | no |
+
+Every game judges again by its own record before it makes anything, so a quest one game shares and another does not (another version of a mod) is made only where it is shared.
+
+**What a game reports.** A stage done is read from the game's own event (`TESQuestStageEvent`; the sink only queues). Objectives and ends are read once a second from the shared quests that run; an objective is said with the quest's current stage in that game, the stage its shown part holds at. Each is reported when it is ahead of the session's word; a report counts as out until the server answers it, so a poll does not send it again. What the server would not take (refused: the quest ended the other way first; or its book full) stays this game's own and is not offered again unless it moves on; what it had already is learnt as the session's.
+
+**A game's own past is never the session's.** When the session's word is new to a game (its welcome, the host's reset, its own load), what the game holds then is its base: its objectives and ends are not reported, only what moves on from them. So a friend that joins with a save ahead of the host's, or whose host loads an older save, does not push its own past into the host's world (stages are reported only from their events, which a load does not fire). A quest further on in a friend's game than in the session (the friend is at a stage the session has not reached, five seconds after the base, once the session's word has come) is apart: its stages, objectives and end there are the friend's own until the session reaches that stage, after which it is with the session again (`quests`: `apart=`, `apartStages=`). The host's game is never apart: its world is the session's.
+
+**The server's book** (`common/QuestBook.h`) keeps the session's word on each quest, up to 4096 quests and 512 entries each. It only grows: a stage once done stays done; an objective goes forward only (the first end said, completed or failed, stays; shown stays shown, at the latest stage of its quest it was read shown at); a quest ends once, the first way said. News goes to every game, the reporter's too, with who said it; the rest goes back to the reporter alone with why (it had it, past the player's budget, full, refused). Each player has a burst of 64 batches and 8 a second after that (past it, answered busy: the game reports it again two seconds later), and two asks for every word and one in 5 seconds after that (owed, never dropped).
+
+**The host's save is the world.** At its welcome and after each load the host's game says its world: `kQuestReset` (the server empties the book and tells the others), then a snapshot of its enabled shared quests: their stages done, objectives and ends. A friend's reset is ignored. A game that joins is sent the whole book after its welcome; a friend that loads a save asks for it again. A friend's own save holds its own quests as they were; the session's word is made where it is behind, never undone where it is ahead (forward only). Open question: quests the host finished and stopped before the session are not in its snapshot (it says only the enabled ones); a friend whose save is behind on them keeps its own.
+
+**Making the session's word here.** Each thing the session says is judged against this game: it has it already, the quest is missing (a mod this game lacks) or not shared here, a stage is below the quest's current stage here (passed: this game went past it, done or a branch it did not take, so it is never set again and its fragment never runs twice, whatever the done bit reads), an objective or end is of a quest not started here (its stages bring it, or were not made), or it is to be made. It is made by the game's own console commands (`setstage`, `SetObjectiveDisplayed`, `SetObjectiveCompleted`, `CompleteQuest`), so the quest's own scripts run here as they ran where the step was done:
+- one thing every 250 ms, never a frame's worth;
+- one stage of a quest at a time, in the order heard (a stage's fragment may set the next one itself), the next once the last reads done, or after 5 seconds (counted stuck, and the quest goes on);
+- a quest's objectives and end only once its stages are made and 5 seconds have passed since the last one, as its fragments set most of them: whatever is still behind is then made directly. An objective's end is made whatever stage the quest is at here; its shown part only while the quest here is at the stage it was read shown at, because a later stage's own script may have withdrawn it (`SetObjectiveDisplayed(n, false)`), and did so here too: a withdrawn objective is never shown again from an older word;
+- a failed end is counted, not made (the console has no command for it).
+
+**Stages that move the player.** A stage whose fragment moves the player (a summons, "come with me") would pull every friend across the map. `QuestRules::STAGE_RULES` names such stages, to be made only when the friend who did the step is near (from the session's past, a join or a load, not at all), and stages that are each game's own. It is empty in this version: every stage the session's word made here that moved our player within 3 seconds (a change of space or a jump of 4096 units) is said once in the log and counted (`quests`: `moved=`), so the rig and players' reports name its rows, and a scan of the quests' fragments fills it.
+
+**Reading the stages.** Whether a stage is done is bit 0 of the stage's flags as the engine holds them. That is read from the engine, not documented, so each game checks it at load against what it must be (no quest never run has a stage done; at least 9 in 10 running quests read their current stage done) and logs the verdict (`quests`: `doneBit=`). When it is not trusted, a stage counts as done only when it was seen set in this game or is the quest's current stage, and the host's snapshot says its current stages and the ones seen.
+
+**Threads.** The console commands run from the plugin's tick, which until the frame hook is written runs on SKSE's task queue; each one run off the main thread is counted (`offmain=`), and each the game made no script to run in (`norun=`). The console runs a command it cannot compile without a word, so what is made is read again two seconds later: an objective or end that does not read so is counted and logged (`unmade=`), and a stage that never reads done is counted stuck.
+
+**Not yet:**
+- Dialogue and scenes play for the player who started them; the others see the stage it set.
+- Quest items and rewards go to the player who got them.
+- An NPC a quest creates for its alias in each game is that game's own until NPCs are shared.
+- Radiant jobs and misc quests are each game's own.
+- A choice a quest keeps in a script variable rather than a stage (which side a player took in a dialogue) is not shared.
+- A quest a friend took further in its own save than the host has (apart) stays the friend's own until the host reaches that stage; the friend cannot hand it to the host.
 
 ## The menu
 
